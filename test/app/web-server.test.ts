@@ -640,6 +640,34 @@ describe("createWebServer (live)", () => {
     expect(ok.status).toBe(200);
   });
 
+  it("body 超过 2 MiB → 413:客户端收到响应头即停发,2s 内仍读到完整 JSON body(复审二轮)", async () => {
+    const port = Number(new URL(base).port);
+    const t0 = Date.now();
+    const res = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const timer = setTimeout(() => { req.destroy(); reject(new Error("2s 内未读完 413 响应")); }, 2000);
+      const req = httpRequest(
+        { host: "127.0.0.1", port, method: "POST", path: "/api/tasks", headers: JSON_HEADERS },
+        (r) => {
+          const chunks: Buffer[] = [];
+          r.on("data", (c: Buffer) => chunks.push(c));
+          r.on("end", () => {
+            clearTimeout(timer);
+            resolve({ status: r.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf-8") });
+            req.destroy();
+          });
+        },
+      );
+      req.on("error", () => { /* 收到响应后主动销毁,忽略 */ });
+      // 超限后既不 end 也不再写:模拟收到 413 即停发的客户端
+      req.write(Buffer.alloc(2 * 1024 * 1024 + 64 * 1024, 0x78));
+    });
+    expect(res.status).toBe(413);
+    expect(JSON.parse(res.body).error).toContain("2097152");
+    expect(Date.now() - t0).toBeLessThan(2000);
+    const ok = await fetch(`${base}/api/tasks`);
+    expect(ok.status).toBe(200);
+  });
+
   it("静态资源:仅 /assets/ 长 immutable 缓存,其余 no-cache(附带 P3)", async () => {
     const staticRoot = mkdtempSync(join(tmpdir(), "web-static-"));
     writeFileSync(join(staticRoot, "index.html"), "<!DOCTYPE html><html><body>427</body></html>");

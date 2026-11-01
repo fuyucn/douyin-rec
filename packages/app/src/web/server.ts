@@ -345,13 +345,15 @@ const BODY_LINGER_MS = 10_000;
 
 /**
  * 413 早响应(issue #427 复审):在 for-await 里 throw 会经异步迭代器 return() 销毁 req,
- * 客户端可能在响应送达前就失去连接 —— 所以超限时**立刻把 413 状态行+头送出去**(flushHeaders)。
+ * 客户端可能在响应送达前就失去连接 —— 所以超限时**立刻把 413 状态行+头+完整 body 写出去**
+ * (writeHead 后 res.write(payload));只有 `res.end()` 推迟到排干后。客户端收到 413 即停发
+ * (curl Expect:100-continue 等)时,body 已在手,不会两边互等。
  *
  * 实测(Node 24)两个反例都不可靠,本实现刻意避开:
  *   - 在请求读完前 `res.end()`(即使带 `Connection: close`):Node 会**立即拆 socket**,
  *     客户端仍在猛写时直接 EPIPE,响应可能整段丢失;
  *   - res finish 后立刻 `req.destroy()`:同样 RST,已写出的响应可能被客户端丢弃。
- * 所以 body 延后到请求体**排干之后**再发(readJson 在 for-await 结束后调 `finish413`),
+ * 所以 `res.end()` 延后到请求体**排干之后**(readJson 在 for-await 结束后调 `finish413`),
  * 连接由 HTTP 层在 req complete + connection:close 下干净关闭 —— 客户端必然收到完整 413。
  */
 function send413AndClose(req: IncomingMessage, res: ServerResponse): void {
@@ -362,17 +364,18 @@ function send413AndClose(req: IncomingMessage, res: ServerResponse): void {
     "content-length": Buffer.byteLength(payload),
     connection: "close",
   });
-  res.flushHeaders(); // 状态码先走:客户端立刻拿到 413,不必等 body
+  res.write(payload); // 头 + 完整 body 立刻送出(content-length 已定,客户端可读完);end 留到排干后
   // 兜底:客户端收到 413 后正常会停止发送(curl/浏览器/undici 均如此);若恶意不停,
-  // 排干不能无限挂 —— 上限后强拆。正常路径请求早已读完,此定时器不会触发。
+  // 排干不能无限挂 —— 上限后强拆。响应结束(close)后清除,不留悬挂定时器。
   const cap = setTimeout(() => req.destroy(), BODY_LINGER_MS);
   cap.unref?.();
+  res.once("close", () => clearTimeout(cap));
 }
 
-/** 413 收尾:请求体排干后发 body 并结束响应(见 send413AndClose 的实测注释)。 */
+/** 413 收尾:请求体排干后结束响应(body 已在 send413AndClose 写出,见其实测注释)。 */
 function finish413(res: ServerResponse): void {
   if (res.writableEnded || res.destroyed) return;
-  res.end(JSON.stringify({ error: BODY_TOO_LARGE_MSG }));
+  res.end();
 }
 
 /** Read the whole request body and JSON.parse it (empty body → {});超 MAX_BODY_BYTES → BodyTooLargeError。 */
@@ -387,7 +390,7 @@ async function readJson(req: IncomingMessage, res: ServerResponse): Promise<unkn
         if (!overflow) {
           overflow = true;
           chunks.length = 0; // 停止累积,释放已占内存
-          send413AndClose(req, res); // 413 状态行+头立刻送出(flushHeaders);body 等排干后再发
+          send413AndClose(req, res); // 413 头+body 立刻写出;end 等排干后
         }
         continue; // 超限后不再累积;继续读是为了让客户端把在途 body 发完,连接才能干净收尾
       }
@@ -399,7 +402,7 @@ async function readJson(req: IncomingMessage, res: ServerResponse): Promise<unkn
     throw e;
   }
   if (overflow) {
-    finish413(res); // 排干完才发 body:请求读完后关闭才干净,不会把客户端正在写的数据 RST 掉
+    finish413(res); // 排干完才 end:请求读完后关闭才干净,不会把客户端正在写的数据 RST 掉
     throw new BodyTooLargeError();
   }
   const raw = Buffer.concat(chunks).toString("utf-8").trim();
