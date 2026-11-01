@@ -74,7 +74,7 @@ export function previewJobLogs(logsRoot: string, days: number, now?: number): Jo
  * Append the outcome to the shared maintenance audit file (same one the orphan cleanup uses).
  * Best effort: a failed audit write must not undo or mask the deletion itself.
  */
-function appendAudit(auditDir: string, logsRoot: string, deleted: number, bytes: number, failed: JobLogCleanupResult["failed"]): void {
+function appendAudit(auditDir: string, deleted: number, bytes: number, failed: JobLogCleanupResult["failed"]): void {
   if (deleted === 0 && failed.length === 0) return;
   try {
     mkdirSync(auditDir, { recursive: true });
@@ -90,7 +90,7 @@ function appendAudit(auditDir: string, logsRoot: string, deleted: number, bytes:
   }
 }
 
-export function cleanupJobLogs(logsRoot: string, days: number, now?: number, auditDir?: string): JobLogCleanupResult {
+export function cleanupJobLogs(logsRoot: string, days: number, auditDir: string, now: number = Date.now()): JobLogCleanupResult {
   const s = selectJobLogs(logsRoot, days, now);
   const failed: JobLogCleanupResult["failed"] = [];
   let deleted = 0;
@@ -107,6 +107,6 @@ export function cleanupJobLogs(logsRoot: string, days: number, now?: number, aud
       failed.push({ file: basename(file), rel: relative(logsRoot, file), error: (e as NodeJS.ErrnoException).code ?? "UNKNOWN" });
     }
   }
-  appendAudit(auditDir ?? join(logsRoot, "..", "config", "maintenance"), logsRoot, deleted, bytes, failed);
+  appendAudit(auditDir, deleted, bytes, failed);
   return { olderThanDays: days, deleted, bytes, failed };
 }

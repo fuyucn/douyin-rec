@@ -52,7 +52,7 @@ describe("job log cleanup (issue #414)", () => {
     log("keep.log", 1, 5);
     expect(previewJobLogs(root, 7, NOW)).toEqual({ olderThanDays: 7, count: 2, bytes: 500 });
     expect(existsSync(a) && existsSync(b)).toBe(true);
-    const r = cleanupJobLogs(root, 7, NOW, join(root, "audit-p"));
+    const r = cleanupJobLogs(root, 7, join(root, "audit-p"), NOW);
     expect(r).toEqual({ olderThanDays: 7, deleted: 2, bytes: 500, failed: [] });
     expect(existsSync(a) || existsSync(b)).toBe(false);
   });
@@ -64,7 +64,7 @@ describe("job log cleanup (issue #414)", () => {
     // A read-only room directory makes the removal of its files fail; the failure must come back.
     chmodSync(roomDir, 0o500);
     try {
-      const r = cleanupJobLogs(root, 7, NOW);
+      const r = cleanupJobLogs(root, 7, join(root, "audit-x"), NOW);
       expect(r.deleted).toBe(0);
       expect(r.failed.map((f) => f.file).sort()).toEqual(["a.log", "b.log"]);
       // The error must be a code, not the fs message: that message carries the full path.
@@ -117,7 +117,7 @@ describe("job log cleanup (issue #414)", () => {
     const failing = process.getuid?.() !== 0;
     if (failing) chmodSync(roomDir, 0o500);
     try {
-      cleanupJobLogs(root, 7, NOW, auditDir);
+      cleanupJobLogs(root, 7, auditDir, NOW);
     } finally {
       if (failing) chmodSync(roomDir, 0o700);
     }
@@ -136,7 +136,7 @@ describe("job log cleanup (issue #414)", () => {
 
   it("writes nothing when there is nothing to delete", () => {
     const auditDir = join(root, "audit2");
-    cleanupJobLogs(root, 7, NOW, auditDir);
+    cleanupJobLogs(root, 7, auditDir, NOW);
     expect(existsSync(join(auditDir, "cleanup-audit.jsonl"))).toBe(false);
   });
 
@@ -146,20 +146,20 @@ describe("job log cleanup (issue #414)", () => {
     writeFileSync(auditDir, "not a directory");
     log("gone.log", 30, 10);
     let r;
-    expect(() => { r = cleanupJobLogs(root, 7, NOW, auditDir); }).not.toThrow();
+    expect(() => { r = cleanupJobLogs(root, 7, auditDir, NOW); }).not.toThrow();
     expect(r?.deleted).toBe(1);
     expect(existsSync(join(roomDir, "gone.log"))).toBe(false);
   });
 
-  it("audit rows carry an error code, not the fs message with the full path", () => {
-    if (process.getuid?.() === 0) return; // permission bits are ignored by root
+  it.skipIf(process.getuid?.() === 0)("audit rows carry an error code, not the fs message with the full path", () => {
     const auditDir = join(root, "audit5");
     log("locked.log", 30, 10);
     chmodSync(roomDir, 0o500);
     try {
-      const r = cleanupJobLogs(root, 7, NOW, auditDir);
+      const r = cleanupJobLogs(root, 7, auditDir, NOW);
       expect(JSON.stringify(r)).not.toContain(root);
       const lines = readFileSync(join(auditDir, "cleanup-audit.jsonl"), "utf-8").trim().split("\n").map((l) => JSON.parse(l));
+      expect(lines.find((l) => l.action === "failed")).toMatchObject({ kind: "jobLog", path: "hub/douyin_123/locked.log" });
       expect(lines.every((l) => l.action !== "failed" || (l.error === "EACCES" || l.error === "EPERM"))).toBe(true);
     } finally {
       chmodSync(roomDir, 0o700);

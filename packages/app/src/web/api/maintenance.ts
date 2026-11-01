@@ -136,7 +136,8 @@ export function buildMaintenance(deps: MaintenanceDeps): {
       if (n === null) return { status: 400, body: { error: "天数必须为 1–3650 的整数" } };
       try {
         // 删除失败不吞:failed 随 body 返回;整体 200(部分成功是常态)。
-        return { status: 200, body: cleanupJobLogs(logsRoot, n, undefined, deps.auditDir ?? pathJoin(root, "config", "maintenance")) };
+        // Same audit file as the orphan cleanup: always the data root's config/maintenance.
+        return { status: 200, body: cleanupJobLogs(logsRoot, n, deps.auditDir ?? pathJoin(root, "config", "maintenance")) };
       } catch {
         return { status: 500, body: { error: "场次日志清理失败" } };
       }
