@@ -550,3 +550,48 @@ describe("SshTransport.zeroDiskReport / nodeCapabilities.zeroDisk (issue #331)",
     expect((await caps({ zeroDisk: "yes" })).zeroDisk).toBe(false);
   });
 });
+
+describe("SshTransport.cleanup(失败不再吞,issue #429)", () => {
+  const mkT = (run: (argv: string[]) => Promise<string>) =>
+    new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec", run, rsync: async () => {} });
+
+  it("成功:单条 rm -f 命令,resolve(成功路径行为不变)", async () => {
+    const calls: string[] = [];
+    const t = mkT(async (argv) => { calls.push(argv.join(" ")); return ""; });
+    await expect(t.cleanup(["/r/a.ts", "/r/b.ts"])).resolves.toBeUndefined();
+    expect(calls).toEqual(["rm -f '/r/a.ts' '/r/b.ts'"]);
+  });
+
+  it("空清单不发命令", async () => {
+    let n = 0;
+    const t = mkT(async () => { n++; return ""; });
+    await expect(t.cleanup([])).resolves.toBeUndefined();
+    expect(n).toBe(0);
+  });
+
+  it("rm 非 0 / ssh 失败 → 抛错(含失败路径数,不吞)", async () => {
+    const t = mkT(async (argv) => {
+      if (argv[0]!.startsWith("rm ")) throw new Error("ssh rc=1: rm: cannot remove: Permission denied");
+      return "";
+    });
+    await expect(t.cleanup(["/r/a.ts", "/r/b.ts"])).rejects
+      .toThrow(/远端清理失败.*2\/2 个路径未删.*Permission denied/);
+  });
+
+  it("rm 失败后只读探测仍存活的路径数(1/2)", async () => {
+    const t = mkT(async (argv) => {
+      const cmd = argv[0]!;
+      if (cmd.startsWith("rm ")) throw new Error("ssh rc=1");
+      if (cmd.startsWith("n=0")) return "1\n"; // 探测:2 个里还剩 1 个
+      return "";
+    });
+    await expect(t.cleanup(["/r/a.ts", "/r/b.ts"])).rejects
+      .toThrow(/远端清理失败: 1\/2 个路径未删/);
+  });
+
+  it("探测命令也失败(节点不可达)→ 保守按整批失败,原错误不吞", async () => {
+    const t = mkT(async () => { throw new Error("ssh 超时 45000ms 被杀"); });
+    await expect(t.cleanup(["/r/a.ts"])).rejects
+      .toThrow(/远端清理失败: 1\/1 个路径未删.*ssh 超时/);
+  });
+});

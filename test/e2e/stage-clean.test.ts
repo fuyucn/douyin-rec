@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { Scenario } from "./harness/scenario.js";
 import { pastStartMs } from "./harness/fake-recordings.js";
 import { expectHealthyDone } from "./harness/invariants.js";
+import type { Transport } from "@drec/orchestrator";
 
 // #60:常见配置 = 只开「完成后删源 + 完成后清 stage」,不开「合并后删 stage 源段」。
 const COMMON = { sourceAfterDone: true, stageAfterDone: true, stageSourceAfterMerge: false } as const;
@@ -231,3 +232,35 @@ describe("e2e: 续跑里 append 返回非 0 → 不 markDone、不清 stage / �
   });
 });
 
+
+// ── issue #429:清理失败必须可见(transport.cleanup 抛错 → clean_source failed)且可补跑 ──
+describe("e2e: 清理失败可见并可补跑(issue #429)", () => {
+  it("节点清理抛错 → job 仍 done 但 clean_source=failed、源保留;恢复后补跑清掉", async () => {
+    let failCleanup = true;
+    s = await Scenario.create({
+      cfg: { cleanup: { ...COMMON } },
+      cleanupBackfillThrottleMs: 0, // 补跑节流关:第二轮立即重派
+      wrapTransport: (base) => {
+        const t = Object.create(base) as Transport;
+        t.cleanup = async (paths) => {
+          if (failCleanup) throw new Error("注入:节点磁盘只读");
+          return base.cleanup(paths);
+        };
+        return t;
+      },
+    });
+    record(s);
+    await s.reconcile();
+    const key = s.onlyKey();
+    expect(s.jobState(key)).toBe("done"); // 终态不被清理失败改写(防重传)
+    expect(s.ledger.getNodeState(key, "clean_source")?.state).toBe("failed");
+    expect(s.ledger.getNodeState(key, "clean_source")?.error).toContain("节点磁盘只读");
+    expect(s.recordingFiles().filter((f) => f.endsWith(".ts")), "清理失败的源必须仍在").toHaveLength(6);
+    // transport 恢复 → reconciler 按「done + clean_* failed」既有机制补跑清源。
+    failCleanup = false;
+    await s.restart();
+    await s.reconcile();
+    expect(s.recordingFiles().filter((f) => f.endsWith(".ts"))).toHaveLength(0);
+    expect(s.ledger.getNodeState(key, "clean_source")?.state).not.toBe("failed");
+  });
+});

@@ -303,12 +303,24 @@ export const defaultSplitForUpload = (mp4: string): Promise<string[]> =>
 
 
 
-/** 默认删 master 本地 stage 文件(cleanup 用)。分段模块也用到。 */
+/**
+ * 默认删 master 本地 stage 文件(cleanup 用)。分段模块也用到。
+ *
+ * **失败不吞(issue #429)**:逐个路径尝试(一个失败不挡后面的),全部试完后若仍有失败
+ * → 抛聚合错误(含失败路径数),由调用方 catch → `clean_*` 步骤记 failed → reconciler 补跑。
+ * 删除动作与从前完全一致(同一条 rmSync、同样的 force/recursive),只是不再静默。
+ */
 export async function defaultRmStage(paths: string[]): Promise<void> {
   const { rmSync } = await import("node:fs");
+  const failed: Array<{ name: string; code: string }> = [];
   for (const p of paths) {
     // recursive 让 .work/ .upload/ 这类目录也能整体删掉(否则只删文件,目录长期残留)。
-    try { rmSync(p, { force: true, recursive: true }); } catch { /* 忽略 */ }
+    try { rmSync(p, { force: true, recursive: true }); }
+    catch (e) { failed.push({ name: path.basename(p), code: (e as NodeJS.ErrnoException)?.code ?? "UNKNOWN" }); }
+  }
+  if (failed.length > 0) {
+    const det = failed.map((f) => `${f.name}:${f.code}`).join(", ").slice(0, 300);
+    throw new Error(`stage 清理失败: ${failed.length}/${paths.length} 个路径未删(${det})`);
   }
 }
 
@@ -417,9 +429,15 @@ export async function cleanupSourcesShared(o: {
   const clean = o.cleanup ?? {};
   const survivors = survivingArtifacts({ pipeline: { cleanup: clean } }, { stageHasXmlCopy: !o.keepNodeXml });
   const failed: CleanupFailure[] = [];
-  /** 把一个清理步骤的失败目标落成一条 failed 步骤(UI/重试都靠它),并写 job.log。 */
+  /** 把一个清理步骤的失败目标落成一条 failed 步骤(UI/重试都靠它),并写 job.log。
+   *  成功时也要把 sync_node_states 的行翻回 done(此前失败时写过 failed):
+   *  否则补跑成功后行仍 failed → cleanupBackfillDue 每轮重派、永不收敛(issue #429)。 */
   const markStep = (step: "clean_source" | "clean_stage_src", failures: CleanupFailure[], detail: string): void => {
-    if (failures.length === 0) { o.ledger.logStep(o.streamKey, step, "done", detail); return; }
+    if (failures.length === 0) {
+      o.ledger.logStep(o.streamKey, step, "done", detail);
+      o.ledger.syncNodeState(o.streamKey, step, "done", { error: null });
+      return;
+    }
     const err = failures.map((f) => `${f.target}: ${f.error}`).join("; ").slice(0, 500);
     o.ledger.logStep(o.streamKey, step, "done", `${detail} · 部分失败 ${failures.length}`);
     o.ledger.syncNodeState(o.streamKey, step, "failed", { error: err });
@@ -509,7 +527,7 @@ export async function finalizeOnly(
     const left = stageVideoLeftovers(stageSub);
     if (left.length > 0) {
       deps.ledger.logStep(streamKey, "clean_stage", "start");
-      try { await rmStageFn(left); deps.ledger.logStep(streamKey, "clean_stage", "done", `删 ${left.length} 文件(补清 stage 视频类)`); removeEmptyStageDir(cfg.stageDir, stageSub, jlog); }
+      try { await rmStageFn(left); deps.ledger.logStep(streamKey, "clean_stage", "done", `删 ${left.length} 文件(补清 stage 视频类)`); deps.ledger.syncNodeState(streamKey, "clean_stage", "done", { error: null }); removeEmptyStageDir(cfg.stageDir, stageSub, jlog); }
       catch (e) {
         const msg = String((e as Error)?.message ?? e).slice(0, 200);
         deps.ledger.logStep(streamKey, "clean_stage", "done", `删 ${left.length} 文件 · 失败`);
@@ -1276,6 +1294,7 @@ async function runPipelineInner(
     catch (e) { stageFailed.push({ target: stageSub, error: String((e as Error)?.message ?? e).slice(0, 200) }); }
     if (stageFailed.length === 0) {
       ledger.logStep(streamKey, "clean_stage", "done", `删 ${present.length} 文件`);
+      ledger.syncNodeState(streamKey, "clean_stage", "done", { error: null }); // 补跑后翻回 done,防 cleanupBackfillDue 死循环
       removeEmptyStageDir(cfg.stageDir, stageSub, jlog);
     } else {
       ledger.logStep(streamKey, "clean_stage", "done", `删 ${present.length} 文件 · 失败`);
@@ -1455,7 +1474,7 @@ async function resumeAppends(
       ...stageVideoLeftovers(stageSub),
     ])];
     ledger.logStep(streamKey, "clean_stage", "start");
-    try { await rmStageFn(products); ledger.logStep(streamKey, "clean_stage", "done", `删 ${products.length} 文件(不含 .xml/.ass)`); removeEmptyStageDir(cfg.stageDir, stageSub, jlog); }
+    try { await rmStageFn(products); ledger.logStep(streamKey, "clean_stage", "done", `删 ${products.length} 文件(不含 .xml/.ass)`); ledger.syncNodeState(streamKey, "clean_stage", "done", { error: null }); removeEmptyStageDir(cfg.stageDir, stageSub, jlog); }
     catch (e) {   // 同上:清理失败不外抛(否则整场被判 failed → 重跑 = 重复投稿)
       const msg = String((e as Error)?.message ?? e).slice(0, 200);
       ledger.logStep(streamKey, "clean_stage", "done", `删 ${products.length} 文件 · 失败`);
