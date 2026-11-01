@@ -8,7 +8,7 @@
     python3 scripts/reinforce-metrics.py --since 2026-10-06
     python3 scripts/reinforce-metrics.py --node vps      # 额外扫节点卡死残留(只读)
     python3 scripts/reinforce-metrics.py --loop --days 7 # 只出「PR 流程」纯文本表(供 loop 通知贴;无台账/无 gh 也能跑)
-    ... --db-container NAME                              # 台账经 docker exec 容器内只读读(优先;WAL 台账严禁宿主机读写打开)
+    ... --db-container NAME [--db-container-path P]      # 台账经 docker exec 容器内只读读(默认容器 douyin-rec;失败: 显式传=报错退出, 默认=降级 immutable 快照)
     ... --ledger-log FILE | --ledger-container NAME      # 统计 `[ledger] 拒绝` 行数(日志不可得则跳过并标注)
     ... --fixture FILE.json                              # 离线喂 {prs,issues}(测试用,不调 gh)
 
@@ -61,11 +61,13 @@ def epoch_ms_to_dt(ms: float) -> datetime | None:
 
 # ---------------------------------------------------------------- 台账读取(issue #428 复审)
 # 台账 <db>-sync.db 已切 WAL(busy_timeout),且 master 的 docker-data 在 bind mount 上 ——
-# 宿主机(尤其 macOS:容器跑在 Linux VM)读写打开会在**跨 VM** 的 -shm/-wal 上动作,
-# 可能触发 checkpoint 或删 -wal,损坏容器侧正在使用的台账。**禁止宿主机读写打开**。
-# 读取优先级:① --db-container:docker exec 进容器用 node:sqlite readOnly 读(最安全);
-#             ② 宿主 sqlite3 -readonly(不写不 checkpoint);
-#             ③ 宿主 file:...?immutable=1(快照语义,可能读到旧数据,来源标注注明)。
+# 宿主机(尤其 macOS:容器跑在 Linux VM)**任何方式**打开(含 sqlite3 -readonly:仍会写/重建 -shm,
+# 且锁不跨 VM 共享)都可能干扰容器侧正在使用的台账。读取顺序只有两档:
+#   ① 容器内 node:sqlite readOnly(docker exec <容器>;默认容器 douyin-rec = docker-compose.yml 的 container_name);
+#   ② 宿主 file:...?immutable=1 快照(不创建 -shm/-wal,不加锁;可能旧/撕裂,报告标注)。
+# 显式传 --db-container 而容器读取失败 → 不降级,报错退出(用户指定了通道,静默换成旧快照会误导)。
+DEFAULT_CONTAINER = "douyin-rec"
+CONTAINER_DB_DIR = "/output-data/db"
 READ_SYNC_SQL = "select streamKey,state,bv,error,updatedAt,startMs,winnerWorker from sync_jobs"
 
 # 容器内 node:sqlite 只读读台账(与 docs/dev-multi-node.md「台账状态」排查命令同款)。
@@ -99,36 +101,28 @@ def _parse_rows(out: str) -> list[dict] | None:
     return rows if isinstance(rows, list) else None
 
 
-def _read_via_container(container: str, db: Path) -> tuple[list[dict], str] | None:
+class LedgerReadError(Exception):
+    """显式指定的容器通道读取失败(不降级)。"""
+
+
+def _read_via_container(container: str, path: str) -> tuple[list[dict], str, str]:
+    """成功返回 (rows, 来源标注, "");失败返回 ([], "", 原因)。"""
     if not shutil.which("docker"):
-        return None
-    # docker compose 把 DATA_ROOT(默认 ./docker-data)挂在 /output-data:容器内路径按库文件名推导。
+        return [], "", "docker 不可用"
     rc, out = _run_rc(["docker", "exec", container, "node", "-e", _NODE_READ_CODE,
-                       f"/output-data/db/{db.name}", READ_SYNC_SQL], timeout=15)
+                       path, READ_SYNC_SQL], timeout=15)
     if rc != 0:
-        return None
+        return [], "", f"docker exec {container} 失败(rc={rc};容器不存在/未运行或库 {path} 打不开)"
     rows = _parse_rows(out)
     if rows is None:
-        return None
-    return rows, f"容器内只读(docker exec {container})"
-
-
-def _read_via_sqlite3_readonly(db: Path) -> tuple[list[dict], str] | None:
-    if not shutil.which("sqlite3"):
-        return None
-    rc, out = _run_rc(["sqlite3", "-readonly", "-json", str(db), READ_SYNC_SQL])
-    if rc != 0:
-        return None
-    rows = _parse_rows(out)
-    if rows is None:
-        return None
-    return rows, "宿主 sqlite3 -readonly(降级)"
+        return [], "", "容器内读取输出无法解析"
+    return rows, f"容器内只读(docker exec {container})", ""
 
 
 def _read_via_sqlite3_immutable(db: Path) -> tuple[list[dict], str] | None:
     if not shutil.which("sqlite3"):
         return None
-    # immutable=1 忽略 -wal/-shm(快照语义):绝不写库,但可能读到旧数据 —— 来源标注注明。
+    # immutable=1 忽略 -wal/-shm(快照语义):不创建 -shm、不加锁,但可能读到旧/撕裂数据 —— 来源标注注明。
     uri = f"file:{quote(str(db))}?immutable=1"
     rc, out = _run_rc(["sqlite3", "-json", uri, READ_SYNC_SQL])
     if rc != 0:
@@ -136,27 +130,32 @@ def _read_via_sqlite3_immutable(db: Path) -> tuple[list[dict], str] | None:
     rows = _parse_rows(out)
     if rows is None:
         return None
-    return rows, "宿主 immutable 快照(可能读到旧数据)"
+    return rows, "宿主 immutable 快照(可能读到旧/撕裂数据)"
 
 
-def read_sync_jobs(db: Path, container: str | None = None) -> tuple[list[dict], str]:
+def read_sync_jobs(db: Path, container: str | None = None, container_path: str | None = None,
+                   explicit: bool = False) -> tuple[list[dict], str]:
     """只读读台账,返回 (rows, 来源标注)。
 
-    台账是 WAL + Docker bind mount(见上注释):**绝不宿主机读写打开**。优先容器内 readOnly;
-    容器不可用退宿主 `sqlite3 -readonly`;再退 immutable=1 快照(标注可能读到旧数据)。
-    台账文件不存在 → 空结果(原口径)。返回的来源标注随报告展示,降级路径不静默。
+    先容器内 readOnly;失败时 explicit(用户显式传 --db-container)→ 抛 LedgerReadError,
+    否则降级宿主 immutable=1 快照(来源标注带降级原因)。**宿主不再有任何 sqlite3 -readonly 档**。
+    台账文件不存在 → 空结果(原口径)。
     """
+    note = ""
     if container:
-        hit = _read_via_container(container, db)
-        if hit is not None:
-            return hit
+        path = container_path or f"{CONTAINER_DB_DIR}/{db.name}"
+        rows, source, why = _read_via_container(container, path)
+        if source:
+            return rows, source
+        if explicit:
+            raise LedgerReadError(f"--db-container {container} 读取失败: {why}")
+        note = f"容器 {container} 不可用({why}),"
     if not db.exists():
-        return [], "台账不存在"
-    for reader in (_read_via_sqlite3_readonly, _read_via_sqlite3_immutable):
-        hit = reader(db)
-        if hit is not None:
-            return hit
-    return [], "台账不可读(容器不可用且 sqlite3 不可用/打不开)"
+        return [], f"{note}台账不存在".lstrip(",")
+    hit = _read_via_sqlite3_immutable(db)
+    if hit is not None:
+        return hit[0], f"{note}{hit[1]}"
+    return [], f"{note}台账不可读(sqlite3 不可用/打不开)"
 
 
 def is_in_window(updated_at: float, since_dt: datetime) -> bool:
@@ -381,9 +380,13 @@ def pr_flow_section(args, now: datetime) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description="自强化循环开发指标巡检(只读)")
     ap.add_argument("--db", type=Path, default=DEFAULT_DB,
-                    help="台账路径;配 --db-container 时按库文件名映射容器内 /output-data/db/")
+                    help="宿主台账路径(immutable 快照降级用;也用于推导容器内默认路径的文件名)")
     ap.add_argument("--db-container", default=None,
-                    help="master 容器名:经 docker exec 在容器内只读读台账(优先;WAL 台账严禁宿主机读写打开,issue #428)")
+                    help=f"master 容器名:经 docker exec 在容器内只读读台账(默认 {DEFAULT_CONTAINER};"
+                         "WAL 台账宿主机只允许 immutable 快照,issue #428)。显式传入而读取失败 → 报错退出,不降级;"
+                         "不传则失败时降级 immutable 快照并在报告标注")
+    ap.add_argument("--db-container-path", default=None,
+                    help="库在容器内的路径(默认 /output-data/db/<--db 的文件名>)")
     ap.add_argument("--stage", type=Path, default=DEFAULT_STAGE)
     ap.add_argument("--days", type=int, default=1)
     ap.add_argument("--since", default=None, help="YYYY-MM-DD 覆盖 --days")
@@ -409,7 +412,12 @@ def main() -> int:
         print(pr_flow_section(args, now), end="")
         return 0
 
-    jobs, ledger_source = read_sync_jobs(args.db, args.db_container)
+    try:
+        jobs, ledger_source = read_sync_jobs(args.db, args.db_container or DEFAULT_CONTAINER,
+                                             args.db_container_path, explicit=args.db_container is not None)
+    except LedgerReadError as e:
+        print(f"错误: {e}", file=sys.stderr)
+        return 2
     window = [j for j in jobs if is_in_window(j.get("updatedAt", 0), since_dt)]
     done = sum(1 for j in window if (j.get("state") or "").lower() == "done")
     needs_manual = [j for j in window if (j.get("state") or "").lower() == "needs_manual"]

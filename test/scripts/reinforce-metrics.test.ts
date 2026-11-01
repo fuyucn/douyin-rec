@@ -124,10 +124,16 @@ describe("reinforce-metrics.py --loop", () => {
 });
 
 describe("reinforce-metrics.py 台账读取(issue #428 复审)", () => {
-  // 台账已切 WAL 且在 Docker bind mount 上:宿主机读写打开(裸 sqlite3 -json)会跨 VM 动
-  // -shm/-wal,可能 checkpoint/删 -wal 弄坏容器侧台账 —— 脚本必须容器内只读优先,
-  // 容器不可用退 sqlite3 -readonly,再退 immutable=1(标注可能读到旧数据)。
-  // shim 法:PATH 限定到只含 fake docker/sqlite3 的目录,断言脚本发出的命令行。
+  // 台账已切 WAL 且在 Docker bind mount 上:宿主机任何方式打开(含 sqlite3 -readonly,仍写 -shm、锁不跨 VM)
+  // 都不安全 —— 只有两档:容器内 readOnly(默认容器 douyin-rec)→ 宿主 immutable=1 快照(标注可能旧)。
+  // 显式 --db-container 失败不降级。shim 法:PATH 限定到只含 fake docker/sqlite3 的目录,断言发出的命令行。
+  const ledgerDb = (dir: string) => {
+    const db = join(dir, "douyin-rec-sync.db");
+    writeFileSync(db, ""); // 只需存在;实际读取走 shim
+    return db;
+  };
+  const immutableOnly = `if [[ "$*" == *"immutable=1"* ]]; then echo '${LEDGER_ROWS}'; exit 0; fi\nexit 1`;
+
   it("--db-container:docker exec 进容器 node:sqlite readOnly 读,宿主文件不存在也能读", () => {
     const shimDir = mkdtempSync(join(tmpdir(), "metrics-shim-"));
     const log = join(shimDir, "docker.log");
@@ -143,41 +149,64 @@ describe("reinforce-metrics.py 台账读取(issue #428 复审)", () => {
     expect(logged).toContain("/output-data/db/no-such-sync.db");
   });
 
-  it("无容器:退宿主 sqlite3 -readonly;命令里必须带 -readonly(绝不读写打开)", () => {
+  it("默认容器名 douyin-rec(compose 的 container_name):不传 --db-container 也走容器内只读", () => {
     const shimDir = mkdtempSync(join(tmpdir(), "metrics-shim-"));
-    const log = join(shimDir, "sqlite3.log");
-    makeShim(shimDir, "sqlite3", log,
-      `if [[ "$*" == *"-readonly"* ]]; then echo '${LEDGER_ROWS}'; exit 0; fi\nexit 1`);
-    const db = join(shimDir, "douyin-rec-sync.db");
-    writeFileSync(db, ""); // 只需存在;实际读取走 shim
-    const r = runFull(["--days", "7", "--db", db], fixture, { PATH: shimDir });
+    const log = join(shimDir, "docker.log");
+    makeShim(shimDir, "docker", log, `echo '${LEDGER_ROWS}'`);
+    const r = runFull(["--days", "7", "--db", join(shimDir, "douyin-rec-sync.db")], fixture, { PATH: shimDir });
     expect(r.status, r.out).toBe(0);
-    expect(r.out).toContain("数据来源：宿主 sqlite3 -readonly(降级)");
-    expect(readFileSync(log, "utf-8")).toContain("-readonly");
+    expect(r.out).toContain("数据来源：容器内只读(docker exec douyin-rec)");
+    expect(readFileSync(log, "utf-8")).toContain("exec douyin-rec node -e");
   });
 
-  it("-readonly 也打不开:退 immutable=1 快照,并标注「可能读到旧数据」", () => {
+  it("--db-container-path:覆盖容器内路径;默认取 /output-data/db/<--db 文件名>(不丢文件名,也不用宿主目录)", () => {
     const shimDir = mkdtempSync(join(tmpdir(), "metrics-shim-"));
-    const log = join(shimDir, "sqlite3.log");
-    makeShim(shimDir, "sqlite3", log,
-      `if [[ "$*" == *"-readonly"* ]]; then exit 1; fi\nif [[ "$*" == *"immutable=1"* ]]; then echo '${LEDGER_ROWS}'; exit 0; fi\nexit 1`);
-    const db = join(shimDir, "douyin-rec-sync.db");
-    writeFileSync(db, "");
-    const r = runFull(["--days", "7", "--db", db], fixture, { PATH: shimDir });
+    const log = join(shimDir, "docker.log");
+    makeShim(shimDir, "docker", log, `echo '${LEDGER_ROWS}'`);
+    const r = runFull(["--days", "7", "--db", "/some/host/dir/x-sync.db", "--db-container-path", "/data/custom/y.db"],
+      fixture, { PATH: shimDir });
     expect(r.status, r.out).toBe(0);
-    expect(r.out).toContain("数据来源：宿主 immutable 快照(可能读到旧数据)");
-    expect(readFileSync(log, "utf-8")).toContain("immutable=1");
+    const logged = readFileSync(log, "utf-8");
+    expect(logged).toContain("/data/custom/y.db");
+    expect(logged).not.toContain("/some/host/dir");
+    expect(logged).not.toContain("/output-data/db/x-sync.db");
   });
 
-  it("空表:sqlite3 成功但零行输出(sqlite3 -json 零行不打印)→ 空结果而非「不可读」", () => {
+  it("显式 --db-container 读取失败:不降级,退出非 0,stderr 说明原因,且绝不碰宿主 sqlite3", () => {
+    const shimDir = mkdtempSync(join(tmpdir(), "metrics-shim-"));
+    makeShim(shimDir, "docker", join(shimDir, "docker.log"), "exit 1");
+    const sqlLog = join(shimDir, "sqlite3.log");
+    makeShim(shimDir, "sqlite3", sqlLog, `echo '${LEDGER_ROWS}'`);
+    const py = spawnSync("which", ["python3"], { encoding: "utf-8" }).stdout.trim();
+    const r = spawnSync(py, [SCRIPT, "--days", "7", "--db", ledgerDb(shimDir), "--db-container", "gone", ...withFixture([], fixture)],
+      { encoding: "utf-8", env: { ...process.env, PATH: shimDir } });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("--db-container gone 读取失败");
+    expect(r.stdout).not.toContain("数据来源");
+    expect(() => readFileSync(sqlLog, "utf-8")).toThrow(); // sqlite3 从未被调用
+  });
+
+  it("未显式传容器(默认 douyin-rec)失败:降级 immutable=1 快照并标注原因,命令里没有 -readonly", () => {
+    const shimDir = mkdtempSync(join(tmpdir(), "metrics-shim-"));
+    makeShim(shimDir, "docker", join(shimDir, "docker.log"), "exit 1");
+    const log = join(shimDir, "sqlite3.log");
+    makeShim(shimDir, "sqlite3", log, immutableOnly);
+    const r = runFull(["--days", "7", "--db", ledgerDb(shimDir)], fixture, { PATH: shimDir });
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toContain("容器 douyin-rec 不可用");
+    expect(r.out).toContain("宿主 immutable 快照(可能读到旧/撕裂数据)");
+    const logged = readFileSync(log, "utf-8");
+    expect(logged).toContain("immutable=1");
+    expect(logged).not.toContain("-readonly");
+  });
+
+  it("空表:immutable 快照成功但零行输出(sqlite3 -json 零行不打印)→ 空结果而非「不可读」", () => {
     const shimDir = mkdtempSync(join(tmpdir(), "metrics-shim-"));
     makeShim(shimDir, "sqlite3", join(shimDir, "l.log"),
-      `if [[ "$*" == *"-readonly"* ]]; then exit 0; fi\nexit 1`);
-    const db = join(shimDir, "douyin-rec-sync.db");
-    writeFileSync(db, "");
-    const r = runFull(["--days", "7", "--db", db], fixture, { PATH: shimDir });
+      `if [[ "$*" == *"immutable=1"* ]]; then exit 0; fi\nexit 1`);
+    const r = runFull(["--days", "7", "--db", ledgerDb(shimDir)], fixture, { PATH: shimDir });
     expect(r.status, r.out).toBe(0);
-    expect(r.out).toContain("数据来源：宿主 sqlite3 -readonly(降级)");
+    expect(r.out).toContain("宿主 immutable 快照");
     expect(r.out).toContain("收口场次（done + needs_manual + failed）：0");
   });
 
@@ -185,11 +214,11 @@ describe("reinforce-metrics.py 台账读取(issue #428 复审)", () => {
     const dir = mkdtempSync(join(tmpdir(), "metrics-shim-"));
     const missing = runFull(["--days", "7", "--db", join(dir, "nope-sync.db")], fixture, { PATH: "/nonexistent-dir" });
     expect(missing.status, missing.out).toBe(0);
-    expect(missing.out).toContain("数据来源：台账不存在");
+    expect(missing.out).toContain("台账不存在");
     expect(missing.out).toContain("收口场次（done + needs_manual + failed）：0");
     writeFileSync(join(dir, "gone-sync.db"), ""); // 文件在,但无 sqlite3/docker 可用 → 读不了
     const unreadable = runFull(["--days", "7", "--db", join(dir, "gone-sync.db")], fixture, { PATH: "/nonexistent-dir" });
     expect(unreadable.status, unreadable.out).toBe(0);
-    expect(unreadable.out).toContain("数据来源：台账不可读");
+    expect(unreadable.out).toContain("台账不可读");
   });
 });

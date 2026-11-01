@@ -156,15 +156,18 @@ Transport 查询各 worker 的活动录制房间，按房间规则选出参与�
 直播直传收尾的 record 子进程、删除房间历史），撞上他人写事务时等锁（至多约 5s）而不是报 BUSY。
 由此对**人工 / 脚本在宿主机上直接开库**有一条硬约束：
 
-- **禁止在宿主机读写打开** `-sync.db`（裸 `sqlite3 <db> "<sql>"` 就是读写打开）。master 的
-  `docker-data/` 走 Docker bind mount，宿主（如 macOS）与容器（Linux VM）**跨 VM**，`-shm`/`-wal`
-  不同步；宿主的读写连接可能触发 checkpoint 或删 `-wal`，损坏容器侧正在使用的台账。
-- **查台账**优先进容器只读（与 [dev-multi-node.md](./dev-multi-node.md)「台账状态」同款）：
-  `docker exec <容器> node -e "const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync('/output-data/db/douyin-rec-sync.db',{readOnly:true});console.log(JSON.stringify(d.prepare('select streamKey,state,bv,error from sync_jobs').all()))"`；
-  `scripts/reinforce-metrics.py --db-container <容器>` 走的就是这条通道。容器不可用才退宿主
-  `sqlite3 -readonly`（不写不 checkpoint）；仍不行用 `file:...?immutable=1`（快照语义，可能读到旧数据）。
-- **备份**用 `sqlite3 -readonly <db> ".backup '<目标>'"`（在线一致快照），或先停 `serve` 再拷；
-  **直接只拷主文件会漏 `-wal`** —— WAL 里已提交但未 checkpoint 的事务全丢，恢复出来的是旧账。
+- **宿主机禁止以任何方式打开在线台账**（含 `sqlite3 -readonly`、`.backup`、裸 `sqlite3 <db> "<sql>"`）。
+  master 的 `docker-data/` 走 Docker bind mount，宿主（如 macOS）与容器（Linux VM）**跨 VM**：
+  `-readonly` 连接仍会写/重建 `-shm`，锁也不跨 VM 共享，可能干扰甚至损坏容器侧正在使用的台账。
+  宿主**只允许** `file:<db>?immutable=1` 只读快照（不建 `-shm`、不加锁；可能读到旧/撕裂数据，仅作参考）。
+- **查台账**进容器只读（与 [dev-multi-node.md](./dev-multi-node.md)「台账状态」同款；`douyin-rec` = docker-compose 的 container_name）：
+  `docker exec douyin-rec node -e "const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync('/output-data/db/douyin-rec-sync.db',{readOnly:true});console.log(JSON.stringify(d.prepare('select streamKey,state,bv,error from sync_jobs').all()))"`；
+  `scripts/reinforce-metrics.py` 默认走这条通道（`--db-container` / `--db-container-path` 可改）。
+- **备份在容器内执行**（`VACUUM INTO` 产出一致的单文件快照，目标文件须不存在）：
+  `docker exec douyin-rec node -e "const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync('/output-data/db/douyin-rec-sync.db',{readOnly:true});d.exec(\"VACUUM INTO '/output-data/db/backup-$(date +%Y%m%d%H%M%S).db'\");d.close()"`
+  （备份文件落在挂载目录，宿主侧直接拷走；`$(date …)` 由宿主 shell 展开）。
+  或先停 `serve`，再把主文件 **连同 `-wal`** 一起拷走；**只拷主文件会漏 `-wal`** —— WAL 里已提交但未
+  checkpoint 的事务全丢，恢复出来的是旧账。
 
 ## 配置
 

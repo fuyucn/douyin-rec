@@ -135,15 +135,18 @@
 自动化：`scripts/reinforce-metrics.py`（默认只读，`--write` 才落 `docs/metrics/<date>.md`）。
 它聚合 `sync_jobs` 的 done / needs_manual / failed、疑似假失败率、master stage 卡死残留
 （只读扫描，不删文件），并给出近 30 天已关闭 issue 的开单→收口平均时长。节点残留可加
-`--node <host>`（同样只读）。台账是 WAL + bind mount（issue #428）：**宿主机严禁读写打开**
-`-sync.db`，读它优先加 `--db-container <容器名>`（容器内 readOnly），容器不可用才退宿主
-`sqlite3 -readonly`；用法：
+`--node <host>`（同样只读）。台账是 WAL + bind mount（issue #428）：**宿主机禁止任何方式打开**
+在线 `-sync.db`（含 `sqlite3 -readonly`：跨 VM 仍会写 `-shm`）。脚本默认经 `docker exec douyin-rec`
+（docker-compose 的 container_name）在容器内 node:sqlite readOnly 读；默认容器不可用时降级宿主
+`immutable=1` 快照（报告标注可能旧/撕裂）。**显式传 `--db-container` 而读取失败 = 报错退出（不降级）**；
+库在容器内的路径默认 `/output-data/db/<--db 文件名>`，可用 `--db-container-path` 覆盖。用法：
 
 ```bash
 python3 scripts/reinforce-metrics.py                      # 打印到 stdout
 python3 scripts/reinforce-metrics.py --days 7 --write     # 写 docs/metrics/2026-10-12.md
 python3 scripts/reinforce-metrics.py --node vps --node vps2
-python3 scripts/reinforce-metrics.py --db-container <master容器名>   # 台账经容器内只读读（推荐）
+python3 scripts/reinforce-metrics.py --db-container douyin-rec   # 显式指定容器；失败即报错退出
+python3 scripts/reinforce-metrics.py --db-container-path /output-data/db/douyin-rec-sync.db
 ```
 
 ### 指标记录
