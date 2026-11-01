@@ -76,7 +76,7 @@ describe("多进程", () => {
     }
   }, 60_000);
 
-  it("并发 acquireLease:两进程同时抳同一个空 kind,恰一个 acquired(#432:读-判定-写在事务内)", async () => {
+  it("并发 acquireLease:两进程同时抢同一个空 kind,恰一个 acquired(#432:读-判定-写在事务内)", async () => {
     for (let round = 0; round < 5; round++) {
       fresh();
       try {

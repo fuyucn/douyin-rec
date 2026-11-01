@@ -51,7 +51,11 @@ RULES: list[tuple[str, str, str]] = [
     ("房间号/长数字", r"(?<!\d)\d{8,}(?!\d)", "抖音/B站房间号、taskId、aid 等"),
     ("BV 号", r"BV[0-9A-Za-z]{8,}", "B站稿件号"),
     ("IP 地址", r"(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)", "节点 IP"),
-    ("本机路径", r"(?:/Users/|/home/|/root/|/mnt/|/srv/|~/)[\w./\-]+", "家目录、节点路径"),
+    # /root/ /mnt/ 只拦独立出现的绝对路径(左边界防 "$t/root/x" 这类相对拼接),并放行容器标准路径
+    # /root/.ssh、/root/.cache(Dockerfile/compose 常规写法),否则 CI 会硬拦正常基础设施改动。
+    # /srv/ 不拦:文档与 e2e 脚本大量用 /srv/... 作示例/默认安装路径,误报远多于真实泄漏。
+    ("本机路径", r"(?:/Users/|/home/|~/)[\w./\-]+|(?<![\w$}/.\-])(?:/root/(?!\.ssh\b|\.cache\b)|/mnt/)[\w./\-]+",
+     "家目录、节点路径"),
     ("streamKey", r"\b(?:douyin|bilibili|kuaishou):[\w:.\-]+", "内部场次键"),
     ("文件名", r"\b\w[\w.\-]*\.(?:ts|mp4|flv|xml|ass|json)\b", "录像/字幕文件名"),
     ("cookie/webhook", r"(?i)\b(?:cookie|webhook|token|secret|authkey)\b", "凭证类"),

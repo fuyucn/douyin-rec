@@ -45,11 +45,12 @@ export class ProcLeaseStore {
   ): { acquired: boolean; takeover: boolean; holder?: LeaseRow } {
     const pid = opt.pid ?? process.pid;
     const leaseMs = opt.leaseMs ?? LEASE_MS;
-    const t = this.o.now();
     // 读-判定-写入包进同一个写事务(#432):无事务时两个进程同时看到过期租约可各自 acquired:true,
     // 输家迟到的 upsert 会覆盖胜者的新租约。写法同 yieldLease:先 BEGIN IMMEDIATE,异常 ROLLBACK。
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      // 取锁后再读时钟:BEGIN IMMEDIATE 可能等满 busy_timeout,先读会让过期判定与 expiresAt 用旧时间。
+      const t = this.o.now();
       const cur = this.getLease(kind);
       const mine = cur?.owner === owner;
       const stale = !cur || cur.expiresAt <= t || (cur.pid !== pid && !this.o.isPidAlive(cur.pid));

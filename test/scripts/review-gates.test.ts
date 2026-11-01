@@ -529,9 +529,9 @@ describe("issue-guard.py --diff", () => {
     expect(r.status).toBe(1);
     expect(r.stderr).toContain("主机名");
   });
-  it("本机路径新增 /root/ /mnt/ /srv/ 前缀拦;相对路径不拦(#432)", () => {
+  it("本机路径新增 /root/ /mnt/ 前缀拦;相对路径、容器标准路径与 /srv/ 不拦(#432)", () => {
     const { d, g } = repo();
-    appendFileSync(join(d, "docs", "a.md"), "数据在 /root/data,备份在 /mnt/backup 与 /srv/recordings\n"); // issue-guard: allow
+    appendFileSync(join(d, "docs", "a.md"), "数据在 /root/data,备份在 /mnt/backup\n"); // issue-guard: allow
     g("commit", "-qam", "c");
     const r = guard(d);
     expect(r.status).toBe(1);
@@ -540,5 +540,11 @@ describe("issue-guard.py --diff", () => {
     appendFileSync(join(d2, "docs", "a.md"), "输出在 data-local/recordings 目录\n");
     g2("commit", "-qam", "c");
     expect(guard(d2).status).toBe(0); // 反向:无挂载点前缀的相对路径不误伤
+    // 反向:标准容器/安装路径与相对拼接不拦(Dockerfile、compose、install-worker 文档里的常规写法)
+    const { d: d3, g: g3 } = repo();
+    appendFileSync(join(d3, "docs", "a.md"), "RUN mkdir -p /root/.ssh\nCOPY ssh /root/.ssh/config\nENV P=/root/.cache/ms-playwright\n默认装到 /srv/drec 或 /srv/docker-data\nout=\"$t/root/node-1/x\"\n");
+    g3("commit", "-qam", "c");
+    const r3 = guard(d3);
+    expect(r3.stderr).not.toContain("本机路径");
   });
 });
