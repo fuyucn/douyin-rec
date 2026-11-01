@@ -13,6 +13,7 @@
  * socket.
  */
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
+import { isIP } from "node:net";
 import {
   makeApi,
   type Api,
@@ -326,10 +327,26 @@ export interface WebServerDeps {
   hubWatch?: HubWatch;
 }
 
-/** Read the whole request body and JSON.parse it (empty body → {}). */
+/** 请求体上限(issue #427 P1):2 MiB。超限 413,防恶意/跨站客户端塞巨量 body 打爆内存。 */
+const MAX_BODY_BYTES = 2 * 1024 * 1024;
+
+/** body 超限错误:server 外层 catch 据此回 413(区别于 JSON 语法错的 400 与未知异常的 500)。 */
+export class BodyTooLargeError extends Error {
+  constructor() {
+    super(`请求体超过 ${MAX_BODY_BYTES} 字节上限`);
+    this.name = "BodyTooLargeError";
+  }
+}
+
+/** Read the whole request body and JSON.parse it (empty body → {});超 MAX_BODY_BYTES → BodyTooLargeError。 */
 async function readJson(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
-  for await (const c of req) chunks.push(c as Buffer);
+  let total = 0;
+  for await (const c of req) {
+    total += (c as Buffer).byteLength;
+    if (total > MAX_BODY_BYTES) throw new BodyTooLargeError(); // 立即拒绝,不再继续读流
+    chunks.push(c as Buffer);
+  }
   const raw = Buffer.concat(chunks).toString("utf-8").trim();
   if (!raw) return {};
   return JSON.parse(raw);
@@ -349,6 +366,74 @@ export function isLoopbackAddr(addr: string | undefined): boolean {
   return addr === "127.0.0.1" || addr === "::1" || addr === "::ffff:127.0.0.1";
 }
 
+/** Host 头剥端口与 IPv6 括号,留裸主机名(小写)。多个冒号视为裸 IPv6 字面量(无端口),不剥。 */
+function bareHost(raw: string): string {
+  const h = raw.toLowerCase();
+  if (h.startsWith("[")) {
+    const end = h.indexOf("]");
+    return end >= 0 ? h.slice(1, end) : h.slice(1);
+  }
+  if ((h.match(/:/g) ?? []).length > 1) return h;
+  return h.replace(/:\d+$/, "");
+}
+
+/**
+ * Host 白名单(issue #427 P1):IP 字面量 / localhost / *.ts.net(tailscale MagicDNS,
+ * 三节点部署的实际访问形态)+ env `DREC_ALLOWED_HOSTS`(逗号分隔追加,供自定义反代域名)。
+ * 比对忽略端口差异。未命中 → 403:拒绝按 Host 做路由投毒 / DNS rebinding 的攻击面。
+ */
+export function hostAllowed(host: string | undefined): boolean {
+  if (!host) return false;
+  const bare = bareHost(host);
+  if (isIP(bare) > 0 || bare === "localhost") return true;
+  if (bare.endsWith(".ts.net") && bare.length > ".ts.net".length) return true;
+  const extra = (process.env.DREC_ALLOWED_HOSTS ?? "")
+    .split(",")
+    .map((s) => bareHost(s.trim()))
+    .filter((s) => s.length > 0);
+  return extra.includes(bare);
+}
+
+/** 请求在用户侧的 scheme:反代 TLS 终止时经 x-forwarded-proto 透传(Origin 对比用),否则 http。 */
+function requestScheme(req: IncomingMessage): "http" | "https" {
+  const xf = req.headers["x-forwarded-proto"];
+  const first = (Array.isArray(xf) ? xf[0] : xf)?.split(",")[0]?.trim();
+  return first === "https" ? "https" : "http";
+}
+
+/**
+ * Origin 校验(issue #427 P1,**所有非 GET/HEAD 方法**,含空 body 的 POST):
+ *   - 无 Origin(curl、内部 fetch)→ 放行;
+ *   - `Origin: null`(沙箱 iframe / file://)仅本机回环放行;
+ *   - 其余必须等于 `${scheme}://${Host}`,否则 403 —— 挡 text/plain 简单请求的跨站 CSRF。
+ * 导出以便对非回环 remoteAddress(本机测试造不出)做无 socket 单测。
+ */
+export function originAllowed(req: IncomingMessage, method: string): boolean {
+  if (method === "GET" || method === "HEAD") return true;
+  const h = req.headers.origin;
+  if (h === undefined) return true;
+  const v = (Array.isArray(h) ? h[0] : h).trim();
+  if (v === "") return true;
+  if (v.toLowerCase() === "null") return isLoopbackAddr(req.socket.remoteAddress);
+  const expected = `${requestScheme(req)}://${req.headers.host ?? ""}`;
+  return v.toLowerCase() === expected.toLowerCase();
+}
+
+/** 请求是否带 body(content-length>0 或 chunked);空 body 的 POST(启停等)不受 415 检查。 */
+function hasRequestBody(req: IncomingMessage): boolean {
+  const len = req.headers["content-length"];
+  if (typeof len === "string" && len.trim() !== "" && Number(len) > 0) return true;
+  const te = req.headers["transfer-encoding"];
+  return typeof te === "string" && te.toLowerCase().includes("chunked");
+}
+
+/** content-type 是否 application/json(容忍 ;charset=… 后缀)。 */
+function isJsonContentType(req: IncomingMessage): boolean {
+  const h = req.headers["content-type"];
+  const v = (Array.isArray(h) ? h[0] : h) ?? "";
+  return v.split(";")[0]?.trim().toLowerCase() === "application/json";
+}
+
 function sendHtml(res: ServerResponse, status: number, html: string): void {
   res.writeHead(status, {
     "content-type": "text/html; charset=utf-8",
@@ -357,12 +442,13 @@ function sendHtml(res: ServerResponse, status: number, html: string): void {
   res.end(html);
 }
 
-function sendAsset(res: ServerResponse, body: Buffer, contentType: string): void {
+function sendAsset(res: ServerResponse, body: Buffer, contentType: string, immutable: boolean): void {
   res.writeHead(200, {
     "content-type": contentType,
     "content-length": body.byteLength,
-    // Hashed Vite assets are immutable; index.html is served via sendHtml (no cache).
-    "cache-control": "public, max-age=31536000, immutable",
+    // 带 hash 的 Vite /assets/ 产物内容不可变 → 长缓存;其余(favicon 等非 hash 文件)no-cache,
+    // 改版后浏览器不会拿到旧文件(issue #427 附带 P3)。index.html 走 sendHtml(本来就不缓存)。
+    "cache-control": immutable ? "public, max-age=31536000, immutable" : "no-cache",
   });
   res.end(body);
 }
@@ -720,6 +806,22 @@ export function createWebServer(deps: WebServerDeps): Server {
         return;
       }
       const pathname = url.pathname;
+      // ── 请求入口防护(issue #427 P1,先于路由/静态服务)──
+      // 1) Host 白名单:不符 → 403。
+      if (!hostAllowed(req.headers.host)) {
+        sendJson(res, 403, { error: `Host 不在白名单: ${String(req.headers.host)}` });
+        return;
+      }
+      // 2) Origin 校验(仅非 GET/HEAD):同源/无 Origin 放行,跨站 → 403。
+      if (!originAllowed(req, method)) {
+        sendJson(res, 403, { error: `Origin 与请求主机不符: ${String(req.headers.origin)}` });
+        return;
+      }
+      // 3) 带 body 的非 GET/HEAD 请求必须 application/json(text/plain 简单请求是 CSRF 通道)→ 415。
+      if (method !== "GET" && method !== "HEAD" && hasRequestBody(req) && !isJsonContentType(req)) {
+        sendJson(res, 415, { error: "带请求体的请求必须使用 application/json" });
+        return;
+      }
       const match = matchRoute(method, pathname);
 
       if (!match) {
@@ -732,7 +834,7 @@ export function createWebServer(deps: WebServerDeps): Server {
         if (method === "GET" || method === "HEAD") {
           const asset = loadStaticAsset(pathname);
           if (asset) {
-            sendAsset(res, asset.body, asset.contentType);
+            sendAsset(res, asset.body, asset.contentType, pathname.startsWith("/assets/"));
             return;
           }
           // Unknown non-asset client route → serve index.html (SPA fallback).
@@ -759,6 +861,10 @@ export function createWebServer(deps: WebServerDeps): Server {
         const result = await dispatch(api, match, req, maintenance, proc);
         sendJson(res, result.status, result.body);
       } catch (e) {
+        if (e instanceof BodyTooLargeError) {
+          sendJson(res, 413, { error: e.message });
+          return;
+        }
         if (e instanceof SyntaxError) {
           sendJson(res, 400, { error: `请求体不是合法 JSON: ${e.message}` });
           return;
