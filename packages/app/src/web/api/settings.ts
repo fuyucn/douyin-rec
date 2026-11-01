@@ -13,6 +13,7 @@ import { applyTimezone, isValidTimezone, DEFAULT_TIMEZONE } from "../../timezone
 import type { NotifWebhookToggles } from "@drec/observability";
 import { resolveWebhookToggles, DEFAULT_WEBHOOK_TOGGLES } from "@drec/observability";
 import { readResources, writeResources, validateResources, DEFAULT_HUB_RESOURCES, type HubResources } from "../../hub-config-store.js";
+import { statSync, accessSync, constants as fsConstants } from "node:fs";
 
 export function buildSettings(ctx: ApiCtx) {
   const { deps, store, manager, hubDir, hubConfigPath,
@@ -135,7 +136,25 @@ export function buildSettings(ctx: ApiCtx) {
 
     setMesioPath(input: { mesioPath?: string }): ApiResult {
       // 空串=清除 → spawn 时不注入 MESIO_PATH → 引擎回落 bin/mesio 默认。改设置下次起录即生效(无需重启)。
-      store.setSetting("mesioPath", (input.mesioPath ?? "").trim());
+      // issue #427 P1:该路径经 MESIO_PATH 注入录制子进程执行,web 入口必须验证它确是一个可执行文件,
+      // 不允许(CSRF/误操作)指向任意路径。非空 → 绝对路径 + 存在 + 普通文件 + 可执行,否则 400。
+      const raw = (input.mesioPath ?? "").trim();
+      if (raw) {
+        if (!raw.startsWith("/")) return err(400, `mesioPath 必须是绝对路径(空串=清除): ${raw}`);
+        let st;
+        try {
+          st = statSync(raw);
+        } catch {
+          return err(400, `路径不存在或不可访问: ${raw}`);
+        }
+        if (!st.isFile()) return err(400, `不是普通文件: ${raw}`);
+        try {
+          accessSync(raw, fsConstants.X_OK);
+        } catch {
+          return err(400, `文件不可执行: ${raw}`);
+        }
+      }
+      store.setSetting("mesioPath", raw);
       return {
         status: 200,
         body: { mesioPath: store.getSetting("mesioPath") ?? "", default: resolveMesioBin() },

@@ -13,6 +13,7 @@
  * socket.
  */
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
+import { isIP } from "node:net";
 import {
   makeApi,
   type Api,
@@ -326,10 +327,84 @@ export interface WebServerDeps {
   hubWatch?: HubWatch;
 }
 
-/** Read the whole request body and JSON.parse it (empty body → {}). */
-async function readJson(req: IncomingMessage): Promise<unknown> {
+/** 请求体上限(issue #427 P1):2 MiB。超限 413,防恶意/跨站客户端塞巨量 body 打爆内存。 */
+const MAX_BODY_BYTES = 2 * 1024 * 1024;
+
+/** body 超限错误:server 外层 catch 据此回 413(区别于 JSON 语法错的 400 与未知异常的 500)。 */
+export class BodyTooLargeError extends Error {
+  constructor() {
+    super(BODY_TOO_LARGE_MSG);
+    this.name = "BodyTooLargeError";
+  }
+}
+
+const BODY_TOO_LARGE_MSG = `请求体超过 ${MAX_BODY_BYTES} 字节上限`;
+
+/** 413 早响应后等客户端停止发送的上限:超时仍未读完 → 强拆(恶意不终止的 body)。 */
+const BODY_LINGER_MS = 10_000;
+
+/**
+ * 413 早响应(issue #427 复审):在 for-await 里 throw 会经异步迭代器 return() 销毁 req,
+ * 客户端可能在响应送达前就失去连接 —— 所以超限时**立刻把 413 状态行+头+完整 body 写出去**
+ * (writeHead 后 res.write(payload));只有 `res.end()` 推迟到排干后。客户端收到 413 即停发
+ * (curl Expect:100-continue 等)时,body 已在手,不会两边互等。
+ *
+ * 实测(Node 24)两个反例都不可靠,本实现刻意避开:
+ *   - 在请求读完前 `res.end()`(即使带 `Connection: close`):Node 会**立即拆 socket**,
+ *     客户端仍在猛写时直接 EPIPE,响应可能整段丢失;
+ *   - res finish 后立刻 `req.destroy()`:同样 RST,已写出的响应可能被客户端丢弃。
+ * 所以 `res.end()` 延后到请求体**排干之后**(readJson 在 for-await 结束后调 `finish413`),
+ * 连接由 HTTP 层在 req complete + connection:close 下干净关闭 —— 客户端必然收到完整 413。
+ */
+function send413AndClose(req: IncomingMessage, res: ServerResponse): void {
+  if (res.headersSent || res.writableEnded) return;
+  const payload = JSON.stringify({ error: BODY_TOO_LARGE_MSG });
+  res.writeHead(413, {
+    "content-type": "application/json; charset=utf-8",
+    "content-length": Buffer.byteLength(payload),
+    connection: "close",
+  });
+  res.write(payload); // 头 + 完整 body 立刻送出(content-length 已定,客户端可读完);end 留到排干后
+  // 兜底:客户端收到 413 后正常会停止发送(curl/浏览器/undici 均如此);若恶意不停,
+  // 排干不能无限挂 —— 上限后强拆。响应结束(close)后清除,不留悬挂定时器。
+  const cap = setTimeout(() => req.destroy(), BODY_LINGER_MS);
+  cap.unref?.();
+  res.once("close", () => clearTimeout(cap));
+}
+
+/** 413 收尾:请求体排干后结束响应(body 已在 send413AndClose 写出,见其实测注释)。 */
+function finish413(res: ServerResponse): void {
+  if (res.writableEnded || res.destroyed) return;
+  res.end();
+}
+
+/** Read the whole request body and JSON.parse it (empty body → {});超 MAX_BODY_BYTES → BodyTooLargeError。 */
+async function readJson(req: IncomingMessage, res: ServerResponse): Promise<unknown> {
   const chunks: Buffer[] = [];
-  for await (const c of req) chunks.push(c as Buffer);
+  let total = 0;
+  let overflow = false;
+  try {
+    for await (const c of req) {
+      total += (c as Buffer).byteLength;
+      if (total > MAX_BODY_BYTES) {
+        if (!overflow) {
+          overflow = true;
+          chunks.length = 0; // 停止累积,释放已占内存
+          send413AndClose(req, res); // 413 头+body 立刻写出;end 等排干后
+        }
+        continue; // 超限后不再累积;继续读是为了让客户端把在途 body 发完,连接才能干净收尾
+      }
+      chunks.push(c as Buffer);
+    }
+  } catch (e) {
+    // 兜底销毁(BODY_LINGER_MS)会从这里打断迭代 —— 超限路径按 413 处理;其余(客户端中途断开等)照旧上抛。
+    if (overflow) throw new BodyTooLargeError();
+    throw e;
+  }
+  if (overflow) {
+    finish413(res); // 排干完才 end:请求读完后关闭才干净,不会把客户端正在写的数据 RST 掉
+    throw new BodyTooLargeError();
+  }
   const raw = Buffer.concat(chunks).toString("utf-8").trim();
   if (!raw) return {};
   return JSON.parse(raw);
@@ -349,6 +424,90 @@ export function isLoopbackAddr(addr: string | undefined): boolean {
   return addr === "127.0.0.1" || addr === "::1" || addr === "::ffff:127.0.0.1";
 }
 
+/** Host 头剥端口与 IPv6 括号、小写、去末尾点(带点 FQDN 与不带点等价),留裸主机名。多个冒号视为裸 IPv6 字面量(无端口),不剥。 */
+function bareHost(raw: string): string {
+  const h = raw.toLowerCase();
+  if (h.startsWith("[")) {
+    const end = h.indexOf("]");
+    return (end >= 0 ? h.slice(1, end) : h.slice(1)).replace(/\.+$/, "");
+  }
+  const noPort = (h.match(/:/g) ?? []).length > 1 ? h : h.replace(/:\d+$/, "");
+  return noPort.replace(/\.+$/, "");
+}
+
+/**
+ * Host 白名单(issue #427 P1 + 复审放宽):IP 字面量 / localhost / **单标签主机名**(Tailscale
+ * MagicDNS 短名如 `master`)/ `*.local`(mDNS 常见形态)/ `*.ts.net`(tailscale MagicDNS,
+ * 三节点部署的实际访问形态)+ env `DREC_ALLOWED_HOSTS`(逗号分隔追加,供自定义反代域名)。
+ * 比对忽略端口差异;末尾带点的 FQDN 先剥点再比对。未命中 → 403:拒绝按 Host 做路由投毒 /
+ * DNS rebinding 的攻击面(单标签主机名无法从公网解析,不受此影响)。
+ */
+export function hostAllowed(host: string | undefined): boolean {
+  if (!host) return false;
+  const bare = bareHost(host);
+  if (bare.length === 0) return false;
+  if (isIP(bare) > 0 || bare === "localhost") return true;
+  if (!bare.includes(".")) return true; // 单标签短名(magicDNS 短名/hosts 别名)
+  if (bare.endsWith(".local") && bare.length > ".local".length) return true;
+  if (bare.endsWith(".ts.net") && bare.length > ".ts.net".length) return true;
+  const extra = (process.env.DREC_ALLOWED_HOSTS ?? "")
+    .split(",")
+    .map((s) => bareHost(s.trim()))
+    .filter((s) => s.length > 0);
+  return extra.includes(bare);
+}
+
+/** 请求在用户侧的 scheme:反代 TLS 终止时经 x-forwarded-proto 透传(Origin 对比用),否则 http。 */
+function requestScheme(req: IncomingMessage): "http" | "https" {
+  const xf = req.headers["x-forwarded-proto"];
+  const first = (Array.isArray(xf) ? xf[0] : xf)?.split(",")[0]?.trim();
+  return first === "https" ? "https" : "http";
+}
+
+/**
+ * origin/host 值归一:小写 + 主机部分去末尾点(带点 FQDN 与不带点等价);端口保留(不同端口是不同 origin)。
+ * 非 scheme://host 形态原样小写返回(比较只会失败,安全侧)。
+ */
+function normalizeOriginValue(v: string): string {
+  const lower = v.toLowerCase();
+  const m = /^([a-z][a-z0-9+.-]*:\/\/)([^:/]+)(:\d+)?$/.exec(lower);
+  if (!m) return lower;
+  return `${m[1]}${m[2].replace(/\.+$/, "")}${m[3] ?? ""}`;
+}
+
+/**
+ * Origin 校验(issue #427 P1,**所有非 GET/HEAD 方法**,含空 body 的 POST):
+ *   - 无 Origin(curl、内部 fetch)→ 放行;
+ *   - `Origin: null`(沙箱 iframe / file://)仅本机回环放行;
+ *   - 其余必须等于 `${scheme}://${Host}`(两侧主机部分都归一:去末尾点),否则 403 —— 挡 text/plain 简单请求的跨站 CSRF。
+ * 导出以便对非回环 remoteAddress(本机测试造不出)做无 socket 单测。
+ */
+export function originAllowed(req: IncomingMessage, method: string): boolean {
+  if (method === "GET" || method === "HEAD") return true;
+  const h = req.headers.origin;
+  if (h === undefined) return true;
+  const v = (Array.isArray(h) ? h[0] : h).trim();
+  if (v === "") return true;
+  if (v.toLowerCase() === "null") return isLoopbackAddr(req.socket.remoteAddress);
+  const expected = normalizeOriginValue(`${requestScheme(req)}://${req.headers.host ?? ""}`);
+  return normalizeOriginValue(v) === expected;
+}
+
+/** 请求是否带 body(content-length>0 或 chunked);空 body 的 POST(启停等)不受 415 检查。 */
+function hasRequestBody(req: IncomingMessage): boolean {
+  const len = req.headers["content-length"];
+  if (typeof len === "string" && len.trim() !== "" && Number(len) > 0) return true;
+  const te = req.headers["transfer-encoding"];
+  return typeof te === "string" && te.toLowerCase().includes("chunked");
+}
+
+/** content-type 是否 application/json(容忍 ;charset=… 后缀)。 */
+function isJsonContentType(req: IncomingMessage): boolean {
+  const h = req.headers["content-type"];
+  const v = (Array.isArray(h) ? h[0] : h) ?? "";
+  return v.split(";")[0]?.trim().toLowerCase() === "application/json";
+}
+
 function sendHtml(res: ServerResponse, status: number, html: string): void {
   res.writeHead(status, {
     "content-type": "text/html; charset=utf-8",
@@ -357,12 +516,13 @@ function sendHtml(res: ServerResponse, status: number, html: string): void {
   res.end(html);
 }
 
-function sendAsset(res: ServerResponse, body: Buffer, contentType: string): void {
+function sendAsset(res: ServerResponse, body: Buffer, contentType: string, immutable: boolean): void {
   res.writeHead(200, {
     "content-type": contentType,
     "content-length": body.byteLength,
-    // Hashed Vite assets are immutable; index.html is served via sendHtml (no cache).
-    "cache-control": "public, max-age=31536000, immutable",
+    // 带 hash 的 Vite /assets/ 产物内容不可变 → 长缓存;其余(favicon 等非 hash 文件)no-cache,
+    // 改版后浏览器不会拿到旧文件(issue #427 附带 P3)。index.html 走 sendHtml(本来就不缓存)。
+    "cache-control": immutable ? `public, max-age=${365 * 24 * 3600}, immutable` : "no-cache",
   });
   res.end(body);
 }
@@ -372,6 +532,7 @@ async function dispatch(
   api: Api,
   match: RouteMatch,
   req: IncomingMessage,
+  res: ServerResponse,
   maintenance: MaintenanceApi,
   proc: ProcApi,
 ): Promise<ApiResult> {
@@ -379,19 +540,19 @@ async function dispatch(
     case "procActive":
       return proc.procActive();
     case "procPurge": {
-      const body = (await readJson(req)) as { purgeFailed?: boolean };
+      const body = (await readJson(req, res)) as { purgeFailed?: boolean };
       return proc.procPurge(body ?? {});
     }
     case "previewOrphans":
       return maintenance.previewOrphans();
     case "cleanupOrphans": {
-      const body = (await readJson(req)) as { confirm?: boolean };
+      const body = (await readJson(req, res)) as { confirm?: boolean };
       return maintenance.cleanupOrphans(body ?? {});
     }
     case "previewJobLogs":
       return maintenance.previewJobLogs(new URL(req.url ?? "/", "http://localhost").searchParams.get("olderThanDays"));
     case "cleanupJobLogs": {
-      const body = (await readJson(req)) as { olderThanDays?: unknown; confirm?: boolean };
+      const body = (await readJson(req, res)) as { olderThanDays?: unknown; confirm?: boolean };
       return maintenance.cleanupJobLogs(body ?? {});
     }
     case "listTasks":
@@ -399,11 +560,11 @@ async function dispatch(
     case "listPlatforms":
       return api.listPlatforms();
     case "createTask": {
-      const body = (await readJson(req)) as Parameters<Api["createTask"]>[0];
+      const body = (await readJson(req, res)) as Parameters<Api["createTask"]>[0];
       return api.createTask(body ?? {});
     }
     case "updateTask": {
-      const body = (await readJson(req)) as Parameters<Api["updateTask"]>[1];
+      const body = (await readJson(req, res)) as Parameters<Api["updateTask"]>[1];
       return api.updateTask(match.id!, body ?? {});
     }
     case "getTask":
@@ -423,7 +584,7 @@ async function dispatch(
     case "drainTask":
       return api.drainTask(match.id!);
     case "startLogin": {
-      const body = (await readJson(req)) as { platform?: string };
+      const body = (await readJson(req, res)) as { platform?: string };
       return api.startLogin(body ?? {});
     }
     case "pollLogin":
@@ -431,7 +592,7 @@ async function dispatch(
     case "getCookie":
       return api.getCookie();
     case "setCookie": {
-      const body = (await readJson(req)) as { cookie?: string };
+      const body = (await readJson(req, res)) as { cookie?: string };
       return api.setCookie(body ?? {});
     }
     case "clearCookie":
@@ -443,7 +604,7 @@ async function dispatch(
     case "getCookiePlatform":
       return api.getCookie(match.slug!);
     case "setCookiePlatform": {
-      const body = (await readJson(req)) as { cookie?: string };
+      const body = (await readJson(req, res)) as { cookie?: string };
       return api.setCookie(body ?? {}, match.slug!);
     }
     case "clearCookiePlatform":
@@ -451,17 +612,17 @@ async function dispatch(
     case "getWebhook":
       return api.getWebhook();
     case "setWebhook": {
-      const body = (await readJson(req)) as { webhook?: string };
+      const body = (await readJson(req, res)) as { webhook?: string };
       return api.setWebhook(body ?? {});
     }
     case "testWebhook": {
-      const body = (await readJson(req)) as { content?: string };
+      const body = (await readJson(req, res)) as { content?: string };
       return api.testWebhook(body ?? {});
     }
     case "getNotifSettings":
       return api.getNotifSettings();
     case "setNotifSettings": {
-      const body = (await readJson(req)) as Parameters<Api["setNotifSettings"]>[0];
+      const body = (await readJson(req, res)) as Parameters<Api["setNotifSettings"]>[0];
       return api.setNotifSettings(body ?? {});
     }
     case "getVersion":
@@ -469,25 +630,25 @@ async function dispatch(
     case "getMesioPath":
       return api.getMesioPath();
     case "setMesioPath": {
-      const body = (await readJson(req)) as { mesioPath?: string };
+      const body = (await readJson(req, res)) as { mesioPath?: string };
       return api.setMesioPath(body ?? {});
     }
     case "getDouyinApiMode":
       return api.getDouyinApiMode();
     case "setDouyinApiMode": {
-      const body = (await readJson(req)) as { mode?: string };
+      const body = (await readJson(req, res)) as { mode?: string };
       return api.setDouyinApiMode(body ?? {});
     }
     case "getTimezone":
       return api.getTimezone();
     case "setTimezone": {
-      const body = (await readJson(req)) as { timezone?: string };
+      const body = (await readJson(req, res)) as { timezone?: string };
       return api.setTimezone(body ?? {});
     }
     case "listRecordings":
       return api.listRecordings(match.id!);
     case "startMerge": {
-      const body = (await readJson(req)) as { sessions?: string[] };
+      const body = (await readJson(req, res)) as { sessions?: string[] };
       return api.startMerge(match.id!, body ?? {});
     }
     case "getMerge":
@@ -501,7 +662,7 @@ async function dispatch(
     case "getHubResources":
       return api.getHubResources();
     case "putHubResources": {
-      const body = (await readJson(req)) as Record<string, unknown>;
+      const body = (await readJson(req, res)) as Record<string, unknown>;
       return api.putHubResources(body ?? {});
     }
     case "listRooms":
@@ -509,7 +670,7 @@ async function dispatch(
     case "getRoom":
       return api.getRoom(match.slug!);
     case "updateRoom": {
-      const body = (await readJson(req)) as RoomPayload;
+      const body = (await readJson(req, res)) as RoomPayload;
       return api.updateRoom(match.slug!, body ?? {});
     }
     case "applyHubTasks": {
@@ -521,15 +682,15 @@ async function dispatch(
     case "listHubRules":
       return api.listHubRules();
     case "createHubRule": {
-      const body = (await readJson(req)) as Parameters<Api["createHubRule"]>[0];
+      const body = (await readJson(req, res)) as Parameters<Api["createHubRule"]>[0];
       return api.createHubRule(body ?? {});
     }
     case "reorderHubRules": {
-      const body = (await readJson(req)) as Parameters<Api["reorderHubRules"]>[0];
+      const body = (await readJson(req, res)) as Parameters<Api["reorderHubRules"]>[0];
       return api.reorderHubRules(body ?? {});
     }
     case "updateHubRule": {
-      const body = (await readJson(req)) as Parameters<Api["updateHubRule"]>[1];
+      const body = (await readJson(req, res)) as Parameters<Api["updateHubRule"]>[1];
       return api.updateHubRule(match.slug!, body ?? {});
     }
     case "deleteHubRule":
@@ -563,37 +724,37 @@ async function dispatch(
       });
     }
     case "retryHubNode": {
-      const body = (await readJson(req)) as { node?: string; force?: boolean };
+      const body = (await readJson(req, res)) as { node?: string; force?: boolean };
       return api.retryHubNode(match.sid!, body ?? {});
     }
     case "stopHubJob":
       return api.stopHubJob(match.sid!);
     case "ackHubJob": {
-      const body = (await readJson(req)) as { note?: string; undo?: boolean };
+      const body = (await readJson(req, res)) as { note?: string; undo?: boolean };
       return api.ackHubJob(match.sid!, body ?? {});
     }
     case "runHubJob": {
-      const body = (await readJson(req)) as Parameters<Api["runHubJob"]>[0];
+      const body = (await readJson(req, res)) as Parameters<Api["runHubJob"]>[0];
       return api.runHubJob(body ?? {});
     }
     case "listWorkers":
       return api.listWorkers();
     case "createWorker": {
-      const body = (await readJson(req)) as Parameters<Api["createWorker"]>[0];
+      const body = (await readJson(req, res)) as Parameters<Api["createWorker"]>[0];
       return api.createWorker(body ?? {});
     }
     case "updateWorker": {
-      const body = (await readJson(req)) as Parameters<Api["updateWorker"]>[1];
+      const body = (await readJson(req, res)) as Parameters<Api["updateWorker"]>[1];
       return api.updateWorker(match.slug!, body ?? {});
     }
     case "reorderWorkers": {
-      const body = (await readJson(req)) as Parameters<Api["reorderWorkers"]>[0];
+      const body = (await readJson(req, res)) as Parameters<Api["reorderWorkers"]>[0];
       return api.reorderWorkers(body ?? {});
     }
     case "deleteWorker":
       return api.deleteWorker(match.slug!);
     case "testWorker": {
-      const body = (await readJson(req)) as Parameters<Api["testWorker"]>[0];
+      const body = (await readJson(req, res)) as Parameters<Api["testWorker"]>[0];
       return api.testWorker(body ?? {});
     }
     case "nodeTasks":
@@ -720,6 +881,22 @@ export function createWebServer(deps: WebServerDeps): Server {
         return;
       }
       const pathname = url.pathname;
+      // ── 请求入口防护(issue #427 P1,先于路由/静态服务)──
+      // 1) Host 白名单:不符 → 403。
+      if (!hostAllowed(req.headers.host)) {
+        sendJson(res, 403, { error: `Host 不在白名单: ${String(req.headers.host)}` });
+        return;
+      }
+      // 2) Origin 校验(仅非 GET/HEAD):同源/无 Origin 放行,跨站 → 403。
+      if (!originAllowed(req, method)) {
+        sendJson(res, 403, { error: `Origin 与请求主机不符: ${String(req.headers.origin)}` });
+        return;
+      }
+      // 3) 带 body 的非 GET/HEAD 请求必须 application/json(text/plain 简单请求是 CSRF 通道)→ 415。
+      if (method !== "GET" && method !== "HEAD" && hasRequestBody(req) && !isJsonContentType(req)) {
+        sendJson(res, 415, { error: "带请求体的请求必须使用 application/json" });
+        return;
+      }
       const match = matchRoute(method, pathname);
 
       if (!match) {
@@ -732,7 +909,7 @@ export function createWebServer(deps: WebServerDeps): Server {
         if (method === "GET" || method === "HEAD") {
           const asset = loadStaticAsset(pathname);
           if (asset) {
-            sendAsset(res, asset.body, asset.contentType);
+            sendAsset(res, asset.body, asset.contentType, pathname.startsWith("/assets/"));
             return;
           }
           // Unknown non-asset client route → serve index.html (SPA fallback).
@@ -756,9 +933,14 @@ export function createWebServer(deps: WebServerDeps): Server {
         return;
       }
       try {
-        const result = await dispatch(api, match, req, maintenance, proc);
+        const result = await dispatch(api, match, req, res, maintenance, proc);
         sendJson(res, result.status, result.body);
       } catch (e) {
+        if (e instanceof BodyTooLargeError) {
+          // 超限路径的 413 已由 readJson 早响应发出(send413AndClose);这里只在响应尚未发出时兜底。
+          if (!res.headersSent) sendJson(res, 413, { error: e.message });
+          return;
+        }
         if (e instanceof SyntaxError) {
           sendJson(res, 400, { error: `请求体不是合法 JSON: ${e.message}` });
           return;

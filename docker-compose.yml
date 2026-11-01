@@ -66,6 +66,11 @@ services:
       DOUYIN_REC_STATIC: /app/web/dist
       # 可选 Discord 通知 webhook。
       DISCORD_WEBHOOK: ${DISCORD_WEBHOOK:-}
+      # Web API 入口防护的 Host 白名单追加项(issue #427):默认放行 IP 字面量 / localhost /
+      # 单标签主机名(Tailscale MagicDNS 短名)/ *.local / *.ts.net。若经自定义域名的反代访问,
+      # 需把该域名加进白名单(逗号分隔),否则所有请求 403:
+      #   DREC_ALLOWED_HOSTS=rec.example.com,rec.example.org
+      DREC_ALLOWED_HOSTS: ${DREC_ALLOWED_HOSTS:-}
     volumes:
       # 单一挂载卷：所有持久数据(db/录像/config)都在它下面，容器重建不丢。宿主机侧目录名(docker-data/)
       # 与容器内挂载点名(/output-data)不必一致——bind mount 只是把这块磁盘的两个入口对上,改容器内
