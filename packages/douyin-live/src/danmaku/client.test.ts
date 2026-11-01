@@ -32,8 +32,15 @@ class FakeWs implements DanmuWsLike {
     this.readyState = 2; // CLOSING
   }
   terminate(): void {
+    const wasConnecting = this.readyState === 0;
     this.terminated = true;
     this.readyState = 3; // CLOSED
+    // 真实 ws:CONNECTING 态 terminate → 异步先发 error("closed before the connection is established")
+    // 再发 close;其余状态只发 close(此处也异步)。
+    queueMicrotask(() => {
+      if (wasConnecting) this.emit("error", new Error("WebSocket was closed before the connection was established"));
+      this.emit("close");
+    });
   }
   /** 测试手动触发事件(模拟真实 ws 的事件回调)。 */
   emit(event: string, ...args: unknown[]): void {
@@ -127,6 +134,54 @@ describe("DouYinDanmaClient close/reconnect 语义 (issue #431)", () => {
     expect(sockets).toHaveLength(1);
   });
 
+  it("迟到 open 在已关闭 client 上:不 emit open、不启动心跳/超时/稳定定时器", async () => {
+    const { client, sockets } = makeHarness({ timeoutInterval: 5000 });
+    const opens: number[] = [];
+    const errors: Error[] = [];
+    client.on("open", () => opens.push(1));
+    client.on("error", (e) => errors.push(e));
+    await client.connect();
+    client.close();
+    sockets[0].readyState = 1;
+    sockets[0].emit("open");
+    expect(vi.getTimerCount()).toBe(0); // 没有任何定时器被启动
+    await vi.advanceTimersByTimeAsync(200_000); // 若超时检查被启动,这里会触发重连
+    expect(opens).toHaveLength(0);
+    expect(errors).toHaveLength(0);
+    expect(sockets).toHaveLength(1);
+  });
+
+  it("stop(close) 后 CONNECTING 态 terminate 异步补发的 error/close:不外抛 error/close 事件、不重连", async () => {
+    const { client, sockets } = makeHarness();
+    const errors: Error[] = [];
+    const closes: number[] = [];
+    client.on("error", (e) => errors.push(e));
+    client.on("close", () => closes.push(1));
+    await client.connect(); // 停在 CONNECTING
+    client.close();
+    await vi.advanceTimersByTimeAsync(1000); // 让 FakeWs 异步补发 error + close
+    expect(sockets[0].terminated).toBe(true);
+    expect(errors).toHaveLength(0); // 旧实现:此处会派发 error → listener-base 误告警
+    expect(closes).toHaveLength(0);
+    expect(sockets).toHaveLength(1);
+  });
+
+  it("超时重连 terminate 旧 socket 后异步补发的 close/error:旧 socket 事件被忽略(不重复重连)", async () => {
+    const { client, sockets } = makeHarness({ timeoutInterval: 5000 });
+    const errors: Error[] = [];
+    client.on("error", (e) => errors.push(e));
+    await client.connect();
+    sockets[0].readyState = 1;
+    sockets[0].emit("open");
+    await vi.advanceTimersByTimeAsync(6100); // 超时 → terminate 旧 + 重连(新 socket)
+    expect(sockets).toHaveLength(2);
+    sockets[0].emit("error", new Error("late"));
+    sockets[0].emit("close");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(errors).toHaveLength(0);
+    expect(sockets).toHaveLength(2);
+  });
+
   it("connect 等待签名期间被 close() → 不再建连", async () => {
     let releaseSign!: (v: string) => void;
     const gate = new Promise<string>((r) => {
@@ -159,15 +214,16 @@ describe("DouYinDanmaClient close/reconnect 语义 (issue #431)", () => {
     expect(sockets).toHaveLength(2);
   });
 
-  it("重连等待期间被 close() → 回调开头检查 closed,不建连", async () => {
+  it("重连回调开头的 closed 检查:绕过 clearTimeout 也不建连", async () => {
     const { client, sockets } = makeHarness();
     await client.connect();
     sockets[0].readyState = 1;
     sockets[0].emit("open");
     sockets[0].emit("close"); // 调度 10ms 后重连
-    // 不调 close():靠回调内的 closed/exhausted 检查?——这里 close() 发生在等待期间但定时器
-    // 已被清除,二者任一生效都不应建连;此用例钉住「等待期间 close → 不建连」的可观察结果。
+    // clearTimeout 失效(模拟定时器清除不到):只剩回调内 closed 检查这一道防线。
+    const spy = vi.spyOn(globalThis, "clearTimeout").mockImplementation(() => undefined);
     client.close();
+    spy.mockRestore();
     await vi.advanceTimersByTimeAsync(1000);
     expect(sockets).toHaveLength(1);
   });
@@ -207,6 +263,79 @@ describe("DouYinDanmaClient close/reconnect 语义 (issue #431)", () => {
     }
     expect(exhausted).toBe(false);
     expect(sockets).toHaveLength(5); // 1 + 4 次重连(计数每场被清零,永不触及上限)
+  });
+});
+
+describe("DouYinDanmaClient 监听方异常隔离 (issue #431)", () => {
+  it("监听方抛异常:同帧后续消息仍分发,且不向 message 回调外抛", async () => {
+    const { client, sockets } = makeHarness({
+      decode: () => ({
+        messages: [
+          { kind: "chat", msg: { user: { id: "u1", nickName: "N" }, content: "first", eventTime: "1" } },
+          { kind: "chat", msg: { user: { id: "u2", nickName: "N" }, content: "second", eventTime: "2" } },
+          { kind: "member", msg: { user: { id: "u3", nickName: "N" } } },
+        ],
+      }),
+    });
+    const seen: string[] = [];
+    client.on("chat", (m) => {
+      seen.push(m.content);
+      if (m.content === "first") throw new Error("ENOSPC: 模拟落盘失败");
+    });
+    client.on("member", () => seen.push("member"));
+    await client.connect();
+    sockets[0].readyState = 1;
+    sockets[0].emit("open");
+    expect(() => sockets[0].emit("message", Buffer.from("x"))).not.toThrow();
+    expect(seen).toEqual(["first", "second", "member"]);
+  });
+});
+
+describe("DouYinDanmaClient 默认签名 (issue #431)", () => {
+  afterEach(() => {
+    vi.doUnmock("./webmssdk.js");
+    vi.resetModules();
+  });
+
+  async function freshClient(): Promise<{ client: DouYinDanmaClient; urls: string[]; sockets: FakeWs[] }> {
+    const mod = await import("./client.js");
+    const urls: string[] = [];
+    const sockets: FakeWs[] = [];
+    const client = new mod.DouYinDanmaClient("live-9", {
+      cookie: "dummy=danmu-test",
+      decode: () => null,
+      wsFactory: (url) => {
+        urls.push(url);
+        const ws = new FakeWs();
+        sockets.push(ws);
+        return ws;
+      },
+    });
+    openClients.push(client);
+    return { client, urls, sockets };
+  }
+
+  it("get_sign 调用抛错 → 回落全零兜底签名,照常建连", async () => {
+    vi.resetModules();
+    vi.doMock("./webmssdk.js", () => ({
+      get_sign: () => {
+        throw new Error("sign boom");
+      },
+    }));
+    const { client, urls } = await freshClient();
+    await client.connect();
+    expect(urls).toHaveLength(1);
+    expect(urls[0]).toContain(`signature=${"0".repeat(8)}`);
+  });
+
+  it("webmssdk 模块加载失败 → connect reject(不带废签名静默建连)", async () => {
+    vi.resetModules();
+    vi.doMock("./webmssdk.js", () => {
+      throw new Error("module load boom");
+    });
+    const { client, sockets } = await freshClient();
+    await expect(client.connect()).rejects.toThrow();
+    expect(sockets).toHaveLength(0);
   });
 });
 

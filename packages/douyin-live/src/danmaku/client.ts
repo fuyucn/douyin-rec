@@ -22,7 +22,10 @@ import { gunzipSync } from "node:zlib";
 import crypto from "node:crypto";
 import type { douyin } from "./proto.js";
 import type { get_sign } from "./webmssdk.js";
+import { createLogger } from "@drec/core";
 import { fetchGuestCookie } from "./danmu-cookie.js";
+
+const log = createLogger("danmaku_client");
 
 // ── vendored 模块懒加载(仅保留类型;运行时经动态 import,注入假实现的测试永不触达)────────
 type DouyinProto = typeof douyin;
@@ -137,10 +140,14 @@ function getXMsStub(params: Record<string, string | number>): string {
 /** 签名函数注入点:md5 stub → signature。默认实现 = webmssdk.get_sign(懒加载)。 */
 export type DanmuSignFn = (xMsStub: string) => string | Promise<string>;
 
-/** 默认签名:webmssdk.get_sign;失败回落 "00000000"(上游同款兜底)。 */
+/**
+ * 默认签名:webmssdk.get_sign;get_sign 调用本身失败回落全零兜底签名(上游同款)。
+ * 模块加载失败不兜底 → connect reject,走上层连接失败告警(否则带废签名静默连接)。
+ */
 async function defaultSign(xMsStub: string): Promise<string> {
+  const getSign = await loadGetSign();
   try {
-    return String((await loadGetSign())(xMsStub));
+    return String(getSign(xMsStub));
   } catch {
     return "00000000";
   }
@@ -313,6 +320,7 @@ export class DouYinDanmaClient extends TypedEmitter<ClientEvents> {
     this.ws = ws;
 
     ws.on("open", () => {
+      if (this.closed || this.ws !== ws) return; // 迟到的 open(已 close / 已被重连替换)→ 不起定时器
       this.emit("open");
       this.startHeartbeat();
       this.startTimeoutCheck();
@@ -321,15 +329,25 @@ export class DouYinDanmaClient extends TypedEmitter<ClientEvents> {
       this.startStableCheck();
     });
     ws.on("message", (...args: unknown[]) => {
+      if (this.closed || this.ws !== ws) return;
       this.lastMessageTime = Date.now();
       this.decodeAndDispatch(args[0] as Buffer);
     });
     ws.on("close", () => {
+      // 已主动关闭 / 已被替换的旧 socket(如 CONNECTING 态 terminate 后异步补发的 close)→ 只记日志。
+      if (this.closed || this.ws !== ws) {
+        log.info("弹幕 WS 旧连接 close 事件(已关闭/已替换),忽略");
+        return;
+      }
       this.emit("close");
       this.reconnect();
     });
     ws.on("error", (...args: unknown[]) => {
       const err = args[0] as Error;
+      if (this.closed || this.ws !== ws) {
+        log.info(`弹幕 WS 旧连接 error 事件(已关闭/已替换),忽略: ${err?.message ?? err}`);
+        return;
+      }
       // 连接级错误 → 上报 + 重连。(帧级解码失败不会走到这里,见 decode。)
       this.emit("error", err);
       this.reconnect();
@@ -461,10 +479,15 @@ export class DouYinDanmaClient extends TypedEmitter<ClientEvents> {
     if (!frame) return;
     if (frame.ack) this.sendAck(frame.ack.logId, frame.ack.payloadType);
     for (const m of frame.messages) {
-      if (m.kind === "chat") this.emit("chat", m.msg);
-      else if (m.kind === "gift") this.emit("gift", m.msg);
-      else if (m.kind === "member") this.emit("member", m.msg);
-      else this.emit("control", m.msg);
+      // 逐条隔离:监听方(落盘等同步链路)抛错不得外抛成 uncaughtException,也不影响同帧后续消息。
+      try {
+        if (m.kind === "chat") this.emit("chat", m.msg);
+        else if (m.kind === "gift") this.emit("gift", m.msg);
+        else if (m.kind === "member") this.emit("member", m.msg);
+        else this.emit("control", m.msg);
+      } catch (e) {
+        log.error(`弹幕消息监听方抛错(kind=${m.kind}),已隔离:`, (e as Error)?.message ?? e);
+      }
     }
   }
 

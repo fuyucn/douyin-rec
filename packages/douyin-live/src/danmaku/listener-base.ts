@@ -110,8 +110,11 @@ export abstract class ListenerDanmuSource implements DanmuSource {
   protected abstract resolveLiveId(roomUrl: string): Promise<string | null>;
 
   private client: DanmaClient | null = null;
-  /** stop() 置位:start() 在每个 await 之后检查,已停止 → 不再继续建连(防 start 期间的竞态僵尸连接)。 */
-  private stopped = false;
+  /**
+   * 代次:start() 捕获自己的代次,stop() 递增;start() 在每个 await 之后检查代次仍为当前,
+   * 否则不再建连(防 start 期间的竞态僵尸连接;也防 start(A)→stop→start(B) 时 A 恢复后误建连)。
+   */
+  private generation = 0;
   /** 收到的消息计数（用于可见性日志）。 */
   private msgCount = 0;
   /** 健康监控:连上后是否收到过任何消息(弹幕/礼物/入场)。 */
@@ -134,12 +137,11 @@ export abstract class ListenerDanmuSource implements DanmuSource {
   ): Promise<void> {
     const alert = (msg: string): void => { try { onAlert?.(msg); } catch { /* ignore */ } };
     const hintEnd = (tips?: string): void => { try { onStreamEndHint?.({ tips }); } catch { /* ignore */ } };
-    // 复位 stop 标志:新的 start 撤销旧的 stop(manager 每场新建源,这里复位只是让同实例
-    // stop→start 复用时语义正确);start 期间的再次 stop 由下方每个 await 后的检查兜住。
-    this.stopped = false;
+    const gen = ++this.generation; // 新 start 使更早的 start 失效;之后任何 stop() 再使本次失效
+    const isStale = (): boolean => gen !== this.generation;
     // 本场 liveId 由子类(平台专属)解析。拿不到 → 解析失败(此时已 onLive 确认开播)→ 告警 + 本场不抓。
     const liveId = await this.resolveLiveId(roomUrl);
-    if (this.stopped) {
+    if (isStale()) {
       log.info(`${this.name} start 期间已 stop,不再建连(${roomUrl})`);
       return;
     }
@@ -150,7 +152,7 @@ export abstract class ListenerDanmuSource implements DanmuSource {
     }
 
     const Ctor = await this.loadClientCtor();
-    if (this.stopped) {
+    if (isStale()) {
       log.info(`${this.name} start 期间已 stop,不再建连(liveId=${liveId})`);
       return;
     }
@@ -160,7 +162,7 @@ export abstract class ListenerDanmuSource implements DanmuSource {
     // 等踢人 token，留 sessionid/uid_tt 保礼物）+ 用匿名 guest 设备指纹覆盖。详见 danmu-cookie.ts。
     const { buildDanmuCookie } = await import("./danmu-cookie.js");
     const wsCookie = await buildDanmuCookie(opts.cookies);
-    if (this.stopped) {
+    if (isStale()) {
       log.info(`${this.name} start 期间已 stop,不再建连(liveId=${liveId})`);
       return;
     }
@@ -272,13 +274,13 @@ export abstract class ListenerDanmuSource implements DanmuSource {
     }
 
     // start 期间被 stop(建连完成后才观察到):立即关闭刚建好的连接,不留僵尸,也不挂看门狗。
-    if (this.stopped) {
+    if (isStale()) {
       try {
         client.close();
       } catch {
         // Ignore close errors
       }
-      this.client = null;
+      if (this.client === client) this.client = null; // 别清掉后起 start 的 client
       log.info(`${this.name} start 期间已 stop,立即关闭刚建好的连接 liveId=${liveId}`);
       return;
     }
@@ -301,7 +303,7 @@ export abstract class ListenerDanmuSource implements DanmuSource {
   }
 
   async stop(): Promise<void> {
-    this.stopped = true;
+    this.generation++;
     this.clearSilentWatch();
     if (this.client) {
       try {

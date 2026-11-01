@@ -195,4 +195,33 @@ describe("弹幕源 start 期间 stop 生效 (issue #431)", () => {
     expect(closeCalls).toBe(1);
     expect(alerts).toHaveLength(0);
   });
+
+  it("代次:start(A) 进行中 → stop → start(B),A 恢复后不建连,B 正常建连", async () => {
+    const releases: Array<(v: string) => void> = [];
+    let constructed = 0;
+    class FakeClient {
+      constructor() { constructed++; }
+      on(): void { /* noop */ }
+      async connect(): Promise<void> { /* noop */ }
+      close(): void { /* noop */ }
+    }
+    class Sub extends ListenerDanmuSource {
+      readonly name = "test-generation";
+      protected async resolveLiveId(): Promise<string | null> {
+        return new Promise<string>((r) => { releases.push(r); });
+      }
+      protected async loadClientCtor(): Promise<never> { return FakeClient as unknown as never; }
+    }
+    const s = new Sub();
+    const a = s.start("https://live.douyin.com/123", OPTS, () => {});
+    await s.stop();
+    const b = s.start("https://live.douyin.com/123", OPTS, () => {});
+    releases[0]("live-A"); // A 恢复:代次已过期 → 不建连
+    await a;
+    expect(constructed).toBe(0);
+    releases[1]("live-B");
+    await b;
+    expect(constructed).toBe(1);
+    await s.stop();
+  });
 });
