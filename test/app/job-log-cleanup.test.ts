@@ -52,7 +52,7 @@ describe("job log cleanup (issue #414)", () => {
     log("keep.log", 1, 5);
     expect(previewJobLogs(root, 7, NOW)).toEqual({ olderThanDays: 7, count: 2, bytes: 500 });
     expect(existsSync(a) && existsSync(b)).toBe(true);
-    const r = cleanupJobLogs(root, 7, NOW);
+    const r = cleanupJobLogs(root, 7, NOW, join(root, "audit-p"));
     expect(r).toEqual({ olderThanDays: 7, deleted: 2, bytes: 500, failed: [] });
     expect(existsSync(a) || existsSync(b)).toBe(false);
   });
@@ -95,6 +95,7 @@ describe("job log cleanup (issue #414)", () => {
       manager: { isRecording: () => false, getAnchorName: () => null } as never,
       dataRoot: root,
       logsDir: root,
+      auditDir: join(root, "audit3"),
     });
     expect(api.cleanupJobLogs({ olderThanDays: 7 }).status).toBe(400);
     expect(api.cleanupJobLogs({ olderThanDays: 0, confirm: true }).status).toBe(400);
@@ -123,7 +124,7 @@ describe("job log cleanup (issue #414)", () => {
     const lines = readFileSync(join(auditDir, "cleanup-audit.jsonl"), "utf-8").trim().split("\n").map((l) => JSON.parse(l));
     if (failing) {
       expect(lines.find((l) => l.action === "deleted")).toMatchObject({ kind: "jobLog", count: 1 });
-      expect(lines.find((l) => l.action === "failed")).toMatchObject({ kind: "jobLog", path: "stays.log" });
+      expect(lines.find((l) => l.action === "failed")).toMatchObject({ kind: "jobLog", path: "hub/douyin_123/stays.log" });
     } else {
       expect(lines).toEqual([expect.objectContaining({ action: "deleted", kind: "jobLog", count: 2 })]);
     }
@@ -137,5 +138,31 @@ describe("job log cleanup (issue #414)", () => {
     const auditDir = join(root, "audit2");
     cleanupJobLogs(root, 7, NOW, auditDir);
     expect(existsSync(join(auditDir, "cleanup-audit.jsonl"))).toBe(false);
+  });
+
+
+  it("a failing audit write does not block the deletion", () => {
+    const auditDir = join(root, "audit4");
+    writeFileSync(auditDir, "not a directory");
+    log("gone.log", 30, 10);
+    let r;
+    expect(() => { r = cleanupJobLogs(root, 7, NOW, auditDir); }).not.toThrow();
+    expect(r?.deleted).toBe(1);
+    expect(existsSync(join(roomDir, "gone.log"))).toBe(false);
+  });
+
+  it("audit rows carry an error code, not the fs message with the full path", () => {
+    if (process.getuid?.() === 0) return; // permission bits are ignored by root
+    const auditDir = join(root, "audit5");
+    log("locked.log", 30, 10);
+    chmodSync(roomDir, 0o500);
+    try {
+      const r = cleanupJobLogs(root, 7, NOW, auditDir);
+      expect(JSON.stringify(r)).not.toContain(root);
+      const lines = readFileSync(join(auditDir, "cleanup-audit.jsonl"), "utf-8").trim().split("\n").map((l) => JSON.parse(l));
+      expect(lines.every((l) => l.action !== "failed" || (l.error === "EACCES" || l.error === "EPERM"))).toBe(true);
+    } finally {
+      chmodSync(roomDir, 0o700);
+    }
   });
 });

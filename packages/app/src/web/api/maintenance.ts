@@ -16,6 +16,7 @@
 import { listHubJobs, hubStageDir } from "../../hub-jobs.js";
 import { cleanupOrphans, scanOrphans, type ScanOptions, type ScanResult, type CleanupResult } from "../../orphan-cleanup.js";
 import { drecRoot, resolveOutputDir, rootLogsDir, rootStageDir } from "../../paths.js";
+import { join as pathJoin } from "node:path";
 import { cleanupJobLogs, parseJobLogDays, previewJobLogs } from "../../job-log-cleanup.js";
 import { HUB_TERMINAL_STATES, platformForRoom, recordingRoomDirCandidates, stageSessionDirCandidates } from "@drec/core";
 import type { ManagerLike, ApiResult } from "./types.js";
@@ -135,7 +136,7 @@ export function buildMaintenance(deps: MaintenanceDeps): {
       if (n === null) return { status: 400, body: { error: "天数必须为 1–3650 的整数" } };
       try {
         // 删除失败不吞:failed 随 body 返回;整体 200(部分成功是常态)。
-        return { status: 200, body: cleanupJobLogs(logsRoot, n, undefined, deps.auditDir) };
+        return { status: 200, body: cleanupJobLogs(logsRoot, n, undefined, deps.auditDir ?? pathJoin(root, "config", "maintenance")) };
       } catch {
         return { status: 500, body: { error: "场次日志清理失败" } };
       }
