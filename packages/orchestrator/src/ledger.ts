@@ -124,6 +124,17 @@ export class SyncLedger {
   private db: DatabaseSync;
   constructor(dbPath: string) {
     this.db = new DatabaseSync(dbPath);
+    try {
+      this.initSchema();
+    } catch (e) {
+      // 连接打开成功但初始化(initWal/建表/迁移)失败 → 先关连接再抛,不泄漏文件句柄(issue #428 复审)。
+      try { this.db.close(); } catch { /* 已关闭 */ }
+      throw e;
+    }
+  }
+
+  /** busy_timeout + WAL + 建表/迁移。原构造体;任一步抛错由构造函数统一 close 后重抛。 */
+  private initSchema(): void {
     // busy_timeout 必须在首个写语句之前生效(每连接设置,不落库;issue #428)。
     this.db.exec(`PRAGMA busy_timeout=${LEDGER_BUSY_TIMEOUT_MS}`);
     this.initWal();

@@ -8,9 +8,9 @@
  * 竞争用 test/sqlite-lock-holder(worker 线程持写事务)制造:主线程阻塞在同步 sqlite 调用里时,
  * 只有真线程能释放锁。变异验证:撤掉 busy_timeout / initWal 重试,下面的用例分别转红。
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { DatabaseSync } from "node:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { holdWriteLock } from "../sqlite-lock-holder.js";
@@ -102,6 +102,23 @@ describe("SyncLedger WAL + busy_timeout(issue #428)", () => {
         expect(ledger.upsertPending("k1")).toEqual({ isNew: true });
       } finally {
         ledger.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("构造失败(initWal/建表抛错)先关连接再抛,不泄漏句柄(issue #428 复审)", () => {
+    const { dir, dbPath } = freshDbPath();
+    try {
+      // 非 sqlite 文件:连接能打开,首个语句(读 journal_mode)才抛 NOTADB —— 正命中「打开成功但初始化失败」。
+      writeFileSync(dbPath, "definitely not a sqlite database file, just padding bytes here");
+      const closeSpy = vi.spyOn(DatabaseSync.prototype, "close");
+      try {
+        expect(() => new SyncLedger(dbPath)).toThrow(/not a database/i);
+        expect(closeSpy).toHaveBeenCalled();
+      } finally {
+        closeSpy.mockRestore();
       }
     } finally {
       rmSync(dir, { recursive: true, force: true });

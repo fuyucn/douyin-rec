@@ -8,6 +8,7 @@
     python3 scripts/reinforce-metrics.py --since 2026-10-06
     python3 scripts/reinforce-metrics.py --node vps      # 额外扫节点卡死残留(只读)
     python3 scripts/reinforce-metrics.py --loop --days 7 # 只出「PR 流程」纯文本表(供 loop 通知贴;无台账/无 gh 也能跑)
+    ... --db-container NAME                              # 台账经 docker exec 容器内只读读(优先;WAL 台账严禁宿主机读写打开)
     ... --ledger-log FILE | --ledger-container NAME      # 统计 `[ledger] 拒绝` 行数(日志不可得则跳过并标注)
     ... --fixture FILE.json                              # 离线喂 {prs,issues}(测试用,不调 gh)
 
@@ -25,6 +26,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_DB = REPO / "docker-data" / "db" / "douyin-rec-sync.db"
@@ -43,7 +45,8 @@ def redact(s: str) -> str:
 def run(cmd: list[str], timeout: int = 20, check: bool = False) -> str:
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, OSError):
+        # OSError:命令不在 PATH(gh 未装等)→ 返回空让调用方走降级路径,不炸整个巡检。
         return ""
     if check and p.returncode != 0:
         return ""
@@ -56,19 +59,104 @@ def epoch_ms_to_dt(ms: float) -> datetime | None:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
 
 
-def read_sync_jobs(db: Path) -> list[dict]:
-    if not db.exists():
-        return []
-    sql = (
-        "select streamKey,state,bv,error,updatedAt,startMs,winnerWorker from sync_jobs"
-    )
-    out = run(["sqlite3", "-json", str(db), sql])
-    if not out:
+# ---------------------------------------------------------------- 台账读取(issue #428 复审)
+# 台账 <db>-sync.db 已切 WAL(busy_timeout),且 master 的 docker-data 在 bind mount 上 ——
+# 宿主机(尤其 macOS:容器跑在 Linux VM)读写打开会在**跨 VM** 的 -shm/-wal 上动作,
+# 可能触发 checkpoint 或删 -wal,损坏容器侧正在使用的台账。**禁止宿主机读写打开**。
+# 读取优先级:① --db-container:docker exec 进容器用 node:sqlite readOnly 读(最安全);
+#             ② 宿主 sqlite3 -readonly(不写不 checkpoint);
+#             ③ 宿主 file:...?immutable=1(快照语义,可能读到旧数据,来源标注注明)。
+READ_SYNC_SQL = "select streamKey,state,bv,error,updatedAt,startMs,winnerWorker from sync_jobs"
+
+# 容器内 node:sqlite 只读读台账(与 docs/dev-multi-node.md「台账状态」排查命令同款)。
+# process.argv[1]=库路径 argv[2]=SQL(与 dev/multi-node/scenarios/lib.sh 的 ledger() 同布局)。
+_NODE_READ_CODE = (
+    "const {DatabaseSync}=require('node:sqlite');"
+    "let d;try{d=new DatabaseSync(process.argv[1],{readOnly:true})}catch(e){process.exit(3)}"
+    "try{process.stdout.write(JSON.stringify(d.prepare(process.argv[2]).all()))}"
+    "finally{try{d.close()}catch(e){}}"
+)
+
+
+def _run_rc(cmd: list[str], timeout: int = 20) -> tuple[int, str]:
+    """返回 (rc, stdout);命令不存在/超时 → (-1, "")。"""
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError):
+        return -1, ""
+    return p.returncode, p.stdout
+
+
+def _parse_rows(out: str) -> list[dict] | None:
+    """解析 -json 输出。空输出 = 合法空结果(sqlite3 -json 零行时不打印任何东西,原口径
+    `if not out: return []`);坏 JSON 才是「不可读」(上层试下一档)。"""
+    if not out.strip():
         return []
     try:
-        return json.loads(out)
+        rows = json.loads(out)
     except json.JSONDecodeError:
-        return []
+        return None
+    return rows if isinstance(rows, list) else None
+
+
+def _read_via_container(container: str, db: Path) -> tuple[list[dict], str] | None:
+    if not shutil.which("docker"):
+        return None
+    # docker compose 把 DATA_ROOT(默认 ./docker-data)挂在 /output-data:容器内路径按库文件名推导。
+    rc, out = _run_rc(["docker", "exec", container, "node", "-e", _NODE_READ_CODE,
+                       f"/output-data/db/{db.name}", READ_SYNC_SQL], timeout=15)
+    if rc != 0:
+        return None
+    rows = _parse_rows(out)
+    if rows is None:
+        return None
+    return rows, f"容器内只读(docker exec {container})"
+
+
+def _read_via_sqlite3_readonly(db: Path) -> tuple[list[dict], str] | None:
+    if not shutil.which("sqlite3"):
+        return None
+    rc, out = _run_rc(["sqlite3", "-readonly", "-json", str(db), READ_SYNC_SQL])
+    if rc != 0:
+        return None
+    rows = _parse_rows(out)
+    if rows is None:
+        return None
+    return rows, "宿主 sqlite3 -readonly(降级)"
+
+
+def _read_via_sqlite3_immutable(db: Path) -> tuple[list[dict], str] | None:
+    if not shutil.which("sqlite3"):
+        return None
+    # immutable=1 忽略 -wal/-shm(快照语义):绝不写库,但可能读到旧数据 —— 来源标注注明。
+    uri = f"file:{quote(str(db))}?immutable=1"
+    rc, out = _run_rc(["sqlite3", "-json", uri, READ_SYNC_SQL])
+    if rc != 0:
+        return None
+    rows = _parse_rows(out)
+    if rows is None:
+        return None
+    return rows, "宿主 immutable 快照(可能读到旧数据)"
+
+
+def read_sync_jobs(db: Path, container: str | None = None) -> tuple[list[dict], str]:
+    """只读读台账,返回 (rows, 来源标注)。
+
+    台账是 WAL + Docker bind mount(见上注释):**绝不宿主机读写打开**。优先容器内 readOnly;
+    容器不可用退宿主 `sqlite3 -readonly`;再退 immutable=1 快照(标注可能读到旧数据)。
+    台账文件不存在 → 空结果(原口径)。返回的来源标注随报告展示,降级路径不静默。
+    """
+    if container:
+        hit = _read_via_container(container, db)
+        if hit is not None:
+            return hit
+    if not db.exists():
+        return [], "台账不存在"
+    for reader in (_read_via_sqlite3_readonly, _read_via_sqlite3_immutable):
+        hit = reader(db)
+        if hit is not None:
+            return hit
+    return [], "台账不可读(容器不可用且 sqlite3 不可用/打不开)"
 
 
 def is_in_window(updated_at: float, since_dt: datetime) -> bool:
@@ -292,7 +380,10 @@ def pr_flow_section(args, now: datetime) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="自强化循环开发指标巡检(只读)")
-    ap.add_argument("--db", type=Path, default=DEFAULT_DB)
+    ap.add_argument("--db", type=Path, default=DEFAULT_DB,
+                    help="台账路径;配 --db-container 时按库文件名映射容器内 /output-data/db/")
+    ap.add_argument("--db-container", default=None,
+                    help="master 容器名:经 docker exec 在容器内只读读台账(优先;WAL 台账严禁宿主机读写打开,issue #428)")
     ap.add_argument("--stage", type=Path, default=DEFAULT_STAGE)
     ap.add_argument("--days", type=int, default=1)
     ap.add_argument("--since", default=None, help="YYYY-MM-DD 覆盖 --days")
@@ -318,7 +409,7 @@ def main() -> int:
         print(pr_flow_section(args, now), end="")
         return 0
 
-    jobs = read_sync_jobs(args.db)
+    jobs, ledger_source = read_sync_jobs(args.db, args.db_container)
     window = [j for j in jobs if is_in_window(j.get("updatedAt", 0), since_dt)]
     done = sum(1 for j in window if (j.get("state") or "").lower() == "done")
     needs_manual = [j for j in window if (j.get("state") or "").lower() == "needs_manual"]
@@ -409,6 +500,7 @@ def main() -> int:
     lines.append("")
     lines.append("## 1. 台账收口")
     lines.append("")
+    lines.append(f"- 数据来源：{ledger_source}")
     lines.append(f"- 收口场次（done + needs_manual + failed）：{closed_manual}")
     lines.append(f"- done：{done}")
     lines.append(f"- needs_manual：{len(needs_manual)}")

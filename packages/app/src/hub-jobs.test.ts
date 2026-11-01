@@ -3,7 +3,6 @@ import { DatabaseSync } from "node:sqlite";
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { holdWriteLock } from "../../../test/sqlite-lock-holder.js";
 import { STAGE_READY } from "@drec/core";
 import { needsManualPhaseOf } from "./hub-jobs.js";
 import { activeHubJobKeys, buildQueueView, deleteHubJobHistory, latestRunPerRoom, listHubJobs, readHubJobLog, jobLogPath, jobLogPaths } from "./hub-jobs.js";
@@ -273,19 +272,8 @@ describe("deleteHubJobHistory / activeHubJobKeys", () => {
     expect(r.deleted).toBe(1);
     expect(activeHubJobKeys(dbPath, "douyin.100")).toEqual([]);
   });
-
-  it("写连接设 busy_timeout:他人持写事务时等锁,不立刻 BUSY(issue #428)", async () => {
-    const { dbPath, db } = makeSyncDb();
-    seedJob(db, "douyin:100:2026-07-01", [["done", T0]], 100, { bv: "A1" });
-    db.close();
-    const { locked, released } = holdWriteLock(dbPath, 200);
-    await locked; // 另一线程 BEGIN IMMEDIATE 持有写锁
-    const t0 = Date.now();
-    const r = deleteHubJobHistory(dbPath, "douyin.100"); // 修复前:BEGIN IMMEDIATE 立刻 SQLITE_BUSY 抛错
-    expect(Date.now() - t0).toBeGreaterThanOrEqual(120); // 真的等过锁
-    await released;
-    expect(r.deleted).toBe(1);
-  });
+  // 「写连接设 busy_timeout 等锁」用例已挪到 test/app/hub-jobs-lock.test.ts:
+  // 它要 import 根 test/sqlite-lock-holder,包内测试不引用包外的根 test/(issue #428 复审)。
 });
 
 describe("latestRunPerRoom", () => {
