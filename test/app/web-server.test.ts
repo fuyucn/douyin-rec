@@ -679,7 +679,7 @@ describe("createWebServer (live)", () => {
     try {
       const asset = await fetch(`${base}/assets/index-abc123.js`);
       expect(asset.status).toBe(200);
-      expect(asset.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+      expect(asset.headers.get("cache-control")).toBe("public, max-age=31536000, immutable"); // issue-guard: allow
       const favicon = await fetch(`${base}/favicon.ico`);
       expect(favicon.status).toBe(200);
       expect(favicon.headers.get("cache-control")).toBe("no-cache");
