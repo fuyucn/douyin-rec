@@ -240,6 +240,40 @@ describe("deleteHubJobHistory / activeHubJobKeys", () => {
     expect(activeHubJobKeys(dbPath, "douyin.100")).toEqual([]);
     expect(deleteHubJobHistory("/nonexistent/x-sync.db", "douyin.100")).toEqual({ deleted: 0, streamKeys: [] });
   });
+
+  it("五表 DELETE 包事务:中途失败整体回滚,不删一半(issue #428)", () => {
+    const { dbPath, db } = makeSyncDb();
+    seedJob(db, "douyin:100:2026-07-01", [["done", T0]], 100, { bv: "A1" });
+    seedJob(db, "douyin:200:2026-07-01", [["done", T0 + 2000]], 100, { bv: "B1" });
+    // seedJob 不写 node_states:补一行让后面的触发器真的被触发。
+    db.prepare("INSERT INTO sync_node_states(streamKey,node,state,error,attempts,updatedAt) VALUES(?,?,?,?,?,?)")
+      .run("douyin:100:2026-07-01", "merge", "done", null, 1, T0);
+    // 让删除顺序靠后的 sync_node_states 报错:前面 sync_jobs/sync_job_events 已删的行必须被回滚。
+    db.exec("CREATE TRIGGER boom BEFORE DELETE ON sync_node_states BEGIN SELECT RAISE(ABORT, 'boom'); END");
+    db.close();
+
+    expect(() => deleteHubJobHistory(dbPath, "douyin.100")).toThrow("boom");
+    const after = new DatabaseSync(dbPath);
+    try {
+      for (const table of ["sync_jobs", "sync_job_events", "sync_candidates"]) {
+        const n = (after.prepare(`SELECT COUNT(*) n FROM ${table} WHERE streamKey LIKE 'douyin:100:%'`).get() as { n: number }).n;
+        expect(n, table).toBe(1); // 一行都没删成
+      }
+      // 其他房间不受影响
+      expect((after.prepare("SELECT COUNT(*) n FROM sync_jobs WHERE streamKey LIKE 'douyin:200:%'").get() as { n: number }).n).toBe(1);
+    } finally {
+      after.close();
+    }
+    // 撤掉触发器后重跑:删除完整成功。
+    const fix = new DatabaseSync(dbPath);
+    fix.exec("DROP TRIGGER boom");
+    fix.close();
+    const r = deleteHubJobHistory(dbPath, "douyin.100");
+    expect(r.deleted).toBe(1);
+    expect(activeHubJobKeys(dbPath, "douyin.100")).toEqual([]);
+  });
+  // 「写连接设 busy_timeout 等锁」用例已挪到 test/app/hub-jobs-lock.test.ts:
+  // 它要 import 根 test/sqlite-lock-holder,包内测试不引用包外的根 test/(issue #428 复审)。
 });
 
 describe("latestRunPerRoom", () => {
