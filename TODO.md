@@ -14,13 +14,13 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
-- [ ] **T-131 运行树画法修正（issue [#407](https://github.com/fuyucn/douyin-rec/issues/407)）**（2026-10-30）
+- [x] **T-131 运行树画法修正（issue [#407](https://github.com/fuyucn/douyin-rec/issues/407)）**（2026-10-30）
   — 新运行树三处与真实流程不符：candidate 清理节点被画进 hub 链末尾而非回连各成员；hub 处理链竖排与整图横向不一致；直播直传无历史场次（口径待定）。
   **做什么**: 清理步改为回连各 candidate 节点；`.tr-hub` 改横向；历史场次口径先在 issue 评论给建议等人拍板，不自行扩到后端。
   **为什么**: 图要如实表达「选优后按全部在场成员删源」与 T-129 的横向展开验收。
   **验收**: 单测钉住新边/新布局；画法与台账实际 steps 一致；全量门禁通过。
 
-- [ ] **T-132 直播直传未开播显示「当前场次·进行中」（issue [#408](https://github.com/fuyucn/douyin-rec/issues/408)）**（2026-10-30）
+- [x] **T-132 直播直传未开播显示「当前场次·进行中」（issue [#408](https://github.com/fuyucn/douyin-rec/issues/408)）**（2026-10-30）
   — CurrentRunTree 根状态写死 running，且 waiting 快照也渲染整棵树，未开播时常驻「进行中」。
   **做什么**: 根状态从快照 state 派生；waiting 不渲染整棵树或显示「等待开播」，与 runtime 页 idle 口径对齐。
   **为什么**: 用户无法区分等开播与正在直播。
