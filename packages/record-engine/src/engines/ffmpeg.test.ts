@@ -76,7 +76,7 @@ describe("ffmpeg stderr 行缓冲解析", () => {
     return { p, segments, stderr, progressCount: () => progress };
   }
 
-  it("Opening 路径含振号(主播名 O'Brien)→ 整段路径上报,不以振号截断", () => {
+  it("Opening 路径含撇号(主播名 O'Brien)→ 整段路径上报,不以撇号截断", () => {
     const { p, segments, stderr } = makeParser();
     p.onChunk("Opening '/out/O'Brien_2026-06-20_01-02-03_000.ts' for writing\n");
     expect(segments).toEqual(["/out/O'Brien_2026-06-20_01-02-03_000.ts"]);
@@ -96,7 +96,7 @@ describe("ffmpeg stderr 行缓冲解析", () => {
     const { p, progressCount, segments } = makeParser();
     p.onChunk("\rframe=1 time=00:00:10.00 speed=1x\rframe=2 time=00:00:20.00 speed=1x\r");
     expect(progressCount()).toBe(2);
-    // 时间戳回退/重复 → 不再喙看门狗。
+    // 时间戳回退/重复 → 不再喂看门狗。
     p.onChunk("\rframe=3 time=00:00:15.00 speed=1x\r");
     expect(progressCount()).toBe(2);
     // 进度条行里不存在 Opening → 不误报分段。
@@ -116,10 +116,12 @@ describe("ffmpeg stderr 行缓冲解析", () => {
     expect(progressCount()).toBe(0);
   });
 
-  it("\\r\\n 作为一个分隔符处理;空行不回调", () => {
+  it("\\r\\n 及其被拆在两个 chunk 间都只产生一行;空行不回调", () => {
     const { p, stderr, segments } = makeParser();
     p.onChunk("Opening '/out/a.ts' for writing\r\n\r\n");
-    expect(segments).toEqual(["/out/a.ts"]);
-    expect(stderr).toEqual(["Opening '/out/a.ts' for writing"]);
+    p.onChunk("Opening '/out/b.ts' for writing\r");
+    p.onChunk("\nnext line\n");
+    expect(segments).toEqual(["/out/a.ts", "/out/b.ts"]);
+    expect(stderr).toEqual(["Opening '/out/a.ts' for writing", "Opening '/out/b.ts' for writing", "next line"]);
   });
 });
