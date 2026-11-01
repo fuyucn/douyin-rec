@@ -180,7 +180,7 @@ describe("reinforce-metrics.py 台账读取(issue #428 复审)", () => {
     const py = spawnSync("which", ["python3"], { encoding: "utf-8" }).stdout.trim();
     const r = spawnSync(py, [SCRIPT, "--days", "7", "--db", ledgerDb(shimDir), "--db-container", "gone", ...withFixture([], fixture)],
       { encoding: "utf-8", env: { ...process.env, PATH: shimDir } });
-    expect(r.status).not.toBe(0);
+    expect(r.status).toBe(2);
     expect(r.stderr).toContain("--db-container gone 读取失败");
     expect(r.stdout).not.toContain("数据来源");
     expect(() => readFileSync(sqlLog, "utf-8")).toThrow(); // sqlite3 从未被调用
