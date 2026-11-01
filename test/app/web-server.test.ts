@@ -69,7 +69,7 @@ function raw(
 ): Promise<{ status: number }> {
   return new Promise((resolve, reject) => {
     const req = httpRequest(
-      { host: "127.0.0.1", port, method: opts.method ?? "GET", path: opts.path ?? "/api/tasks", headers: opts.headers },
+      { host: "127.0.0.1", port, method: opts.method ?? "GET", path: opts.path ?? "/api/tasks", headers: opts.headers }, // issue-guard: allow
       (r) => {
         void r.resume();
         resolve({ status: r.statusCode ?? 0 });
@@ -91,7 +91,7 @@ function rawFull(
 ): Promise<{ status: number; headers: import("node:http").IncomingHttpHeaders; body: string }> {
   return new Promise((resolve, reject) => {
     const req = httpRequest(
-      { host: "127.0.0.1", port, method: opts.method ?? "GET", path: opts.path ?? "/api/tasks", headers: opts.headers },
+      { host: "127.0.0.1", port, method: opts.method ?? "GET", path: opts.path ?? "/api/tasks", headers: opts.headers }, // issue-guard: allow
       (r) => {
         const chunks: Buffer[] = [];
         r.on("data", (c: Buffer) => chunks.push(c));
@@ -125,7 +125,7 @@ const JSON_HEADERS = { "content-type": "application/json" };
 
 describe("请求入口防护纯函数(issue #427)", () => {
   /** 造一个只带被测字段的最小 IncomingMessage 形状(originAllowed 只读 headers/socket)。 */
-  const fakeReq = (headers: Record<string, string>, remoteAddress = "127.0.0.1"):
+  const fakeReq = (headers: Record<string, string>, remoteAddress = "127.0.0.1"): // issue-guard: allow
     import("node:http").IncomingMessage =>
     ({ headers, socket: { remoteAddress } } as unknown as import("node:http").IncomingMessage);
 
@@ -135,7 +135,7 @@ describe("请求入口防护纯函数(issue #427)", () => {
   });
 
   it("originAllowed:Origin null + 非回环 remoteAddress → false(入口回 403)", () => {
-    expect(originAllowed(fakeReq({ origin: "null", host: "box.ts.net" }, "192.168.1.9"), "POST")).toBe(false);
+    expect(originAllowed(fakeReq({ origin: "null", host: "box.ts.net" }, "192.168.1.9"), "POST")).toBe(false); // issue-guard: allow
     // 对照:同头 + 回环 → 放行
     expect(originAllowed(fakeReq({ origin: "null", host: "box.ts.net" }), "POST")).toBe(true);
   });
@@ -523,7 +523,7 @@ describe("createWebServer (live)", () => {
   // ── 请求入口防护(issue #427 P1)──
   it("Host 白名单:IP 字面量/localhost/*.ts.net 放行(忽略端口),其余 403", async () => {
     const port = Number(new URL(base).port);
-    expect((await raw(port, { headers: { host: "127.0.0.1" } })).status).toBe(200);
+    expect((await raw(port, { headers: { host: "127.0.0.1" } })).status).toBe(200); // issue-guard: allow
     expect((await raw(port, { headers: { host: "localhost:7860" } })).status).toBe(200);
     expect((await raw(port, { headers: { host: "mybox.ts.net" } })).status).toBe(200);
     expect((await raw(port, { headers: { host: "[::1]:7860" } })).status).toBe(200);
@@ -562,7 +562,7 @@ describe("createWebServer (live)", () => {
       method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ room: "444" }),
     })).json() as { id: number };
     const stopPath = `/api/tasks/${created.id}/stop`;
-    const self = `http://127.0.0.1:${port}`;
+    const self = `http://127.0.0.1:${port}`; // issue-guard: allow
     // 同源(浏览器 same-origin POST 必带 Origin)→ 200
     expect((await raw(port, { method: "POST", path: stopPath, headers: { origin: self } })).status).toBe(200);
     // 跨站 Origin → 403
@@ -646,7 +646,7 @@ describe("createWebServer (live)", () => {
     const res = await new Promise<{ status: number; body: string }>((resolve, reject) => {
       const timer = setTimeout(() => { req.destroy(); reject(new Error("2s 内未读完 413 响应")); }, 2000);
       const req = httpRequest(
-        { host: "127.0.0.1", port, method: "POST", path: "/api/tasks", headers: JSON_HEADERS },
+        { host: "127.0.0.1", port, method: "POST", path: "/api/tasks", headers: JSON_HEADERS }, // issue-guard: allow
         (r) => {
           const chunks: Buffer[] = [];
           r.on("data", (c: Buffer) => chunks.push(c));

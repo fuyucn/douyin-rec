@@ -522,7 +522,7 @@ function sendAsset(res: ServerResponse, body: Buffer, contentType: string, immut
     "content-length": body.byteLength,
     // 带 hash 的 Vite /assets/ 产物内容不可变 → 长缓存;其余(favicon 等非 hash 文件)no-cache,
     // 改版后浏览器不会拿到旧文件(issue #427 附带 P3)。index.html 走 sendHtml(本来就不缓存)。
-    "cache-control": immutable ? "public, max-age=31536000, immutable" : "no-cache",
+    "cache-control": immutable ? `public, max-age=${365 * 24 * 3600}, immutable` : "no-cache",
   });
   res.end(body);
 }
