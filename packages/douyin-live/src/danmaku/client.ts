@@ -12,14 +12,32 @@
  *
  * 仍依赖两块无法重写的 vendored:`./proto.js`(pbjs 生成的消息 schema)+ `./webmssdk.js`
  * (a_bogus 签名,逆向 sdk)。签名参数(sigParams / webcast5Params)逐字沿用上游,改动即废签名。
+ * 这两个 vendored 模块**不在模块加载期静态执行**,而是 connect() 时按需动态加载(下方 lazy loader);
+ * 签名 / 解码 / WS 工厂均可经构造参数注入假实现(默认值仍是本文件里的现实现),供单测使用 ——
+ * 测试由此永不触达 vendored 代码,也不发起真实网络连接。
  */
 import WebSocket from "ws";
 import { TypedEmitter } from "tiny-typed-emitter";
 import { gunzipSync } from "node:zlib";
 import crypto from "node:crypto";
-import { douyin } from "./proto.js";
-import { get_sign } from "./webmssdk.js";
+import type { douyin } from "./proto.js";
+import type { get_sign } from "./webmssdk.js";
 import { fetchGuestCookie } from "./danmu-cookie.js";
+
+// ── vendored 模块懒加载(仅保留类型;运行时经动态 import,注入假实现的测试永不触达)────────
+type DouyinProto = typeof douyin;
+type WebmssdkGetSign = typeof get_sign;
+
+let protoMemo: DouyinProto | undefined;
+async function loadProto(): Promise<DouyinProto> {
+  protoMemo ??= (await import("./proto.js")).douyin;
+  return protoMemo;
+}
+let getSignMemo: WebmssdkGetSign | undefined;
+async function loadGetSign(): Promise<WebmssdkGetSign> {
+  getSignMemo ??= (await import("./webmssdk.js")).get_sign;
+  return getSignMemo;
+}
 
 /** 消息体最小形状(client.ts 消费 + listener-base 归一化用到的字段)。 */
 export interface DyUser {
@@ -62,6 +80,18 @@ interface ClientEvents {
   control: (e: { action: number; tips: string }) => void;
 }
 
+/** 注入用最小 WS 接口:真实 ws 与测试假 socket 都满足(readyState 用 ws 的标准数值常量)。 */
+export interface DanmuWsLike {
+  readyState: number;
+  on(event: string, listener: (...args: unknown[]) => void): unknown;
+  send(data: string | Uint8Array): unknown;
+  close(...args: unknown[]): unknown;
+  terminate(): unknown;
+}
+
+/** WS 工厂注入点(默认 = 真实 ws 客户端;测试注入假 socket 避免真实网络)。 */
+export type DanmuWsFactory = (url: string, options: { headers: Record<string, string> }) => DanmuWsLike;
+
 export interface DanmaClientOptions {
   autoStart?: boolean;
   autoReconnect?: number;
@@ -70,6 +100,12 @@ export interface DanmaClientOptions {
   timeoutInterval?: number;
   cookie?: string;
   host?: string;
+  /** 测试注入:签名函数(默认 = vendored webmssdk.get_sign)。 */
+  sign?: DanmuSignFn;
+  /** 测试注入:帧解码函数(默认 = vendored proto.js 管线)。 */
+  decode?: DanmuDecodeFn;
+  /** 测试注入:WS 工厂(默认 = 真实 ws 客户端)。 */
+  wsFactory?: DanmuWsFactory;
 }
 
 // ── 假设备 ID(防踢补丁,原样保留)──────────────────────────────────────────────
@@ -98,13 +134,101 @@ function getXMsStub(params: Record<string, string | number>): string {
   return crypto.createHash("md5").update(s).digest("hex");
 }
 
-/** a_bogus 签名(webmssdk.get_sign);失败回落 "00000000"(上游同款兜底)。 */
-function getSignature(xMsStub: string): string {
+/** 签名函数注入点:md5 stub → signature。默认实现 = webmssdk.get_sign(懒加载)。 */
+export type DanmuSignFn = (xMsStub: string) => string | Promise<string>;
+
+/** 默认签名:webmssdk.get_sign;失败回落 "00000000"(上游同款兜底)。 */
+async function defaultSign(xMsStub: string): Promise<string> {
   try {
-    return String(get_sign(xMsStub));
+    return String((await loadGetSign())(xMsStub));
   } catch {
     return "00000000";
   }
+}
+
+/** 解码产物中的一条消息(保持帧内原始顺序)。 */
+export type DecodedDanmuMessage =
+  | { kind: "chat"; msg: DyChatMessage }
+  | { kind: "gift"; msg: DyGiftMessage }
+  | { kind: "member"; msg: DyMemberMessage }
+  | { kind: "control"; msg: { action: number; tips: string } };
+
+/** 解码一帧 WS 二进制的产物;null = 丢帧(解不开/非 gzip 控制帧 → 静默,不当连接错误)。 */
+export interface DecodedDanmuFrame {
+  /** needAck=true 时的回执参数(PushFrame logId + Response internalExt)→ 由 client 统一回 ack。 */
+  ack?: { logId: unknown; payloadType: unknown };
+  messages: DecodedDanmuMessage[];
+}
+
+/** 解码函数注入点(默认实现 = vendored proto.js 管线,见 defaultDecode)。 */
+export type DanmuDecodeFn = (data: Buffer) => DecodedDanmuFrame | null;
+
+/**
+ * 默认解码管线(原 DouYinDanmaClient.decode 的逻辑移出成纯函数):无条件 gunzip(消息帧都是
+ * gzip);非 gzip 控制/握手帧 → 静默丢帧、不 emit("error")(上游对此 emit 连接错误、污染弹幕
+ * 健康告警)。注:别按 payloadEncoding 门控 —— 实测消息帧的该字段并非 "gzip",门控会把所有
+ * 消息帧都跳过 gunzip → 0 弹幕(已被真实录制证伪)。proto 由 connect() 预载。
+ */
+function defaultDecode(data: Buffer): DecodedDanmuFrame | null {
+  const proto = protoMemo;
+  if (!proto) return null; // 理论不可达:connect() 已预载(注入解码时不走此函数)
+  let frame: { payload?: Uint8Array; logId?: unknown };
+  try {
+    frame = proto.PushFrame.decode(data);
+  } catch {
+    return null; // 连 PushFrame 都解不了 → 丢帧(极少见)
+  }
+  const payload = frame.payload;
+  if (!payload || payload.length === 0) return null;
+
+  // 消息帧都是 gzip(webcast5Params 请求了 compress:gzip),无条件 gunzip;开播时的非 gzip
+  // 控制/握手帧会抛错 → catch 里静默丢帧、不当连接错误上报。
+  let body: Uint8Array;
+  try {
+    body = gunzipSync(payload);
+  } catch {
+    return null; // 非 gzip 帧(开播控制/握手帧)→ 静默丢,不当连接错误上报
+  }
+
+  let resp: { needAck?: boolean; internalExt?: unknown; messagesList?: Array<{ method?: string; payload?: Uint8Array }> };
+  try {
+    resp = proto.Response.decode(body);
+  } catch {
+    return null;
+  }
+
+  const out: DecodedDanmuFrame = { messages: [] };
+  if (resp.needAck) out.ack = { logId: frame.logId, payloadType: resp.internalExt };
+
+  for (const msg of resp.messagesList ?? []) {
+    if (!msg.payload) continue;
+    try {
+      switch (msg.method) {
+        case "WebcastChatMessage":
+          out.messages.push({ kind: "chat", msg: proto.ChatMessage.decode(msg.payload).toJSON() as DyChatMessage });
+          break;
+        case "WebcastMemberMessage":
+          out.messages.push({ kind: "member", msg: proto.MemberMessage.decode(msg.payload).toJSON() as DyMemberMessage });
+          break;
+        case "WebcastGiftMessage":
+          out.messages.push({ kind: "gift", msg: proto.GiftMessage.decode(msg.payload).toJSON() as DyGiftMessage });
+          break;
+        case "WebcastControlMessage": {
+          // 上游语义:action === 3 = 本场疑似结束(下播)。仅作提示 → 交给上层用 getLiving 复核。
+          const c = proto.ControlMessage.decode(msg.payload);
+          if (Number(c.action) === 3) {
+            out.messages.push({ kind: "control", msg: { action: Number(c.action), tips: String(c.tips ?? "") } });
+          }
+          break;
+        }
+        default:
+          break; // like / social / roomStats / roomRank / screenChat … 不消费
+      }
+    } catch {
+      /* 单条消息解码失败:跳过这条,不影响同帧其余消息 */
+    }
+  }
+  return out;
 }
 
 const UA =
@@ -124,7 +248,7 @@ const STABLE_CONNECTION_MS = 60_000;
  * 传 slug 能连上却收不到弹幕 —— 见 listener-base 注释)。事件:open/close/error/chat/gift/member。
  */
 export class DouYinDanmaClient extends TypedEmitter<ClientEvents> {
-  private ws: WebSocket | undefined;
+  private ws: DanmuWsLike | undefined;
   private readonly roomId: string;
   private readonly heartbeatInterval: number;
   private readonly autoReconnect: number;
@@ -132,10 +256,16 @@ export class DouYinDanmaClient extends TypedEmitter<ClientEvents> {
   private readonly timeoutInterval: number;
   private readonly cookie: string | undefined;
   private readonly host: string;
+  // 注入点(默认值 = 本文件的现实现,见 DanmaClientOptions 注释)。
+  private readonly signFn: DanmuSignFn;
+  private readonly decodeFn: DanmuDecodeFn;
+  private readonly wsFactory: DanmuWsFactory;
 
   private reconnectAttempts = 0;
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   private timeoutTimer: ReturnType<typeof setInterval> | undefined;
+  /** 重连等待定时器:close() 时必须清除,否则等待期间被停仍会再建一条连接(僵尸)。 */
+  private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   /** 连接稳定计时器:存活满 STABLE_MS 才认定连接可用(重置重连计数)。 */
   private stableTimer: ReturnType<typeof setTimeout> | undefined;
   private lastMessageTime = Date.now();
@@ -154,17 +284,25 @@ export class DouYinDanmaClient extends TypedEmitter<ClientEvents> {
     this.timeoutInterval = options.timeoutInterval ?? 100_000;
     this.cookie = options.cookie;
     this.host = options.host ?? "webcast100-ws-web-hl.douyin.com";
+    this.signFn = options.sign ?? defaultSign;
+    this.decodeFn = options.decode ?? defaultDecode;
+    this.wsFactory = options.wsFactory ?? ((url, opts) => new WebSocket(url, opts) as unknown as DanmuWsLike);
     if (options.autoStart) void this.connect();
   }
 
   async connect(): Promise<void> {
+    if (this.closed) return;
+    // 默认解码管线依赖 vendored proto.js → 建连前预载(注入 decode 的调用方不触达 vendored 模块)。
+    if (this.decodeFn === defaultDecode) await loadProto();
     const url = await this.getWsInfo(this.roomId);
+    if (this.closed) return; // 签名期间被 close → 不再建连
     if (!url) {
       this.emit("error", new Error("获取抖音弹幕签名失败"));
       return;
     }
     const cookie = this.cookie || (await fetchGuestCookie());
-    const ws = new WebSocket(url, {
+    if (this.closed) return; // 拉访客登录态期间被 close → 不再建连
+    const ws = this.wsFactory(url, {
       headers: {
         Cookie: cookie,
         "User-Agent": UA,
@@ -182,15 +320,16 @@ export class DouYinDanmaClient extends TypedEmitter<ClientEvents> {
       // 上限永远不触发(无限重连)。改为存活满 STABLE_CONNECTION_MS 才认定连接稳定并清零。
       this.startStableCheck();
     });
-    ws.on("message", (data: WebSocket.RawData) => {
+    ws.on("message", (...args: unknown[]) => {
       this.lastMessageTime = Date.now();
-      this.decode(data as Buffer);
+      this.decodeAndDispatch(args[0] as Buffer);
     });
     ws.on("close", () => {
       this.emit("close");
       this.reconnect();
     });
-    ws.on("error", (err: Error) => {
+    ws.on("error", (...args: unknown[]) => {
+      const err = args[0] as Error;
       // 连接级错误 → 上报 + 重连。(帧级解码失败不会走到这里,见 decode。)
       this.emit("error", err);
       this.reconnect();
@@ -206,7 +345,19 @@ export class DouYinDanmaClient extends TypedEmitter<ClientEvents> {
     this.stopHeartbeat();
     this.stopTimeoutCheck();
     this.stopStableCheck();
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.close();
+    this.stopReconnectTimer();
+    const ws = this.ws;
+    this.ws = undefined;
+    if (!ws) return;
+    try {
+      // CONNECTING(握手未完成)→ terminate 立即销毁;其余状态 → close 优雅关闭(ws 库对迟迟
+      // 不应答的 close 有 30s 超时后强制 terminate)。旧实现只处理 OPEN,CONNECTING 的半开连接
+      // 会成为僵尸(弹幕 stop 后仍挂着一条死连接,#420)。
+      if (ws.readyState === WebSocket.CONNECTING) ws.terminate();
+      else ws.close();
+    } catch {
+      /* 连接已标记 closed,事件回调不会再触发重连;close 失败不致命 */
+    }
   }
 
   private startHeartbeat(): void {
@@ -242,6 +393,13 @@ export class DouYinDanmaClient extends TypedEmitter<ClientEvents> {
     }
   }
 
+  private stopReconnectTimer(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+  }
+
   /** 连接稳定计时:存活满 STABLE_CONNECTION_MS → 认定可用,清零重连计数(闪断则不计)。 */
   private startStableCheck(): void {
     this.stopStableCheck();
@@ -264,6 +422,16 @@ export class DouYinDanmaClient extends TypedEmitter<ClientEvents> {
     this.stopHeartbeat();
     this.stopTimeoutCheck();
     this.stopStableCheck();
+    // 超时/错误触发的重连:旧 socket 可能还活着(如僵死连接),先终止再等重连,避免新旧两条并存。
+    if (this.ws) {
+      const old = this.ws;
+      this.ws = undefined;
+      try {
+        old.terminate();
+      } catch {
+        /* 旧连接终止失败不致命(多数场景本就已死) */
+      }
+    }
     if (this.reconnectAttempts >= this.autoReconnect) {
       // 上限已到:永久停止本场重连并通知上层(避免无限重连刷爆出口 IP 的风控)。
       this.exhausted = true;
@@ -272,81 +440,45 @@ export class DouYinDanmaClient extends TypedEmitter<ClientEvents> {
     }
     this.isReconnecting = true;
     this.reconnectAttempts++;
-    setTimeout(() => {
+    this.stopReconnectTimer();
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
       this.isReconnecting = false;
-      void this.connect();
+      // 等待期间被 close()(或耗尽)→ 不再建连;定时器本身也已在 close() 清除,这里是双保险。
+      if (this.closed || this.exhausted) return;
+      void this.connect().catch((e) => this.emit("error", e as Error));
     }, this.reconnectInterval);
   }
 
-  /**
-   * 解码一帧 WS 二进制。无条件 gunzip(消息帧都是 gzip);非 gzip 控制帧 → 静默丢帧不报连接错误(见文件头)。
-   */
-  private decode(data: Buffer): void {
-    let frame: { payload?: Uint8Array; payloadEncoding?: string; logId?: unknown };
+  /** 解码一帧并分发。帧级解码/解压失败 = 静默丢帧,不 emit("error")(见文件头)。 */
+  private decodeAndDispatch(data: Buffer): void {
+    let frame: DecodedDanmuFrame | null;
     try {
-      frame = douyin.PushFrame.decode(data);
+      frame = this.decodeFn(data);
     } catch {
-      return; // 连 PushFrame 都解不了 → 丢帧(极少见)
+      return; // 解码器抛错 → 丢帧(极少见)
     }
-    const payload = frame.payload;
-    if (!payload || payload.length === 0) return;
+    if (!frame) return;
+    if (frame.ack) this.sendAck(frame.ack.logId, frame.ack.payloadType);
+    for (const m of frame.messages) {
+      if (m.kind === "chat") this.emit("chat", m.msg);
+      else if (m.kind === "gift") this.emit("gift", m.msg);
+      else if (m.kind === "member") this.emit("member", m.msg);
+      else this.emit("control", m.msg);
+    }
+  }
 
-    // 消息帧都是 gzip(webcast5Params 请求了 compress:gzip),无条件 gunzip;开播时的非 gzip
-    // 控制/握手帧会抛错 → catch 里**静默丢帧、不 emit("error")**(这才是真正的修复:上游对此 emit
-    // 连接错误、污染弹幕健康告警)。注:别按 payloadEncoding 门控 —— 实测消息帧的该字段并非 "gzip",
-    // 门控会把所有消息帧都跳过 gunzip → 0 弹幕(已被真实录制证伪)。
-    let body: Uint8Array;
+  /** needAck 回执:编码 PushFrame{logId, payloadType} 发回(proto 已在 connect() 预载)。 */
+  private sendAck(logId: unknown, payloadType: unknown): void {
     try {
-      body = gunzipSync(payload);
+      const proto = protoMemo;
+      if (!proto) return;
+      const ack = proto.PushFrame.encode(
+        proto.PushFrame.create({ logId, payloadType }),
+      ).finish();
+      this.send(ack);
     } catch {
-      return; // 非 gzip 帧(开播控制/握手帧)→ 静默丢,不当连接错误上报
-    }
-
-    let resp: { needAck?: boolean; internalExt?: unknown; messagesList?: Array<{ method?: string; payload?: Uint8Array }> };
-    try {
-      resp = douyin.Response.decode(body);
-    } catch {
-      return;
-    }
-
-    if (resp.needAck) {
-      try {
-        const ack = douyin.PushFrame.encode(
-          douyin.PushFrame.create({ logId: frame.logId, payloadType: resp.internalExt }),
-        ).finish();
-        this.send(ack);
-      } catch {
-        /* ack 失败不致命 */
-      }
-    }
-
-    for (const msg of resp.messagesList ?? []) {
-      if (!msg.payload) continue;
-      try {
-        switch (msg.method) {
-          case "WebcastChatMessage":
-            this.emit("chat", douyin.ChatMessage.decode(msg.payload).toJSON() as DyChatMessage);
-            break;
-          case "WebcastMemberMessage":
-            this.emit("member", douyin.MemberMessage.decode(msg.payload).toJSON() as DyMemberMessage);
-            break;
-          case "WebcastGiftMessage":
-            this.emit("gift", douyin.GiftMessage.decode(msg.payload).toJSON() as DyGiftMessage);
-            break;
-          case "WebcastControlMessage": {
-            // 上游语义:action === 3 = 本场疑似结束(下播)。仅作提示 → 交给上层用 getLiving 复核。
-            const c = douyin.ControlMessage.decode(msg.payload);
-            if (Number(c.action) === 3) {
-              this.emit("control", { action: Number(c.action), tips: String(c.tips ?? "") });
-            }
-            break;
-          }
-          default:
-            break; // like / social / roomStats / roomRank / screenChat … 不消费
-        }
-      } catch {
-        /* 单条消息解码失败:跳过这条,不影响同帧其余消息 */
-      }
+      /* ack 失败不致命 */
     }
   }
 
@@ -370,7 +502,7 @@ export class DouYinDanmaClient extends TypedEmitter<ClientEvents> {
       ac: "",
       identity: "audience",
     };
-    const signature = getSignature(getXMsStub(sigParams));
+    const signature = await this.signFn(getXMsStub(sigParams));
     const webcast5Params: Record<string, string> = {
       app_name: "douyin_web",
       room_id: roomId,

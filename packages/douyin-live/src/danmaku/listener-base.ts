@@ -110,6 +110,8 @@ export abstract class ListenerDanmuSource implements DanmuSource {
   protected abstract resolveLiveId(roomUrl: string): Promise<string | null>;
 
   private client: DanmaClient | null = null;
+  /** stop() 置位:start() 在每个 await 之后检查,已停止 → 不再继续建连(防 start 期间的竞态僵尸连接)。 */
+  private stopped = false;
   /** 收到的消息计数（用于可见性日志）。 */
   private msgCount = 0;
   /** 健康监控:连上后是否收到过任何消息(弹幕/礼物/入场)。 */
@@ -132,8 +134,15 @@ export abstract class ListenerDanmuSource implements DanmuSource {
   ): Promise<void> {
     const alert = (msg: string): void => { try { onAlert?.(msg); } catch { /* ignore */ } };
     const hintEnd = (tips?: string): void => { try { onStreamEndHint?.({ tips }); } catch { /* ignore */ } };
+    // 复位 stop 标志:新的 start 撤销旧的 stop(manager 每场新建源,这里复位只是让同实例
+    // stop→start 复用时语义正确);start 期间的再次 stop 由下方每个 await 后的检查兜住。
+    this.stopped = false;
     // 本场 liveId 由子类(平台专属)解析。拿不到 → 解析失败(此时已 onLive 确认开播)→ 告警 + 本场不抓。
     const liveId = await this.resolveLiveId(roomUrl);
+    if (this.stopped) {
+      log.info(`${this.name} start 期间已 stop,不再建连(${roomUrl})`);
+      return;
+    }
     if (!liveId) {
       log.warn(`${this.name} 拿不到 liveId(${roomUrl})，本场不抓弹幕`);
       alert(`弹幕未启动:拿不到本场 liveId(${roomUrl}),整场无弹幕。疑似解析失败/被风控。`);
@@ -141,12 +150,20 @@ export abstract class ListenerDanmuSource implements DanmuSource {
     }
 
     const Ctor = await this.loadClientCtor();
+    if (this.stopped) {
+      log.info(`${this.name} start 期间已 stop,不再建连(liveId=${liveId})`);
+      return;
+    }
 
     // 关键：不能把【完整】cookie 直接灌进弹幕 WS（会触发抖音异地登录踢手机）。
     // 移植 Python 生产版做法：白名单过滤（丢 sid_guard/sid_ucp_v1/ssid_ucp_v1/login_time
     // 等踢人 token，留 sessionid/uid_tt 保礼物）+ 用匿名 guest 设备指纹覆盖。详见 danmu-cookie.ts。
     const { buildDanmuCookie } = await import("./danmu-cookie.js");
     const wsCookie = await buildDanmuCookie(opts.cookies);
+    if (this.stopped) {
+      log.info(`${this.name} start 期间已 stop,不再建连(liveId=${liveId})`);
+      return;
+    }
 
     this.msgCount = 0;
     this.gotMsg = false;
@@ -254,6 +271,18 @@ export abstract class ListenerDanmuSource implements DanmuSource {
       throw e;
     }
 
+    // start 期间被 stop(建连完成后才观察到):立即关闭刚建好的连接,不留僵尸,也不挂看门狗。
+    if (this.stopped) {
+      try {
+        client.close();
+      } catch {
+        // Ignore close errors
+      }
+      this.client = null;
+      log.info(`${this.name} start 期间已 stop,立即关闭刚建好的连接 liveId=${liveId}`);
+      return;
+    }
+
     // 健康看门狗:连上后长时间一条都没有(弹幕/礼物/**入场**都计数,入场即便匿名也会推)。
     // 这强烈指向陈旧/错误 liveId 的静默失败(整场 0 弹幕的特征);但**冷清小房间**确实可能真没人进出,
     // 故措辞为「提示排查」而非断言故障,避免对低人气主播每场误报、消磨告警可信度。一次性,不重复。
@@ -272,6 +301,7 @@ export abstract class ListenerDanmuSource implements DanmuSource {
   }
 
   async stop(): Promise<void> {
+    this.stopped = true;
     this.clearSilentWatch();
     if (this.client) {
       try {
