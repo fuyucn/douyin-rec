@@ -46,6 +46,13 @@ describe("pr-risk-scan.sh", () => {
     expect(r.status).toBe(1);
     expect(r.out).toContain("敏感文件: packages/core/src/survivors.ts");
   });
+  it("敏感文件清单扩充(#432):remux 校验 / proc-queue store / finalize-format 任何改动 → RISK", () => {
+    for (const f of ["packages/processors/src/remux.ts", "packages/proc-queue/src/store.ts", "packages/orchestrator/src/finalize-format.ts"]) {
+      const r = risk(diffOf(f, "const a = 1;"));
+      expect(r.status).toBe(1);
+      expect(r.out).toContain(`敏感文件: ${f}`);
+    }
+  });
   it("纯改名(只有 rename 头)按新旧路径判定", () => {
     const d = "diff --git a/packages/app/src/a.ts b/packages/app/src/cleanup-x.ts\nsimilarity index 100%\nrename from packages/app/src/a.ts\nrename to packages/app/src/cleanup-x.ts\n";
     const r = risk(d);
@@ -509,5 +516,29 @@ describe("issue-guard.py --diff", () => {
     const r = guard(d);
     expect(r.status).toBe(1);
     expect(r.stderr).toContain("登录凭证键值");
+  });
+  it("MagicDNS 主机名(x.y.ts.net)在文档里拦;源码里主机名规则照旧豁免(#432)", () => {
+    const { d, g } = repo();
+    writeFileSync(join(d, "x.ts"), 'const host = "node-a.drec-xyz.ts.net";\n');
+    g("add", ".");
+    g("commit", "-qm", "c");
+    expect(guard(d).status).toBe(0); // 反向:源码类文件不套主机名规则(CODE_SKIP 语义不变)
+    appendFileSync(join(d, "docs", "a.md"), "节点 node-a.drec-xyz.ts.net 连不上\n"); // issue-guard: allow
+    g("commit", "-qam", "c2");
+    const r = guard(d);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("主机名");
+  });
+  it("本机路径新增 /root/ /mnt/ /srv/ 前缀拦;相对路径不拦(#432)", () => {
+    const { d, g } = repo();
+    appendFileSync(join(d, "docs", "a.md"), "数据在 /root/data,备份在 /mnt/backup 与 /srv/recordings\n"); // issue-guard: allow
+    g("commit", "-qam", "c");
+    const r = guard(d);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("本机路径");
+    const { d: d2, g: g2 } = repo();
+    appendFileSync(join(d2, "docs", "a.md"), "输出在 data-local/recordings 目录\n");
+    g2("commit", "-qam", "c");
+    expect(guard(d2).status).toBe(0); // 反向:无挂载点前缀的相对路径不误伤
   });
 });

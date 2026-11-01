@@ -51,7 +51,7 @@ RULES: list[tuple[str, str, str]] = [
     ("房间号/长数字", r"(?<!\d)\d{8,}(?!\d)", "抖音/B站房间号、taskId、aid 等"),
     ("BV 号", r"BV[0-9A-Za-z]{8,}", "B站稿件号"),
     ("IP 地址", r"(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)", "节点 IP"),
-    ("本机路径", r"(?:/Users/|/home/|~/)[\w./\-]+", "家目录、节点路径"),
+    ("本机路径", r"(?:/Users/|/home/|/root/|/mnt/|/srv/|~/)[\w./\-]+", "家目录、节点路径"),
     ("streamKey", r"\b(?:douyin|bilibili|kuaishou):[\w:.\-]+", "内部场次键"),
     ("文件名", r"\b\w[\w.\-]*\.(?:ts|mp4|flv|xml|ass|json)\b", "录像/字幕文件名"),
     ("cookie/webhook", r"(?i)\b(?:cookie|webhook|token|secret|authkey)\b", "凭证类"),
@@ -59,8 +59,10 @@ RULES: list[tuple[str, str, str]] = [
     ("登录凭证键值", r"(?i)\b(?:sessionid(?:_ss)?|sid_guard|sid_tt|uid_tt|odin_tt|ttwid|passport_csrf_token|"
      r"sessdata|bili_jct|dedeuserid(?:__ckmd5)?|buvid3|kuaishou\.server\.web_(?:st|ph))"
      r"[\"']?\s*[=:]\s*[\"']?[A-Za-z0-9%_\-|]{16,}", "登录 cookie 键值对"),
-    # 「master / worker」是允许的角色说法，只拦真实主机名样式（vps1、node-a、*.local 等）。
-    ("主机名", r"(?i)\bvps\s*\d+\b|\b[\w\-]+\.(?:local|internal|lan)\b", "真实节点主机名（用「master / 某个 worker」指代）"),
+    # 「master / worker」是允许的角色说法，只拦真实主机名样式（vps1、node-a、*.local、
+    # MagicDNS `<machine>.<tailnet>.ts.net` 等）。
+    ("主机名", r"(?i)\bvps\s*\d+\b|\b[\w\-]+\.(?:local|internal|lan)\b|\b[\w\-]+\.[\w\-]+\.ts\.net\b",
+     "真实节点主机名（用「master / 某个 worker」指代）"),
 ]
 
 # Rules matched across lines (the cookie file is usually pretty-printed, one field per line).

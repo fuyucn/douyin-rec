@@ -75,4 +75,20 @@ describe("多进程", () => {
       env.cleanup();
     }
   }, 60_000);
+
+  it("并发 acquireLease:两进程同时抳同一个空 kind,恰一个 acquired(#432:读-判定-写在事务内)", async () => {
+    for (let round = 0; round < 5; round++) {
+      fresh();
+      try {
+        env.open(); // 建库(WAL/迁移),子进程连同一个 db
+        const startAt = Date.now() + 120;
+        const rs = await Promise.all([0, 1].map((i) => spawnChild("acquire", env.dbPath, startAt, i === 0 ? "A" : "B")));
+        expect(rs.map((r) => r.err), `round ${round}`).toEqual(["", ""]);
+        const got = rs.map((r) => JSON.parse(r.out) as { acquired: boolean });
+        expect(got.filter((r) => r.acquired), `round ${round}`).toHaveLength(1);
+      } finally {
+        env.cleanup();
+      }
+    }
+  }, 60_000);
 });
