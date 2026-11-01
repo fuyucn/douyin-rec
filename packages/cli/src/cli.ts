@@ -41,6 +41,7 @@ import type { UploadOpts } from "@drec/core";
 import { zeroDiskStreamKey } from "@drec/core";
 import type { PipelineCfg, SyncLedger, WorkflowNodeKey } from "@drec/orchestrator";
 import { recordStreamUpload, recordZeroDiskReceipt } from "@drec/orchestrator";
+import { reportStreamUploadLedgerResult } from "./stream-upload-ledger-report.js";
 import { DEFAULT_SEGMENT_CAP } from "@drec/zero-upload";
 
 /**
@@ -623,9 +624,13 @@ program
             parts: res.segments.length,
             startMs: streamStartMs,
           });
-          console.log(r.ok
-            ? `[直播直传] 台账已记录: ${r.bvid}${r.alreadyTerminal ? "(已是终态,未覆盖)" : ""}`
-            : `[直播直传] ⚠️ 台账记录失败(不影响已上传稿件): ${r.error}`);
+          // 收尾台账结果统一出口(issue #428):失败除日志外走告警通道(与上方受管分支的
+          // receiptError 同款)——稿件已上传但台账没记,房间看不到这场结果,不能只 console.log。
+          // 收尾后马上 process.exit,notify 必须 await,否则 webhook 被截断。
+          await reportStreamUploadLedgerResult(r, {
+            log: (m) => console.log(m),
+            notify: (message) => notifier.notify({ kind: "error", stage: "直播直传", message }),
+          });
         }
         // `ok:true` covers three endings: parts delivered, `idle` and `no-stream`. With
         // `waitForBroadcast` the pump never gives up waiting on its own (issue #308); `idle` means

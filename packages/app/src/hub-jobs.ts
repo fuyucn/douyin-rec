@@ -65,7 +65,7 @@ const TERMINAL_SQL = HUB_TERMINAL_STATES.map((s) => `'${s}'`).join(",");
 const HISTORY_TABLES = HUB_TABLE_NAMES;
 /** 无历史数据时的保守「步骤耗时/视频时长」比率(按 2026-07 实测:烧录 veryfast ~0.11×,上传取决于带宽)。 */
 const FALLBACK_RATE: Record<string, number> = { pending: 0.01, settling: 0.05, syncing: 0.1, merging: 0.3, uploading: 0.6 };
-/** 只读连接等写锁的预算(ms)。见 openLedger 注释 —— 不设会静默空队列。 */
+/** 台账连接等写锁的预算(ms)。见 openLedger 注释 —— 不设会静默空队列。 */
 const LEDGER_BUSY_TIMEOUT_MS = 3000;
 
 
@@ -121,6 +121,10 @@ export interface DeleteHubHistoryResult {
 /**
  * 删除某房间的全部历史 run:五张台账表 + 各场 job.log。
  * 表结构即契约;旧库缺表按存在表删,不炸。无 sync db → 空结果。
+ *
+ * 写连接(issue #428):这里不是只读 —— 与 SyncLedger 的写端(serve 长连接、record 子进程)
+ * 并发,故①设 `busy_timeout` 等锁,不立刻 `SQLITE_BUSY`;②五表 DELETE 包进一个
+ * `BEGIN IMMEDIATE` 事务:中途撞锁/出错时整体回滚,不会「删一半」留下半个房间的历史。
  */
 export function deleteHubJobHistory(syncDbPath: string, roomKey: string, stageDir = hubStageDir(), logsDir = hubLogsDir()): DeleteHubHistoryResult {
   const prefix = roomKeyToStreamPrefix(roomKey);
@@ -128,15 +132,23 @@ export function deleteHubJobHistory(syncDbPath: string, roomKey: string, stageDi
   const db = new DatabaseSync(syncDbPath);
   let rows: { streamKey: string }[] = [];
   try {
-    const tables = new Set(
-      (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as unknown as { name: string }[]).map((r) => r.name),
-    );
+    try { db.exec(`PRAGMA busy_timeout=${LEDGER_BUSY_TIMEOUT_MS}`); } catch { /* 极老 sqlite 不支持该 pragma → 保持默认 */ }
+    db.exec("BEGIN IMMEDIATE");
     try {
-      rows = db.prepare("SELECT streamKey FROM sync_jobs WHERE streamKey LIKE ?").all(prefix + "%") as unknown as { streamKey: string }[];
-    } catch { /* 旧库连 sync_jobs 都没有 → 仍按存在表删 */ }
-    for (const table of HISTORY_TABLES) {
-      if (!tables.has(table)) continue;
-      db.prepare(`DELETE FROM ${table} WHERE streamKey LIKE ?`).run(prefix + "%");
+      const tables = new Set(
+        (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as unknown as { name: string }[]).map((r) => r.name),
+      );
+      try {
+        rows = db.prepare("SELECT streamKey FROM sync_jobs WHERE streamKey LIKE ?").all(prefix + "%") as unknown as { streamKey: string }[];
+      } catch { /* 旧库连 sync_jobs 都没有 → 仍按存在表删 */ }
+      for (const table of HISTORY_TABLES) {
+        if (!tables.has(table)) continue;
+        db.prepare(`DELETE FROM ${table} WHERE streamKey LIKE ?`).run(prefix + "%");
+      }
+      db.exec("COMMIT");
+    } catch (e) {
+      try { db.exec("ROLLBACK"); } catch { /* 已回滚 */ }
+      throw e;
     }
   } finally {
     db.close();
