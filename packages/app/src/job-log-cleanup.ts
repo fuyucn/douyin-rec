@@ -6,8 +6,8 @@
  * mtime is older than N days, and deletes exactly that set. The preview and the delete use the same
  * selection function, so what the user confirmed is what gets removed.
  */
-import { readdirSync, rmSync, statSync } from "node:fs";
-import { basename, join } from "node:path";
+import { appendFileSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { basename, join, relative } from "node:path";
 
 const DAY_MS = 24 * 3600_000;
 /** Upper bound for the age input; anything above is a typo, not a request. */
@@ -70,7 +70,27 @@ export function previewJobLogs(logsRoot: string, days: number, now?: number): Jo
   return { olderThanDays: days, count: s.files.length, bytes: s.bytes };
 }
 
-export function cleanupJobLogs(logsRoot: string, days: number, now?: number): JobLogCleanupResult {
+/**
+ * Append the outcome to the shared maintenance audit file (same one the orphan cleanup uses).
+ * Best effort: a failed audit write must not undo or mask the deletion itself.
+ */
+function appendAudit(auditDir: string | undefined, logsRoot: string, deleted: JobLogCleanupResult["deleted"], bytes: number, failed: JobLogCleanupResult["failed"]): void {
+  if (deleted === 0 && failed.length === 0) return;
+  try {
+    const dir = auditDir ?? join(logsRoot, "..", "config", "maintenance");
+    mkdirSync(dir, { recursive: true });
+    const ts = Date.now();
+    const lines = [
+      ...deleted > 0 ? [JSON.stringify({ ts, action: "deleted", kind: "jobLog", count: deleted, bytes })] : [],
+      ...failed.map((f) => JSON.stringify({ ts, action: "failed", kind: "jobLog", path: f.file, error: f.error })),
+    ];
+    if (lines.length) appendFileSync(join(dir, "cleanup-audit.jsonl"), lines.join("\n") + "\n", "utf-8");
+  } catch (e) {
+    console.error(`[job-log-cleanup] 审计日志写失败(删除已完成): ${(e as Error)?.message ?? e}`);
+  }
+}
+
+export function cleanupJobLogs(logsRoot: string, days: number, now?: number, auditDir?: string): JobLogCleanupResult {
   const s = selectJobLogs(logsRoot, days, now);
   const failed: JobLogCleanupResult["failed"] = [];
   let deleted = 0;
@@ -86,5 +106,6 @@ export function cleanupJobLogs(logsRoot: string, days: number, now?: number): Jo
       failed.push({ file: basename(file), error: (e as NodeJS.ErrnoException).code ?? "UNKNOWN" });
     }
   }
+  appendAudit(auditDir, logsRoot, deleted, bytes, failed);
   return { olderThanDays: days, deleted, bytes, failed };
 }

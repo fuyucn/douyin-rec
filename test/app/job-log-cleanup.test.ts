@@ -2,6 +2,7 @@ import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync, existsSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { cleanupJobLogs, parseJobLogDays, previewJobLogs, selectJobLogs } from "../../packages/app/src/job-log-cleanup.js";
 import { buildMaintenance } from "../../packages/app/src/web/api/maintenance.js";
 
@@ -102,5 +103,39 @@ describe("job log cleanup (issue #414)", () => {
     expect(ok.status).toBe(200);
     expect(existsSync(p)).toBe(false);
     expect(api.previewJobLogs("abc").status).toBe(400);
+  });
+
+
+  it("audits deletions to the shared maintenance audit file, failures included", () => {
+    const auditDir = join(root, "audit");
+    // Two rooms: one read-only (its file fails) and one writable (its file deletes).
+    const otherDir = join(root, "hub", "other-room");
+    mkdirSync(otherDir, { recursive: true });
+    log("gone.log", 30, 10, otherDir);
+    log("stays.log", 30, 10);
+    const failing = process.getuid?.() !== 0;
+    if (failing) chmodSync(roomDir, 0o500);
+    try {
+      cleanupJobLogs(root, 7, NOW, auditDir);
+    } finally {
+      if (failing) chmodSync(roomDir, 0o700);
+    }
+    const lines = readFileSync(join(auditDir, "cleanup-audit.jsonl"), "utf-8").trim().split("\n").map((l) => JSON.parse(l));
+    if (failing) {
+      expect(lines.find((l) => l.action === "deleted")).toMatchObject({ kind: "jobLog", count: 1 });
+      expect(lines.find((l) => l.action === "failed")).toMatchObject({ kind: "jobLog", path: "stays.log" });
+    } else {
+      expect(lines).toEqual([expect.objectContaining({ action: "deleted", kind: "jobLog", count: 2 })]);
+    }
+    // Preview never writes the audit.
+    const before = readFileSync(join(auditDir, "cleanup-audit.jsonl"), "utf-8");
+    previewJobLogs(root, 7, NOW);
+    expect(readFileSync(join(auditDir, "cleanup-audit.jsonl"), "utf-8")).toBe(before);
+  });
+
+  it("writes nothing when there is nothing to delete", () => {
+    const auditDir = join(root, "audit2");
+    cleanupJobLogs(root, 7, NOW, auditDir);
+    expect(existsSync(join(auditDir, "cleanup-audit.jsonl"))).toBe(false);
   });
 });
