@@ -6,8 +6,8 @@
  * mtime is older than N days, and deletes exactly that set. The preview and the delete use the same
  * selection function, so what the user confirmed is what gets removed.
  */
-import { readdirSync, rmSync, statSync } from "node:fs";
-import { basename, join } from "node:path";
+import { appendFileSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { basename, join, relative } from "node:path";
 
 const DAY_MS = 24 * 3600_000;
 /** Upper bound for the age input; anything above is a typo, not a request. */
@@ -30,7 +30,7 @@ export interface JobLogCleanupResult {
   deleted: number;
   bytes: number;
   /** Files that could not be removed (basename + error code only); reported, never swallowed. */
-  failed: Array<{ file: string; error: string }>;
+  failed: Array<{ file: string; rel: string; error: string }>;
 }
 
 /** Validate the age input: an integer day count in [1, JOB_LOG_MAX_DAYS]; null when invalid. */
@@ -70,7 +70,27 @@ export function previewJobLogs(logsRoot: string, days: number, now?: number): Jo
   return { olderThanDays: days, count: s.files.length, bytes: s.bytes };
 }
 
-export function cleanupJobLogs(logsRoot: string, days: number, now?: number): JobLogCleanupResult {
+/**
+ * Append the outcome to the shared maintenance audit file (same one the orphan cleanup uses).
+ * Best effort: a failed audit write must not undo or mask the deletion itself.
+ */
+function appendAudit(auditDir: string, deleted: number, bytes: number, failed: JobLogCleanupResult["failed"]): void {
+  if (deleted === 0 && failed.length === 0) return;
+  try {
+    mkdirSync(auditDir, { recursive: true });
+    const ts = Date.now();
+    const lines = [
+      ...deleted > 0 ? [JSON.stringify({ ts, action: "deleted", kind: "jobLog", count: deleted, bytes })] : [],
+      // hub/<room>/<name>: distinguishes same-named files across rooms without exposing the data root.
+      ...failed.map((f) => JSON.stringify({ ts, action: "failed", kind: "jobLog", path: f.rel, error: f.error })),
+    ];
+    appendFileSync(join(auditDir, "cleanup-audit.jsonl"), lines.join("\n") + "\n", "utf-8");
+  } catch (e) {
+    console.error(`[job-log-cleanup] 审计日志写失败(删除已完成): ${(e as Error)?.message ?? e}`);
+  }
+}
+
+export function cleanupJobLogs(logsRoot: string, days: number, auditDir: string, now: number = Date.now()): JobLogCleanupResult {
   const s = selectJobLogs(logsRoot, days, now);
   const failed: JobLogCleanupResult["failed"] = [];
   let deleted = 0;
@@ -82,9 +102,11 @@ export function cleanupJobLogs(logsRoot: string, days: number, now?: number): Jo
       deleted += 1;
       bytes += size;
     } catch (e) {
-      // Basename + error code only: the message from the fs layer embeds the full path, which would expose the data root.
-      failed.push({ file: basename(file), error: (e as NodeJS.ErrnoException).code ?? "UNKNOWN" });
+      // file: basename only (goes to the UI); rel: hub/<room>/<name> (goes to the audit) — neither exposes the data root,
+      // and the fs message that does embed it is replaced by the error code.
+      failed.push({ file: basename(file), rel: relative(logsRoot, file), error: (e as NodeJS.ErrnoException).code ?? "UNKNOWN" });
     }
   }
+  appendAudit(auditDir, deleted, bytes, failed);
   return { olderThanDays: days, deleted, bytes, failed };
 }

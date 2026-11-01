@@ -2,6 +2,7 @@ import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync, existsSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { cleanupJobLogs, parseJobLogDays, previewJobLogs, selectJobLogs } from "../../packages/app/src/job-log-cleanup.js";
 import { buildMaintenance } from "../../packages/app/src/web/api/maintenance.js";
 
@@ -51,7 +52,7 @@ describe("job log cleanup (issue #414)", () => {
     log("keep.log", 1, 5);
     expect(previewJobLogs(root, 7, NOW)).toEqual({ olderThanDays: 7, count: 2, bytes: 500 });
     expect(existsSync(a) && existsSync(b)).toBe(true);
-    const r = cleanupJobLogs(root, 7, NOW);
+    const r = cleanupJobLogs(root, 7, join(root, "audit-p"), NOW);
     expect(r).toEqual({ olderThanDays: 7, deleted: 2, bytes: 500, failed: [] });
     expect(existsSync(a) || existsSync(b)).toBe(false);
   });
@@ -63,7 +64,7 @@ describe("job log cleanup (issue #414)", () => {
     // A read-only room directory makes the removal of its files fail; the failure must come back.
     chmodSync(roomDir, 0o500);
     try {
-      const r = cleanupJobLogs(root, 7, NOW);
+      const r = cleanupJobLogs(root, 7, join(root, "audit-x"), NOW);
       expect(r.deleted).toBe(0);
       expect(r.failed.map((f) => f.file).sort()).toEqual(["a.log", "b.log"]);
       // The error must be a code, not the fs message: that message carries the full path.
@@ -94,6 +95,7 @@ describe("job log cleanup (issue #414)", () => {
       manager: { isRecording: () => false, getAnchorName: () => null } as never,
       dataRoot: root,
       logsDir: root,
+      auditDir: join(root, "audit3"),
     });
     expect(api.cleanupJobLogs({ olderThanDays: 7 }).status).toBe(400);
     expect(api.cleanupJobLogs({ olderThanDays: 0, confirm: true }).status).toBe(400);
@@ -102,5 +104,65 @@ describe("job log cleanup (issue #414)", () => {
     expect(ok.status).toBe(200);
     expect(existsSync(p)).toBe(false);
     expect(api.previewJobLogs("abc").status).toBe(400);
+  });
+
+
+  it("audits deletions to the shared maintenance audit file, failures included", () => {
+    const auditDir = join(root, "audit");
+    // Two rooms: one read-only (its file fails) and one writable (its file deletes).
+    const otherDir = join(root, "hub", "other-room");
+    mkdirSync(otherDir, { recursive: true });
+    log("gone.log", 30, 10, otherDir);
+    log("stays.log", 30, 10);
+    const failing = process.getuid?.() !== 0;
+    if (failing) chmodSync(roomDir, 0o500);
+    try {
+      cleanupJobLogs(root, 7, auditDir, NOW);
+    } finally {
+      if (failing) chmodSync(roomDir, 0o700);
+    }
+    const lines = readFileSync(join(auditDir, "cleanup-audit.jsonl"), "utf-8").trim().split("\n").map((l) => JSON.parse(l));
+    if (failing) {
+      expect(lines.find((l) => l.action === "deleted")).toMatchObject({ kind: "jobLog", count: 1 });
+      expect(lines.find((l) => l.action === "failed")).toMatchObject({ kind: "jobLog", path: "hub/douyin_123/stays.log" });
+    } else {
+      expect(lines).toEqual([expect.objectContaining({ action: "deleted", kind: "jobLog", count: 2 })]);
+    }
+    // Preview never writes the audit.
+    const before = readFileSync(join(auditDir, "cleanup-audit.jsonl"), "utf-8");
+    previewJobLogs(root, 7, NOW);
+    expect(readFileSync(join(auditDir, "cleanup-audit.jsonl"), "utf-8")).toBe(before);
+  });
+
+  it("writes nothing when there is nothing to delete", () => {
+    const auditDir = join(root, "audit2");
+    cleanupJobLogs(root, 7, auditDir, NOW);
+    expect(existsSync(join(auditDir, "cleanup-audit.jsonl"))).toBe(false);
+  });
+
+
+  it("a failing audit write does not block the deletion", () => {
+    const auditDir = join(root, "audit4");
+    writeFileSync(auditDir, "not a directory");
+    log("gone.log", 30, 10);
+    let r;
+    expect(() => { r = cleanupJobLogs(root, 7, auditDir, NOW); }).not.toThrow();
+    expect(r?.deleted).toBe(1);
+    expect(existsSync(join(roomDir, "gone.log"))).toBe(false);
+  });
+
+  it.skipIf(process.getuid?.() === 0)("audit rows carry an error code, not the fs message with the full path", () => {
+    const auditDir = join(root, "audit5");
+    log("locked.log", 30, 10);
+    chmodSync(roomDir, 0o500);
+    try {
+      const r = cleanupJobLogs(root, 7, auditDir, NOW);
+      expect(JSON.stringify(r)).not.toContain(root);
+      const lines = readFileSync(join(auditDir, "cleanup-audit.jsonl"), "utf-8").trim().split("\n").map((l) => JSON.parse(l));
+      expect(lines.find((l) => l.action === "failed")).toMatchObject({ kind: "jobLog", path: "hub/douyin_123/locked.log" });
+      expect(lines.every((l) => l.action !== "failed" || (l.error === "EACCES" || l.error === "EPERM"))).toBe(true);
+    } finally {
+      chmodSync(roomDir, 0o700);
+    }
   });
 });
