@@ -97,7 +97,8 @@ export class APILoadBalancer {
             const blockDuration = this.config.blockDuration *
                 Math.pow(this.config.retryMultiplier, status.failureCount - this.config.maxFailures);
             status.nextRetryTime = Date.now() + blockDuration;
-            console.warn(`[stream_processor] API ${apiType} has been blocked due to ${status.failureCount} failures. Next retry at: ${(new Date(status.nextRetryTime).toISOString(), error.message)}`);
+            // ⚠️ 我们的扩展(上游把时间戳用逗号运算符丢掉、并把原始 error.message 拼进日志;error.message 可能含登录串,见 issue #425)。
+            console.warn(`[stream_processor] API ${apiType} has been blocked due to ${status.failureCount} failures. Next retry at: ${new Date(status.nextRetryTime).toISOString()} err=${String(error.message ?? "").replace(/cookies:[^;]+/g, "cookies:[已隐去]")}`);
         }
     }
     /**
@@ -158,7 +159,8 @@ export class APILoadBalancer {
             catch (error) {
                 lastError = error;
                 this.recordFailure(apiType, lastError);
-                console.warn(`[stream_processor] API ${apiType} failed (attempt ${attempt + 1}/${maxAttempts}):`, lastError.message);
+                // ⚠️ 我们的扩展:错误消息可能带整串登录串(douyin_api assert 模板,issue #425),出日志前隐去。
+                console.warn(`[stream_processor] API ${apiType} failed (attempt ${attempt + 1}/${maxAttempts}):`, String(lastError.message ?? "").replace(/cookies:\s*[^;]+/g, "cookies:[已隐去]"));
                 // 如果这是最后一次尝试，或者没有更多可用端点，则抛出错误
                 if (attempt === maxAttempts - 1) {
                     break;

@@ -358,7 +358,12 @@ async function getRoomInfoByWeb(webRoomId, opts = {}) {
             },
         };
     }
-    assert(res.data.status_code === 0, `Unexpected resp, code ${res.data.status_code}, msg ${JSON.stringify(res.data.data)}, id ${webRoomId}, cookies: ${cookies}`);
+    // ⚠️ 我们的扩展(上游模板把整串登录串拼进错误消息,经 loadBalancer console.warn 进 docker logs,见 issue #425):
+    //    只打「有/无(长度)」。升级 vendor 时务必保留本改动。
+    assert(
+        res.data.status_code === 0,
+        `Unexpected resp, code ${res.data.status_code}, msg ${JSON.stringify(res.data.data)}, id ${webRoomId}, 登录串: ${cookies ? `有(${cookies.length})` : "无"}`,
+    );
     const data = res.data.data;
     const room = data?.data?.[0];
     return {

@@ -90,6 +90,11 @@ JS 做归一化 diff),补齐了以下**上游修复**(这些是我们缺的,不�
      早于该修复**,所以副本里还带着这个 bug。
    - **我们的实测**(2026-10-07,家宽 + VPS 均如此):`webHTML` 的 `getRoomInfo` **恒返回 `streams: 0`**
      (只给状态与 `id_str`,不给流),选中即「未找到对应的流」。
+5. **`douyin_api.js`: assert 错误模板不打登录串** —— 上游把整串会话登录串拼进 `Unexpected resp` 消息,
+   经 loadBalancer 的 console.warn 进 docker logs(2026-10-31 巡检发现,issue #425)。只打「有(长度)/无」。
+6. **`loadBalancer.js`: 日志出口对 `cookies:` 字段脱敏 + blocked 消息的时间戳修复** —— 上游 blocked 消息
+   用逗号运算符把 `nextRetryTime` 丢掉了(`(new Date(...).toISOString(), error.message)`),且把原始
+   error.message 拼进日志。两处 console.warn 现在都过滤 `cookies:` 字段(issue #425)。
 
    注意:上游**只修了 `getStream` 直调路径,没修 balance 路径** —— 它的 `loadBalancer` 端点表里
    `webHTML` 仍在候选、且会把「无流」当成功返回。我们的 `exclude` + `validate` 正好补上这半。
