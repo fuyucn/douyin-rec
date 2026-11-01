@@ -81,6 +81,45 @@ function raw(
   });
 }
 
+/**
+ * 裸 node:http 请求且**等完整响应**(headers + body 全部读完):用于验证 413 确实送达客户端
+ * 且带 Connection: close(复审),而非连接被提前销毁只剩半截/重置。
+ */
+function rawFull(
+  port: number,
+  opts: { method?: string; path?: string; headers?: Record<string, string>; totalBytes?: number },
+): Promise<{ status: number; headers: import("node:http").IncomingHttpHeaders; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      { host: "127.0.0.1", port, method: opts.method ?? "GET", path: opts.path ?? "/api/tasks", headers: opts.headers },
+      (r) => {
+        const chunks: Buffer[] = [];
+        r.on("data", (c: Buffer) => chunks.push(c));
+        r.on("end", () => resolve({ status: r.statusCode ?? 0, headers: r.headers, body: Buffer.concat(chunks).toString("utf-8") }));
+      },
+    );
+    req.on("error", reject);
+    if (opts.totalBytes !== undefined) {
+      // 大 body 分块写并尊重背压,模拟真实客户端边发边等;响应早到也能正常读完。
+      const chunk = Buffer.alloc(64 * 1024, 0x78);
+      let sent = 0;
+      const total = opts.totalBytes;
+      const writeMore = (): void => {
+        while (sent < total) {
+          const n = Math.min(chunk.length, total - sent);
+          const ok = req.write(n === chunk.length ? chunk : chunk.subarray(0, n));
+          sent += n;
+          if (!ok) { req.once("drain", writeMore); return; }
+        }
+        req.end();
+      };
+      writeMore();
+    } else {
+      req.end();
+    }
+  });
+}
+
 /** 本测试文件里 fetch 的 JSON body 统一带 content-type(带 body 的请求会被 415 拒收,issue #427)。 */
 const JSON_HEADERS = { "content-type": "application/json" };
 
@@ -99,6 +138,25 @@ describe("请求入口防护纯函数(issue #427)", () => {
     expect(originAllowed(fakeReq({ origin: "null", host: "box.ts.net" }, "192.168.1.9"), "POST")).toBe(false);
     // 对照:同头 + 回环 → 放行
     expect(originAllowed(fakeReq({ origin: "null", host: "box.ts.net" }), "POST")).toBe(true);
+  });
+
+  it("hostAllowed:单标签短名/`.local`/末尾点 FQDN 放行;伪装后缀/剥点后空仍拒(复审)", () => {
+    expect(hostAllowed("master")).toBe(true); // Tailscale MagicDNS 短名
+    expect(hostAllowed("master:7860")).toBe(true); // 带端口剥端口后同上
+    expect(hostAllowed("mybox.local")).toBe(true); // mDNS/Bonjour
+    expect(hostAllowed("x.tailnet.ts.net.")).toBe(true); // 末尾点 FQDN 与不带点等价
+    expect(hostAllowed("x.tailnet.ts.net")).toBe(true);
+    expect(hostAllowed("attacker.example.com.")).toBe(false); // 末尾点不构成白名单
+    expect(hostAllowed("evil.local.attacker.io")).toBe(false); // 伪装后缀
+    expect(hostAllowed(".")).toBe(false); // 剥点后为空
+  });
+
+  it("originAllowed:Host/Origin 主机部分末尾点归一后比较;端口仍参与判定(复审)", () => {
+    const xfwd = { "x-forwarded-proto": "https" };
+    expect(originAllowed(fakeReq({ origin: "https://x.tailnet.ts.net.", host: "x.tailnet.ts.net.", ...xfwd }), "POST")).toBe(true);
+    expect(originAllowed(fakeReq({ origin: "https://x.tailnet.ts.net", host: "x.tailnet.ts.net.", ...xfwd }), "POST")).toBe(true);
+    // 端口不同仍是不同 origin(归一只去末尾点,不抹端口)
+    expect(originAllowed(fakeReq({ origin: "https://box.ts.net:8443", host: "box.ts.net", ...xfwd }), "POST")).toBe(false);
   });
 });
 
@@ -475,6 +533,15 @@ describe("createWebServer (live)", () => {
     expect((await raw(port, { headers: { host: "evil.ts.net.attacker.io" } })).status).toBe(403);
   });
 
+  it("Host 白名单放宽(复审):单标签短名/`.local`/末尾点 FQDN 放行,伪装后缀仍 403", async () => {
+    const port = Number(new URL(base).port);
+    expect((await raw(port, { headers: { host: "master" } })).status).toBe(200);
+    expect((await raw(port, { headers: { host: "mybox.local" } })).status).toBe(200);
+    expect((await raw(port, { headers: { host: "x.tailnet.ts.net." } })).status).toBe(200);
+    expect((await raw(port, { headers: { host: "attacker.example.com." } })).status).toBe(403);
+    expect((await raw(port, { headers: { host: "evil.local.attacker.io" } })).status).toBe(403);
+  });
+
   it("DREC_ALLOWED_HOSTS 逗号分隔追加白名单,比对忽略端口", async () => {
     const port = Number(new URL(base).port);
     const prev = process.env.DREC_ALLOWED_HOSTS;
@@ -508,6 +575,33 @@ describe("createWebServer (live)", () => {
     expect((await raw(port, { path: "/api/tasks", headers: { origin: "http://evil.example.com" } })).status).toBe(200);
   });
 
+  it("x-forwarded-proto:https 反代同源放行;无该头时 https Origin 仍 403(复审)", async () => {
+    const port = Number(new URL(base).port);
+    const created = await (await fetch(`${base}/api/tasks`, {
+      method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ room: "446" }),
+    })).json() as { id: number };
+    const stopPath = `/api/tasks/${created.id}/stop`;
+    // 反代 TLS 终止:x-forwarded-proto: https + 同源 https Origin → 放行
+    expect((await raw(port, {
+      method: "POST", path: stopPath,
+      headers: { host: "box.ts.net", origin: "https://box.ts.net", "x-forwarded-proto": "https" },
+    })).status).toBe(200);
+    // 无 x-forwarded-proto:服务端按 http 比对 https Origin → 403(scheme 不符)
+    expect((await raw(port, {
+      method: "POST", path: stopPath,
+      headers: { host: "box.ts.net", origin: "https://box.ts.net" },
+    })).status).toBe(403);
+  });
+
+  it("PUT/DELETE 跨站 Origin → 403(复审)", async () => {
+    const port = Number(new URL(base).port);
+    expect((await raw(port, { method: "PUT", path: "/api/hub/resources", headers: { origin: "http://evil.example.com" } })).status).toBe(403);
+    const created = await (await fetch(`${base}/api/tasks`, {
+      method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ room: "447" }),
+    })).json() as { id: number };
+    expect((await raw(port, { method: "DELETE", path: `/api/tasks/${created.id}`, headers: { origin: "http://evil.example.com" } })).status).toBe(403);
+  });
+
   it("content-type:空 body POST 豁免;带 body 的 text/plain → 415;application/json → 放行", async () => {
     // 空体(undici fetch 无 body 不发 content-type)→ 豁免,进入 handler
     const empty = await fetch(`${base}/api/timezone`, { method: "POST" });
@@ -526,6 +620,22 @@ describe("createWebServer (live)", () => {
     const big = JSON.stringify({ room: "1", name: "x".repeat(2 * 1024 * 1024 + 16) });
     const res = await fetch(`${base}/api/tasks`, { method: "POST", headers: JSON_HEADERS, body: big });
     expect(res.status).toBe(413);
+    const ok = await fetch(`${base}/api/tasks`);
+    expect(ok.status).toBe(200);
+  });
+
+  it("body 超过 2 MiB → 413:原始 http 客户端必须真收到 413 + Connection: close(复审,Node 24)", async () => {
+    const port = Number(new URL(base).port);
+    // 4 MiB:远超上限,服务端在客户端仍在发送途中就要把 413 送出去。
+    const res = await rawFull(port, {
+      method: "POST",
+      headers: JSON_HEADERS,
+      totalBytes: 4 * 1024 * 1024,
+    });
+    expect(res.status).toBe(413);
+    expect(res.headers["connection"]).toBe("close"); // 旧实现(超限即抛)发不出这个头,变异可感
+    expect(res.body).toContain("2097152"); // 完整错误 JSON 送达(而非半截/重置)
+    // 服务仍存活
     const ok = await fetch(`${base}/api/tasks`);
     expect(ok.status).toBe(200);
   });

@@ -39,6 +39,7 @@ docker compose exec douyin-rec date   # 验证容器时区
 | `BIND` | `0.0.0.0` | 端口绑定网卡；有公网 IP 时建议改具体内网/Tailscale IP，避免无鉴权服务裸奔。 |
 | `TZ` | `Asia/Shanghai` | 只是容器启动前的初始值/`date` 等诊断命令参考。**调度实际用的时区由 config 决定**(`settings.timezone`,未设默认也是 `Asia/Shanghai`,启动时 `applyTimezone()` 会**覆盖** `process.env.TZ`,不看这个 env)——查看启动日志 `[tz] 时区 = ...` 或 `GET /api/timezone`;要改用 `POST /api/timezone`,立即生效。 |
 | `DISCORD_WEBHOOK` | 空 | 可选，录制开始/结束/出错通知。 |
+| `DREC_ALLOWED_HOSTS` | 空 | 可选。Web API 入口防护的 Host 白名单**追加项**（issue #427，逗号分隔域名）。默认已放行 IP 字面量 / localhost / 单标签主机名（Tailscale MagicDNS 短名如 `master`）/ `*.local` / `*.ts.net`，比对忽略端口、末尾带点的 FQDN 先归一。**何时需要设**：经自定义域名的反代访问本服务时（如 nginx `server_name rec.example.com` + `proxy_set_header Host $host`），不加进白名单则所有请求 403。格式：`DREC_ALLOWED_HOSTS=rec.example.com,rec.example.org`。 |
 
 > 容器内路径（`/output-data`、`/app/web/dist`）由 compose 写死，一般不用管；你只配宿主机侧的 `DATA_ROOT`。
 
