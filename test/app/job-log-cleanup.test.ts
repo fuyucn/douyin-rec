@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { cleanupJobLogs, parseJobLogDays, previewJobLogs, selectJobLogs } from "../../packages/app/src/job-log-cleanup.js";
 import { buildMaintenance } from "../../packages/app/src/web/api/maintenance.js";
+import { jobLogFileName } from "@drec/core";
+import { SyncLedger } from "@drec/orchestrator";
 
 const DAY = 24 * 3600_000;
 const NOW = Date.UTC(2026, 9, 30);
@@ -164,5 +166,93 @@ describe("job log cleanup (issue #414)", () => {
     } finally {
       chmodSync(roomDir, 0o700);
     }
+  });
+});
+
+describe("job log cleanup excludes non-terminal jobs (issue #429)", () => {
+  let root: string;
+  let roomDir: string;
+  const DAY = 24 * 3600_000;
+  const NOW2 = Date.UTC(2026, 9, 30);
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "joblog-active-"));
+    roomDir = join(root, "hub", "douyin_232");
+    mkdirSync(roomDir, { recursive: true });
+  });
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+  /** Write a log of `bytes` size whose mtime is `ageDays` before NOW2. */
+  function log(name: string, ageDays: number, bytes = 10, dir = roomDir): string {
+    const p = join(dir, name);
+    writeFileSync(p, "x".repeat(bytes));
+    const at = new Date(NOW2 - ageDays * DAY);
+    utimesSync(p, at, at);
+    return p;
+  }
+
+  it("selectJobLogs excludes logs whose path is in the active path set", () => {
+    const key = "douyin:232:2026-10-30_1000";
+    const activeLog = log(jobLogFileName(key), 30, 40);
+    const stale = log("old.log", 30, 20);
+    const s = selectJobLogs(root, 7, NOW2, { paths: new Set([activeLog]) });
+    expect(s.files).toEqual([stale]);
+    expect(s.bytes).toBe(20);
+  });
+
+  it("active.streamKeys are matched via the room-layout log file name", () => {
+    const key = "douyin:232:2026-10-30_1000";
+    const activeLog = log(jobLogFileName(key), 30, 40);
+    const stale = log("old.log", 30, 20);
+    const s = selectJobLogs(root, 7, NOW2, { streamKeys: new Set([key]) });
+    expect(s.files).toEqual([stale]);
+    // without the filter both would be selected (backward-compatible baseline)
+    expect(selectJobLogs(root, 7, NOW2).files.sort()).toEqual([activeLog, stale].sort());
+  });
+
+  it("cleanupJobLogs does not delete an active job's log but deletes stale ones", () => {
+    const key = "douyin:232:2026-10-30_1000";
+    const activeLog = log(jobLogFileName(key), 30, 40);
+    const stale = log("old.log", 30, 20);
+    const r = cleanupJobLogs(root, 7, join(root, "audit-active"), NOW2, { streamKeys: new Set([key]) });
+    expect(r.deleted).toBe(1);
+    expect(existsSync(activeLog)).toBe(true);
+    expect(existsSync(stale)).toBe(false);
+  });
+
+  it("maintenance endpoint excludes non-terminal job logs from the ledger", () => {
+    const key = "douyin:232:2026-10-30_1000";
+    log(jobLogFileName(key), 30, 40);
+    log("old.log", 30, 20);
+    const db = join(root, "sync.db");
+    const ledger = new SyncLedger(db);
+    ledger.upsertPending(key, NOW2 - DAY);
+    ledger.close();
+    const api = buildMaintenance({
+      store: { listTasks: () => [] } as never,
+      manager: { isRecording: () => false, getAnchorName: () => null } as never,
+      dataRoot: root,
+      logsDir: root,
+      syncDbPath: db,
+      stageDir: join(root, "stage"),
+      auditDir: join(root, "audit-ledger"),
+    });
+    const ok = api.previewJobLogs(7) as { status: number; body: { count: number } };
+    expect(ok.status).toBe(200);
+    expect(ok.body.count).toBe(1); // only old.log; the active job's log is protected
+
+    // ledger unreadable → conservatively no exclusion, no error
+    const bad = join(root, "bad.db");
+    writeFileSync(bad, "not a database");
+    const api2 = buildMaintenance({
+      store: { listTasks: () => [] } as never,
+      manager: { isRecording: () => false, getAnchorName: () => null } as never,
+      dataRoot: root,
+      logsDir: root,
+      syncDbPath: bad,
+      stageDir: join(root, "stage"),
+      auditDir: join(root, "audit-ledger"),
+    });
+    const r = api2.previewJobLogs(7) as { status: number; body: { count: number } };
+    expect(r.status).toBe(200);
+    expect(r.body.count).toBe(2); // conservative: nothing excluded
   });
 });
