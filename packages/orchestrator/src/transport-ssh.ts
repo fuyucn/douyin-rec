@@ -543,7 +543,11 @@ export class SshTransport implements Transport {
       // 只认最后一个非空行且必须为纯数字:登录 banner/空输出不得被误读成「0 个未删」。
       const last = out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).pop();
       if (last != null && /^\d+$/.test(last)) left = Number(last);
-    } catch { /* 探测失败不影响上报口径 */ }
+    } catch (pe) {
+      // 探测期间用户停止:按 abort 上抛,不包成普通清理失败(复审 #429)。
+      if (isJobAbort(pe)) throw pe;
+      /* 其余探测失败不影响上报口径:保守按整批失败 */
+    }
     const detail = String((err as Error)?.message ?? err).slice(0, 300);
     // 探测确认 rm 实际已全删(仅 ssh 退出非 0 / 超时):目标已达成,不报失败,只留日志。
     if (left === 0) { console.warn(`[ssh cleanup] ${this.o.host}: rm 报错但探测确认 ${paths.length} 个路径均已删除: ${detail}`); return; }

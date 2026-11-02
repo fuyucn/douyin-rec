@@ -1183,7 +1183,6 @@ describe("runPipeline", () => {
     deps.ledger.close();
   });
 
-
   it("非 done 场续跑重烧失败 → needs_manual 的 error 必须非空(空串不得落库,issue #188 回归)", async () => {
     const stageDir = mkdtempSync(join(tmpdir(), "reburn-"));
     const deps = makeDeps({ cfg: { ...makeDeps().cfg, stageDir } });
@@ -1199,6 +1198,7 @@ describe("runPipeline", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const r = await runPipeline(b, deps);
     warn.mockRestore();
+    expect(deps.sh).toHaveBeenCalled(); // 确认真走到重烧分支,不是被前置分支转人工
     expect(r.state).toBe("needs_manual");
     expect(deps.ledger.get(b.streamKey)?.state).toBe("needs_manual");
     expect((deps.ledger.get(b.streamKey)?.error ?? "").trim()).not.toBe("");
