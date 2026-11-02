@@ -1,6 +1,6 @@
 // packages/orchestrator/src/transport-local.test.ts
-import { describe, it, expect, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalTransport } from "./transport-local.js";
@@ -264,5 +264,29 @@ describe("LocalTransport.procCancel", () => {
   it("throws ProcUnsupported when no handler is injected", async () => {
     const t = new LocalTransport(base);
     await expect(t.procCancel(["j1"])).rejects.toBeInstanceOf(ProcUnsupported);
+  });
+});
+
+describe("LocalTransport.cleanup(失败不再吞,issue #429)", () => {
+  const base = { id: "local", taskRooms: {}, ffprobe: async () => ({ durationSec: 0, startMs: 0, endMs: 0 }) };
+  let root: string;
+  beforeEach(() => { root = mkdtempSync(join(tmpdir(), "loc-clean-")); });
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  it("成功:逐个删除(真实 fs;不存在的路径不算失败)", async () => {
+    const a = join(root, "a.ts"); writeFileSync(a, "x");
+    const t = new LocalTransport({ ...base, recordingsDir: root });
+    await expect(t.cleanup([a, join(root, "gone.ts")])).resolves.toBeUndefined();
+    expect(existsSync(a)).toBe(false);
+  });
+
+  it("任一失败 → 抛聚合错误(含失败路径数),其余路径照删、失败者保留", async () => {
+    // 目录没有 recursive → rmSync(force) 报 ERR_FS_EISDIR,可稳定制造失败。
+    const dir = join(root, "segdir"); mkdirSync(dir); writeFileSync(join(dir, "x.ts"), "x");
+    const b = join(root, "b.ts"); writeFileSync(b, "x");
+    const t = new LocalTransport({ ...base, recordingsDir: root });
+    await expect(t.cleanup([dir, b])).rejects.toThrow(/本机清理失败: 1\/2 个路径未删/);
+    expect(existsSync(b)).toBe(false);   // 一个失败不挡后面的
+    expect(existsSync(dir)).toBe(true);  // 失败的保留(留给补跑)
   });
 });

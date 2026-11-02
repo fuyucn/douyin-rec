@@ -5,9 +5,15 @@
  * deletion). This module only ever runs on an explicit user request: it lists the `.log` files whose
  * mtime is older than N days, and deletes exactly that set. The preview and the delete use the same
  * selection function, so what the user confirmed is what gets removed.
+ *
+ * 非终态保护(issue #429):`selectJobLogs` 接受可选的「活动 job」材料(日志路径集合 /
+ * streamKey 集合),命中的文件不进清理集 —— 非终态 job 的日志被 UI 实时读取,删了会 404。
+ * 删除动作本身与集合怎么来无关;调用方(maintenance)从 hub 台账取非终态 job,
+ * 台账读不到 → 不传 = 不排除(旧行为),绝不报错。
  */
 import { appendFileSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
-import { basename, join, relative } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
+import { jobLogFileName } from "@drec/core";
 
 const DAY_MS = 24 * 3600_000;
 /** Upper bound for the age input; anything above is a typo, not a request. */
@@ -40,13 +46,25 @@ export function parseJobLogDays(raw: unknown): number | null {
   return n;
 }
 
+/** 活动(非终态)hub job 的日志判定材料:任一命中即从清理集里排除(宁可多保留)。 */
+export interface JobLogActive {
+  /** 日志绝对路径(通常为 `jobLogPaths` 的全部候选,含 legacy stage 位置);按 resolve 后比对。 */
+  paths?: ReadonlySet<string>;
+  /** 活动 job 的 streamKey 集合;按 room 布局的日志文件名(core `jobLogFileName`)归一匹配。 */
+  streamKeys?: ReadonlySet<string>;
+}
+
 /** Every `.log` under `<logsRoot>/hub/<room dir>/` whose mtime is strictly older than `days`. */
-export function selectJobLogs(logsRoot: string, days: number, now: number = Date.now()): JobLogSelection {
+export function selectJobLogs(logsRoot: string, days: number, now: number = Date.now(), active?: JobLogActive): JobLogSelection {
   const cutoff = now - days * DAY_MS;
   const out: JobLogSelection = { files: [], bytes: 0 };
   const hubDir = join(logsRoot, "hub");
   let rooms: string[];
   try { rooms = readdirSync(hubDir); } catch { return out; }
+  // 非终态排除(issue #429):路径集合精确(覆盖 legacy 重名 job.log);
+  // streamKey 集合按文件名归一,给只有台账 key 的调用方用。
+  const activeNames = new Set([...(active?.streamKeys ?? [])].map((k) => jobLogFileName(k)));
+  const activePaths = new Set([...(active?.paths ?? [])].map((p) => resolve(p)));
   for (const room of rooms) {
     const roomDir = join(hubDir, room);
     let names: string[];
@@ -54,6 +72,7 @@ export function selectJobLogs(logsRoot: string, days: number, now: number = Date
     for (const name of names) {
       if (!name.endsWith(".log")) continue;
       const p = join(roomDir, name);
+      if (activeNames.has(name) || activePaths.has(resolve(p))) continue;
       try {
         const st = statSync(p);
         if (!st.isFile() || st.mtimeMs >= cutoff) continue;
@@ -65,8 +84,8 @@ export function selectJobLogs(logsRoot: string, days: number, now: number = Date
   return out;
 }
 
-export function previewJobLogs(logsRoot: string, days: number, now?: number): JobLogPreview {
-  const s = selectJobLogs(logsRoot, days, now);
+export function previewJobLogs(logsRoot: string, days: number, now: number = Date.now(), active?: JobLogActive): JobLogPreview {
+  const s = selectJobLogs(logsRoot, days, now, active);
   return { olderThanDays: days, count: s.files.length, bytes: s.bytes };
 }
 
@@ -90,8 +109,8 @@ function appendAudit(auditDir: string, deleted: number, bytes: number, failed: J
   }
 }
 
-export function cleanupJobLogs(logsRoot: string, days: number, auditDir: string, now: number = Date.now()): JobLogCleanupResult {
-  const s = selectJobLogs(logsRoot, days, now);
+export function cleanupJobLogs(logsRoot: string, days: number, auditDir: string, now: number = Date.now(), active?: JobLogActive): JobLogCleanupResult {
+  const s = selectJobLogs(logsRoot, days, now, active);
   const failed: JobLogCleanupResult["failed"] = [];
   let deleted = 0;
   let bytes = 0;

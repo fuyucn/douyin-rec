@@ -26,6 +26,7 @@ function fakeLedger() {
     logStep: vi.fn(),
     setState: vi.fn(),
     syncNodeState: vi.fn(),
+    getNodeState: vi.fn(() => null),
     markFailed: vi.fn(),
     markDone: vi.fn(),
   } as never;
@@ -198,6 +199,7 @@ describe("tryNodeSideUpload 失败收口(回读节点落盘结果,区分假失�
       logStep: vi.fn(),
       setState: vi.fn(),
       syncNodeState: vi.fn(),
+      getNodeState: vi.fn(() => null),
       markFailed: vi.fn(),
       markDone: vi.fn(),
       setBv: vi.fn(),
@@ -410,6 +412,7 @@ describe("节点侧上传台账步骤名 = node_upload(非 pull)", () => {
       logStep: vi.fn(),
       setState: vi.fn(),
       syncNodeState: vi.fn(),
+      getNodeState: vi.fn(() => null),
       markFailed: vi.fn(),
       markDone: vi.fn(),
     };
@@ -506,6 +509,7 @@ describe("issue #2:started + 主动终止节点执行体(A1 尽早落盘 + A2 �
       logStep: vi.fn(),
       setState: vi.fn(),
       syncNodeState: vi.fn(),
+      getNodeState: vi.fn(() => null),
       markFailed: vi.fn(),
       markDone: vi.fn(),
     };
@@ -625,7 +629,7 @@ describe("tryNodeSideUpload 已建稿护栏(issue #91)", () => {
 
 describe("tryNodeSideUpload 成功收尾(issue #92)", () => {
   it("节点侧上传成功(返回 ok)→ 立刻按配置删节点源;节点侧无 sync_parts 基线,不排旁路校验", async () => {
-    const ledger = { get: () => ({ bv: "" }), getUploadPlan: () => null, logStep: vi.fn(), setState: vi.fn(), syncNodeState: vi.fn(), markFailed: vi.fn(), markDone: vi.fn(), doneParts: () => new Set<number>() };
+    const ledger = { get: () => ({ bv: "" }), getUploadPlan: () => null, logStep: vi.fn(), setState: vi.fn(), syncNodeState: vi.fn(), getNodeState: () => null, markFailed: vi.fn(), markDone: vi.fn(), doneParts: () => new Set<number>() };
     const t = fakeTransport();
     const scheduled: number[] = [];
     const deps = {
