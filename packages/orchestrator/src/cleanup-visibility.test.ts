@@ -13,6 +13,7 @@ import {
   type PipelineCfg, type PipelineDeps,
 } from "./pipeline.js";
 import type { Transport } from "./transport.js";
+import { SshTransport } from "./transport-ssh.js";
 
 const K = "douyin:r1:2026-01-01";
 let dir: string;
@@ -173,6 +174,22 @@ describe("clean_source 失败节点集合(同场多节点,#429 二轮)", () => {
     await only.run(["A", "B"]);
     expect(only.l.getNodeState(K, "clean_source")).toBeNull();
     expect(failing.size + abortFor.size).toBeGreaterThan(0);
+  });
+});
+
+describe("真实 SshTransport 包装路径:用户停止的远端删源(#429 三轮)", () => {
+  it("rm 抛 JobAbortedError → clean_source 不记 failed、不告警、时间线收尾 done", async () => {
+    const l = new SyncLedger(":memory:"); l.upsertPending(K);
+    const ev: NotifyEvent[] = [];
+    const t = new SshTransport({ id: "A", host: "h", dataRoot: "/d", run: async () => { throw new JobAbortedError(); }, rsync: async () => {} });
+    await cleanupSourcesShared({
+      streamKey: K, ledger: l, transports: new Map([["A", t]]),
+      members: [{ workerId: "A", rec: { tsFiles: ["/r/a.ts"] } }],
+      cleanup: { sourceAfterDone: true }, rmStage: async () => {}, log: () => {}, notify: (e) => ev.push(e),
+    });
+    expect(l.getNodeState(K, "clean_source")?.state).not.toBe("failed");
+    expect(alerts(ev)).toHaveLength(0);
+    expect(l.getSteps(K).find((s) => s.step === "clean_source" && s.phase === "done")).toBeTruthy();
   });
 });
 

@@ -1184,6 +1184,27 @@ describe("runPipeline", () => {
   });
 
 
+  it("非 done 场续跑重烧失败 → needs_manual 的 error 必须非空(空串不得落库,issue #188 回归)", async () => {
+    const stageDir = mkdtempSync(join(tmpdir(), "reburn-"));
+    const deps = makeDeps({ cfg: { ...makeDeps().cfg, stageDir } });
+    const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+    deps.ledger.upsertPending(b.streamKey);
+    for (const st of ["syncing", "merging", "uploading"] as const) deps.ledger.setState(b.streamKey, st);
+    deps.ledger.setBv(b.streamKey, "BVing");
+    const sub = join(stageDir, "douyin_test-room_2026-06-27");
+    mkdirSync(sub, { recursive: true });
+    for (const f of [".mp4", "_danmu.mp4", "_livechat.mp4"]) writeFileSync(join(sub, "主播名_2026-06-27" + f), "x");
+    deps.ledger.syncNodeState(b.streamKey, "burn_danmu", "failed", { error: "" });
+    (deps.sh as Mock).mockImplementation(async () => { throw new Error(""); });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const r = await runPipeline(b, deps);
+    warn.mockRestore();
+    expect(r.state).toBe("needs_manual");
+    expect(deps.ledger.get(b.streamKey)?.state).toBe("needs_manual");
+    expect((deps.ledger.get(b.streamKey)?.error ?? "").trim()).not.toBe("");
+    deps.ledger.close();
+  });
+
   it("合并模式 stage 收口必须写 STAGE_READY(线上噪音主来源,空 error 会被判红灯)", async () => {
     const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
     const deps = makeDeps({ cfg: { ...makeDeps().cfg, uploadMode: "stage" } });

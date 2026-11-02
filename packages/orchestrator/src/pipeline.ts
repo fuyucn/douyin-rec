@@ -4,7 +4,7 @@ import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { NodeUploadConfig } from "./node-upload-config.js";
 import type { JobState, SyncLedger } from "./ledger.js";
-import { resolveSubmissionTitle, isAtomicTempName, formatPartTitle, isAppendAmbiguous, isJobAbort, JobAbortedError, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, resolveJobLogPath, stageSessionDir, anchorNameOfSessionBase, type PathLayout, survivingArtifacts, throwIfAborted, closeStageReady, USER_STOP, VIDEO_EXT_ALT, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, isSidecarSkipEvent, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
+import { resolveSubmissionTitle, isAtomicTempName, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, resolveJobLogPath, stageSessionDir, anchorNameOfSessionBase, type PathLayout, survivingArtifacts, throwIfAborted, closeStageReady, USER_STOP, VIDEO_EXT_ALT, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, isSidecarSkipEvent, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
 import type { OutputFormat, UploadOpts } from "@drec/core";
 import { groupSessionsInDir } from "@drec/post-process";
 import { selectWinner } from "./select.js";
@@ -482,7 +482,11 @@ export async function cleanupSourcesShared(o: {
    *  仍有残留 → 保持 failed,不复位、不重复告警);失败时把「未在本轮删净的旧失败节点 ∪ 本轮真实失败节点」写回。 */
   const markStep = (step: "clean_source" | "clean_stage_src", failures: CleanupFailure[], detail: string): void => {
     const real = failures.filter((f) => !f.aborted);
-    if (failures.length > 0 && real.length === 0) { o.log(`清理被用户停止中断(${step}),不记 failed`); return; }
+    if (failures.length > 0 && real.length === 0) {
+      o.ledger.logStep(o.streamKey, step, "done", `${detail} · 被停止`);
+      o.log(`清理被用户停止中断(${step}),不记 failed`);
+      return;
+    }
     const row = o.ledger.getNodeState(o.streamKey, step);
     const prior = step === "clean_source" && row?.state === "failed" ? decodeFailedNodes(row.error) : null;
     const cleanedNow = new Set(o.members.map((m) => m.workerId));
@@ -1412,7 +1416,7 @@ async function resumeAppends(
   // 守卫(#429):已 done 的场只可能因 clean_* 补跑进来 —— 上传 / append 早已完成,这里**只清理**,
   // 绝不进入 append / 转人工分支(stage 成品部分已删时那些分支会把好稿件翻成 needs_manual 并告警「删稿重来」)。
   if (wasDone) {
-    jlog(`续跑:job 已 done → 只补收尾清理(不重跑上传 / append,永不转人工)`);
+    jlog(`续跑:job 已 done → 只补收尾清理(不重跑上传 / append;不进入 append / 产物缺失转人工分支,回读不符仍按 #327 转人工)`);
     return await drainSeason(await finalizeOnly(streamKey, bv, deps, jlog, notify, members, stageSub));
   }
   const prod = deriveStageProducts(stageSub, effectiveStageFormat(cfg.outputFormat, cfg.uploadMode));

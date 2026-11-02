@@ -1,7 +1,7 @@
 // packages/orchestrator/src/transport-ssh.ts
 import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
-import { encodeEnqueue, normalizeNodeResultFile, normalizeZeroDiskReport, type ZeroDiskReport, registerChild, throwIfAborted, type EnqueueRequest, type EnqueueResponse, type ProcessReceipt, type RemoteTaskSpec } from "@drec/core";
+import { encodeEnqueue, isJobAbort, normalizeNodeResultFile, normalizeZeroDiskReport, type ZeroDiskReport, registerChild, throwIfAborted, type EnqueueRequest, type EnqueueResponse, type ProcessReceipt, type RemoteTaskSpec } from "@drec/core";
 import type { ActiveRecordingRoom, ApplyTasksResult, NodeInventory, NodeRecording, NodeRecordingStatus, NodeRollingSession, NodeTasks, RecoverOrderRequest, RecoverOrderResult, Transport } from "./transport.js";
 import { ProcUnsupported } from "./transport.js";
 import { parseUnclaimedPayload } from "./unclaimed.js";
@@ -530,7 +530,11 @@ export class SshTransport implements Transport {
     const q = (p: string): string => `'${p.replace(/'/g, "'\\''")}'`;
     const quoted = paths.map(q).join(" ");
     let err: unknown;
-    try { await this.run([`rm -f ${quoted}`]); return; } catch (e) { err = e; }
+    try { await this.run([`rm -f ${quoted}`]); return; } catch (e) {
+      // 用户停止:原样上抛(不探测、不包装),上层按 abort 处理(不记 failed / 不告警 / 不补跑)。
+      if (isJobAbort(e)) throw e;
+      err = e;
+    }
     // rm 失败 → 只读探测还剩几个路径(逐个 test -e 计数,一条命令);探测不了按整批失败。
     // 用 runStatus(短预算):节点不可达时 rm 已经等过一轮,探测不再拖一个完整超时。
     let left = paths.length;
@@ -541,6 +545,8 @@ export class SshTransport implements Transport {
       if (last != null && /^\d+$/.test(last)) left = Number(last);
     } catch { /* 探测失败不影响上报口径 */ }
     const detail = String((err as Error)?.message ?? err).slice(0, 300);
+    // 探测确认 rm 实际已全删(仅 ssh 退出非 0 / 超时):目标已达成,不报失败,只留日志。
+    if (left === 0) { console.warn(`[ssh cleanup] ${this.o.host}: rm 报错但探测确认 ${paths.length} 个路径均已删除: ${detail}`); return; }
     throw new Error(`远端清理失败: ${left}/${paths.length} 个路径未删${detail ? `: ${detail}` : ""}`);
   }
 

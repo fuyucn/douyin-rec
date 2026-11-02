@@ -1,8 +1,9 @@
 // packages/orchestrator/src/transport-ssh.test.ts
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { chmodSync, existsSync, rmSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { JobAbortedError, isJobAbort } from "@drec/core";
 import { SshTransport, buildRsyncArgs } from "./transport-ssh.js";
 import { ProcUnsupported, recordingStatusWorkerIds, type NodeRecording } from "./transport.js";
 import { summarizeRsyncStderr } from "./transport-ssh.js";
@@ -602,6 +603,25 @@ describe("SshTransport.cleanup(失败不再吞,issue #429)", () => {
     });
     await expect(t.cleanup(["/r/a.ts", "/r/b.ts"])).rejects
       .toThrow(/远端清理失败: 1\/2 个路径未删/);
+  });
+
+  it("rm 抛 abort(用户停止)→ 原样上抛(仍满足 isJobAbort),不探测、不包装", async () => {
+    const calls: string[] = [];
+    const t = mkT(async (argv) => { calls.push(argv[0]!); throw new JobAbortedError(); });
+    const e = await t.cleanup(["/r/a.ts"]).then(() => null, (x: unknown) => x);
+    expect(isJobAbort(e)).toBe(true);
+    expect(calls).toEqual(["rm -f '/r/a.ts'"]);
+  });
+
+  it("rm 报错但探测确认 0 个残留(已全删,仅 ssh 非 0 / 超时)→ resolve,不抛错", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const t = mkT(async (argv) => {
+      if (argv[0]!.startsWith("rm ")) throw new Error("ssh 超时");
+      return "0\n";
+    });
+    await expect(t.cleanup(["/r/a.ts", "/r/b.ts"])).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
   });
 
   it("探测命令也失败(节点不可达)→ 保守按整批失败,原错误不吞", async () => {
