@@ -562,6 +562,21 @@ describe("SshTransport.cleanup(失败不再吞,issue #429)", () => {
     expect(calls).toEqual(["rm -f '/r/a.ts' '/r/b.ts'"]);
   });
 
+  it("路径含空格 / 撇号 / $:rm 与探测命令都按单引号转义(断言命令字符串)", async () => {
+    const calls: string[] = [];
+    const t = mkT(async (argv) => {
+      calls.push(argv.join(" "));
+      if (argv[0]!.startsWith("rm ")) throw new Error("ssh rc=1");
+      return "2\n";
+    });
+    const weird = ["/r/a b.ts", "/r/it's.ts", "/r/$HOME`x`.ts"];
+    await expect(t.cleanup(weird)).rejects.toThrow(/2\/3 个路径未删/);
+    expect(calls[0]).toBe("rm -f '/r/a b.ts' '/r/it'\\''s.ts' '/r/$HOME`x`.ts'");
+    expect(calls[1]).toBe(
+      "n=0; test -e '/r/a b.ts' && n=$((n+1)); test -e '/r/it'\\''s.ts' && n=$((n+1)); test -e '/r/$HOME`x`.ts' && n=$((n+1)); echo $n",
+    );
+  });
+
   it("空清单不发命令", async () => {
     let n = 0;
     const t = mkT(async () => { n++; return ""; });

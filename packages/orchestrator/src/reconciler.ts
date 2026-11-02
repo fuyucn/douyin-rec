@@ -1,9 +1,9 @@
 import { abortJob, effectiveReconnectWindowMs, isJobAbort, isJobLive, resolveDiskMinGB, SAME_BROADCAST_GAP_MS, USER_STOP } from "@drec/core";
 import type { Transport, NodeInventory } from "./transport.js";
 import type { UnclaimedSegment } from "./unclaimed.js";
-import type { JobState, SyncLedger } from "./ledger.js";
+import type { JobState, StepName, SyncLedger } from "./ledger.js";
 import type { PipelineDeps, PipelineCfg } from "./pipeline.js";
-import { runPipeline } from "./pipeline.js";
+import { runPipeline, CLEANUP_BACKFILL_MAX } from "./pipeline.js";
 import { pollFollowups } from "./finalize-format.js";
 import { createUploadQueuePoller, type UploadPollerOpts } from "./node-upload-poll.js";
 import { isDerivedKey, runNowConflict } from "./run-now-guard.js";
@@ -577,7 +577,9 @@ private alertUnclaimedOnDone(b: Broadcast, job: { bv?: string | null }): void {
  *
  * @returns 可补跑的节点名(供日志);null = 无需补跑。
  */
-private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string | null {
+private cleanupBackfillDue(streamKey: string, segmentMode = false): string | null {
+  // 分段模式(mergeSegments=false)清理失败只告警、不补跑:补跑会重跑整条管线并把整场源拉回 master(见下「已撤回」注释)。
+  if (segmentMode) return null;
   const nodes = this.ledger.getNodeStates(streamKey);
   const now = Date.now();
   const due: string[] = [];
@@ -587,6 +589,8 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
     // 为一个只剩观察意义的软状态付这个代价不值得;存量 pending 场次的源需人工清理。
     const matches = CLEANUP_BACKFILL_NODES.has(n.node) && n.state === "failed";
     if (!matches) continue;
+    // 合并模式补跑上限(issue #429):attempts = 已发起的补跑次数(派发时 +1,清理成功复位为 0)。耗尽后只剩已发出的那次告警。
+    if (n.attempts >= CLEANUP_BACKFILL_MAX) continue;
     // `Math.max(0, ...)`:台账的 now() 是**进程内单调递增**(同毫秒多次调用会 +1 递推),
     // 而这里用 Date.now() 读墙钟 → 同一 tick 内 `Date.now() - updatedAt` 可能是**负数**
     // (updatedAt 是未来 1ms 的递推值)。不夹到 0 的话,throttleMs=0 也会被当成「刚失败」而跳过。
@@ -605,7 +609,6 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
   // 正确做法(留 T33 后续):删源**不该借道 pipeline**,应有一个**只删源、不做 select/pull/
   // append/上传**的独立收尾入口(或 pipeline 支持「只跑 cleanup」的收尾模式)。
   // 在那之前,积压源录像**保持现状**(安全第一:源不能因为清理动作本身被重复上传)。
-  void sourceAfterDone;
   return due.length > 0 ? due.join(",") : null;
 }
 
@@ -715,10 +718,15 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
         // 复用 pipeline 已有的幂等续跑(bv 已在库 → 只补 append + 收尾闸门),
         // 成员清单来自本轮 inventory —— 清理失败的源文件**仍在节点上**(没删成),故能被扫到。
         if (job?.state === "done") {
-          // sourceAfterDone 从**该房间当前配置**读:没开清理就不该补删源(与 cleanupSources 同口径)。
-          const due = this.cleanupBackfillDue(b.streamKey, cfg.cleanup?.sourceAfterDone === true);
+          // 分段模式按**该房间当前配置**判(cleanupBackfillDue 对其恒 false)。
+          const due = this.cleanupBackfillDue(b.streamKey, cfg.steps?.mergeSegments === false);
           if (due) {
             jlogInfo(`[reconciler] ${b.streamKey} 上传后收尾未完成(${due}) → 补跑`);
+            // 派发即计一次(不依赖补跑里是否又记了失败:补跑抛错 / 提前返回也必须收敛)。
+            for (const node of due.split(",")) {
+              const row = this.ledger.getNodeState(b.streamKey, node as StepName);
+              if (row) this.ledger.syncNodeState(b.streamKey, node as StepName, row.state, { error: row.error, attempts: row.attempts + 1 });
+            }
             // 也派发出去(收尾补跑同样是长 IO)—— 失败**不改终态**:上传已成功,
             // 不该把 job 打成 failed(会诱导重传 = 重复稿)。只记日志 + 下轮再来。
             dispatched.push(this.dispatcher.dispatch(b.streamKey, async () => {

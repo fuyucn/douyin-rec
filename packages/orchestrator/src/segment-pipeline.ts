@@ -15,7 +15,7 @@ import type { Broadcast } from "./identity.js";
 import type { JobState, SyncLedger } from "./ledger.js";
 import { retry } from "./retry.js";
 import { prepareUploadAlias, SEG_WORK_DIR, segmentStem, segWorkPath, UPLOAD_ALIAS_DIR, type SegmentPlan } from "./session-plan.js";
-import { cleanupSourcesShared, defaultRmStage, defaultSplitForUpload, finalizeAfterUpload, finalizeOnly, readdirSyncSafe, removeEmptyStageDir, stageVideoLeftovers, videoOnly, xmlKeepRule, type CleanupOutcome, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
+import { cleanupSourcesShared, clearCleanFailure, defaultRmStage, defaultSplitForUpload, finalizeAfterUpload, finalizeOnly, readdirSyncSafe, recordCleanFailure, removeEmptyStageDir, stageVideoLeftovers, videoOnly, xmlKeepRule, type CleanupOutcome, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
 
 /** 默认单段 remux(ts/flv → mp4,无损,-c copy + 时基钉 90000)。 */
 const defaultRemuxSegment = (src: string, out: string): Promise<void> =>
@@ -487,7 +487,7 @@ export async function runSegmentPipeline(o: {
   const cleanupNodeSources = async (): Promise<CleanupOutcome> =>
     cleanupSourcesShared({
       streamKey, ledger, transports: deps.transports, members: allMembers,
-      cleanup: clean, rmStage, log: jlog,
+      cleanup: clean, rmStage, log: jlog, notify,
     });
   // stage 里拉来的源段副本 + 逐段 remux 中间产物(.work) —— 只在**上传成功后**清(见下)。
   const stageScratchPaths = (): string[] => [
@@ -661,8 +661,8 @@ export async function runSegmentPipeline(o: {
     // 清理失败不外抛(T12):抛出去 → reconciler 判整场 failed → 重跑 = 重复投稿。
     ledger.logStep(streamKey, "clean_stage_src", "start");
     // 成功也要把 sync_node_states 的行翻回 done(失败时写过 failed),否则补跑永不收敛(#429)。
-    try { await rmStage(stageScratchPaths()); ledger.logStep(streamKey, "clean_stage_src", "done", `删 ${stageScratchPaths().length} 文件`); ledger.syncNodeState(streamKey, "clean_stage_src", "done", { error: null }); }
-    catch (e) { const msg = String((e as Error)?.message ?? e).slice(0, 200); ledger.logStep(streamKey, "clean_stage_src", "done", `删 ${stageScratchPaths().length} 文件 · 失败`); ledger.syncNodeState(streamKey, "clean_stage_src", "failed", { error: msg }); jlog(`清理失败(clean_stage_src):${msg}`); }
+    try { await rmStage(stageScratchPaths()); ledger.logStep(streamKey, "clean_stage_src", "done", `删 ${stageScratchPaths().length} 文件`); clearCleanFailure(ledger, streamKey, "clean_stage_src"); }
+    catch (e) { const msg = String((e as Error)?.message ?? e).slice(0, 200); ledger.logStep(streamKey, "clean_stage_src", "done", `删 ${stageScratchPaths().length} 文件 · 失败`); recordCleanFailure({ ledger, streamKey, node: "clean_stage_src", error: msg, cause: e, notify, log: jlog }); }
   }
   if (clean.stageAfterDone) {
     // 组产物(合并 mp4 / 烧录 mp4)+ 组成员的逐段 plain(若合并成组则逐段 plain 可一并清)。
@@ -680,8 +680,8 @@ export async function runSegmentPipeline(o: {
     products.push(...stageVideoLeftovers(stageSub));
     products.splice(0, products.length, ...new Set(products));
     ledger.logStep(streamKey, "clean_stage", "start");
-    try { await rmStage(products); ledger.logStep(streamKey, "clean_stage", "done", `删 ${products.length} 文件`); ledger.syncNodeState(streamKey, "clean_stage", "done", { error: null }); removeEmptyStageDir(deps.cfg.stageDir, stageSub, jlog); }
-    catch (e) { const msg = String((e as Error)?.message ?? e).slice(0, 200); ledger.logStep(streamKey, "clean_stage", "done", `删 ${products.length} 文件 · 失败`); ledger.syncNodeState(streamKey, "clean_stage", "failed", { error: msg }); jlog(`清理失败(clean_stage):${msg}`); }
+    try { await rmStage(products); ledger.logStep(streamKey, "clean_stage", "done", `删 ${products.length} 文件`); clearCleanFailure(ledger, streamKey, "clean_stage"); removeEmptyStageDir(deps.cfg.stageDir, stageSub, jlog); }
+    catch (e) { const msg = String((e as Error)?.message ?? e).slice(0, 200); ledger.logStep(streamKey, "clean_stage", "done", `删 ${products.length} 文件 · 失败`); recordCleanFailure({ ledger, streamKey, node: "clean_stage", error: msg, cause: e, notify, log: jlog }); }
   }
   return { state: "done", bv };
 }
@@ -880,7 +880,7 @@ async function resumeSegmentAppends(
     streamKey, bv, deps, log: jlog, notify,
     cleanupSources: () => cleanupSourcesShared({
       streamKey, ledger, transports: deps.transports, members: allMembers,
-      cleanup: cfg.cleanup, rmStage, log: jlog,
+      cleanup: cfg.cleanup, rmStage, log: jlog, notify,
     }),
     on: { plain: true, danmu: burnDanmu, livechat: burnLivechat },
     commitDone: () => {
@@ -896,8 +896,8 @@ async function resumeSegmentAppends(
       ...(existsSync(path.join(stageSub, SEG_WORK_DIR)) ? [path.join(stageSub, SEG_WORK_DIR)] : []),
     ];
     ledger.logStep(streamKey, "clean_stage_src", "start");
-    try { await rmStage(scratch); ledger.logStep(streamKey, "clean_stage_src", "done", `删 ${scratch.length} 文件`); ledger.syncNodeState(streamKey, "clean_stage_src", "done", { error: null }); }
-    catch (e) { const msg = String((e as Error)?.message ?? e).slice(0, 200); ledger.logStep(streamKey, "clean_stage_src", "done", `删 ${scratch.length} 文件 · 失败`); ledger.syncNodeState(streamKey, "clean_stage_src", "failed", { error: msg }); jlog(`清理失败(clean_stage_src):${msg}`); }
+    try { await rmStage(scratch); ledger.logStep(streamKey, "clean_stage_src", "done", `删 ${scratch.length} 文件`); clearCleanFailure(ledger, streamKey, "clean_stage_src"); }
+    catch (e) { const msg = String((e as Error)?.message ?? e).slice(0, 200); ledger.logStep(streamKey, "clean_stage_src", "done", `删 ${scratch.length} 文件 · 失败`); recordCleanFailure({ ledger, streamKey, node: "clean_stage_src", error: msg, cause: e, notify, log: jlog }); }
   }
   if (cfg.cleanup?.stageAfterDone) {
     const products = videoOnly([
@@ -911,8 +911,8 @@ async function resumeSegmentAppends(
     }
     products.push(...stageVideoLeftovers(stageSub));
     products.splice(0, products.length, ...new Set(products));
-    try { await rmStage(products); ledger.syncNodeState(streamKey, "clean_stage", "done", { error: null }); removeEmptyStageDir(cfg.stageDir, stageSub, jlog); }
-    catch (e) { const msg = String((e as Error)?.message ?? e).slice(0, 200); ledger.syncNodeState(streamKey, "clean_stage", "failed", { error: msg }); jlog(`清理失败(clean_stage):${msg}`); }
+    try { await rmStage(products); clearCleanFailure(ledger, streamKey, "clean_stage"); removeEmptyStageDir(cfg.stageDir, stageSub, jlog); }
+    catch (e) { const msg = String((e as Error)?.message ?? e).slice(0, 200); recordCleanFailure({ ledger, streamKey, node: "clean_stage", error: msg, cause: e, notify, log: jlog }); }
   }
   return { state: "done", bv };
 }
