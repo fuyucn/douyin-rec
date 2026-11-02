@@ -128,9 +128,22 @@ export class LocalTransport implements Transport {
     return paths.every((p) => existsSync(p));
   }
 
-  /** 同机:fs 删除(逐个 rm,失败吞掉)。 */
+  /**
+   * 同机:fs 删除(逐个 rm,`rm -f` 语义不变:不存在的路径不算失败)。
+   * **失败不吞(issue #429)**:任一失败 → 抛聚合错误(含失败路径数),由调用方
+   * (`cleanupSourcesShared` 等)记 `clean_*` failed 供 reconciler 补跑。
+   * 消息只带文件名+错误码(完整路径已由调用方按 target 记台账)。
+   */
   async cleanup(paths: string[]): Promise<void> {
-    for (const p of paths) { try { rmSync(p, { force: true }); } catch { /* 忽略 */ } }
+    const failed: Array<{ name: string; code: string }> = [];
+    for (const p of paths) {
+      try { rmSync(p, { force: true }); }
+      catch (e) { failed.push({ name: basename(p), code: (e as NodeJS.ErrnoException)?.code ?? "UNKNOWN" }); }
+    }
+    if (failed.length > 0) {
+      const det = failed.map((f) => `${f.name}:${f.code}`).join(", ").slice(0, 300);
+      throw new Error(`本机清理失败: ${failed.length}/${paths.length} 个路径未删(${det})`);
+    }
   }
 
   /**

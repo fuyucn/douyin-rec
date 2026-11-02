@@ -65,6 +65,8 @@ export interface LiveDetailEntry {
   workerName: string;
   current?: import("@drec/contracts").LiveUploadSnapshot;
   previous?: import("@drec/contracts").LiveUploadSnapshot;
+  /** Finished runs of this room on this node, newest first (issue #413). */
+  history?: import("@drec/contracts").LiveUploadSnapshot[];
 }
 
 export interface LiveUploadView {

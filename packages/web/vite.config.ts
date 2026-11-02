@@ -39,7 +39,9 @@ export default defineConfig({
     proxy: {
       "/api": {
         target: process.env.API_TARGET ?? "http://localhost:7860",
-        changeOrigin: true,
+        // 不开 changeOrigin:后端有 Origin 同源校验(issue #427),按 Host 判同源。开 changeOrigin 会把
+        // Host 改写成 target(localhost:7860),与浏览器 Origin(localhost:5173)不符 → 所有写请求 403。
+        // 保留原始 Host,前端 dev 代理下的同源判定才能通过。
       },
     },
   },

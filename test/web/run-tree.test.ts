@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { liveNode, partSteps, pipelineTree, rollingNode, rootStateOf, treeEdges } from "../../packages/web/src/lib/run-tree.js";
+import { liveBroadcast, liveNode, partSteps, pipelineTree, rollingNode, rootStateOf, treeEdges } from "../../packages/web/src/lib/run-tree.js";
 import type { HubJobDTO, RollingDeliveryDTO } from "../../packages/web/src/api/client.js";
 import type { LiveUploadSnapshot } from "../../packages/core/src/live-upload.js";
 
@@ -107,6 +107,37 @@ describe("rootStateOf", () => {
   });
 });
 
+describe("liveBroadcast (issue #408)", () => {
+  const by = (state: string): { state: string } => ({ state });
+
+  it("derives the root state from the snapshots instead of a hard-coded running", () => {
+    const root = (...states: string[]): unknown => liveBroadcast(states.map(by), (s) => s.state).state;
+    expect(root("streaming")).toBe("running");
+    expect(root("waiting", "submitting")).toBe("running");
+    expect(root("failed")).toBe("failed");
+    expect(root("stopped")).toBe("skipped");
+    expect(root("finished")).toBe("done");
+    expect(root("waiting")).toBe("waiting");
+    expect(root()).toBe("waiting");
+  });
+
+  it("drops waiting snapshots: a pump waiting for the broadcast is not on air", () => {
+    const mixed = liveBroadcast([by("waiting"), by("streaming")], (s) => s.state);
+    expect(mixed.onAir).toEqual([by("streaming")]);
+    expect(mixed.state).toBe("running");
+    const idle = liveBroadcast([by("waiting")], (s) => s.state);
+    expect(idle.onAir).toHaveLength(0);
+    expect(idle.state).toBe("waiting");
+  });
+
+  it("works on the component's {e, s} pairs", () => {
+    const pairs = [{ s: snap({ state: "waiting" }) }, { s: snap({ state: "stopped" }) }];
+    const b = liveBroadcast(pairs, ({ s }) => s.state);
+    expect(b.onAir).toHaveLength(1);
+    expect(b.state).toBe("skipped");
+  });
+});
+
 describe("treeEdges", () => {
   it("connects the root to every first-level child, including a single one", () => {
     const one = liveNode(snap({ currentPart: { index: 0, phase: "streaming", uploadedBytes: 1, chunks: 1 } }), "a", "A", "winner");
@@ -123,7 +154,23 @@ describe("treeEdges", () => {
     const e = treeEdges(t);
     expect(e.filter(([f]) => f === "root").map(([, to]) => to)).toEqual(["c:a", "c:b"]);
     expect(e.filter(([, to]) => to === "sel")).toEqual([["c:a", "sel", false], ["c:b", "sel", true]]);
-    expect(e.at(-1)?.[0]).toBe("sel");
+    expect(e.filter(([f]) => f === "sel")).toEqual([["sel", "h:pull"]]);
+  });
+
+  it("links the hub steps left to right, one edge per neighbour pair (issue #407)", () => {
+    const t = pipelineTree(job({ steps: [{ step: "pull", phase: "done", at: 1 }, { step: "merge", phase: "start", at: 2 }] }), undefined, (id) => id);
+    expect(treeEdges(t)).toEqual([["root", "sel"], ["sel", "h:pull"], ["h:pull", "h:merge"]]);
+  });
+
+  it("puts the source cleanup state on every candidate, losers included (issue #407)", () => {
+    const cands = [
+      { worker: "a", coverage: 1, durationSec: 60, complete: true, isWinner: true },
+      { worker: "b", coverage: 1, durationSec: 60, complete: true, isWinner: false },
+    ];
+    const withClean = pipelineTree(job({ candidates: cands, steps: [{ step: "clean_source", phase: "done", at: 1 }] }), undefined, (id) => id);
+    expect(withClean.candidates.map((c) => c.cleanState)).toEqual(["done", "done"]);
+    const without = pipelineTree(job({ candidates: cands }), undefined, (id) => id);
+    expect(without.candidates.map((c) => c.cleanState)).toEqual([undefined, undefined]);
   });
 
   it("links a node to its folded summary only when there is something folded", () => {

@@ -10,11 +10,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
-import { mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { request as httpRequest } from "node:http";
+import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TaskStore } from "../../packages/app/src/store.js";
-import { createWebServer, matchRoute } from "../../packages/app/src/web/server.js";
+import { createWebServer, matchRoute, hostAllowed, originAllowed } from "../../packages/app/src/web/server.js";
 import type { ManagerLike } from "../../packages/app/src/web/api.js";
 
 class MockManager implements ManagerLike {
@@ -57,6 +58,107 @@ class MockManager implements ManagerLike {
     return [];
   }
 }
+
+/**
+ * 裸 node:http 请求(undici fetch 禁止覆盖 Host,Host/Origin 场景只能这样发)。
+ * 只关心状态码;响应体直接 resume 丢弃。
+ */
+function raw(
+  port: number,
+  opts: { method?: string; path?: string; headers?: Record<string, string>; body?: string },
+): Promise<{ status: number }> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      { host: "127.0.0.1", port, method: opts.method ?? "GET", path: opts.path ?? "/api/tasks", headers: opts.headers }, // issue-guard: allow
+      (r) => {
+        void r.resume();
+        resolve({ status: r.statusCode ?? 0 });
+      },
+    );
+    req.on("error", reject);
+    if (opts.body !== undefined) req.write(opts.body);
+    req.end();
+  });
+}
+
+/**
+ * 裸 node:http 请求且**等完整响应**(headers + body 全部读完):用于验证 413 确实送达客户端
+ * 且带 Connection: close(复审),而非连接被提前销毁只剩半截/重置。
+ */
+function rawFull(
+  port: number,
+  opts: { method?: string; path?: string; headers?: Record<string, string>; totalBytes?: number },
+): Promise<{ status: number; headers: import("node:http").IncomingHttpHeaders; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      { host: "127.0.0.1", port, method: opts.method ?? "GET", path: opts.path ?? "/api/tasks", headers: opts.headers }, // issue-guard: allow
+      (r) => {
+        const chunks: Buffer[] = [];
+        r.on("data", (c: Buffer) => chunks.push(c));
+        r.on("end", () => resolve({ status: r.statusCode ?? 0, headers: r.headers, body: Buffer.concat(chunks).toString("utf-8") }));
+      },
+    );
+    req.on("error", reject);
+    if (opts.totalBytes !== undefined) {
+      // 大 body 分块写并尊重背压,模拟真实客户端边发边等;响应早到也能正常读完。
+      const chunk = Buffer.alloc(64 * 1024, 0x78);
+      let sent = 0;
+      const total = opts.totalBytes;
+      const writeMore = (): void => {
+        while (sent < total) {
+          const n = Math.min(chunk.length, total - sent);
+          const ok = req.write(n === chunk.length ? chunk : chunk.subarray(0, n));
+          sent += n;
+          if (!ok) { req.once("drain", writeMore); return; }
+        }
+        req.end();
+      };
+      writeMore();
+    } else {
+      req.end();
+    }
+  });
+}
+
+/** 本测试文件里 fetch 的 JSON body 统一带 content-type(带 body 的请求会被 415 拒收,issue #427)。 */
+const JSON_HEADERS = { "content-type": "application/json" };
+
+describe("请求入口防护纯函数(issue #427)", () => {
+  /** 造一个只带被测字段的最小 IncomingMessage 形状(originAllowed 只读 headers/socket)。 */
+  const fakeReq = (headers: Record<string, string>, remoteAddress = "127.0.0.1"): // issue-guard: allow
+    import("node:http").IncomingMessage =>
+    ({ headers, socket: { remoteAddress } } as unknown as import("node:http").IncomingMessage);
+
+  it("hostAllowed:缺失/空 Host → false(入口回 403)", () => {
+    expect(hostAllowed(undefined)).toBe(false);
+    expect(hostAllowed("")).toBe(false);
+  });
+
+  it("originAllowed:Origin null + 非回环 remoteAddress → false(入口回 403)", () => {
+    expect(originAllowed(fakeReq({ origin: "null", host: "box.ts.net" }, "192.168.1.9"), "POST")).toBe(false); // issue-guard: allow
+    // 对照:同头 + 回环 → 放行
+    expect(originAllowed(fakeReq({ origin: "null", host: "box.ts.net" }), "POST")).toBe(true);
+  });
+
+  it("hostAllowed:单标签短名/`.local`/末尾点 FQDN 放行;伪装后缀/剥点后空仍拒(复审)", () => {
+    expect(hostAllowed("master")).toBe(true); // Tailscale MagicDNS 短名
+    expect(hostAllowed("master:7860")).toBe(true); // 带端口剥端口后同上
+    expect(hostAllowed("mybox.local")).toBe(true); // mDNS/Bonjour
+    expect(hostAllowed("x.tailnet.ts.net.")).toBe(true); // 末尾点 FQDN 与不带点等价
+    expect(hostAllowed("x.tailnet.ts.net")).toBe(true);
+    expect(hostAllowed("attacker.example.com.")).toBe(false); // 末尾点不构成白名单
+    expect(hostAllowed("evil.local.attacker.io")).toBe(false); // 伪装后缀
+    expect(hostAllowed(".")).toBe(false); // 剥点后为空
+  });
+
+  it("originAllowed:Host/Origin 主机部分末尾点归一后比较;端口仍参与判定(复审)", () => {
+    const xfwd = { "x-forwarded-proto": "https" };
+    expect(originAllowed(fakeReq({ origin: "https://x.tailnet.ts.net.", host: "x.tailnet.ts.net.", ...xfwd }), "POST")).toBe(true);
+    expect(originAllowed(fakeReq({ origin: "https://x.tailnet.ts.net", host: "x.tailnet.ts.net.", ...xfwd }), "POST")).toBe(true);
+    // 端口不同仍是不同 origin(归一只去末尾点,不抹端口)
+    expect(originAllowed(fakeReq({ origin: "https://box.ts.net:8443", host: "box.ts.net", ...xfwd }), "POST")).toBe(false);
+  });
+});
 
 describe("matchRoute", () => {
   it("非法 percent 编码 → 不匹配(而不是抛 URIError 崩进程)", () => {
@@ -271,6 +373,7 @@ describe("createWebServer (live)", () => {
   it("POST /api/tasks parses body + creates (201)", async () => {
     const res = await fetch(`${base}/api/tasks`, {
       method: "POST",
+      headers: JSON_HEADERS,
       body: JSON.stringify({ room: "222", name: "t" }),
     });
     expect(res.status).toBe(201);
@@ -287,7 +390,7 @@ describe("createWebServer (live)", () => {
   });
 
   it("POST /api/tasks with bad json → 400", async () => {
-    const res = await fetch(`${base}/api/tasks`, { method: "POST", body: "{not json" });
+    const res = await fetch(`${base}/api/tasks`, { method: "POST", headers: JSON_HEADERS, body: "{not json" });
     expect(res.status).toBe(400);
   });
 
@@ -309,11 +412,13 @@ describe("createWebServer (live)", () => {
   it("PATCH /api/tasks/:id updates + reflects in GET", async () => {
     const created = await (await fetch(`${base}/api/tasks`, {
       method: "POST",
+      headers: JSON_HEADERS,
       body: JSON.stringify({ room: "333", name: "old" }),
     })).json() as { id: number };
 
     const patch = await fetch(`${base}/api/tasks/${created.id}`, {
       method: "PATCH",
+      headers: JSON_HEADERS,
       body: JSON.stringify({ name: "new", danmu: 0 }),
     });
     expect(patch.status).toBe(200);
@@ -333,17 +438,17 @@ describe("createWebServer (live)", () => {
     expect(body1.timezone).toBe(""); // 未设置
     expect(body1.default).toBeTruthy();
 
-    const bad = await fetch(`${base}/api/timezone`, { method: "POST", body: JSON.stringify({ timezone: "Not/A/Zone" }) });
+    const bad = await fetch(`${base}/api/timezone`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ timezone: "Not/A/Zone" }) });
     expect(bad.status).toBe(400);
 
-    const set = await fetch(`${base}/api/timezone`, { method: "POST", body: JSON.stringify({ timezone: "Asia/Shanghai" }) });
+    const set = await fetch(`${base}/api/timezone`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ timezone: "Asia/Shanghai" }) });
     expect(set.status).toBe(200);
     const setBody = (await set.json()) as { timezone: string; effective: string };
     expect(setBody.timezone).toBe("Asia/Shanghai");
     expect(setBody.effective).toBe("Asia/Shanghai");
     expect(process.env.TZ).toBe("Asia/Shanghai"); // 真的覆盖了进程环境变量
 
-    const clear = await fetch(`${base}/api/timezone`, { method: "POST", body: JSON.stringify({ timezone: "" }) });
+    const clear = await fetch(`${base}/api/timezone`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ timezone: "" }) });
     expect(((await clear.json()) as { effective: string }).effective).toBe(body1.default); // 清空回落默认
   });
 
@@ -357,6 +462,7 @@ describe("createWebServer (live)", () => {
     // 新规则必须绑定一个 master 源任务:房间/roomSlug 从该任务派生。
     const task = await fetch(`${base}/api/tasks`, {
       method: "POST",
+      headers: JSON_HEADERS,
       body: JSON.stringify({ room: "654321" }),
     });
     expect(task.status).toBe(201);
@@ -364,6 +470,7 @@ describe("createWebServer (live)", () => {
 
     const create = await fetch(`${base}/api/hub/rules`, {
       method: "POST",
+      headers: JSON_HEADERS,
       body: JSON.stringify({
         recording: { sourceTaskId },
         pipeline: { steps: { burnLivechat: false } },
@@ -383,6 +490,7 @@ describe("createWebServer (live)", () => {
 
     const patch = await fetch(`${base}/api/hub/rules/douyin.654321`, {
       method: "PATCH",
+      headers: JSON_HEADERS,
       body: JSON.stringify({ enabled: false }),
     });
     expect(patch.status).toBe(200);
@@ -391,13 +499,14 @@ describe("createWebServer (live)", () => {
     const del = await fetch(`${base}/api/hub/rules/douyin.654321`, { method: "DELETE" });
     expect(del.status).toBe(200);
     expect(existsSync(join(hubDir, "douyin.654321.json"))).toBe(false); // 删文件
-    const missing = await fetch(`${base}/api/hub/rules/douyin.654321`, { method: "PATCH", body: JSON.stringify({ enabled: true }) });
+    const missing = await fetch(`${base}/api/hub/rules/douyin.654321`, { method: "PATCH", headers: JSON_HEADERS, body: JSON.stringify({ enabled: true }) });
     expect(missing.status).toBe(404);
   });
 
   it("start/stop lifecycle via http", async () => {
     const created = await (await fetch(`${base}/api/tasks`, {
       method: "POST",
+      headers: JSON_HEADERS,
       body: JSON.stringify({ room: "333" }),
     })).json() as { id: number };
 
@@ -409,5 +518,174 @@ describe("createWebServer (live)", () => {
 
     const stop = await fetch(`${base}/api/tasks/${created.id}/stop`, { method: "POST" });
     expect(stop.status).toBe(200);
+  });
+
+  // ── 请求入口防护(issue #427 P1)──
+  it("Host 白名单:IP 字面量/localhost/*.ts.net 放行(忽略端口),其余 403", async () => {
+    const port = Number(new URL(base).port);
+    expect((await raw(port, { headers: { host: "127.0.0.1" } })).status).toBe(200); // issue-guard: allow
+    expect((await raw(port, { headers: { host: "localhost:7860" } })).status).toBe(200);
+    expect((await raw(port, { headers: { host: "mybox.ts.net" } })).status).toBe(200);
+    expect((await raw(port, { headers: { host: "[::1]:7860" } })).status).toBe(200);
+    expect((await raw(port, { headers: { host: "attacker.example.com" } })).status).toBe(403);
+    // 后缀匹配:裸 ts.net 与伪装后缀不在白名单
+    expect((await raw(port, { headers: { host: "ts.net" } })).status).toBe(403);
+    expect((await raw(port, { headers: { host: "evil.ts.net.attacker.io" } })).status).toBe(403);
+  });
+
+  it("Host 白名单放宽(复审):单标签短名/`.local`/末尾点 FQDN 放行,伪装后缀仍 403", async () => {
+    const port = Number(new URL(base).port);
+    expect((await raw(port, { headers: { host: "master" } })).status).toBe(200);
+    expect((await raw(port, { headers: { host: "mybox.local" } })).status).toBe(200);
+    expect((await raw(port, { headers: { host: "x.tailnet.ts.net." } })).status).toBe(200);
+    expect((await raw(port, { headers: { host: "attacker.example.com." } })).status).toBe(403);
+    expect((await raw(port, { headers: { host: "evil.local.attacker.io" } })).status).toBe(403);
+  });
+
+  it("DREC_ALLOWED_HOSTS 逗号分隔追加白名单,比对忽略端口", async () => {
+    const port = Number(new URL(base).port);
+    const prev = process.env.DREC_ALLOWED_HOSTS;
+    try {
+      process.env.DREC_ALLOWED_HOSTS = "master.example.com, backup.corp:8443";
+      expect((await raw(port, { headers: { host: "master.example.com" } })).status).toBe(200);
+      expect((await raw(port, { headers: { host: "backup.corp:9000" } })).status).toBe(200);
+      expect((await raw(port, { headers: { host: "other.example.com" } })).status).toBe(403);
+    } finally {
+      if (prev === undefined) delete process.env.DREC_ALLOWED_HOSTS;
+      else process.env.DREC_ALLOWED_HOSTS = prev;
+    }
+  });
+
+  it("Origin 校验:同源放行 / 跨站 403 / Origin null 仅回环 / 无 Origin 放行 / GET 豁免", async () => {
+    const port = Number(new URL(base).port);
+    const created = await (await fetch(`${base}/api/tasks`, {
+      method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ room: "444" }),
+    })).json() as { id: number };
+    const stopPath = `/api/tasks/${created.id}/stop`;
+    const self = `http://127.0.0.1:${port}`; // issue-guard: allow
+    // 同源(浏览器 same-origin POST 必带 Origin)→ 200
+    expect((await raw(port, { method: "POST", path: stopPath, headers: { origin: self } })).status).toBe(200);
+    // 跨站 Origin → 403
+    expect((await raw(port, { method: "POST", path: stopPath, headers: { origin: "http://evil.example.com" } })).status).toBe(403);
+    // Origin: null + 本机回环 → 200
+    expect((await raw(port, { method: "POST", path: stopPath, headers: { origin: "null" } })).status).toBe(200);
+    // 无 Origin(curl、内部 fetch)→ 200
+    expect((await raw(port, { method: "POST", path: stopPath })).status).toBe(200);
+    // GET 豁免 Origin 校验
+    expect((await raw(port, { path: "/api/tasks", headers: { origin: "http://evil.example.com" } })).status).toBe(200);
+  });
+
+  it("x-forwarded-proto:https 反代同源放行;无该头时 https Origin 仍 403(复审)", async () => {
+    const port = Number(new URL(base).port);
+    const created = await (await fetch(`${base}/api/tasks`, {
+      method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ room: "446" }),
+    })).json() as { id: number };
+    const stopPath = `/api/tasks/${created.id}/stop`;
+    // 反代 TLS 终止:x-forwarded-proto: https + 同源 https Origin → 放行
+    expect((await raw(port, {
+      method: "POST", path: stopPath,
+      headers: { host: "box.ts.net", origin: "https://box.ts.net", "x-forwarded-proto": "https" },
+    })).status).toBe(200);
+    // 无 x-forwarded-proto:服务端按 http 比对 https Origin → 403(scheme 不符)
+    expect((await raw(port, {
+      method: "POST", path: stopPath,
+      headers: { host: "box.ts.net", origin: "https://box.ts.net" },
+    })).status).toBe(403);
+  });
+
+  it("PUT/DELETE 跨站 Origin → 403(复审)", async () => {
+    const port = Number(new URL(base).port);
+    expect((await raw(port, { method: "PUT", path: "/api/hub/resources", headers: { origin: "http://evil.example.com" } })).status).toBe(403);
+    const created = await (await fetch(`${base}/api/tasks`, {
+      method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ room: "447" }),
+    })).json() as { id: number };
+    expect((await raw(port, { method: "DELETE", path: `/api/tasks/${created.id}`, headers: { origin: "http://evil.example.com" } })).status).toBe(403);
+  });
+
+  it("content-type:空 body POST 豁免;带 body 的 text/plain → 415;application/json → 放行", async () => {
+    // 空体(undici fetch 无 body 不发 content-type)→ 豁免,进入 handler
+    const empty = await fetch(`${base}/api/timezone`, { method: "POST" });
+    expect(empty.status).toBe(200);
+    // 带 body 但 text/plain(undici 对 string body 的默认)→ 415
+    const plain = await fetch(`${base}/api/tasks`, { method: "POST", body: JSON.stringify({ room: "1" }) });
+    expect(plain.status).toBe(415);
+    // application/json → 放行
+    const json = await fetch(`${base}/api/tasks`, {
+      method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ room: "445" }),
+    });
+    expect(json.status).toBe(201);
+  });
+
+  it("body 超过 2 MiB → 413,服务仍存活", async () => {
+    const big = JSON.stringify({ room: "1", name: "x".repeat(2 * 1024 * 1024 + 16) });
+    const res = await fetch(`${base}/api/tasks`, { method: "POST", headers: JSON_HEADERS, body: big });
+    expect(res.status).toBe(413);
+    const ok = await fetch(`${base}/api/tasks`);
+    expect(ok.status).toBe(200);
+  });
+
+  it("body 超过 2 MiB → 413:原始 http 客户端必须真收到 413 + Connection: close(复审,Node 24)", async () => {
+    const port = Number(new URL(base).port);
+    // 4 MiB:远超上限,服务端在客户端仍在发送途中就要把 413 送出去。
+    const res = await rawFull(port, {
+      method: "POST",
+      headers: JSON_HEADERS,
+      totalBytes: 4 * 1024 * 1024,
+    });
+    expect(res.status).toBe(413);
+    expect(res.headers["connection"]).toBe("close"); // 旧实现(超限即抛)发不出这个头,变异可感
+    expect(res.body).toContain("2097152"); // 完整错误 JSON 送达(而非半截/重置)
+    // 服务仍存活
+    const ok = await fetch(`${base}/api/tasks`);
+    expect(ok.status).toBe(200);
+  });
+
+  it("body 超过 2 MiB → 413:客户端收到响应头即停发,2s 内仍读到完整 JSON body(复审二轮)", async () => {
+    const port = Number(new URL(base).port);
+    const t0 = Date.now();
+    const res = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const timer = setTimeout(() => { req.destroy(); reject(new Error("2s 内未读完 413 响应")); }, 2000);
+      const req = httpRequest(
+        { host: "127.0.0.1", port, method: "POST", path: "/api/tasks", headers: JSON_HEADERS }, // issue-guard: allow
+        (r) => {
+          const chunks: Buffer[] = [];
+          r.on("data", (c: Buffer) => chunks.push(c));
+          r.on("end", () => {
+            clearTimeout(timer);
+            resolve({ status: r.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf-8") });
+            req.destroy();
+          });
+        },
+      );
+      req.on("error", () => { /* 收到响应后主动销毁,忽略 */ });
+      // 超限后既不 end 也不再写:模拟收到 413 即停发的客户端
+      req.write(Buffer.alloc(2 * 1024 * 1024 + 64 * 1024, 0x78));
+    });
+    expect(res.status).toBe(413);
+    expect(JSON.parse(res.body).error).toContain("2097152");
+    expect(Date.now() - t0).toBeLessThan(2000);
+    const ok = await fetch(`${base}/api/tasks`);
+    expect(ok.status).toBe(200);
+  });
+
+  it("静态资源:仅 /assets/ 长 immutable 缓存,其余 no-cache(附带 P3)", async () => {
+    const staticRoot = mkdtempSync(join(tmpdir(), "web-static-"));
+    writeFileSync(join(staticRoot, "index.html"), "<!DOCTYPE html><html><body>427</body></html>");
+    mkdirSync(join(staticRoot, "assets"));
+    writeFileSync(join(staticRoot, "assets", "index-abc123.js"), "console.log(1);\n");
+    writeFileSync(join(staticRoot, "favicon.ico"), Buffer.from([0, 1, 2]));
+    const prevStatic = process.env.DOUYIN_REC_STATIC;
+    process.env.DOUYIN_REC_STATIC = staticRoot;
+    try {
+      const asset = await fetch(`${base}/assets/index-abc123.js`);
+      expect(asset.status).toBe(200);
+      expect(asset.headers.get("cache-control")).toBe("public, max-age=31536000, immutable"); // issue-guard: allow
+      const favicon = await fetch(`${base}/favicon.ico`);
+      expect(favicon.status).toBe(200);
+      expect(favicon.headers.get("cache-control")).toBe("no-cache");
+    } finally {
+      if (prevStatic === undefined) delete process.env.DOUYIN_REC_STATIC;
+      else process.env.DOUYIN_REC_STATIC = prevStatic;
+    }
   });
 });

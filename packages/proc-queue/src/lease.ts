@@ -45,24 +45,38 @@ export class ProcLeaseStore {
   ): { acquired: boolean; takeover: boolean; holder?: LeaseRow } {
     const pid = opt.pid ?? process.pid;
     const leaseMs = opt.leaseMs ?? LEASE_MS;
-    const t = this.o.now();
-    const cur = this.getLease(kind);
-    const mine = cur?.owner === owner;
-    const stale = !cur || cur.expiresAt <= t || (cur.pid !== pid && !this.o.isPidAlive(cur.pid));
-    if (cur && !mine && !stale) {
-      if (opt.requestHandover) this.db.prepare("UPDATE proc_runner_lease SET handoverRequested=1 WHERE kind=?").run(kind);
-      return { acquired: false, takeover: false, holder: cur };
+    // 读-判定-写入包进同一个写事务(#432):无事务时两个进程同时看到过期租约可各自 acquired:true,
+    // 输家迟到的 upsert 会覆盖胜者的新租约。写法同 yieldLease:先 BEGIN IMMEDIATE,异常 ROLLBACK。
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      // 取锁后再读时钟:BEGIN IMMEDIATE 可能等满 busy_timeout,先读会让过期判定与 expiresAt 用旧时间。
+      const t = this.o.now();
+      const cur = this.getLease(kind);
+      const mine = cur?.owner === owner;
+      const stale = !cur || cur.expiresAt <= t || (cur.pid !== pid && !this.o.isPidAlive(cur.pid));
+      if (cur && !mine && !stale) {
+        if (opt.requestHandover) this.db.prepare("UPDATE proc_runner_lease SET handoverRequested=1 WHERE kind=?").run(kind);
+        this.db.exec("COMMIT");
+        return { acquired: false, takeover: false, holder: cur };
+      }
+      // Freshly yielded to a handover requester: only a requester may take it until the reservation lapses.
+      if (!mine && !opt.requestHandover && this.reservedUntil(kind) > t) {
+        this.db.exec("COMMIT");
+        return { acquired: false, takeover: false };
+      }
+      this.db.prepare(
+        `INSERT INTO proc_runner_lease(kind, owner, pid, heartbeatAt, expiresAt, handoverRequested)
+         VALUES(?, ?, ?, ?, ?, 0)
+         ON CONFLICT(kind) DO UPDATE SET owner=excluded.owner, pid=excluded.pid, heartbeatAt=excluded.heartbeatAt,
+           expiresAt=excluded.expiresAt, handoverRequested=0`,
+      ).run(kind, owner, pid, t, t + leaseMs);
+      this.db.prepare("DELETE FROM proc_lease_reservation WHERE kind=?").run(kind);
+      this.db.exec("COMMIT");
+      return { acquired: true, takeover: !!cur && !mine };
+    } catch (e) {
+      try { this.db.exec("ROLLBACK"); } catch { /* already rolled back */ }
+      throw e;
     }
-    // Freshly yielded to a handover requester: only a requester may take it until the reservation lapses.
-    if (!mine && !opt.requestHandover && this.reservedUntil(kind) > t) return { acquired: false, takeover: false };
-    this.db.prepare(
-      `INSERT INTO proc_runner_lease(kind, owner, pid, heartbeatAt, expiresAt, handoverRequested)
-       VALUES(?, ?, ?, ?, ?, 0)
-       ON CONFLICT(kind) DO UPDATE SET owner=excluded.owner, pid=excluded.pid, heartbeatAt=excluded.heartbeatAt,
-         expiresAt=excluded.expiresAt, handoverRequested=0`,
-    ).run(kind, owner, pid, t, t + leaseMs);
-    this.db.prepare("DELETE FROM proc_lease_reservation WHERE kind=?").run(kind);
-    return { acquired: true, takeover: !!cur && !mine };
   }
 
   heartbeat(kind: string, owner: string, leaseMs = LEASE_MS): { ok: boolean; handoverRequested: boolean } {

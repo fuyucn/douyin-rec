@@ -2,7 +2,7 @@
 
 > 本文件是本仓库 **agent 工作的唯一待办台账**。管理规则见 `AGENTS.md`「任务与 TODO 管理」。
 > 编号 `T-N` 稳定不变（引用/提交信息里用它指代条目）。
-> 最后更新：2026-10-28
+> 最后更新：2026-10-30
 
 ## 状态约定
 
@@ -25,6 +25,7 @@
   **做什么**: 节点新增通知发件箱（sqlite）；受管节点（`DREC_NOTIFY_RELAY=1`）把事件写入发件箱且子进程与本站中枢都不发送；新增隐藏命令读取/确认；主控每 10 秒按游标拉取、去重后统一发送；独立部署无 hub 时行为不变。
   **为什么**: 用户要求全部通知走主控，节点不再持有推送凭据，主控宕机期间事件也不丢。
   **验收**: 四类事件都只收到一条；主控停机后恢复能补齐且不重复；节点上没有推送地址；全量门禁通过。
+
 
 - [~] **T-130 主控统一代发开播/收播通知（issue [#403](https://github.com/fuyucn/douyin-rec/issues/403)）**（2026-10-30）
   — 直播直传不创建录制会话，从来不发开播/收播；hub 托管的房间在 worker 上录，worker 没有推送地址或开关未开，用户因此收不到通知。
@@ -757,6 +758,17 @@
   属模型取舍，不是可顺手加的功能。**为什么**：冗余模型把轮询量乘了 N，是 VPS 被限流的根因之一。
 
 ## 已完成
+- [x] **T-131 运行树画法修正（issue [#407](https://github.com/fuyucn/douyin-rec/issues/407)）**（2026-10-30）
+  — 新运行树三处与真实流程不符：candidate 清理节点被画进 hub 链末尾而非回连各成员；hub 处理链竖排与整图横向不一致；直播直传无历史场次（口径待定）。
+  **做什么**: 清理步改为回连各 candidate 节点；`.tr-hub` 改横向；历史场次口径先在 issue 评论给建议等人拍板，不自行扩到后端。
+  **为什么**: 图要如实表达「选优后按全部在场成员删源」与 T-129 的横向展开验收。
+  **验收**: 单测钉住新边/新布局；画法与台账实际 steps 一致；全量门禁通过。
+- [x] **T-132 直播直传未开播显示「当前场次·进行中」（issue [#408](https://github.com/fuyucn/douyin-rec/issues/408)）**（2026-10-30）
+  — CurrentRunTree 根状态写死 running，且 waiting 快照也渲染整棵树，未开播时常驻「进行中」。
+  **做什么**: 根状态从快照 state 派生；waiting 不渲染整棵树或显示「等待开播」，与 runtime 页 idle 口径对齐。
+  **为什么**: 用户无法区分等开播与正在直播。
+  **验收**: 未开播不显示进行中；streaming/finished/stopped/failed 各态正确；vitest 钉住；全量门禁通过。（完成于 2026-11-01，PR #412/#410，已部署 0.0.251+）
+
 - [x] **T-120 节点健康状态区分加载中与无状态（issue [#378](https://github.com/fuyucn/douyin-rec/issues/378)）**（2026-10-27）
   — PR [#379](https://github.com/fuyucn/douyin-rec/pull/379) 已合并并部署（0.0.236-bace9f，controller 与两个 worker 全部升级且健康）。Nodes/Queue 现在区分 loading、探测失败、无状态、在线、离线；空 200 和 HTTP 失败不会覆盖上一次健康快照。回归覆盖 loading/failed/ready、初始空响应、HTTP 失败和 empty-after-good-snapshot；全量 3804 tests、typecheck、Web build、i18n、bundle 与线上 `/nodes` HTTP 200 均通过，issue 已关闭。
 - [x] **T-93 0 落盘下播后进程不再 code=1 退出重启循环(issue [#308](https://github.com/fuyucn/douyin-rec/issues/308))**（2026-10-20）
