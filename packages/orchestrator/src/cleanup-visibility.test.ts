@@ -108,6 +108,74 @@ describe("cleanupSourcesShared:失败记账 + 无可删/开关关 → 复位", (
   });
 });
 
+describe("clean_source 失败节点集合(同场多节点,#429 二轮)", () => {
+  const mk = (failing: Set<string>, abortFor: Set<string> = new Set()) => {
+    const l = new SyncLedger(":memory:"); l.upsertPending(K);
+    const ev: NotifyEvent[] = [];
+    const transport = (id: string) => ({
+      id,
+      cleanup: async () => { if (abortFor.has(id)) throw new JobAbortedError(); if (failing.has(id)) throw new Error(`${id} 只读`); },
+    }) as unknown as Transport;
+    const run = (ids: string[]) => cleanupSourcesShared({
+      streamKey: K, ledger: l, transports: new Map(ids.map((id) => [id, transport(id)])),
+      members: ids.map((id) => ({ workerId: id, rec: { tsFiles: [`/r/${id}.ts`] } })),
+      cleanup: { sourceAfterDone: true }, rmStage: async () => {}, log: () => {}, notify: (e) => ev.push(e),
+    });
+    return { l, ev, run, failing, abortFor };
+  };
+
+  it("A、B 双录都失败 → 下轮 A 失联、B 删净 → 行仍 failed(不复位、不重复告警);A、B 都在且删净才复位", async () => {
+    const { l, ev, run, failing } = mk(new Set(["A", "B"]));
+    await run(["A", "B"]);
+    expect(l.getNodeState(K, "clean_source")?.state).toBe("failed");
+    failing.clear();
+    await run(["B"]); // A 失联:只含可达成员
+    expect(l.getNodeState(K, "clean_source")?.state).toBe("failed");
+    expect(alerts(ev)).toHaveLength(1);
+    await run(["B"]);
+    expect(l.getNodeState(K, "clean_source")?.state).toBe("failed");
+    await run(["A", "B"]);
+    expect(l.getNodeState(K, "clean_source")).toMatchObject({ state: "done", attempts: 0 });
+  });
+
+  it("A 失败 B 成功 → 失败集只含 A;下轮 A 回来删净 → 复位", async () => {
+    const { l, run, failing } = mk(new Set(["A"]));
+    await run(["A", "B"]);
+    expect(JSON.parse(l.getNodeState(K, "clean_source")!.error!).nodes).toEqual(["A"]);
+    failing.clear();
+    await run(["A", "B"]);
+    expect(l.getNodeState(K, "clean_source")?.state).toBe("done");
+  });
+
+  it("本轮 B 失败、上轮失败的 A 不在成员内 → 失败集 = A ∪ B(旧失败不丢)", async () => {
+    const { l, run, failing } = mk(new Set(["A"]));
+    await run(["A"]);
+    failing.clear(); failing.add("B");
+    await run(["B"]);
+    expect(JSON.parse(l.getNodeState(K, "clean_source")!.error!).nodes.sort()).toEqual(["A", "B"]);
+  });
+
+  it("老行(error 是纯文本、无节点集合)→ 成功后照旧整行复位(向后兼容)", async () => {
+    const { l, run } = mk(new Set());
+    l.syncNodeState(K, "clean_source", "failed", { error: "磁盘满", attempts: 1 });
+    await run(["B"]);
+    expect(l.getNodeState(K, "clean_source")?.state).toBe("done");
+  });
+
+  it("混合:A abort、B 真失败 → 按真实失败记 failed(集合只含 B)并告警一次;全是 abort 才跳过记账", async () => {
+    const { l, ev, run, failing, abortFor } = mk(new Set(["B"]), new Set(["A"]));
+    await run(["A", "B"]);
+    expect(l.getNodeState(K, "clean_source")?.state).toBe("failed");
+    expect(JSON.parse(l.getNodeState(K, "clean_source")!.error!).nodes).toEqual(["B"]);
+    expect(alerts(ev)).toHaveLength(1);
+
+    const only = mk(new Set(), new Set(["A", "B"]));
+    await only.run(["A", "B"]);
+    expect(only.l.getNodeState(K, "clean_source")).toBeNull();
+    expect(failing.size + abortFor.size).toBeGreaterThan(0);
+  });
+});
+
 describe("finalizeOnly:补清 stage 的记账 / 复位", () => {
   const setup = (cleanup: PipelineCfg["cleanup"], rmStage: (p: string[]) => Promise<void>, withLeftover: boolean) => {
     dir = mkdtempSync(join(tmpdir(), "cv-"));

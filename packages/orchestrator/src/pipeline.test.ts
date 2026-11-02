@@ -1164,8 +1164,7 @@ describe("runPipeline", () => {
     expect(() => closeStageReady({ setState: () => {} }, "douyin:R:2026-10-01", "upload")).toThrow();
   });
 
-  it("done 场补跑重烧失败 → needs_manual 的 error 必须非空(空串不得落库,issue #188)", async () => {
-    // 重烧失败的节点 error 若是空串,`?? ` 不会回落到默认文案 → 台账里会是一条「没有原因」的待人工。
+  it("done 场补跑遇 failed 烧录节点 → 不重烧、不转人工,job 仍 done(#429:done 场只清理)", async () => {
     const stageDir = mkdtempSync(join(tmpdir(), "reburn-"));
     const deps = makeDeps({ cfg: { ...makeDeps().cfg, stageDir } });
     const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
@@ -1175,14 +1174,12 @@ describe("runPipeline", () => {
     const sub = join(stageDir, "douyin_test-room_2026-06-27");
     mkdirSync(sub, { recursive: true });
     for (const f of [".mp4", "_danmu.mp4", "_livechat.mp4"]) writeFileSync(join(sub, "主播名_2026-06-27" + f), "x");
-    // 预置一个「failed 的烧录节点」,续跑会先重烧;重烧抛空 message 的错误 → 节点 error 仍是空串。
     deps.ledger.syncNodeState(b.streamKey, "burn_danmu", "failed", { error: "" });
     (deps.sh as Mock).mockImplementation(async () => { throw new Error(""); });
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const r = await runPipeline(b, deps);
-    warn.mockRestore();
-    expect(r.state).toBe("needs_manual");
-    expect((deps.ledger.get(b.streamKey)?.error ?? "").trim()).not.toBe("");
+    expect(r.state).toBe("done");
+    expect(deps.sh).not.toHaveBeenCalled();
+    expect(deps.ledger.get(b.streamKey)?.state).toBe("done");
     deps.ledger.close();
   });
 
@@ -1498,17 +1495,18 @@ describe("runPipeline", () => {
     });
   });
 
-  // 回归(issue #26 review P1):done 场收尾补跑转人工必须 force —— done 无出边,
-  // 普通 setState 被白名单拒 → job 仍 done、告警照发、周期补跑反复刷告警。真实 SyncLedger,不 mock。
-  describe("resumeAppends:done 场补跑转人工(force)", () => {
-    async function doneResume(over: Partial<PipelineDeps>, files: string[]) {
+  // issue #429:done 场因 clean_* 补跑进入 resumeAppends 时只清理 —— stage 成品部分已删 / 多段组等
+  // 在非 done 场会转人工的情形,在 done 场必须保持 done、不告警「删稿重来」、不 append / 重传。真实 SyncLedger,不 mock。
+  describe("resumeAppends:done 场补跑只清理,永不转人工(#429)", () => {
+    async function doneResume(over: Partial<PipelineDeps>, files: string[], cleanup: PipelineCfg["cleanup"] = { stageAfterDone: true }) {
       const { mkdirSync, writeFileSync } = await import("node:fs");
       const stageDir = mkdtempSync(join(tmpdir(), "resume-done-"));
-      const deps = makeDeps({ cfg: { ...makeDeps().cfg, stageDir }, ...over });
+      const deps = makeDeps({ cfg: { ...makeDeps().cfg, stageDir, cleanup }, ...over });
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
       deps.ledger.upsertPending(b.streamKey);
       for (const st of ["syncing", "merging", "uploading"] as const) deps.ledger.setState(b.streamKey, st);
       deps.ledger.markDone(b.streamKey, "BVdone");
+      deps.ledger.syncNodeState(b.streamKey, "clean_stage", "failed", { error: "旧失败" });
       const sub = join(stageDir, "douyin_test-room_2026-06-27");
       mkdirSync(sub, { recursive: true });
       for (const f of files) writeFileSync(join(sub, "主播名_2026-06-27" + f), "x");
@@ -1518,33 +1516,39 @@ describe("runPipeline", () => {
       warn.mockRestore();
       return { r, deps, b, rejected };
     }
-
-    it("done + 有稿件编号 + 弹幕产物缺失 → 台账真转 needs_manual,无非法转换 warn,不重传", async () => {
-      const { r, deps, b, rejected } = await doneResume({}, [".mp4"]); // 只有 plain,缺 danmu/livechat
-      expect(r.state).toBe("needs_manual");
-      expect(deps.ledger.get(b.streamKey)?.state).toBe("needs_manual");
+    const noRedo = (deps: PipelineDeps, b: Broadcast): void => {
+      expect(deps.ledger.get(b.streamKey)?.state).toBe("done");
       expect(deps.ledger.get(b.streamKey)?.bv).toBe("BVdone");
-      expect(rejected).toEqual([]);
       expect(deps.uploadPlain).not.toHaveBeenCalled();
       expect(deps.appendGroup).not.toHaveBeenCalled();
+      expect((deps.notify as Mock).mock.calls.filter((c) => /删稿重来|产物缺失|多段组/.test(String((c[0] as { message?: string }).message)))).toEqual([]);
+    };
+
+    it("done + 成品部分已删(plain 在、danmu/livechat 已删)+ clean_stage failed → 仍 done、无「删稿重来」告警", async () => {
+      const { r, deps, b, rejected } = await doneResume({}, [".mp4"]);
+      expect(r.state).toBe("done");
+      noRedo(deps, b);
+      expect(rejected).toEqual([]);
+      expect(deps.ledger.getNodeState(b.streamKey, "clean_stage")?.state).toBe("done"); // 补清成功 → 复位
       deps.ledger.close();
     });
 
-    it("done + 多段组 → 台账真转 needs_manual,无非法转换 warn,不 append", async () => {
+    it("done + 成品部分已删 + 补清再失败 → 仍 done,clean_stage 保持 failed 且不重复告警「删稿重来」", async () => {
+      const { r, deps, b } = await doneResume({ rmStage: async () => { throw new Error("busy"); } }, [".mp4"]);
+      expect(r.state).toBe("done");
+      noRedo(deps, b);
+      expect(deps.ledger.getNodeState(b.streamKey, "clean_stage")?.state).toBe("failed");
+      deps.ledger.close();
+    });
+
+    it("done + 多段组 → 仍 done,不 append", async () => {
       const { r, deps, b, rejected } = await doneResume(
         { splitForUpload: async (mp4: string) => [mp4, mp4 + ".part2"] },
         [".mp4", "_danmu.mp4", "_livechat.mp4"],
       );
-      expect(r.state).toBe("needs_manual");
-      expect(deps.ledger.get(b.streamKey)?.state).toBe("needs_manual");
+      expect(r.state).toBe("done");
+      noRedo(deps, b);
       expect(rejected).toEqual([]);
-      expect(deps.appendGroup).not.toHaveBeenCalled();
-      deps.ledger.close();
-    });
-
-    it("转人工后不再是 done:ledger 不会被后续 done 守卫当作已完成而重复补跑", async () => {
-      const { deps, b } = await doneResume({}, [".mp4"]);
-      expect(deps.ledger.get(b.streamKey)?.state).not.toBe("done");
       deps.ledger.close();
     });
   });

@@ -166,3 +166,94 @@ describe("e2e: 用户停止不记 failed(#429)", () => {
     expect(cleanAlerts(s)).toBe(0);
   });
 });
+
+describe("e2e: 补跑次数只在派发被接受时计数(#429 二轮)", () => {
+  it("同场已在执行 → 补跑派发被去重挡掉:attempts 不增、不删源", async () => {
+    let fail = true;
+    const p = probe(() => { if (fail) throw new Error("注入:节点磁盘只读"); });
+    s = await Scenario.create({
+      cfg: { cleanup: { ...COMMON } },
+      cleanupBackfillThrottleMs: 0,
+      wrapTransport: (base) => p.wrap(base),
+    });
+    record(s);
+    await s.reconcile();
+    const key = s.onlyKey();
+    expect(s.ledger.getNodeState(key, "clean_source")?.attempts).toBe(0);
+    fail = false;
+    await s.restart();
+    const before = p.calls.cleanup;
+    // 占住该场的活动去重槽(短暂后释放,reconcileAll 末尾的 drain 才不会卡住)。
+    const d = (s.reconciler as unknown as { dispatcher: { tryDispatch: (k: string, r: () => Promise<void>) => Promise<void> | null } }).dispatcher;
+    expect(d.tryDispatch(key, () => new Promise<void>((r) => setTimeout(r, 100)))).not.toBeNull();
+    await s.reconcile();
+    expect(p.calls.cleanup).toBe(before);
+    expect(s.ledger.getNodeState(key, "clean_source")?.attempts).toBe(0);
+    await s.restart(); await s.reconcile(); // 槽已空 → 正常补跑并收敛
+    expect(s.ledger.getNodeState(key, "clean_source")?.state).toBe("done");
+  });
+});
+
+describe("e2e: done 场补跑只清理(#429 二轮)", () => {
+  it("done + stage 成品部分已删 + clean_stage failed → 补跑后仍 done、无「删稿重来」告警、不重传", async () => {
+    let fail = true;
+    s = await Scenario.create({
+      cfg: { cleanup: { stageAfterDone: true, sourceAfterDone: false, stageSourceAfterMerge: false } },
+      cleanupBackfillThrottleMs: 0,
+      deps: { rmStage: async (paths: string[]) => { if (fail) throw new Error("注入:stage 只读"); const { rmSync } = await import("node:fs"); for (const x of paths) rmSync(x, { force: true, recursive: true }); } },
+    });
+    record(s);
+    await s.reconcile();
+    const key = s.onlyKey();
+    expect(s.ledger.getNodeState(key, "clean_stage")?.state).toBe("failed");
+    // 部分成品已被(人工 / 上一轮部分成功)删掉:只剩 plain
+    const { readdirSync, rmSync } = await import("node:fs");
+    const sub = s.stageSubOf(key);
+    for (const f of readdirSync(sub)) if (/_(danmu|livechat)\.mp4$/.test(f)) rmSync(`${sub}/${f}`, { force: true });
+    const calls = s.fake.calls.length;
+    fail = false;
+    await s.restart(); await s.reconcile();
+    expect(s.jobState(key)).toBe("done");
+    expect(s.fake.calls).toHaveLength(calls);
+    expect(s.notifications.filter((n) => /删稿重来|产物缺失/.test(String((n as { message?: string }).message)))).toEqual([]);
+    expect(s.ledger.getNodeState(key, "clean_stage")?.state).toBe("done");
+  });
+});
+
+describe("e2e: 分段续跑 resumeSegmentAppends 清理复位 / 记账分支(#429 二轮)", () => {
+  const cfg = { steps: { mergeSegments: false, burnDanmu: false, burnLivechat: false }, cleanup: { ...FULL_CLEANUP, sourceAfterDone: false } } as const;
+  const interrupt = async (sc: Scenario): Promise<string> => {
+    sc.record({ sessions: [{ startMs: pastStartMs(0, 10, 0), segments: 2, segSec: 600 }] });
+    await sc.reconcile();
+    const key = sc.onlyKey();
+    expect(sc.jobState(key)).toBe("done");
+    sc.ledger.setState(key, "failed", { error: "进程重启中断" }, { force: true });
+    return key;
+  };
+
+  it("续跑成功清理 → 旧 failed 的 clean_stage_src / clean_stage 复位 done", async () => {
+    s = await Scenario.create({ cfg });
+    const key = await interrupt(s);
+    s.ledger.syncNodeState(key, "clean_stage_src", "failed", { error: "旧", attempts: 2 });
+    s.ledger.syncNodeState(key, "clean_stage", "failed", { error: "旧", attempts: 2 });
+    await s.reconcile();
+    expect(s.jobState(key)).toBe("done");
+    expect(s.ledger.getNodeState(key, "clean_stage_src")).toMatchObject({ state: "done", attempts: 0 });
+    expect(s.ledger.getNodeState(key, "clean_stage")).toMatchObject({ state: "done", attempts: 0 });
+  });
+
+  it("续跑清理失败 → 记 failed 并告警一次,job 仍 done", async () => {
+    let fail = false;
+    s = await Scenario.create({
+      cfg,
+      deps: { rmStage: async (paths: string[]) => { if (fail) throw new Error("注入:stage 只读"); const { rmSync } = await import("node:fs"); for (const x of paths) rmSync(x, { force: true, recursive: true }); } },
+    });
+    const key = await interrupt(s);
+    fail = true;
+    await s.reconcile();
+    expect(s.jobState(key)).toBe("done");
+    expect(s.ledger.getNodeState(key, "clean_stage_src")?.state).toBe("failed");
+    expect(s.ledger.getNodeState(key, "clean_stage")?.state).toBe("failed");
+    expect(cleanAlerts(s)).toBe(2); // 每个失败节点各告警一次(节点此前非 failed)
+  });
+});

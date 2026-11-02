@@ -722,21 +722,24 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
           const due = this.cleanupBackfillDue(b.streamKey, cfg.steps?.mergeSegments === false);
           if (due) {
             jlogInfo(`[reconciler] ${b.streamKey} 上传后收尾未完成(${due}) → 补跑`);
-            // 派发即计一次(不依赖补跑里是否又记了失败:补跑抛错 / 提前返回也必须收敛)。
-            for (const node of due.split(",")) {
-              const row = this.ledger.getNodeState(b.streamKey, node as StepName);
-              if (row) this.ledger.syncNodeState(b.streamKey, node as StepName, row.state, { error: row.error, attempts: row.attempts + 1 });
-            }
             // 也派发出去(收尾补跑同样是长 IO)—— 失败**不改终态**:上传已成功,
             // 不该把 job 打成 failed(会诱导重传 = 重复稿)。只记日志 + 下轮再来。
-            dispatched.push(this.dispatcher.dispatch(b.streamKey, async () => {
+            const settled = this.dispatcher.tryDispatch(b.streamKey, async () => {
               try {
                 await this._runPipeline(b, { ...this.pipelineDeps, transports, cfg });
               } catch (err) {
                 if (isJobAbort(err)) { this.ledger.setState(b.streamKey, "needs_manual", { error: USER_STOP }); return; }
                 console.error(`[reconciler] ${b.streamKey} 收尾补跑失败:`, err);
               }
-            }));
+            });
+            // 补跑次数只在派发真正被接受时 +1(被活动去重挡掉不计);不依赖补跑里是否又记了失败:补跑抛错 / 提前返回也必须收敛。
+            if (settled) {
+              dispatched.push(settled);
+              for (const node of due.split(",")) {
+                const row = this.ledger.getNodeState(b.streamKey, node as StepName);
+                if (row) this.ledger.syncNodeState(b.streamKey, node as StepName, row.state, { error: row.error, attempts: row.attempts + 1 });
+              }
+            }
           }
           this.alertUnclaimedOnDone(b, job);
           continue;

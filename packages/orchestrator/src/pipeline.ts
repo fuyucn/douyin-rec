@@ -392,6 +392,8 @@ export interface CleanupFailure {
   /** 失败的清理目标(节点 id 或 stage 路径)。 */
   target: string;
   error: string;
+  /** 失败源于用户停止(不是清理故障):不计入失败节点集;全部失败都是 abort 时整步不记账。 */
+  aborted?: boolean;
 }
 /**
  * 清理结果:**不抛错、不吞错**(plans/030 T12)。
@@ -434,6 +436,21 @@ export function clearCleanFailure(ledger: SyncLedger, streamKey: string, node: C
   if (ledger.getNodeState(streamKey, node)?.state === "failed") ledger.syncNodeState(streamKey, node, "done", { error: null, attempts: 0 });
 }
 
+/**
+ * `clean_source` 每场只有一行、不分节点;失败节点 id 集合以 JSON 持久化在该行 `error`(不加 schema):
+ * `{"nodes":["A","B"],"msg":"…"}`。老行 / 非 JSON 文本 → null(= 无节点信息,按旧口径整行复位)。
+ */
+function encodeFailedNodes(nodes: string[], msg: string): string {
+  return JSON.stringify({ nodes, msg: msg.slice(0, 300) });
+}
+function decodeFailedNodes(error: string | null | undefined): string[] | null {
+  if (!error) return null;
+  try {
+    const v = JSON.parse(error) as { nodes?: unknown };
+    return Array.isArray(v?.nodes) && v.nodes.every((x) => typeof x === "string") ? (v.nodes as string[]) : null;
+  } catch { return null; }
+}
+
 export async function cleanupSourcesShared(o: {
   streamKey: string;
   ledger: SyncLedger;
@@ -460,16 +477,30 @@ export async function cleanupSourcesShared(o: {
   const failed: CleanupFailure[] = [];
   /** 把一个清理步骤的失败目标落成一条 failed 步骤(UI/重试都靠它),并写 job.log。
    *  成功时把此前的 failed 行复位 done,否则补跑成功后行仍 failed、永不收敛(issue #429)。
-   *  `aborted`:失败源于用户停止 → 不记 failed。 */
-  const markStep = (step: "clean_source" | "clean_stage_src", failures: CleanupFailure[], detail: string, aborted: boolean): void => {
-    if (failures.length === 0) {
+   *  全部失败都是 abort(用户停止)→ 整步不记账;混合时只按真实失败记(abort 的成员不计入失败节点集)。
+   *  `clean_source` 行不分节点:成功复位前必须确认上次失败的节点全在本轮成员里(失联 / 被规则排除的节点
+   *  仍有残留 → 保持 failed,不复位、不重复告警);失败时把「未在本轮删净的旧失败节点 ∪ 本轮真实失败节点」写回。 */
+  const markStep = (step: "clean_source" | "clean_stage_src", failures: CleanupFailure[], detail: string): void => {
+    const real = failures.filter((f) => !f.aborted);
+    if (failures.length > 0 && real.length === 0) { o.log(`清理被用户停止中断(${step}),不记 failed`); return; }
+    const row = o.ledger.getNodeState(o.streamKey, step);
+    const prior = step === "clean_source" && row?.state === "failed" ? decodeFailedNodes(row.error) : null;
+    const cleanedNow = new Set(o.members.map((m) => m.workerId));
+    for (const f of failures) cleanedNow.delete(f.target); // abort 的成员也没删净
+    const carried = (prior ?? []).filter((id) => !cleanedNow.has(id));
+    if (real.length === 0) {
       o.ledger.logStep(o.streamKey, step, "done", detail);
+      if (carried.length > 0) {
+        o.log(`清理未复位(${step}):上次失败节点 ${carried.join(",")} 本轮不在成员内,残留未确认删净`);
+        return;
+      }
       clearCleanFailure(o.ledger, o.streamKey, step);
       return;
     }
-    const err = failures.map((f) => `${f.target}: ${f.error}`).join("; ").slice(0, 500);
-    o.ledger.logStep(o.streamKey, step, "done", `${detail} · 部分失败 ${failures.length}`);
-    recordCleanFailure({ ledger: o.ledger, streamKey: o.streamKey, node: step, error: err, cause: aborted ? new JobAbortedError() : undefined, notify: o.notify, log: o.log });
+    const err = real.map((f) => `${f.target}: ${f.error}`).join("; ").slice(0, 500);
+    o.ledger.logStep(o.streamKey, step, "done", `${detail} · 部分失败 ${real.length}`);
+    const nodes = step === "clean_source" ? [...new Set([...carried, ...real.map((f) => f.target)])] : null;
+    recordCleanFailure({ ledger: o.ledger, streamKey: o.streamKey, node: step, error: nodes ? encodeFailedNodes(nodes, err) : err, notify: o.notify, log: o.log });
   };
 
   // ① 各节点 recordings 源(与 stage 侧独立;两开关可单独开)。
@@ -479,7 +510,6 @@ export async function cleanupSourcesShared(o: {
     o.ledger.logStep(o.streamKey, "clean_source", "start");
     let fileCount = 0;
     const srcFailed: CleanupFailure[] = [];
-    let srcAborted = false;
     for (const m of o.members) {
       const paths = videoOnly(m.rec.tsFiles);
       if (delNodeXml && m.rec.xmlPath) paths.push(m.rec.xmlPath);
@@ -489,10 +519,10 @@ export async function cleanupSourcesShared(o: {
       // 无 cleanup 能力的 transport / 抛错都**如实记账**(不静默):否则磁盘占满时无人知。
       if (!t?.cleanup) { srcFailed.push({ target: m.workerId, error: "transport 无 cleanup 能力" }); continue; }
       try { await t.cleanup(paths); }
-      catch (e) { if (isJobAbort(e)) srcAborted = true; srcFailed.push({ target: m.workerId, error: String((e as Error)?.message ?? e).slice(0, 200) }); }
+      catch (e) { srcFailed.push({ target: m.workerId, error: String((e as Error)?.message ?? e).slice(0, 200), aborted: isJobAbort(e) }); }
     }
     failed.push(...srcFailed);
-    markStep("clean_source", srcFailed, `删 ${o.members.length} 节点 · ${fileCount} 文件`, srcAborted);
+    markStep("clean_source", srcFailed, `删 ${o.members.length} 节点 · ${fileCount} 文件`);
   } else {
     clearCleanFailure(o.ledger, o.streamKey, "clean_source"); // 开关已关:旧失败行不再有意义
   }
@@ -507,18 +537,16 @@ export async function cleanupSourcesShared(o: {
     }
     o.ledger.logStep(o.streamKey, "clean_stage_src", "start");
     const stageFailed: CleanupFailure[] = [];
-    let stageAborted = false;
     // rmStage 逐个路径失败也要归因到具体文件(否则只剩一个匿名错误,补跑时无法定位)。
     try {
       // rmStage 是一批一把梭:整批抛错时逐条重试,只为区分「哪些文件真的删不掉」。
       await o.rmStage(paths);
     } catch (e) {
-      if (isJobAbort(e)) stageAborted = true;
       const msg = String((e as Error)?.message ?? e).slice(0, 200);
-      stageFailed.push({ target: paths.join(",").slice(0, 300), error: msg });
+      stageFailed.push({ target: paths.join(",").slice(0, 300), error: msg, aborted: isJobAbort(e) });
     }
     failed.push(...stageFailed);
-    markStep("clean_stage_src", stageFailed, `删 ${paths.length} 文件`, stageAborted);
+    markStep("clean_stage_src", stageFailed, `删 ${paths.length} 文件`);
   } else {
     clearCleanFailure(o.ledger, o.streamKey, "clean_stage_src");
   }
@@ -1380,18 +1408,15 @@ async function resumeAppends(
     catch (e) { await seasonTail; throw e; }
   };
 
-  // done 场的收尾补跑若在下面三处转人工:done 无出边,普通 setState 会被白名单拒绝 →
-  // job 仍 done、告警照发、cleanupBackfillDue 周期性重复补跑刷告警。wasDone 时必须 force。
   const wasDone = ledger.get(streamKey)?.state === "done";
+  // 守卫(#429):已 done 的场只可能因 clean_* 补跑进来 —— 上传 / append 早已完成,这里**只清理**,
+  // 绝不进入 append / 转人工分支(stage 成品部分已删时那些分支会把好稿件翻成 needs_manual 并告警「删稿重来」)。
+  if (wasDone) {
+    jlog(`续跑:job 已 done → 只补收尾清理(不重跑上传 / append,永不转人工)`);
+    return await drainSeason(await finalizeOnly(streamKey, bv, deps, jlog, notify, members, stageSub));
+  }
   const prod = deriveStageProducts(stageSub, effectiveStageFormat(cfg.outputFormat, cfg.uploadMode));
   if (!prod) {
-    // stage 产物已不存在:若该场**本来就 done**(T12 收尾补跑:stageAfterDone 已清空),
-    // 说明上传早已完成、这里只是来补清理的 → 绝不能把 done 打成 needs_manual
-    // (那会让 UI 显示"待人工",而实际上稿件好好的)。走「只清理」收口。
-    if (wasDone) {
-      jlog(`续跑:job 已 done 且 stage 产物已清理 → 只补收尾清理(不重跑上传)`);
-      return await drainSeason(await finalizeOnly(streamKey, bv, deps, jlog, notify, members, stageSub));
-    }
     jlog(`续跑失败:stage 产物缺失(可能已清理),转人工。`);
     ledger.setState(streamKey, "needs_manual", { error: `续跑失败:bv=${bv} 但 stage 产物缺失,请人工补 append` });
     notify({ kind: "error", stage: "上传", message: `续跑失败:${bv} 产物缺失,请人工处理(补 append 或删稿重来)` });
@@ -1422,7 +1447,7 @@ async function resumeAppends(
     if (!repaired.ok) {
       const err = ledger.getNodeState(streamKey, br.step)?.error || `重烧失败: ${br.step}`;
       jlog(`续跑重烧 ${br.step} 失败,转人工: ${err}`);
-      ledger.setState(streamKey, "needs_manual", { error: err }, { force: wasDone });
+      ledger.setState(streamKey, "needs_manual", { error: err });
       notify({ kind: "error", stage: "上传", message: `续跑重烧 ${br.step} 失败,请人工处理: ${err}` });
       return await drainSeason({ state: "needs_manual", bv });
     }
@@ -1432,15 +1457,9 @@ async function resumeAppends(
     ...(burnLivechat ? [prod?.livechatMp4] : []),
   ].filter((f): f is string => !!f);
   if (need.some((f) => !existsSync(f))) {
-    // 本来就 done 的场(收尾补跑)+ 分P成品(plain/danmu/livechat mp4)已被 stageAfterDone **全部**清掉
-    // = 上传早已完成,只补收尾;stage 里还剩拉回的源段(使 deriveStageProducts 非空)时同理,
-    // 不能把 done 打成 needs_manual。成品只缺一部分(如有 plain 缺 danmu)= 真不一致,仍转人工。
-    if (wasDone && ![prod.plain, prod.danmuMp4, prod.livechatMp4].some((f) => existsSync(f))) {
-      jlog(`续跑:job 已 done 且 stage 分P产物已清理 → 只补收尾清理(不重跑上传)`);
-      return await drainSeason(await finalizeOnly(streamKey, bv, deps, jlog, notify, members, stageSub));
-    }
+    // 非 done 的场成品缺失 = 真不一致,转人工。(已 done 的场在函数开头就走只清理,到不了这里。)
     jlog(`续跑失败:stage 产物缺失(可能已清理),转人工。need=${JSON.stringify(need)}`);
-    ledger.setState(streamKey, "needs_manual", { error: `续跑失败:bv=${bv} 但 stage 产物缺失,请人工补 append` }, { force: wasDone });
+    ledger.setState(streamKey, "needs_manual", { error: `续跑失败:bv=${bv} 但 stage 产物缺失,请人工补 append` });
     notify({ kind: "error", stage: "上传", message: `续跑失败:${bv} 产物缺失,请人工处理(补 append 或删稿重来)` });
     return await drainSeason({ state: "needs_manual", bv });
   }
@@ -1457,7 +1476,7 @@ async function resumeAppends(
     // 多段组(>16GB)无法安全续跑:上一轮可能已 append 部分段,重跑会重复分 P(无 per-part checkpoint)→ 转人工。
     if (files.length > 1) {
       jlog(`续跑无法安全处理多段组 ${g.step}(${files.length} 段,可能已 append 部分)→ 转人工`);
-      ledger.setState(streamKey, "needs_manual", { error: `续跑遇多段组 ${g.step}(${files.length} 段),无法安全续传,请人工核对分 P` }, { force: wasDone });
+      ledger.setState(streamKey, "needs_manual", { error: `续跑遇多段组 ${g.step}(${files.length} 段),无法安全续传,请人工核对分 P` });
       notify({ kind: "error", stage: "上传", message: `${bv} 续跑遇多段组 ${g.step},无法安全续传,请人工核对分 P` });
       return await drainSeason({ state: "needs_manual", bv });
     }
