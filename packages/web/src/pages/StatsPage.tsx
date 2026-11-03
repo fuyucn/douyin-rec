@@ -117,16 +117,16 @@ export function StatsPage(): ReactNode {
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead><tr className="text-left text-muted">
-              <th className="py-1 pr-3">{t("stats.node.node")}</th><th className="py-1 pr-3">{t("stats.node.assignedRooms")}</th><th className="py-1 pr-3">{t("stats.node.sessions")}</th><th className="py-1 pr-3">{t("stats.node.hours")}</th><th className="py-1 pr-3">{t("stats.node.peakConcurrent")}</th>
+              <th className="px-3 py-2">{t("stats.node.node")}</th><th className="px-3 py-2">{t("stats.node.assignedRooms")}</th><th className="px-3 py-2">{t("stats.node.sessions")}</th><th className="px-3 py-2">{t("stats.node.hours")}</th><th className="px-3 py-2">{t("stats.node.peakConcurrent")}</th>
             </tr></thead>
             <tbody>
               {o.nodeLoad.map((n: StatsDTO["overview"]["nodeLoad"][number]) => (
                 <tr key={n.workerId} className="border-t border-[var(--border)]">
-                  <td className="py-1 pr-3 font-mono text-xs">{n.name ?? n.workerId}</td>
-                  <td className="py-1 pr-3 tabular-nums">{n.assignedRooms}</td>
-                  <td className="py-1 pr-3 tabular-nums">{n.sessions}</td>
-                  <td className="py-1 pr-3 tabular-nums">{n.hours}</td>
-                  <td className="py-1 pr-3 tabular-nums">{n.peakConcurrent}</td>
+                  <td className="px-3 py-2 font-mono text-xs">{n.name ?? n.workerId}</td>
+                  <td className="px-3 py-2 tabular-nums">{n.assignedRooms}</td>
+                  <td className="px-3 py-2 tabular-nums">{n.sessions}</td>
+                  <td className="px-3 py-2 tabular-nums">{n.hours}</td>
+                  <td className="px-3 py-2 tabular-nums">{n.peakConcurrent}</td>
                 </tr>
               ))}
             </tbody>
@@ -140,22 +140,22 @@ export function StatsPage(): ReactNode {
         <div className="overflow-x-auto">
           <table className="w-full text-xs">
             <thead><tr className="text-left text-muted">
-              <th className="py-1 pr-2">{t("stats.col.anchor")}</th><th className="py-1 pr-2">{t("stats.col.mode")}</th><th className="py-1 pr-2">{t("stats.col.format")}</th>
-              <th className="py-1 pr-2">{t("stats.col.sessions")}</th><th className="py-1 pr-2">{t("stats.col.totalHours")}</th><th className="py-1 pr-2">{t("stats.col.perDayHours")}</th>
-              <th className="py-1 pr-2">{t("stats.col.avgMedian")}</th><th className="py-1 pr-2">{t("stats.col.typicalStart")}</th><th className="py-1 pr-2">{t("stats.col.nodes")}</th>
+              <th className="px-3 py-1.5">{t("stats.col.anchor")}</th><th className="px-3 py-1.5">{t("stats.col.mode")}</th><th className="px-3 py-1.5">{t("stats.col.format")}</th>
+              <th className="px-3 py-1.5">{t("stats.col.sessions")}</th><th className="px-3 py-1.5">{t("stats.col.totalHours")}</th><th className="px-3 py-1.5">{t("stats.col.perDayHours")}</th>
+              <th className="px-3 py-1.5">{t("stats.col.avgMedian")}</th><th className="px-3 py-1.5">{t("stats.col.typicalStart")}</th><th className="px-3 py-1.5">{t("stats.col.nodes")}</th>
             </tr></thead>
             <tbody>
               {data.rooms.map((r: NonNullable<StatsDTO["rooms"][number]>) => (
                 <tr key={r.key} className="border-t border-[var(--border)]">
-                  <td className="py-1 pr-2">{r.anchorName ?? r.roomSlug}</td>
-                  <td className="py-1 pr-2 whitespace-nowrap">{uploadModeLabel(r.uploadMode, t)}</td>
-                  <td className="py-1 pr-2">{r.outputFormat}</td>
-                  <td className="py-1 pr-2 tabular-nums">{r.sessions}</td>
-                  <td className="py-1 pr-2 tabular-nums">{r.totalHours}</td>
-                  <td className="py-1 pr-2 tabular-nums">{r.perDayHours}</td>
-                  <td className="py-1 pr-2 tabular-nums">{r.avgHours}/{r.medianHours}</td>
-                  <td className="py-1 pr-2 tabular-nums">{r.typicalStartHour == null ? "—" : `${r.typicalStartHour}:00`}</td>
-                  <td className="py-1 pr-2">{r.nodes.map((n: { name: string | null; workerId: string; sessions: number }) => `${n.name ?? n.workerId}×${n.sessions}`).join(", ")}</td>
+                  <td className="px-3 py-1.5">{r.anchorName ?? r.roomSlug}</td>
+                  <td className="px-3 py-1.5 whitespace-nowrap">{uploadModeLabel(r.uploadMode, t)}</td>
+                  <td className="px-3 py-1.5">{r.outputFormat}</td>
+                  <td className="px-3 py-1.5 tabular-nums">{r.sessions}</td>
+                  <td className="px-3 py-1.5 tabular-nums">{r.totalHours}</td>
+                  <td className="px-3 py-1.5 tabular-nums">{r.perDayHours}</td>
+                  <td className="px-3 py-1.5 tabular-nums">{r.avgHours}/{r.medianHours}</td>
+                  <td className="px-3 py-1.5 tabular-nums">{r.typicalStartHour == null ? "—" : `${r.typicalStartHour}:00`}</td>
+                  <td className="px-3 py-1.5">{r.nodes.map((n: { name: string | null; workerId: string; sessions: number }) => `${n.name ?? n.workerId}×${n.sessions}`).join(", ")}</td>
                 </tr>
               ))}
             </tbody>
