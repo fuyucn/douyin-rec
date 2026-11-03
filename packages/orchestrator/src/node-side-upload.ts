@@ -147,7 +147,7 @@ async function finalizeNodeSuccess(
     streamKey, ledger, transports: o.deps.transports,
     members: o.members ?? winnerMembers,
     cleanup: cfg.cleanup, keepNodeXml: true,
-    rmStage: o.deps.rmStage ?? defaultRmStage, log: jlog,
+    rmStage: o.deps.rmStage ?? defaultRmStage, log: jlog, notify: o.deps.notify,
   });
   if (!cleanOutcome.ok) {
     jlog(`节点侧收尾清理部分失败(${cleanOutcome.failed.length}):`

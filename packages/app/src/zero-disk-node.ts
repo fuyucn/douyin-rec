@@ -9,7 +9,7 @@
  * Receipts and status are plain JSON files: read-only for the master, written atomically.
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join, posix } from "node:path";
+import { dirname, join, posix } from "node:path";
 import {
   biliAccountKeyFromCookiesJson,
   isKnownAccountKey,
@@ -20,6 +20,9 @@ import {
   zeroDiskAccountVerdict,
   normalizeLiveUploadSnapshot,
   capLiveUploadSnapshot,
+  LIVE_HISTORY_LIMIT,
+  REPORT_EVENT_LIMIT,
+  REPORT_PART_LIMIT,
   type ZeroDiskDelivery,
   type ZeroDiskNodeStatus,
   type ZeroDiskReceipt,
@@ -180,16 +183,65 @@ export function readLiveUploadFile(
   return current || previous ? { ...(current ? { current } : {}), ...(previous ? { previous } : {}) } : null;
 }
 
+/** Per-room history of finished runs (issue #413): one small file per room, newest first, capped. */
+export const liveHistoryPath = (platform: string, roomSlug: string): string =>
+  join(zeroDiskNodeDir(), "history", `${safeName(platform)}.${safeName(roomSlug)}.json`);
+
+/** Finished runs of one room, newest first. A missing or torn file reads as no history. */
+export function readLiveHistory(platform: string, roomSlug: string): LiveUploadSnapshot[] {
+  try {
+    const raw = JSON.parse(readFileSync(liveHistoryPath(platform, roomSlug), "utf-8")) as { v?: unknown; runs?: unknown };
+    if (!raw || raw.v !== 1 || !Array.isArray(raw.runs)) return [];
+    return raw.runs.flatMap((r) => {
+      const s = normalizeLiveUploadSnapshot(r);
+      return s ? [s] : [];
+    }).slice(0, LIVE_HISTORY_LIMIT);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Record runs that are no longer running. The caller passes only snapshots it knows are not running
+ * (the rotated-away previous run, or a current run that reached a terminal state). A run that was
+ * cut off before it finished is stored as `stopped`. Keyed by sessionId: a later write of the same run
+ * replaces the earlier one, so repeated calls are idempotent. Best effort, like the status file.
+ */
+export function upsertLiveHistory(platform: string, roomSlug: string, snaps: Array<LiveUploadSnapshot | undefined>): boolean {
+  const incoming = snaps.flatMap((s): LiveUploadSnapshot[] => {
+    if (!s?.sessionId) return [];
+    const done = s.state === "finished" || s.state === "failed" || s.state === "stopped";
+    return [done ? s : { ...s, state: "stopped" }];
+  });
+  if (incoming.length === 0) return true;
+  try {
+    const ids = new Set(incoming.map((s) => s.sessionId));
+    const runs = [...incoming, ...readLiveHistory(platform, roomSlug).filter((s) => !ids.has(s.sessionId))]
+      .sort((a, b) => b.startedAt - a.startedAt)
+      .slice(0, LIVE_HISTORY_LIMIT);
+    const path = liveHistoryPath(platform, roomSlug);
+    mkdirSync(dirname(path), { recursive: true });
+    writeJsonAtomic(path, { v: 1, platform, roomSlug, runs });
+    return true;
+  } catch {
+    // Observability only: report the failure to the caller, which retries on its next change.
+    return false;
+  }
+}
+
 /** Remove stale live files; mirrors receipt retention. */
 export function pruneLiveFiles(now = Date.now()): void {
-  const dir = join(zeroDiskNodeDir(), "live");
-  try {
-    for (const f of readdirSync(dir)) {
-      if (!f.endsWith(".json")) continue;
-      const p = join(dir, f);
-      if (now - statSync(p).mtimeMs > ZERO_DISK_RECEIPT_TTL_MS) rmSync(p, { force: true });
-    }
-  } catch { /* best effort */ }
+  // History follows the live files' retention: a room's history file is never newer than its live file.
+  for (const sub of ["live", "history"]) {
+    const dir = join(zeroDiskNodeDir(), sub);
+    try {
+      for (const f of readdirSync(dir)) {
+        if (!f.endsWith(".json")) continue;
+        const p = join(dir, f);
+        if (now - statSync(p).mtimeMs > ZERO_DISK_RECEIPT_TTL_MS) rmSync(p, { force: true });
+      }
+    } catch { /* best effort */ }
+  }
 }
 
 /** Per-room 1s read cache; never share one room's data with another. */
@@ -256,6 +308,12 @@ export function pidAlive(pid: unknown): boolean {
  * `_zero-disk-report` body: receipts + per-room status. A status stuck at "running" whose process
  * is gone is reported as "stopped" (killed / crashed), so the console never shows a dead run as live.
  */
+/** Report projection of one room's history; empty object when there is none. */
+function historyOf(platform: string, roomSlug: string): { history?: LiveUploadSnapshot[] } {
+  const history = readLiveHistory(platform, roomSlug).map((s) => capLiveUploadSnapshot(s, { events: REPORT_EVENT_LIMIT, parts: REPORT_PART_LIMIT }));
+  return history.length ? { history } : {};
+}
+
 export function buildZeroDiskReport(o: { isAlive?: (pid: unknown) => boolean } = {}): ZeroDiskReport {
   const alive = o.isAlive ?? pidAlive;
   const receipts = readJsonDir(join(zeroDiskNodeDir(), "receipts"))
@@ -286,6 +344,7 @@ export function buildZeroDiskReport(o: { isAlive?: (pid: unknown) => boolean } =
         roomSlug: raw.roomSlug,
         ...(terminal && !recent ? {} : { current: capLiveUploadSnapshot(r.current) }),
         ...(!terminal || recent ? (r.previous ? { previous: capLiveUploadSnapshot(r.previous) } : {}) : {}),
+        ...historyOf(raw.platform, raw.roomSlug),
       });
     }
   } catch { /* no live dir yet */ }

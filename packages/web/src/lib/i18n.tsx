@@ -279,30 +279,12 @@ const DICT = {
       runTree: {
         viewTree: "运行树", viewFlow: "流程图", step: { stream: "录制+上传", seal: "封口", submit: "提交", confirm: "确认" },
         confirmedFold: "已确认 {n} 个分 P", pending: "待传 {n} 个", noParts: "暂无分 P", hubChain: "hub 处理链",
-        cover: "覆盖 {pct}% · {min} 分钟", gap: "有缺口", noHistory: "无历史", current: "当前场次", root: "第 {n} 场", zoomIn: "放大", zoomOut: "缩小", fit: "适应",
+        cover: "覆盖 {pct}% · {min} 分钟", gap: "有缺口", noHistory: "无历史", current: "当前场次", root: "第 {n} 场", zoomIn: "放大", zoomOut: "缩小", fit: "适应", historyBadge: "历史场次",
       },
       runtime: {
-        open: "运行树", backToDetail: "返回房间详情", preview: "预览版",
-        title: "运行责任树", subtitle: "同一场直播里，节点、winner 与 hub 各自处在什么阶段。",
-        readOnly: "只读 · 状态来自 hub 快照",
-        currentRun: "当前场次", noRun: "无", winner: "胜出节点", noWinner: "未产生",
-        nodesLabel: "节点", nodesValue: "{total} 个 · {recording} 个录制中", upload: "上传进度",
-        runKicker: "当前运行", winnerBadge: "winner · {name}", nodesBadge: "{n} 个节点",
-        elapsed: "已运行", hubState: "hub",
-        events: "事件流", eventsHint: "最新 {n} 条 · 按时间排序", noEvents: "暂无事件流数据",
-        noNodes: "暂无参与节点", stages: "{n} 个阶段", diskFree: "磁盘剩余 {gb} GB",
         mode: { "live-direct": "直播直传", rolling: "边录边传", "node-upload": "节点直传", upload: "投稿 B站", archive: "存档" },
         role: { winner: "Winner · 胜出", candidate: "Candidate · 候补", standby: "Standby · 待命", controller: "Controller · 台账" },
-        nodeState: { recording: "录制中", uploading: "上传中", syncing: "同步中", idle: "空闲", offline: "离线", unknown: "未知" },
-        overall: { live: "进行中", running: "处理中", done: "已完成", attention: "需处理", waiting: "等待中" },
-        stage: {
-          record: "录制", transfer: "回传", merge: "合并", burn: "烧录", upload: "上传", confirm: "确认",
-          cleanup: "清理", select: "选优", ledger: "台账", segmentUpload: "分段上传", reconcile: "收播对账",
-        },
         stageState: { done: "完成", running: "进行中", waiting: "等待", failed: "失败", skipped: "跳过", unknown: "未知" },
-        headline: {
-          uploading: "正在上传当前分 P", recording: "正在录制", idle: "未参与本场", offline: "节点不可达", unknown: "状态未知",
-        },
         note: {
           recording: "正在写入", recorded: "已结束写入", part: "P{part} · {uploaded} MiB", partCap: "P{part} · {uploaded} / {cap} MiB",
           partsConfirmed: "已确认 {n} 个分 P", winner: "选定 {name}", runState: "运行状态 {state}",
@@ -435,7 +417,7 @@ const DICT = {
         childTitle: "这是 child node(从节点)",
         childDesc1: "本节点未启用 hub(以 ", childDesc2: " 运行,无 ", childDesc3: ")。多节点选优合并 / 上传由 ",
         childMaster: "主控节点", childDesc4: "统一编排;Hub 规则只在主控上配置与生效。本节点只负责录制 + 供主控拉取。",
-        roomsHeading: "直播间", selectRoomHint: "从左侧选择一个直播间查看运行记录。", backToList: "返回直播间列表",
+        roomsHeading: "直播间", selectRoomHint: "从左侧选择一个直播间查看运行记录。", backToList: "返回直播间列表", logsTitle: "场次日志清理", logsHint: "场次日志永久保留。这里只做手动清理：删除超过指定天数的日志文件，删除前先预览。", logsDays: "天数", logsPreview: "预览", logsCleanup: "清理", logsPreviewResult: "将删除 {count} 个文件，共 {size}", logsConfirmTitle: "删除场次日志？", logsConfirmMessage: "将删除 {count} 个超过 {days} 天的场次日志（{size}）。此操作不可恢复。", logsDone: "已删除 {deleted} 个文件（{size}）", logsFailed: "{count} 个文件删除失败：{names}",
       },
       detail: {
         pipelineConfig: "后处理配置",
@@ -873,30 +855,12 @@ const DICT = {
       runTree: {
         viewTree: "Tree", viewFlow: "Flow", step: { stream: "Record+upload", seal: "Seal", submit: "Submit", confirm: "Confirm" },
         confirmedFold: "{n} part(s) confirmed", pending: "{n} pending", noParts: "No parts yet", hubChain: "hub pipeline",
-        cover: "{pct}% coverage · {min} min", gap: "gaps", noHistory: "No history", current: "Current run", root: "Run {n}", zoomIn: "Zoom in", zoomOut: "Zoom out", fit: "Fit",
+        cover: "{pct}% coverage · {min} min", gap: "gaps", noHistory: "No history", current: "Current run", root: "Run {n}", zoomIn: "Zoom in", zoomOut: "Zoom out", fit: "Fit", historyBadge: "Past run",
       },
       runtime: {
-        open: "Runtime tree", backToDetail: "Back to room details", preview: "Preview",
-        title: "Runtime responsibility tree", subtitle: "Which step the nodes, winner and hub are on in the same broadcast.",
-        readOnly: "Read-only · from hub snapshots",
-        currentRun: "Current run", noRun: "none", winner: "Winner", noWinner: "not selected",
-        nodesLabel: "Nodes", nodesValue: "{total} total · {recording} recording", upload: "Upload progress",
-        runKicker: "Current run", winnerBadge: "winner · {name}", nodesBadge: "{n} nodes",
-        elapsed: "Elapsed", hubState: "hub",
-        events: "Event stream", eventsHint: "Latest {n} · newest first", noEvents: "No event stream data yet",
-        noNodes: "No participating nodes", stages: "{n} steps", diskFree: "disk {gb} GB free",
         mode: { "live-direct": "Live upload", rolling: "Rolling upload", "node-upload": "Node upload", upload: "Upload to Bilibili", archive: "Archive" },
         role: { winner: "Winner", candidate: "Candidate · standby", standby: "Standby", controller: "Controller · ledger" },
-        nodeState: { recording: "Recording", uploading: "Uploading", syncing: "Syncing", idle: "Idle", offline: "Offline", unknown: "Unknown" },
-        overall: { live: "Live", running: "Running", done: "Done", attention: "Needs action", waiting: "Waiting" },
-        stage: {
-          record: "Record", transfer: "Transfer", merge: "Merge", burn: "Burn", upload: "Upload", confirm: "Confirm",
-          cleanup: "Cleanup", select: "Select", ledger: "Ledger", segmentUpload: "Segment upload", reconcile: "Reconcile",
-        },
         stageState: { done: "Done", running: "Running", waiting: "Waiting", failed: "Failed", skipped: "Skipped", unknown: "Unknown" },
-        headline: {
-          uploading: "Uploading the current part", recording: "Recording", idle: "Not part of this run", offline: "Node unreachable", unknown: "Status unknown",
-        },
         note: {
           recording: "Writing", recorded: "Writing finished", part: "P{part} · {uploaded} MiB", partCap: "P{part} · {uploaded} / {cap} MiB",
           partsConfirmed: "{n} part(s) confirmed", winner: "Selected {name}", runState: "Run state {state}",
@@ -1028,7 +992,7 @@ const DICT = {
         childTitle: "This is a child node",
         childDesc1: "Hub isn't enabled on this node (running ", childDesc2: " without ", childDesc3: "). Multi-node selection/merge/upload is orchestrated entirely by the ",
         childMaster: "master node", childDesc4: "; Hub rules are only configured and take effect on master. This node only records and lets master pull from it.",
-        roomsHeading: "Rooms", selectRoomHint: "Select a room on the left to view its run history.", backToList: "Back to rooms",
+        roomsHeading: "Rooms", selectRoomHint: "Select a room on the left to view its run history.", backToList: "Back to rooms", logsTitle: "Job log cleanup", logsHint: "Job logs are kept forever. Cleanup is manual only: delete logs older than the given days, after a preview.", logsDays: "Days", logsPreview: "Preview", logsCleanup: "Clean up", logsPreviewResult: "Will delete {count} files, {size} in total", logsConfirmTitle: "Delete job logs?", logsConfirmMessage: "Delete {count} job logs older than {days} days ({size}). This cannot be undone.", logsDone: "Deleted {deleted} files ({size})", logsFailed: "{count} files could not be deleted: {names}",
       },
       detail: {
         pipelineConfig: "Post-processing config",

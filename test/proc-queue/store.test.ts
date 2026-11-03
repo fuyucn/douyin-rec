@@ -243,6 +243,17 @@ describe("租约", () => {
     env.clock.t += LEASE_MS + 1;
     expect(s.leaseAlive("fake")).toBe(false);
   });
+
+  it("acquireLease 写失败 → 异常原样抛出且 ROLLBACK,不留半个事务(#432)", () => {
+    const s = env.open();
+    const raw = new DatabaseSync(env.dbPath);
+    raw.exec("CREATE TRIGGER proc_test_fail_lease BEFORE INSERT ON proc_runner_lease BEGIN SELECT RAISE(ABORT, 'boom'); END");
+    expect(() => s.acquireLease("fake", "A", { pid: process.pid })).toThrow(/boom/);
+    raw.exec("DROP TRIGGER proc_test_fail_lease");
+    raw.close();
+    expect(s.getLease("fake")).toBeNull(); // 回滚后无残留
+    expect(s.acquireLease("fake", "A", { pid: process.pid }).acquired).toBe(true); // 事务已关,后续正常
+  });
 });
 
 describe("claim", () => {

@@ -47,6 +47,8 @@ export interface PipelineCandidate {
   coverage: number;
   durationSec: number;
   complete: boolean;
+  /** Source cleanup of the run (`clean_source` deletes every member's source, losers included). Absent when the run has no such step. */
+  cleanState?: StepState;
 }
 
 export interface PipelineTree {
@@ -129,6 +131,23 @@ export function rollingNode(rows: RollingDeliveryDTO[], id: string, name: string
   return { id, name, role, parts, confirmed, ambiguous, pending: Math.max(0, total - confirmed - (up ? 1 : 0) - ambiguous) };
 }
 
+/**
+ * The live snapshots that are on air (a `waiting` pump is not on air yet, issue #408) and the root state
+ * derived from them. Nothing on air -> `waiting`, so the caller can skip the whole tree.
+ */
+export function liveBroadcast<T>(items: T[], stateOf: (item: T) => string): { onAir: T[]; state: StepState } {
+  const onAir = items.filter((item) => stateOf(item) !== "waiting");
+  return { onAir, state: liveRootState(onAir.map(stateOf)) };
+}
+
+function liveRootState(states: string[]): StepState {
+  if (states.some((s) => s === "streaming" || s === "submitting")) return "running";
+  if (states.some((s) => s === "failed")) return "failed";
+  if (states.some((s) => s === "stopped")) return "skipped";
+  if (states.some((s) => s === "finished")) return "done";
+  return "waiting";
+}
+
 const ORDER = [
   "pull", "node_upload", "merge", "burn_danmu", "burn_livechat", "upload_plain",
   "append_danmu", "append_livechat", "clean_stage_src", "clean_source", "clean_stage",
@@ -154,11 +173,13 @@ export function pipelineTree(job: HubJobDTO, cfg: FlowCfg | undefined, workerNam
   const steps = ORDER.filter((k) => present.has(k)).map((key) => ({ key, state: stepState(job, key) }));
   const selected = job.candidates.length > 0 || job.steps.some((s) => s.step === "select" && s.phase === "done");
   const selectState: StepState = selected ? "done" : TERMINAL.has(job.state) ? "unknown" : "running";
+  const cleanSource = steps.find((s) => s.key === "clean_source");
   return {
     kind: "pipeline",
     candidates: job.candidates.map((c) => ({
       id: c.worker, name: workerName(c.worker), winner: c.isWinner,
       coverage: c.coverage, durationSec: c.durationSec, complete: c.complete,
+      ...(cleanSource ? { cleanState: cleanSource.state } : {}),
     })),
     selectState,
     steps,
@@ -196,6 +217,8 @@ export function treeEdges(tree: RunTree): TreeEdge[] {
     out.push([`c:${c.id}`, "sel", !c.winner]);
   }
   if (tree.steps.length > 0) out.push(["sel", `h:${tree.steps[0].key}`]);
+  // The hub chain reads left to right: each step is linked to the next one.
+  for (let i = 1; i < tree.steps.length; i++) out.push([`h:${tree.steps[i - 1].key}`, `h:${tree.steps[i].key}`]);
   return out;
 }
 

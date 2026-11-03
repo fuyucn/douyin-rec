@@ -2047,7 +2047,9 @@ table.tasks tbody tr:last-child td {
 .tr-bytes { flex-basis: 100%; display: flex; align-items: center; gap: 10px; font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
 .tr-bar { width: 260px; height: 5px; border-radius: 3px; background: var(--hairline); overflow: hidden; }
 .tr-bar i { display: block; height: 100%; background: var(--accent); }
-.tr-hub { display: flex; flex-direction: column; gap: 8px; width: 210px; }
+.tr-hub { display: flex; flex-direction: column; gap: 8px; }
+.tr-hub-steps { display: flex; flex-direction: row; align-items: stretch; gap: 8px; }
+.tr-hub-steps .tr-step { width: 150px; flex: 0 0 auto; }
 .tr-step { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; font-size: 12px; padding: 8px 10px; }
 .tr-pill { display: inline-flex; align-items: center; gap: 5px; height: 20px; padding: 0 7px; border: 1px solid var(--hairline); border-radius: 6px; background: var(--raised); color: var(--body); font-family: var(--font-mono); font-size: 10px; font-weight: 500; white-space: nowrap; }
 .tr-green { background: color-mix(in srgb, var(--success) 12%, transparent); color: var(--success-fg); border-color: color-mix(in srgb, var(--success) 38%, var(--hairline)); }
@@ -2063,5 +2065,7 @@ table.tasks tbody tr:last-child td {
   .tr-cols, .tr-group { flex-direction: column; align-items: stretch; gap: 12px; min-width: 0; }
   .tr-part { min-width: 0; }
   .tr-root, .tr-node, .tr-select, .tr-hub { width: auto; }
+  .tr-hub-steps { flex-direction: column; }
+  .tr-hub-steps .tr-step { width: auto; }
   .tr-bar { width: 100%; }
 }

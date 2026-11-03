@@ -9,7 +9,10 @@
  * Parsing is strict on purpose: a missing field is a refusal to start, never a default.
  */
 import { processTimeZone, zonedStamp } from "./title-template.js";
-import { capLiveUploadSnapshot, normalizeLiveUploadSnapshot, type LiveUploadSnapshot, type LiveUploadSummary } from "./live-upload.js";
+import {
+  capLiveUploadSnapshot, LIVE_HISTORY_LIMIT, normalizeLiveUploadSnapshot, REPORT_EVENT_LIMIT, REPORT_PART_LIMIT,
+  type LiveUploadSnapshot, type LiveUploadSummary,
+} from "./live-upload.js";
 
 /** Env var carrying the delivered JSON from the node's task manager to its `record` child. */
 export const ZERO_DISK_DELIVERY_ENV = "DREC_ZERO_DISK_DELIVERY";
@@ -198,8 +201,8 @@ export interface ZeroDiskReport {
   v: 1;
   receipts: ZeroDiskReceipt[];
   status: ZeroDiskNodeStatus[];
-  /** Bounded current/previous snapshots for rooms with an active or recent run. */
-  live?: Array<{ platform: string; roomSlug: string; current?: LiveUploadSnapshot; previous?: LiveUploadSnapshot }>;
+  /** Bounded current/previous snapshots for rooms with an active or recent run; `history` = finished runs, newest first. */
+  live?: Array<{ platform: string; roomSlug: string; current?: LiveUploadSnapshot; previous?: LiveUploadSnapshot; history?: LiveUploadSnapshot[] }>;
 }
 
 const RUN_STATES: readonly string[] = ["running", "finished", "failed", "refused", "stopped"];
@@ -244,11 +247,15 @@ export function normalizeZeroDiskReport(x: unknown): ZeroDiskReport | null {
     if (!isRecord(v) || typeof v.platform !== "string" || !v.platform || typeof v.roomSlug !== "string" || !v.roomSlug) return [];
     const current = v.current ? normalizeLiveUploadSnapshot(v.current) : undefined;
     const previous = v.previous ? normalizeLiveUploadSnapshot(v.previous) : undefined;
+    const history = (Array.isArray(v.history) ? v.history : [])
+      .flatMap((h) => { const s = normalizeLiveUploadSnapshot(h); return s ? [capLiveUploadSnapshot(s, { events: REPORT_EVENT_LIMIT, parts: REPORT_PART_LIMIT })] : []; })
+      .slice(0, LIVE_HISTORY_LIMIT);
     return [{
       platform: v.platform,
       roomSlug: v.roomSlug,
       ...(current ? { current: capLiveUploadSnapshot(current) } : {}),
       ...(previous ? { previous: capLiveUploadSnapshot(previous) } : {}),
+      ...(history.length ? { history } : {}),
     }];
   });
   return { v: 1, receipts, status, ...(live.length ? { live } : {}) };

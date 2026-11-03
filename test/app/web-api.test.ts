@@ -2783,3 +2783,38 @@ describe("F3:master 代查节点任务与日志", () => {
     expect((t.body as { error?: string }).error).toContain("节点不可达");
   });
 });
+
+describe("setMesioPath 校验(issue #427:路径直进录制子进程,web 入口必须验证)", () => {
+  it("空串/缺省 = 清除 → 200", () => {
+    expect(api.setMesioPath({ mesioPath: "" }).status).toBe(200);
+    expect(store.getSetting("mesioPath")).toBe("");
+    expect(api.setMesioPath({}).status).toBe(200);
+    expect(store.getSetting("mesioPath")).toBe("");
+  });
+
+  it("相对路径 → 400,不落库", () => {
+    const r = api.setMesioPath({ mesioPath: "bin/mesio" });
+    expect(r.status).toBe(400);
+    expect(store.getSetting("mesioPath") ?? "").toBe("");
+  });
+
+  it("不存在的绝对路径 → 400", () => {
+    const r = api.setMesioPath({ mesioPath: "/nonexistent/drec-mesio-427" });
+    expect(r.status).toBe(400);
+    expect(store.getSetting("mesioPath") ?? "").toBe("");
+  });
+
+  it("目录 → 400;不可执行文件 → 400;可执行文件 → 200 并落库", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mesio-427-"));
+    const noExec = join(dir, "mesio-noexec");
+    writeFileSync(noExec, "#!/bin/sh\n", { mode: 0o644 });
+    const exec = join(dir, "mesio-exec");
+    writeFileSync(exec, "#!/bin/sh\n", { mode: 0o755 });
+    expect(api.setMesioPath({ mesioPath: dir }).status).toBe(400);
+    expect(api.setMesioPath({ mesioPath: noExec }).status).toBe(400);
+    const ok = api.setMesioPath({ mesioPath: exec });
+    expect(ok.status).toBe(200);
+    expect(store.getSetting("mesioPath")).toBe(exec);
+    expect((ok.body as { mesioPath: string }).mesioPath).toBe(exec);
+  });
+});

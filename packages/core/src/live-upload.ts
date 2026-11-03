@@ -12,6 +12,8 @@ export const LIVE_PART_LIMIT = 500;
 export const REPORT_EVENT_LIMIT = 100;
 export const REPORT_PART_LIMIT = 200;
 export const LIVE_MESSAGE_LIMIT = 300;
+/** Finished runs kept per room on the node (issue #413); older ones are dropped. */
+export const LIVE_HISTORY_LIMIT = 20;
 
 export type LiveUploadMode = "zero-disk" | "rolling";
 export type LivePartPhase = "streaming" | "sealing" | "submitting" | "confirmed" | "unconfirmed" | "failed";

@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { JobLogCleanup } from "../components/JobLogCleanup";
 import { useAtomValue, useSetAtom } from "jotai";
 import { ClipboardPaste } from "lucide-react";
 import { api, type HubResources } from "../api/client";
@@ -484,6 +485,7 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
         <div className="settings-tab-body space-y-4">
           <h4 className="form-section">{t("settings.resourcesSection")}</h4>
           <p className="text-xs text-muted">{t("settings.resourcesHint")}</p>
+          <JobLogCleanup />
           {!resources ? (
             <p className="text-sm text-muted">{t("settings.resourcesUnavailable")}</p>
           ) : (

@@ -1,4 +1,12 @@
 import { getRoomInfo } from "../douyin_api.js";
+
+// ⚠️ 我们的扩展(issue #425):把登录串从错误消息里脱敏。
+//   douyin_api 的 assert 曾把整串登录串拼进消息,上游 loadBalancer 会把它原样 console.warn
+//   并最终 throw。这里统一出口:整段 `cookies: ...` 到行尾/字符串末尾全部替换。
+export function redactSecrets(msg) {
+    if (typeof msg !== "string") return msg;
+    return msg.replace(/cookies:[^\n]*/g, "cookies:[已隐去]");
+}
 /**
  * API 负载均衡器类
  * 实现多个 API 接口的负载均衡调用，具备失败重试和禁用机制
@@ -97,7 +105,8 @@ export class APILoadBalancer {
             const blockDuration = this.config.blockDuration *
                 Math.pow(this.config.retryMultiplier, status.failureCount - this.config.maxFailures);
             status.nextRetryTime = Date.now() + blockDuration;
-            console.warn(`[stream_processor] API ${apiType} has been blocked due to ${status.failureCount} failures. Next retry at: ${(new Date(status.nextRetryTime).toISOString(), error.message)}`);
+            // ⚠️ 我们的扩展(上游把时间戳用逗号运算符丢掉、并把原始 error.message 拼进日志;error.message 可能含登录串,见 issue #425)。
+            console.warn(`[stream_processor] API ${apiType} has been blocked due to ${status.failureCount} failures. Next retry at: ${new Date(status.nextRetryTime).toISOString()} err=${redactSecrets(error.message)}`);
         }
     }
     /**
@@ -158,9 +167,12 @@ export class APILoadBalancer {
             catch (error) {
                 lastError = error;
                 this.recordFailure(apiType, lastError);
-                console.warn(`[stream_processor] API ${apiType} failed (attempt ${attempt + 1}/${maxAttempts}):`, lastError.message);
+                // ⚠️ 我们的扩展:错误消息可能带整串登录串(douyin_api assert 模板,issue #425),出日志前隐去。
+                console.warn(`[stream_processor] API ${apiType} failed (attempt ${attempt + 1}/${maxAttempts}):`, redactSecrets(lastError.message));
                 // 如果这是最后一次尝试，或者没有更多可用端点，则抛出错误
                 if (attempt === maxAttempts - 1) {
+                    // 最终错误同样脱敏后再抛出(调用方日志会原样打印 message,issue #425)。
+                    lastError = new Error(redactSecrets(lastError?.message));
                     break;
                 }
             }

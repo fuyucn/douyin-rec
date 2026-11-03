@@ -118,6 +118,7 @@ export interface ApiDeps {
   zeroDiskLive?: (platform: string, roomSlug: string) => Array<{
     workerId: string; workerName: string; current?: import("@drec/core").LiveUploadSnapshot;
     previous?: import("@drec/core").LiveUploadSnapshot;
+    history?: import("@drec/core").LiveUploadSnapshot[];
   }>;
   /**
    * 节点侧 master 下发快照目录(`<数据根>/config/managed`)。提供时,受管任务视图带 `assigned`

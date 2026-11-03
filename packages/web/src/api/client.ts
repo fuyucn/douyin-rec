@@ -103,7 +103,7 @@ export const api = {
   getPlatforms: (): Promise<PlatformsDTO> => request("GET", "/api/platforms"),
   getTask: (id: number): Promise<TaskDetail> => request("GET", `/api/tasks/${id}`),
   getTaskLogs: (id: number): Promise<{ lines: string[] }> => request("GET", `/api/tasks/${id}/logs`),
-  getTaskLive: (id: number): Promise<{ entries: Array<{ workerId: string; workerName: string; current?: import("@drec/contracts").LiveUploadSnapshot; previous?: import("@drec/contracts").LiveUploadSnapshot }> }> =>
+  getTaskLive: (id: number): Promise<{ entries: Array<{ workerId: string; workerName: string; current?: import("@drec/contracts").LiveUploadSnapshot; previous?: import("@drec/contracts").LiveUploadSnapshot; history?: import("@drec/contracts").LiveUploadSnapshot[] }> }> =>
     request("GET", `/api/tasks/${id}/live`),
   createTask: (input: TaskPayload): Promise<Task> => request("POST", "/api/tasks", input),
   updateTask: (id: number, input: Partial<TaskPayload>): Promise<Task> =>
@@ -149,6 +149,12 @@ export const api = {
 
   // ── hub 任务(运行态:step/进度/ETA/日志)──────────────────────────────────────
   // room 给定=只列该房间的历次 run(独立历史页);省略=全房间最近 N(规则行取最近一条)。
+  /** 场次日志清理预览(只统计,不删)。 */
+  previewJobLogs: (days: number): Promise<{ dryRun: true; olderThanDays: number; count: number; bytes: number }> =>
+    request("GET", `/api/maintenance/job-logs?olderThanDays=${days}`),
+  /** 场次日志清理执行(必须 confirm;failed 为删除失败的文件名)。 */
+  cleanupJobLogs: (days: number): Promise<{ olderThanDays: number; deleted: number; bytes: number; failed: Array<{ file: string; error: string }> }> =>
+    request("POST", "/api/maintenance/job-logs", { olderThanDays: days, confirm: true }),
   listHubJobs: (opts: { room?: string; limit?: number; offset?: number; states?: string[] } = {}): Promise<HubJobsDTO> => {
     const q = new URLSearchParams();
     if (opts.room) q.set("room", opts.room);
