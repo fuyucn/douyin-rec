@@ -455,7 +455,17 @@ export function buildRooms(ctx: ApiCtx) {
       if (task && !store.removeTask(task.id)) {
         return err(500, `删除录制任务失败(id=${task.id}),房间未改动`);
       }
-      const history = rule && deps.syncDbPath ? deleteHubJobHistory(deps.syncDbPath, key) : { deleted: 0 };
+      let history = { deleted: 0 };
+      if (rule && deps.syncDbPath) {
+        // M1(review):删历史撞锁/出错会抛(#428 加的事务路径)。它在 removeTask 之后执行,
+        // 异常若不接住会冒成通用 500,丢掉「任务已删、规则仍在」的显式说明 —— 那正是
+        // 本端点承诺的不留静默半成功。接住后返回同一形态的 500,重试即可收敛。
+        try {
+          history = deleteHubJobHistory(deps.syncDbPath, key);
+        } catch (e) {
+          return err(500, `录制任务已删除,但处理历史清理失败(${(e as Error).message}) —— 规则仍在,请重试删除房间`);
+        }
+      }
       if (rule && !hubStore.removeHubRule(hubDir, key)) {
         // 任务已删、规则还在:房间会以「仅处理半边」继续出现,但重试本端点即可删掉它。
         return err(500, `录制任务已删除,但处理规则删除失败(${key}) —— 请重试删除房间`);

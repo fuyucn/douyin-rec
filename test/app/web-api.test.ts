@@ -2260,6 +2260,23 @@ describe("rooms 域(T9 统一房间视图)", () => {
       s.close();
     });
 
+    it("删历史撞锁/抛错 → 显式 500(任务已删、规则仍在,可重试收敛),不是通用 500", async () => {
+      const s = new TaskStore(":memory:");
+      // syncDbPath 指向一个坏文件 → 删历史的首条 exec 必然抛(SQLITE_NOTADB,与 #428 的锁/IO 故障同类)
+      const broken = join(mkdtempSync(join(tmpdir(), "rooms-del-histfail-db-")), "sync.db");
+      writeFileSync(broken, "definitely not a sqlite database");
+      const aBad = makeApi({ store: s, manager: new MockManager(), ...hubDeps("rooms-del-histfail-hub-"), syncDbPath: broken });
+      const id = (aBad.createTask({ room: "123456", name: "主播" }).body as { id: number }).id;
+      expect(aBad.createHubRule({ recording: { sourceTaskId: id }, workers: ["local"] }).status).toBe(201);
+      const res = await aBad.deleteRoom("douyin.123456");
+      expect(res.status).toBe(500);
+      expect((res.body as { error: string }).error).toContain("处理历史清理失败");
+      expect((res.body as { error: string }).error).toContain("重试");
+      expect(s.getTask(id)).toBeNull();              // 任务已删(先删任务后删历史)
+      expect(ruleListed(aBad, "douyin.123456")).toBe(true); // 规则仍在,重试可收敛
+      s.close();
+    });
+
     it("两半都不存在 → 404", () => {
       const { s, a } = setup("rooms-del-none-");
       expect(a.deleteRoom("douyin.999999").status).toBe(404);
