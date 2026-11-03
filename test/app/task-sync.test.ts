@@ -208,6 +208,31 @@ describe("applyRemoteTasks", () => {
       expect(store.getTask(doomed.id)).toBeNull();
     });
 
+    // #442:master 对被移出的受管任务点名 deleted:true = 明确的删除意图,守卫放行(两阶段)。
+    it("#442:点名 deleted:true 的缩容守卫放行:先停后删,保留房间不动", () => {
+      const ids = seed(2);          // "90" 留在期望,"91" 被点名删除
+      const doomed = ids[1];
+      const kept = { roomSlug: "90", room: "https://live.douyin.com/90" };
+      const dropped = { roomSlug: "91", room: "https://live.douyin.com/91", deleted: true };
+      const r1 = applyRemoteTasks(store, [spec(kept), spec(dropped)], undefined, { adopt: true });
+      expect(r1.rejected).toBeUndefined();
+      expect(r1.removed).toEqual([]);              // 两阶段:第一轮只停
+      expect(r1.pending).toEqual(["douyin:91"]);
+      expect(store.getTask(doomed)!.enabled).toBe(false);
+      const r2 = applyRemoteTasks(store, [spec(kept), spec(dropped)], undefined, { adopt: true });
+      expect(r2.removed).toEqual(["douyin:91"]);   // 第二轮真删
+      expect(store.getTask(doomed)).toBeNull();
+      expect(store.getTask(ids[0])!.enabled).toBe(true);
+    });
+
+    it("#442:deleted:true 指向节点没有的任务 → 忽略,不凭空建、不报错", () => {
+      const r = applyRemoteTasks(store, [spec({ roomSlug: "777", room: "https://live.douyin.com/777", deleted: true })]);
+      expect(r.applied).toEqual([]);
+      expect(r.removed).toEqual([]);
+      expect(r.rejected).toBeUndefined();
+      expect(store.listTasks()).toHaveLength(0);
+    });
+
     it("force=true:骤减照常执行删除", () => {
       seed(4);
       const r = applyRemoteTasks(store, [spec()], undefined, { adopt: true, force: true });
