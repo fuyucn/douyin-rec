@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, Fragment, type ReactNode } from "react";
 import { Activity, BarChart3, Clock, Server, Users } from "lucide-react";
 import { api, type StatsDTO } from "../api/client";
 import { useT } from "../lib/i18n";
@@ -13,15 +13,17 @@ export function StatsPage(): ReactNode {
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
+  const reqIdRef = useRef(0);
   const load = (): void => {
+    const myId = ++reqIdRef.current;
     setLoading(true);
     setErr(null);
     void api.getStats(days)
-      .then(setData)
-      .catch((e) => setErr(String(e?.message ?? e)))
-      .finally(() => setLoading(false));
+      .then((d) => { if (reqIdRef.current === myId) setData(d); })
+      .catch((e) => { if (reqIdRef.current === myId) setErr(String(e?.message ?? e)); })
+      .finally(() => { if (reqIdRef.current === myId) setLoading(false); });
   };
-  useEffect(load, [days]);
+  useEffect(() => { load(); }, [days]);
 
   const dowLabels = DOW_LABELS;
   const heatMax = useMemo(() => {
@@ -29,12 +31,18 @@ export function StatsPage(): ReactNode {
     return Math.max(0.0001, ...data.heatmap.map((c: { hours: number }) => c.hours));
   }, [data]);
 
-  if (err) return <div className="text-[var(--danger-fg)]">{err}</div>;
+  const errorBlock = err ? (
+    <div className="flex items-center justify-between gap-3 text-[var(--danger-fg)]">
+      <span className="text-sm">{err}</span>
+      <button className="btn btn-secondary btn-small" onClick={load} disabled={loading}>{loading ? "…" : "重试"}</button>
+    </div>
+  ) : null;
   if (!data) return <div className="text-muted">{loading ? "加载中…" : "—"}</div>;
 
   const o = data.overview;
   return (
     <div className="space-y-6">
+      {errorBlock}
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="headline text-[28px] sm:text-[32px] leading-tight">{t("stats.title")}</h1>
@@ -54,7 +62,7 @@ export function StatsPage(): ReactNode {
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <Card icon={<Activity className="w-4 h-4" />} label="已观测直播间" value={o.observedRooms} sub={`/ ${o.knownRooms} 个已知`} />
         <Card icon={<Clock className="w-4 h-4" />} label="总在播时长" value={`${o.broadcastHours}h`} sub={`${o.sessions} 场`} />
-        <Card icon={<Users className="w-4 h-4" />} label="已启用" value={o.enabledRooms} sub={`录制中 ${data.rooms.filter((r) => r.sessions > 0).length}`} />
+        <Card icon={<Users className="w-4 h-4" />} label="已启用" value={o.enabledRooms} sub={`窗口内有场次 ${data.rooms.filter((r) => r.sessions > 0).length}`} />
         <Card icon={<BarChart3 className="w-4 h-4" />} label="采集时间" value={data.lastCollectedAt ? new Date(data.lastCollectedAt).toLocaleString() : "—"} sub={data.empty ? "暂无数据(等待对账)" : ""} />
       </div>
 
@@ -167,7 +175,7 @@ function Heatmap({ cells, max, labels }: { cells: { dow: number; hour: number; h
           <div key={h} className="text-[9px] text-muted text-center">{h % 3 === 0 ? h : ""}</div>
         ))}
         {labels.map((lab, dow) => (
-          <>
+          <Fragment key={dow}>
             <div key={`l${dow}`} className="text-[10px] text-muted flex items-center">{lab}</div>
             {Array.from({ length: 24 }).map((_, h) => {
               const v = map.get(`${dow}:${h}`) ?? 0;
@@ -177,7 +185,7 @@ function Heatmap({ cells, max, labels }: { cells: { dow: number; hour: number; h
                      className="h-4 rounded-sm" style={{ background: `rgba(59,130,246,${0.08 + a * 0.82})` }} />
               );
             })}
-          </>
+          </Fragment>
         ))}
       </div>
     </div>
