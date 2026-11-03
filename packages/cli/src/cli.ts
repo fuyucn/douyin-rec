@@ -1857,6 +1857,10 @@ const hubStarter: HubStarter = {
         // 让节点**停用但保留**(T3)。字段与正常路径**同源构造**:早前写成两个 push 各抄一遍字段,
         // 抄漏一个字段就是「禁用路径丢配置」的静默 bug(自审发现,已合为一条)。
         const { assigned, enabled: specEnabledBase } = resolveSpecAssignment(rule, workerId, capsOfThis, src.enabled);
+        // #442:节点只保留「启用且分配给它」的房间。未分配给本节点 → 不下发(节点按缺席 → 两阶段删除,
+        // 仍受空期望/骤减守卫保护,不会因 master 误读而清空)。与「停用保留」(enabled:false 仍保留)
+        // 不同:停用保留只针对「已分配但停用」的房间,未分配的不再留在节点上。
+        if (!assigned) continue;
         // Zero-disk on a side node (issue #331): the master ships the resolved upload metadata and the
         // expected account; an old / unconfirmed node, or an unbuildable delivery, gets the task
         // DISABLED with a visible reason, never defaults. One decision point: `planZeroDiskSpec`.
