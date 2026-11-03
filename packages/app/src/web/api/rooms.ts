@@ -19,6 +19,7 @@ import type { ApiCtx } from "./context.js";
 import type { ApiResult } from "./types.js";
 import { refreshLocalRollingEffective } from "../../rolling-effective.js";
 import * as hubStore from "../../hub-store.js";
+import { activeHubJobKeys, deleteHubJobHistory } from "../../hub-jobs.js";
 import type { Task, TaskStore } from "../../store.js";
 import { parseSchedule, toDanmuFlag } from "../../task-input.js";
 
@@ -49,7 +50,7 @@ function stripIdentity(dto: RoomDTO["processing"] & { key?: string }): NonNullab
 }
 
 export function buildRooms(ctx: ApiCtx) {
-  const { deps, store, hubDir, err, normWebhook } = ctx;
+  const { deps, store, manager, hubDir, err, normWebhook } = ctx;
 
   /**
    * 解析 `{platform}.{roomSlug}`;格式非法 → null(调用方回 400)。
@@ -410,6 +411,60 @@ export function buildRooms(ctx: ApiCtx) {
       const after = view(key);
       if (!after) return err(500, "写入后房间读不回来(store/hub 目录不一致?)");
       return { status: 200, body: after };
+    },
+
+    /**
+     * DELETE /api/rooms/:key —— **删除整个房间**:录制任务 + hub 规则一起删。
+     *
+     * 为什么需要它:此前前端「删除房间」只调 `DELETE /api/tasks/:id`,hub 规则留在磁盘上;
+     * 而列表数据源是「规则 ∪ 任务」,于是房间删完仍出现在 `/rooms`(只剩处理半边),
+     * 且那个残留房间在房间页上**没有任何删除入口**(编辑器的删除按钮只在有 task 时出现)。
+     * (Hub 页的「删除该 Hub 规则」是另一个显式入口,只删规则半边,语义不同,保持不变。)
+     *
+     * 守卫与两个旧端点一致:**先全部校验、再动数据**,任一不满足则两半都不动:
+     *   - 受管任务(hub 远程副本)→ 403(只能在 master 上删);
+     *   - 任务仍启用或正在录制 → 409(先停止);
+     *   - 规则还有进行中的 hub job → 409(先等它结束或停止)。
+     * 删除顺序:先删任务、再删规则与历史。后者失败时明确说明「任务已删、规则仍在」,
+     * 不留静默半成功;此时重试本端点即可删掉剩下的规则半边。
+     */
+    deleteRoom(key: string): ApiResult {
+      const k = parseKey(key);
+      if (!k) return err(400, `房间 key 非法: ${key}(应为 {platform}.{roomSlug})`);
+      const dto = view(key);
+      if (!dto || (!dto.recording && !dto.processing)) return err(404, `未找到房间 ${key}`);
+
+      // ── 先校验两半,任何一半不满足都不动数据 ──────────────────────────────
+      const taskId = dto.recording?.taskId ?? null;
+      const task = taskId !== null ? store.getTask(taskId) : null;
+      if (task) {
+        if (task.managedBy === "hub") return err(403, `任务 id=${task.id} 由 hub 管理，请在 master 上删除`);
+        if (task.enabled || manager.isRunning(task.id)) {
+          return err(409, `任务 id=${task.id} 仍启用或运行中，请先停止再删除房间`);
+        }
+      }
+      const rule = hubStore.getHubRule(hubDir, key);
+      if (rule && deps.syncDbPath) {
+        const active = activeHubJobKeys(deps.syncDbPath, key);
+        if (active.length > 0) {
+          return err(409, `该直播间有进行中的 hub 任务(${active[0]}),请先等它结束或停止后再删除房间`);
+        }
+      }
+
+      // ── 删除:先任务(守卫已过),再规则 + 历史 ────────────────────────────
+      if (task && !store.removeTask(task.id)) {
+        return err(500, `删除录制任务失败(id=${task.id}),房间未改动`);
+      }
+      const history = rule && deps.syncDbPath ? deleteHubJobHistory(deps.syncDbPath, key) : { deleted: 0 };
+      if (rule && !hubStore.removeHubRule(hubDir, key)) {
+        // 任务已删、规则还在:房间会以「仅处理半边」继续出现,但重试本端点即可删掉它。
+        return err(500, `录制任务已删除,但处理规则删除失败(${key}) —— 请重试删除房间`);
+      }
+      if (rule) {
+        refreshLocalRollingEffective(store, hubDir); // 规则已删:本机源任务派生值回落
+        deps.requestSyncTasks?.();
+      }
+      return { status: 200, body: { ok: true, key, deletedHistory: history.deleted } };
     },
   };
 }

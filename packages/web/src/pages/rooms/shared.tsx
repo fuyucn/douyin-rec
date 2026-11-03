@@ -224,7 +224,7 @@ export function useRoomActions(data: Pick<RoomsData, "refresh" | "taskOf">, opts
           managed={managedOf(editing)}
           onClose={() => setEditing(null)}
           onSaved={() => { setEditing(null); void data.refresh().catch(() => {}); }}
-          onDelete={taskIdOf(editing) !== null && !managedOf(editing) ? () => setConfirm({ kind: "delete", room: editing }) : undefined}
+          onDelete={(taskIdOf(editing) !== null || editing.processing !== null) && !managedOf(editing) ? () => setConfirm({ kind: "delete", room: editing }) : undefined}
         />
       )}
       <ConfirmDialog
@@ -240,10 +240,13 @@ export function useRoomActions(data: Pick<RoomsData, "refresh" | "taskOf">, opts
           const { kind, room } = confirm;
           const id = taskIdOf(room);
           setConfirm(null);
-          if (id === null) return;
-          if (kind === "stop") { void run(() => api.stopTask(id)); return; }
+          if (kind === "stop") {
+            if (id !== null) void run(() => api.stopTask(id));
+            return;
+          }
+          // 删除房间 = 删两半(录制任务 + hub 规则);只删任务会把规则留在列表里(见 issue #439)。
           void run(async () => {
-            await api.deleteTask(id);
+            await api.deleteRoom(room.key);
             setEditing(null);
             toast(t("rooms.deleted"), "info");
             opts.onDeleted?.();

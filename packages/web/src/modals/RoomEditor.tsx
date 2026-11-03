@@ -35,7 +35,7 @@ interface Props {
   managed: boolean;
   onClose: () => void;
   onSaved: () => void;
-  /** Omitted = no delete button (rule-only / managed rooms). */
+  /** Omitted = no delete button (managed rooms). A rule-only room (its task already gone) is deletable too. */
   onDelete?: () => void;
 }
 
