@@ -3,8 +3,33 @@ import { Activity, BarChart3, Clock, Server, Users } from "lucide-react";
 import { api, type StatsDTO } from "../api/client";
 import { useT } from "../lib/i18n";
 
-const DOW_LABELS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+const DOW_KEYS = ["stats.dow.mon", "stats.dow.tue", "stats.dow.wed", "stats.dow.thu", "stats.dow.fri", "stats.dow.sat", "stats.dow.sun"] as const;
+/** 热力图表头与数据行共用同一列模板,保证小时列对齐。 */
+const HEAT_COLS = "44px repeat(24, minmax(14px, 1fr))";
 
+/** rolling / upload / stage / local → 词典 key;未知值原样显示。 */
+function uploadModeLabel(mode: string, t: ReturnType<typeof useT>): string {
+  switch (mode) {
+    case "rolling": return t("stats.mode.rolling");
+    case "upload": return t("stats.mode.upload");
+    case "stage": return t("stats.mode.stage");
+    case "local": return t("stats.mode.local");
+    default: return mode || "—";
+  }
+}
+
+/** 按服务端时区格式化为 `MM-DD HH:mm`(short)与完整时间(full,用作 title)。 */
+function formatCollectedAt(ms: number, timeZone: string): { short: string; full: string } {
+  const d = new Date(ms);
+  const parts = new Intl.DateTimeFormat("zh-CN", {
+    timeZone, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(d);
+  const get = (type: string): string => parts.find((p) => p.type === type)?.value ?? "";
+  const full = new Intl.DateTimeFormat("zh-CN", {
+    timeZone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+  }).format(d);
+  return { short: `${get("month")}-${get("day")} ${get("hour")}:${get("minute")}`, full: `${full} (${timeZone})` };
+}
 
 export function StatsPage(): ReactNode {
   const t = useT();
@@ -25,7 +50,7 @@ export function StatsPage(): ReactNode {
   };
   useEffect(() => { load(); }, [days]);
 
-  const dowLabels = DOW_LABELS;
+  const dowLabels = DOW_KEYS.map((k) => t(k));
   const heatMax = useMemo(() => {
     if (!data) return 0;
     return Math.max(0.0001, ...data.heatmap.map((c: { hours: number }) => c.hours));
@@ -34,17 +59,18 @@ export function StatsPage(): ReactNode {
   const errorBlock = err ? (
     <div className="flex items-center justify-between gap-3 text-[var(--danger-fg)]">
       <span className="text-sm">{err}</span>
-      <button className="btn btn-secondary btn-small" onClick={load} disabled={loading}>{loading ? "…" : "重试"}</button>
+      <button className="btn btn-secondary btn-small" onClick={load} disabled={loading}>{loading ? "…" : t("stats.retry")}</button>
     </div>
   ) : null;
   if (!data) return (
     <div className="space-y-6">
       {errorBlock}
-      {!err && <div className="text-muted">{loading ? "加载中…" : "—"}</div>}
+      {!err && <div className="text-muted">{loading ? t("stats.loading") : "—"}</div>}
     </div>
   );
 
   const o = data.overview;
+  const collected = data.lastCollectedAt ? formatCollectedAt(data.lastCollectedAt, data.timeZone) : null;
   return (
     <div className="space-y-6">
       {errorBlock}
@@ -55,43 +81,43 @@ export function StatsPage(): ReactNode {
         </div>
         <div className="flex items-center gap-2">
           <select className="input" value={days} onChange={(e) => setDays(Number(e.target.value))}>
-            {[7, 14, 30, 60, 90].map((d) => <option key={d} value={d}>{d} 天</option>)}
+            {[7, 14, 30, 60, 90].map((d) => <option key={d} value={d}>{t("stats.daysOption", { days: d })}</option>)}
           </select>
           <button className="btn btn-secondary btn-small" onClick={load} disabled={loading}>
-            {loading ? "…" : "刷新"}
+            {loading ? "…" : t("common.refresh")}
           </button>
         </div>
       </div>
 
       {/* overview cards */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <Card icon={<Activity className="w-4 h-4" />} label="已观测直播间" value={o.observedRooms} sub={`/ ${o.knownRooms} 个已知`} />
-        <Card icon={<Clock className="w-4 h-4" />} label="总在播时长" value={`${o.broadcastHours}h`} sub={`${o.sessions} 场`} />
-        <Card icon={<Users className="w-4 h-4" />} label="已启用" value={o.enabledRooms} sub={`窗口内有场次 ${data.rooms.filter((r) => r.sessions > 0).length}`} />
-        <Card icon={<BarChart3 className="w-4 h-4" />} label="采集时间" value={data.lastCollectedAt ? new Date(data.lastCollectedAt).toLocaleString() : "—"} sub={data.empty ? "暂无数据(等待对账)" : ""} />
+        <Card icon={<Activity className="w-4 h-4" />} label={t("stats.observedRooms")} value={o.observedRooms} sub={t("stats.knownRooms", { n: o.knownRooms })} />
+        <Card icon={<Clock className="w-4 h-4" />} label={t("stats.broadcastHours")} value={`${o.broadcastHours}h`} sub={t("stats.sessionsCount", { n: o.sessions })} />
+        <Card icon={<Users className="w-4 h-4" />} label={t("stats.enabledRooms")} value={o.enabledRooms} sub={t("stats.roomsWithSessions", { n: data.rooms.filter((r) => r.sessions > 0).length })} />
+        <Card icon={<BarChart3 className="w-4 h-4" />} label={t("stats.collectedAt")} value={collected?.short ?? "—"} title={collected?.full} compact sub={data.empty ? t("stats.emptyHint") : ""} />
       </div>
 
       {/* upload mode / format / platform breakdown */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-        <Breakdown title="上传模式" items={o.uploadModes.map((x: { mode: string; count: number }) => ({ label: x.mode || "—", count: x.count }))} />
-        <Breakdown title="输出格式" items={o.outputFormats.map((x: { format: string; count: number }) => ({ label: x.format || "—", count: x.count }))} />
-        <Breakdown title="平台" items={o.platforms.map((x: { platform: string; count: number }) => ({ label: x.platform, count: x.count }))} />
+        <Breakdown title={t("stats.uploadMode")} items={o.uploadModes.map((x: { mode: string; count: number }) => ({ label: uploadModeLabel(x.mode, t), count: x.count }))} />
+        <Breakdown title={t("stats.outputFormat")} items={o.outputFormats.map((x: { format: string; count: number }) => ({ label: x.format || "—", count: x.count }))} />
+        <Breakdown title={t("stats.platform")} items={o.platforms.map((x: { platform: string; count: number }) => ({ label: x.platform, count: x.count }))} />
       </div>
-      <div className="text-xs text-muted">弹幕:开 {o.danmu.on} / 关 {o.danmu.off} · 引擎: {o.engines.map((e) => `${e.engine} ${e.count}`).join(" · ")}</div>
+      <div className="text-xs text-muted">{t("stats.danmuEngines", { on: o.danmu.on, off: o.danmu.off, engines: o.engines.map((e) => `${e.engine} ${e.count}`).join(" · ") })}</div>
 
       {/* global heatmap */}
       <section className="card">
-        <h2 className="text-sm font-semibold mb-3">全局在播热力图(跨节点去重,小时)</h2>
+        <h2 className="text-sm font-semibold mb-3">{t("stats.heatmapTitle")}</h2>
         <Heatmap cells={data.heatmap} max={heatMax} labels={dowLabels} />
       </section>
 
       {/* node load */}
       <section className="card">
-        <h2 className="text-sm font-semibold mb-3 flex items-center gap-2"><Server className="w-4 h-4" />节点负载</h2>
+        <h2 className="text-sm font-semibold mb-3 flex items-center gap-2"><Server className="w-4 h-4" />{t("stats.nodeLoad")}</h2>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead><tr className="text-left text-muted">
-              <th className="py-1 pr-3">节点</th><th className="py-1 pr-3">分配房间</th><th className="py-1 pr-3">会话数</th><th className="py-1 pr-3">小时</th><th className="py-1 pr-3">峰值并发</th>
+              <th className="py-1 pr-3">{t("stats.node.node")}</th><th className="py-1 pr-3">{t("stats.node.assignedRooms")}</th><th className="py-1 pr-3">{t("stats.node.sessions")}</th><th className="py-1 pr-3">{t("stats.node.hours")}</th><th className="py-1 pr-3">{t("stats.node.peakConcurrent")}</th>
             </tr></thead>
             <tbody>
               {o.nodeLoad.map((n: StatsDTO["overview"]["nodeLoad"][number]) => (
@@ -110,19 +136,19 @@ export function StatsPage(): ReactNode {
 
       {/* rooms table */}
       <section className="card">
-        <h2 className="text-sm font-semibold mb-3">直播间明细(按每日常规在播时长排序)</h2>
+        <h2 className="text-sm font-semibold mb-3">{t("stats.roomsTitle")}</h2>
         <div className="overflow-x-auto">
           <table className="w-full text-xs">
             <thead><tr className="text-left text-muted">
-              <th className="py-1 pr-2">主播</th><th className="py-1 pr-2">模式</th><th className="py-1 pr-2">格式</th>
-              <th className="py-1 pr-2">场次</th><th className="py-1 pr-2">总时长h</th><th className="py-1 pr-2">每天h</th>
-              <th className="py-1 pr-2">均/中位</th><th className="py-1 pr-2">典型开播</th><th className="py-1 pr-2">节点</th>
+              <th className="py-1 pr-2">{t("stats.col.anchor")}</th><th className="py-1 pr-2">{t("stats.col.mode")}</th><th className="py-1 pr-2">{t("stats.col.format")}</th>
+              <th className="py-1 pr-2">{t("stats.col.sessions")}</th><th className="py-1 pr-2">{t("stats.col.totalHours")}</th><th className="py-1 pr-2">{t("stats.col.perDayHours")}</th>
+              <th className="py-1 pr-2">{t("stats.col.avgMedian")}</th><th className="py-1 pr-2">{t("stats.col.typicalStart")}</th><th className="py-1 pr-2">{t("stats.col.nodes")}</th>
             </tr></thead>
             <tbody>
               {data.rooms.map((r: NonNullable<StatsDTO["rooms"][number]>) => (
                 <tr key={r.key} className="border-t border-[var(--border)]">
                   <td className="py-1 pr-2">{r.anchorName ?? r.roomSlug}</td>
-                  <td className="py-1 pr-2">{r.uploadMode}</td>
+                  <td className="py-1 pr-2 whitespace-nowrap">{uploadModeLabel(r.uploadMode, t)}</td>
                   <td className="py-1 pr-2">{r.outputFormat}</td>
                   <td className="py-1 pr-2 tabular-nums">{r.sessions}</td>
                   <td className="py-1 pr-2 tabular-nums">{r.totalHours}</td>
@@ -140,12 +166,12 @@ export function StatsPage(): ReactNode {
   );
 }
 
-function Card({ icon, label, value, sub }: { icon: ReactNode; label: string; value: ReactNode; sub?: string }): ReactNode {
+function Card({ icon, label, value, sub, title, compact }: { icon: ReactNode; label: string; value: ReactNode; sub?: string; title?: string; compact?: boolean }): ReactNode {
   return (
-    <div className="card p-3">
+    <div className="card p-3 min-w-0">
       <div className="flex items-center gap-2 text-muted text-xs">{icon}{label}</div>
-      <div className="text-xl font-semibold tabular-nums mt-1">{value}</div>
-      {sub ? <div className="text-xs text-muted mt-0.5">{sub}</div> : null}
+      <div className={`${compact ? "text-base" : "text-xl"} font-semibold tabular-nums mt-1 truncate`} title={title}>{value}</div>
+      {sub ? <div className="text-xs text-muted mt-0.5 truncate" title={sub}>{sub}</div> : null}
     </div>
   );
 }
@@ -172,21 +198,22 @@ function Breakdown({ title, items }: { title: string; items: { label: string; co
 
 function Heatmap({ cells, max, labels }: { cells: { dow: number; hour: number; hours: number }[]; max: number; labels: string[] }): ReactNode {
   const map = new Map(cells.map((c) => [`${c.dow}:${c.hour}`, c.hours]));
+  const hours = Array.from({ length: 24 }, (_, h) => h);
   return (
-    <div className="overflow-x-auto">
-      <div className="grid" style={{ gridTemplateColumns: `40px repeat(24, minmax(14px, 1fr))`, gap: 2 }}>
+    <div className="overflow-x-auto px-1 pb-1">
+      <div className="grid min-w-[480px]" style={{ gridTemplateColumns: HEAT_COLS, gap: 2 }}>
         <div />
-        {Array.from({ length: 24 }).map((_, h) => (
-          <div key={h} className="text-[9px] text-muted text-center">{h % 3 === 0 ? h : ""}</div>
+        {hours.map((h) => (
+          <div key={`h${h}`} className="text-[9px] text-muted text-center tabular-nums leading-4">{h % 3 === 0 ? h : ""}</div>
         ))}
         {labels.map((lab, dow) => (
           <Fragment key={dow}>
-            <div key={`l${dow}`} className="text-[10px] text-muted flex items-center">{lab}</div>
-            {Array.from({ length: 24 }).map((_, h) => {
+            <div className="text-[10px] text-muted flex items-center pr-1 whitespace-nowrap">{lab}</div>
+            {hours.map((h) => {
               const v = map.get(`${dow}:${h}`) ?? 0;
               const a = Math.min(1, v / max);
               return (
-                <div key={`${dow}-${h}`} title={`${lab} ${h}:00  ${v.toFixed(2)}h`}
+                <div key={h} title={`${lab} ${h}:00  ${v.toFixed(2)}h`}
                      className="h-4 rounded-sm" style={{ background: `rgba(59,130,246,${0.08 + a * 0.82})` }} />
               );
             })}

@@ -123,18 +123,20 @@ export function RoomsPage(): ReactNode {
           <table className="tasks" style={{ tableLayout: "fixed" }}>
             <thead>
               <tr>
-                <th>{t("room.colRoom")}</th>
-                <th className="w-[118px]">{t("room.colLastDeliver")}</th>
-                <th className="w-[138px]">{t("room.colNodes")}</th>
-                <th className="w-[104px]">{t("room.colSchedule")}</th>
-                <th className="w-[178px]">{t("room.colStatus")}</th>
-                <th className="w-[150px] text-right">{t("room.colAction")}</th>
+                <th className="w-[212px]">{t("room.colRoom")}</th>
+                <th className="w-[104px]">{t("room.colUploadMethod")}</th>
+                <th className="w-[112px]">{t("room.colLastDeliver")}</th>
+                <th className="w-[132px]">{t("room.colNodes")}</th>
+                <th className="w-[96px]">{t("room.colSchedule")}</th>
+                <th className="w-[168px]">{t("room.colStatus")}</th>
+                <th className="w-[146px] text-right">{t("room.colAction")}</th>
               </tr>
             </thead>
             <tbody>
               {!loaded && [0, 1, 2].map((i) => (
                 <tr key={i} aria-hidden="true">
                   <td><span className="skeleton block h-4 w-40 max-w-full" /></td>
+                  <td><span className="skeleton block h-4 w-14" /></td>
                   <td><span className="skeleton block h-4 w-16" /></td>
                   <td><span className="skeleton block h-4 w-24" /></td>
                   <td><span className="skeleton block h-4 w-20" /></td>
@@ -143,7 +145,7 @@ export function RoomsPage(): ReactNode {
                 </tr>
               ))}
               {loaded && shown.length === 0 && (
-                <tr><td colSpan={6} className="p-0"><Empty t={t} empty={rooms.length === 0} /></td></tr>
+                <tr><td colSpan={7} className="p-0"><Empty t={t} empty={rooms.length === 0} /></td></tr>
               )}
               {loaded && shown.map((r) => (
                 <tr key={r.key}>
@@ -168,6 +170,13 @@ export function RoomsPage(): ReactNode {
                         <span className="font-mono text-xs text-muted truncate">{roomDisplayId(r)}</span>
                       </div>
                     </Link>
+                  </td>
+                  <td>
+                    {(() => { const m = uploadMethod(t, r); return (
+                      <span className="badge badge-muted text-[10.5px] whitespace-nowrap" title={m.title} style={m.tone ? { color: m.tone, borderColor: "var(--border)" } : undefined}>
+                        {m.label}
+                      </span>
+                    ); })()}
                   </td>
                   <td><DeliveryCell s={statusOf(r)} now={now} /></td>
                   <td className="font-mono text-[11px] text-muted truncate max-w-0" title={nodesText(r, data.workers, t("room.allNodes"))}>{nodesText(r, data.workers, t("room.allNodes"))}</td>
@@ -214,6 +223,20 @@ export function RoomsPage(): ReactNode {
       />
     </>
   );
+}
+
+
+/** 上传方式 chip:直播直传 > 边录边传 > 收播后上传 > 存档。私有/公开作为 title 悬浮提示。 */
+function uploadMethod(t: ReturnType<typeof useT>, r: RoomDTO): { label: string; title: string; tone?: string } {
+  const rec = r.recording ?? null;
+  if (rec?.streamUpload === true) return { label: t("room.methodLiveStream"), title: t("room.methodLiveStream") + " · " + (rec.streamUploadSpool ? "spool" : "0-disk"), tone: "var(--status-fg)" };
+  const mode = r.processing?.pipeline?.upload?.mode;
+  const privateFlag = r.processing?.pipeline?.upload?.private;
+  const priv = privateFlag === false ? t("room.publicShort") : t("room.privateShort");
+  if (mode === "rolling") return { label: t("room.methodRolling"), title: `${t("room.methodRolling")} · ${priv}`, tone: "var(--status-fg)" };
+  if (mode === "upload") return { label: t("room.methodUpload"), title: `${t("room.methodUpload")} · ${priv}`, tone: "var(--status-fg)" };
+  if (mode === "stage") return { label: t("room.methodStage"), title: t("room.archiveMode") };
+  return r.processing ? { label: mode ?? "—", title: String(mode) } : { label: "—", title: t("room.noTask") };
 }
 
 /** Recording half may be missing (rule-only room); scheduleText wants both endpoints. */
@@ -291,6 +314,7 @@ function RoomCompactRow({ room, data, actions, now }: {
       <div className="mt-2"><DeliveryCell s={s} now={now} /></div>
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
         <span className="chip">{deliverText(t, room)}</span>
+        <span className="chip" title={uploadMethod(t, room).title}>{uploadMethod(t, room).label}</span>
         {scheduleText(scheduleOf(room)) && <span className="font-mono text-[11px] text-muted-soft tabular-nums">{scheduleText(scheduleOf(room))}</span>}
         <span className="font-mono text-[11px] text-muted-soft truncate">{nodesText(room, data.workers, t("room.allNodes"))}</span>
       </div>
