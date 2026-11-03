@@ -1835,7 +1835,7 @@ const hubStarter: HubStarter = {
         : {}),
       observeInventory: (workerId, sessions) => {
         try {
-          recordRoomSessions(`${drecRoot()}/db/room-stats.db`, workerId, sessions);
+          recordRoomSessions(rootStatsDbPath(), workerId, sessions);
         } catch (e) {
           console.warn(`[stats] ${workerId} 采集失败:${String((e as Error)?.message ?? e)}`);
         }

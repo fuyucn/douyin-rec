@@ -56,10 +56,15 @@ export function roomStatsDbPath(dataRoot: string): string {
   return `${dataRoot}/db/room-stats.db`;
 }
 
-let warned = false;
-function warnOnce(message: string): void {
-  if (warned) return;
-  warned = true;
+// 每个 reason 的最近一次告警时刻；5 分钟内同 reason 不重复刷屏，避免库长期不可用时日志被占满，
+// 但也不让第一次失败之后永远静默（AGENTS「出错路径必须不静默」）。
+const WARN_THROTTLE_MS = 5 * 60_000;
+const lastWarnAt = new Map<string, number>();
+function warnThrottled(reason: string, message: string): void {
+  const now = Date.now();
+  const last = lastWarnAt.get(reason) ?? 0;
+  if (now - last < WARN_THROTTLE_MS) return;
+  lastWarnAt.set(reason, now);
   console.warn(message);
 }
 
@@ -142,7 +147,7 @@ export function recordRoomSessions(
     }
     return sessions.length;
   } catch (e) {
-    warnOnce(`[room-stats] 采集失败(不影响录制,后续轮次会重试): ${String((e as Error)?.message ?? e)}`);
+    warnThrottled("record", `[room-stats] 采集失败(不影响录制,后续轮次会重试): ${String((e as Error)?.message ?? e)}`);
     return 0;
   } finally {
     try { db?.close(); } catch { /* 已关闭 */ }
@@ -173,7 +178,7 @@ export function readStatsSessions(dbPath: string, sinceMs: number): StoredSessio
       lastSeenAt: Number(r.lastSeenAt ?? 0),
     }));
   } catch (e) {
-    warnOnce(`[room-stats] 读取失败: ${String((e as Error)?.message ?? e)}`);
+    warnThrottled("read", `[room-stats] 读取失败: ${String((e as Error)?.message ?? e)}`);
     return [];
   } finally {
     try { db?.close(); } catch { /* 已关闭 */ }
