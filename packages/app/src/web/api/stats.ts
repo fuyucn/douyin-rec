@@ -28,6 +28,12 @@ export function buildStats(ctx: ApiCtx) {
         const key = `${platform}.${roomSlug}`;
         const rule = ruleByKey.get(key) ?? null;
         const uploadMode = rule?.pipeline?.upload?.mode ?? (rule ? "stage" : "local");
+        // hub 语义：workers 缺省/空数组 = 全部节点（与 reconciler 的 cfg.workers?.length 判定、
+        // HubRuleDTO 注释一致）；无规则的房间才是「本机单节点」。
+        const allWorkers = workerStore.listWorkers(hubConfigPath).map((w) => w.id);
+        const workers = rule
+          ? (rule.workers && rule.workers.length ? [...rule.workers] : [...allWorkers])
+          : ["local"];
         return {
           platform,
           roomSlug,
@@ -37,7 +43,7 @@ export function buildStats(ctx: ApiCtx) {
           outputFormat: t.outputFormat ?? "original",
           engine: t.engine ?? "ffmpeg",
           danmu: t.danmu === 1,
-          workers: rule?.workers && rule.workers.length ? [...rule.workers] : (rule ? [] : ["local"]),
+          workers,
         };
       });
 
