@@ -78,6 +78,14 @@ describe("room-stats store", () => {
 });
 
 describe("buildStats 聚合", () => {
+  it("同场间隔小于合并容差(10 分钟)→ 合并为一场", () => {
+    const s1 = mk({ workerId: "w1", startMs: NOW - 5 * H, endMs: NOW - 4 * H });
+    const s2 = mk({ workerId: "w1", startMs: NOW - 4 * H + 300_000, endMs: NOW - 3 * H, durationSec: 3600 });
+    const dto = buildStats({ ...base, sessions: [s1, s2] });
+    expect(dto.rooms[0].sessions).toBe(1);
+    expect(dto.rooms[0].totalHours).toBe(2);
+  });
+
   it("跨节点同场去重计一场、合计时长不翻倍;节点负载仍按节点真值", () => {
     const merged = buildStats({
       ...base,
