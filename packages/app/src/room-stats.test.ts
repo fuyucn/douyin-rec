@@ -77,6 +77,34 @@ describe("room-stats store", () => {
   });
 });
 
+describe("sessionBase 主键与坏行过滤", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "room-stats-sb-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  it("同一 sessionBase 漂移的 startMs 跨轮次不产生重复行(节点负载不翻倍)", () => {
+    const db = roomStatsDbPath(dir);
+    const base = { platform: "douyin", roomSlug: "123", sessionBase: "sess_1", endMs: NOW, durationSec: 3600, totalGapSec: 0 };
+    recordRoomSessions(db, "w1", [{ ...base, startMs: NOW - 10 * H }], NOW);
+    recordRoomSessions(db, "w1", [{ ...base, startMs: NOW - 9 * H + 600_000 }], NOW); // ffprobe 时长变化,startMs 漂移 10 分钟
+    const rows = readStatsSessions(db, NOW - 24 * H);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].startMs).toBe(NOW - 10 * H); // MIN
+  });
+
+  it("recordRoomSessions 跳过 NaN/倒序/无法判断的行,不拖垮整批", () => {
+    const db = roomStatsDbPath(dir);
+    const good = { platform: "douyin", roomSlug: "123", sessionBase: "sess_ok", startMs: NOW - H, endMs: NOW, durationSec: 3600 };
+    const bad1 = { ...good, sessionBase: "sess_nan", startMs: Number.NaN };
+    const bad2 = { ...good, sessionBase: "sess_order", endMs: NOW - 2 * H };
+    expect(recordRoomSessions(db, "w1", [bad1, bad2, good], NOW)).toBe(3);
+    const rows = readStatsSessions(db, NOW - 24 * H);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].roomSlug).toBe("123");
+  });
+
+});
+
 describe("buildStats 聚合", () => {
   it("同场间隔小于合并容差(10 分钟)→ 合并为一场", () => {
     const s1 = mk({ workerId: "w1", startMs: NOW - 5 * H, endMs: NOW - 4 * H });

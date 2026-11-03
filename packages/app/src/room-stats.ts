@@ -83,10 +83,62 @@ CREATE TABLE IF NOT EXISTS room_sessions (
   sessionBase TEXT,
   firstSeenAt INTEGER NOT NULL,
   lastSeenAt  INTEGER NOT NULL,
-  PRIMARY KEY (workerId, platform, roomSlug, startMs)
+  -- 旧库(0.0.266 及更早,PK=startMs)由 openDb 一次性迁移到 sessionBase 主键
+  PRIMARY KEY (workerId, platform, roomSlug, sessionBase)
 );
 CREATE INDEX IF NOT EXISTS room_sessions_start ON room_sessions(startMs);
 `;
+
+/**
+ * 旧库迁移(0.0.266 及更早:PK=startMs)→ sessionBase 主键。
+ * 旧库没有 sessionBase(对那些行)就用 startMs 派生稳定占位符(stage 不会伪造重复行,占位只用于保持旧行可见);
+ * 新写入行一定带 sessionBase,ON CONFLICT 不再漂移。迁移只跑一次,幂等。
+ */
+function migrateIfNeeded(db: DatabaseSync): void {
+  const pk = db.prepare("PRAGMA table_info(room_sessions)").all() as Array<{ pk: number; name: string }>;
+  const sessionBaseIsPk = pk.some((c) => c.name === "sessionBase" && c.pk > 0);
+  if (sessionBaseIsPk) return;
+  const oldColsExist = pk.some((c) => c.name === "sessionBase");
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS room_sessions_new (
+        workerId TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        roomSlug TEXT NOT NULL,
+        startMs INTEGER NOT NULL,
+        endMs INTEGER NOT NULL,
+        durationSec REAL NOT NULL DEFAULT 0,
+        gapSec REAL NOT NULL DEFAULT 0,
+        danmuCount INTEGER,
+        bytes INTEGER,
+        title TEXT,
+        sessionBase TEXT NOT NULL,
+        firstSeenAt INTEGER NOT NULL,
+        lastSeenAt INTEGER NOT NULL,
+        PRIMARY KEY (workerId, platform, roomSlug, sessionBase)
+      );
+    `);
+    // 合并同一 sessionBase 的旧行:startMs MIN,endMs MAX,durationSec MAX,其余取最新非空
+    db.exec(oldColsExist
+      ? `INSERT INTO room_sessions_new (workerId, platform, roomSlug, startMs, endMs, durationSec, gapSec, danmuCount, bytes, title, sessionBase, firstSeenAt, lastSeenAt)
+         SELECT workerId, platform, roomSlug, MIN(startMs), MAX(endMs), MAX(durationSec), MAX(gapSec),
+                MAX(danmuCount), MAX(bytes), MAX(title), COALESCE(sessionBase, printf('legacy_%d', MIN(startMs))),
+                MIN(firstSeenAt), MAX(lastSeenAt)
+         FROM room_sessions GROUP BY workerId, platform, roomSlug, COALESCE(sessionBase, printf('legacy_%d', MIN(startMs)))`
+      : `INSERT INTO room_sessions_new (workerId, platform, roomSlug, startMs, endMs, durationSec, gapSec, danmuCount, bytes, title, sessionBase, firstSeenAt, lastSeenAt)
+         SELECT workerId, platform, roomSlug, MIN(startMs), MAX(endMs), MAX(durationSec), MAX(gapSec),
+                MAX(danmuCount), MAX(bytes), MAX(title), printf('legacy_%d', MIN(startMs)), MIN(firstSeenAt), MAX(lastSeenAt)
+         FROM room_sessions GROUP BY workerId, platform, roomSlug`);
+    db.exec("DROP TABLE room_sessions");
+    db.exec("ALTER TABLE room_sessions_new RENAME TO room_sessions");
+    db.exec("CREATE INDEX IF NOT EXISTS room_sessions_start ON room_sessions(startMs)");
+    db.exec("COMMIT");
+  } catch (e) {
+    try { db.exec("ROLLBACK"); } catch { /* 事务已结束 */ }
+    throw e;
+  }
+}
 
 function openDb(path: string, readOnly: boolean): DatabaseSync {
   const db = new DatabaseSync(path, readOnly ? { readOnly: true } : {});
@@ -95,6 +147,7 @@ function openDb(path: string, readOnly: boolean): DatabaseSync {
     try { db.exec("PRAGMA journal_mode=WAL"); } catch { /* 已有 WAL/被占用:继续用当前模式 */ }
     db.exec("PRAGMA busy_timeout=2000");
     db.exec(SCHEMA);
+    migrateIfNeeded(db);
   }
   return db;
 }
@@ -118,8 +171,9 @@ export function recordRoomSessions(
       INSERT INTO room_sessions
         (workerId, platform, roomSlug, startMs, endMs, durationSec, gapSec, danmuCount, bytes, title, sessionBase, firstSeenAt, lastSeenAt)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(workerId, platform, roomSlug, startMs) DO UPDATE SET
-        -- 录制中每轮对账都会右移 endMs:取最大值,不能让一轮更早的观测把进度改回去。
+      ON CONFLICT(workerId, platform, roomSlug, sessionBase) DO UPDATE SET
+        -- 同一 sessionBase 的 startMs 可能漂移(分段 mtime 重采样):取最小值,endMs 取最大值。
+        startMs     = MIN(room_sessions.startMs, excluded.startMs),
         endMs       = MAX(room_sessions.endMs, excluded.endMs),
         durationSec = MAX(room_sessions.durationSec, excluded.durationSec),
         gapSec      = MAX(room_sessions.gapSec, excluded.gapSec),
@@ -132,10 +186,15 @@ export function recordRoomSessions(
     db.exec("BEGIN IMMEDIATE");
     try {
       for (const s of sessions) {
+        const startMs = Math.round(s.startMs);
+        // sessionBase 是稳定身份(与 core 的会话聚类同口径);缺的会话只能回落 startMs 派生占位——
+        // 这会让漂移再次产生多行,但只限没有 sessionBase 的兜底路径(正常采集从 scan 来必带 sessionBase)。
+        const sessionBase = s.sessionBase && s.sessionBase.trim() ? s.sessionBase : `auto_${startMs}`;
+        if (!Number.isFinite(s.startMs) || !Number.isFinite(s.endMs) || s.endMs <= s.startMs || !Number.isFinite(s.durationSec)) continue;
         stmt.run(
-          workerId, s.platform, s.roomSlug, Math.round(s.startMs), Math.round(s.endMs),
+          workerId, s.platform, s.roomSlug, startMs, Math.round(s.endMs),
           s.durationSec, s.totalGapSec ?? 0, s.danmuCount ?? null, s.totalBytes ?? null,
-          s.title ?? null, s.sessionBase ?? null, now, now,
+          s.title ?? null, sessionBase, now, now,
         );
       }
       // 保留期清理放在同一事务里:一次写入至少顺带一次有界清理,不额外起定时器。
@@ -178,8 +237,9 @@ export function readStatsSessions(dbPath: string, sinceMs: number): StoredSessio
       lastSeenAt: Number(r.lastSeenAt ?? 0),
     }));
   } catch (e) {
+    // 读失败不能伪装成「空库」:调用方按空态返回会让用户以为从未采集。抛出去让 API 回 5xx + 明确错误。
     warnThrottled("read", `[room-stats] 读取失败: ${String((e as Error)?.message ?? e)}`);
-    return [];
+    throw new Error(`统计库读取失败: ${String((e as Error)?.message ?? e)}`);
   } finally {
     try { db?.close(); } catch { /* 已关闭 */ }
   }
@@ -380,8 +440,9 @@ export function buildStats(input: BuildStatsInput): StatsDTO {
       const endHour = localParts(Math.max(m.startMs, m.endMs - 1), timeZone).hour;
       startHist.set(st.hour, (startHist.get(st.hour) ?? 0) + 1);
       endHist.set(endHour, (endHist.get(endHour) ?? 0) + 1);
+      const enDate = localParts(Math.max(m.startMs, m.endMs - 1), timeZone).date;
       days.add(st.date);
-      days.add(localParts(m.endMs, timeZone).date);
+      days.add(enDate);
     }
 
     // 跨节点冗余检测:各节点合并后的区间放在一起算同一时刻最多几个节点在录

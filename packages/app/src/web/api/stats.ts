@@ -10,7 +10,7 @@ import type { StatsDTO } from "@drec/core";
 import type { StatsRoomInfo } from "../../room-stats.js";
 
 export function buildStats(ctx: ApiCtx) {
-  const { store, hubDir, hubConfigPath } = ctx;
+  const { store, hubDir, hubConfigPath, err } = ctx;
   return {
     getStats(opts: { days?: number } = {}): ApiResult {
       const days = Math.max(1, Math.min(90, Number(opts.days) || 30));
@@ -22,15 +22,19 @@ export function buildStats(ctx: ApiCtx) {
       const allWorkerIds = workersCfg.map((w) => w.id);
       const tasks = store.listTasks();
 
-      const seenKeys = new Set<string>();
-      const rooms: StatsRoomInfo[] = [];
+      const byKey = new Map<string, StatsRoomInfo>();
       for (const t of tasks) {
         let platform = "douyin";
         let roomSlug = "";
         try { const p = platformForRoom(t.room); platform = p.id; roomSlug = p.extractRoomSlug(t.room); } catch { /* leave empty */ }
         const key = `${platform}.${roomSlug}`;
-        if (seenKeys.has(key)) continue; // 同一房间多任务只计一次，避免 knownRooms 重复
-        seenKeys.add(key);
+        const existing = byKey.get(key);
+        if (existing) {
+          // 同一房间多任务去重,但 enabled 取「任何一个启用」(停用的老任务不得盖掉启用的新任务)
+          existing.enabled = existing.enabled || t.enabled === true;
+          if (!existing.anchorName && t.anchorName) existing.anchorName = t.anchorName;
+          continue;
+        }
         const rule = ruleByKey.get(key) ?? null;
         // 无规则 → 本机单节点；有规则但 upload.mode 未配 → stage（与 hub 默认一致）
         const uploadMode = rule?.pipeline?.upload?.mode ?? (rule ? "stage" : "local");
@@ -41,7 +45,7 @@ export function buildStats(ctx: ApiCtx) {
         const workers = rule
           ? allWorkerIds.filter((id) => isWorkerAssigned(rule as { enabled?: boolean; workers?: readonly string[]; requires?: readonly string[] }, id, capsOf(id)))
           : ["local"];
-        rooms.push({
+        byKey.set(key, {
           platform,
           roomSlug,
           anchorName: t.anchorName ?? null,
@@ -53,8 +57,14 @@ export function buildStats(ctx: ApiCtx) {
           workers,
         });
       }
+      const rooms = [...byKey.values()];
 
-      const sessions = roomStats.readStatsSessions(rootStatsDbPath(), now - days * 86_400_000);
+      let sessions: ReturnType<typeof roomStats.readStatsSessions>;
+      try {
+        sessions = roomStats.readStatsSessions(rootStatsDbPath(), now - days * 86_400_000);
+      } catch (readErr) {
+        return err(500, String((readErr as Error)?.message ?? readErr));
+      }
       const dto = roomStats.buildStats({
         dbPath: rootStatsDbPath(),
         sessions,
