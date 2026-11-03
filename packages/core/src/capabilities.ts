@@ -38,7 +38,8 @@ export function isWorkerTargeted(rule: { workers?: readonly string[] }, workerId
  * 消费点必须共用它,不得各写一份:master 下发(cli desiredFor → `assigned`/`enabled`)、
  * reconciler 的失联判定与成员过滤、状态探测范围(recordingStatusWorkerIds)、
  * 本机抑制名单(localSuppressedSourceTaskIds)。
- * 注意:「未派给」≠「删除」—— 节点上对应任务只停用保留(T3),真删见 #75。
+ * 注意(#442 起):「未派给」分两个维度 —— 规则停用/能力不满足 = 可逆状态,节点停用保留(T3);
+ * 规则启用但未勾选 = 用户明确的重配意图,master 下发 deleted:true 点名节点删除。
  */
 export function isWorkerAssigned(
   rule: { enabled?: boolean; workers?: readonly string[]; requires?: readonly string[] },

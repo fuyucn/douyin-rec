@@ -85,6 +85,7 @@ export interface RouteMatch {
     | "listRooms"
     | "getRoom"
     | "updateRoom"
+    | "deleteRoom"
     | "listHubRules"
     | "createHubRule"
     | "updateHubRule"
@@ -180,6 +181,7 @@ const ROUTES: readonly RouteEntry[] = [
   { name: "listRooms", methods: ["GET"], pattern: /^\/api\/rooms$/ },
   { name: "getRoom", methods: ["GET"], pattern: /^\/api\/rooms\/([^/]+)$/, param: "slug", decode: true },
   { name: "updateRoom", methods: ["PUT"], pattern: /^\/api\/rooms\/([^/]+)$/, param: "slug", decode: true, needsBody: true },
+  { name: "deleteRoom", methods: ["DELETE"], pattern: /^\/api\/rooms\/([^/]+)$/, param: "slug", decode: true },
   { name: "listHubJobs", methods: ["GET"], pattern: /^\/api\/hub\/jobs$/ },
   { name: "hubQueue", methods: ["GET"], pattern: /^\/api\/hub\/queue$/ },
   // SSE(T4):常驻流,不进 dispatch(那会经 sendJson 序列化)。createServer 特判处理。
@@ -673,6 +675,8 @@ async function dispatch(
       const body = (await readJson(req, res)) as RoomPayload;
       return api.updateRoom(match.slug!, body ?? {});
     }
+    case "deleteRoom":
+      return api.deleteRoom(match.slug!);
     case "applyHubTasks": {
       // force 走 query(POST 无 body):`?force=1`。语义与 retry-node 的 force 保持一致。
       const q = new URL(req.url ?? "/", "http://localhost").searchParams;

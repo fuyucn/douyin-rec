@@ -2199,6 +2199,140 @@ describe("rooms 域(T9 统一房间视图)", () => {
     expect(dto.recording.cookies).toBeNull();
     expect(JSON.stringify(dto)).not.toContain("SECRET");
   });
+
+  /** 该房间是否还出现在 /rooms 列表里(测试目录把 hub.config.json 和规则放同一层,故按 key 过滤)。 */
+  const roomListed = (a: ReturnType<typeof makeApi>, key: string): boolean =>
+    (a.listRooms().body as Array<{ key: string }>).some((r) => r.key === key);
+  /** 该房间的 hub 规则是否还在(同样按 key 过滤,避开同目录的 hub.config.json)。 */
+  const ruleListed = (a: ReturnType<typeof makeApi>, key: string): boolean =>
+    (a.listHubRules().body as Array<{ key: string }>).some((r) => r.key === key);
+
+  // 回归(#439):旧「删除房间」只调 DELETE /api/tasks/:id,规则留在磁盘上 → 房间继续出现在 /rooms,
+  // 且残留的「仅规则」房间在房间页上没有删除入口。真正的删除房间必须一次删两半。
+  describe("DELETE /api/rooms/:key —— 删除整个房间(#439)", () => {
+    function makeSyncDb(prefix: string): string {
+      const p = join(mkdtempSync(join(tmpdir(), prefix)), "sync.db");
+      const db = new DatabaseSync(p);
+      db.exec(`CREATE TABLE sync_jobs(streamKey TEXT PRIMARY KEY, state TEXT NOT NULL,
+        winnerWorker TEXT, bv TEXT, error TEXT, fails INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL)`);
+      db.close();
+      return p;
+    }
+
+    it("任务 + 规则一起删掉,/rooms 不再出现该房间,并触发一次同步", () => {
+      const s = new TaskStore(":memory:");
+      const requestSyncTasks = vi.fn();
+      const a = makeApi({ store: s, manager: new MockManager(), ...hubDeps("rooms-del-", { requestSyncTasks }) });
+      const id = bindRoom(a, "123456");
+      requestSyncTasks.mockClear();
+
+      const res = a.deleteRoom("douyin.123456");
+      expect(res.status).toBe(200);
+      expect((res.body as { ok: boolean }).ok).toBe(true);
+      expect(s.getTask(id)).toBeNull();
+      expect(ruleListed(a, "douyin.123456")).toBe(false);
+      expect(roomListed(a, "douyin.123456")).toBe(false);
+      expect(requestSyncTasks).toHaveBeenCalled();
+      s.close();
+    });
+
+    it("只剩处理规则(任务已被旧路径删掉)—— 旧 bug 留下的残留也能删干净", async () => {
+      const { s, a } = setup("rooms-del-ruleonly-");
+      const id = bindRoom(a, "123456");
+      // 复刻旧行为:只删任务。房间此时是「只有处理半边」—— 修复前它在房间页上删不掉。
+      expect((await a.deleteTask(id)).status).toBe(200);
+      expect(roomListed(a, "douyin.123456")).toBe(true);
+
+      expect(a.deleteRoom("douyin.123456").status).toBe(200);
+      expect(roomListed(a, "douyin.123456")).toBe(false);
+      expect(ruleListed(a, "douyin.123456")).toBe(false);
+      s.close();
+    });
+
+    it("只剩录制任务(没有规则)也能删", () => {
+      const { s, a } = setup("rooms-del-taskonly-");
+      const t = a.createTask({ room: "123456" }).body as { id: number };
+      expect(roomListed(a, "douyin.123456")).toBe(true);
+
+      expect(a.deleteRoom("douyin.123456").status).toBe(200);
+      expect(s.getTask(t.id)).toBeNull();
+      expect(roomListed(a, "douyin.123456")).toBe(false);
+      s.close();
+    });
+
+    it("删历史撞锁/抛错 → 显式 500(任务已删、规则仍在,可重试收敛),不是通用 500", async () => {
+      const s = new TaskStore(":memory:");
+      // syncDbPath 指向一个坏文件 → 删历史的首条 exec 必然抛(SQLITE_NOTADB,与 #428 的锁/IO 故障同类)
+      const broken = join(mkdtempSync(join(tmpdir(), "rooms-del-histfail-db-")), "sync.db");
+      writeFileSync(broken, "definitely not a sqlite database");
+      const aBad = makeApi({ store: s, manager: new MockManager(), ...hubDeps("rooms-del-histfail-hub-"), syncDbPath: broken });
+      const id = (aBad.createTask({ room: "123456", name: "主播" }).body as { id: number }).id;
+      expect(aBad.createHubRule({ recording: { sourceTaskId: id }, workers: ["local"] }).status).toBe(201);
+      const res = await aBad.deleteRoom("douyin.123456");
+      expect(res.status).toBe(500);
+      expect((res.body as { error: string }).error).toContain("处理历史清理失败");
+      expect((res.body as { error: string }).error).toContain("重试");
+      expect(s.getTask(id)).toBeNull();              // 任务已删(先删任务后删历史)
+      expect(ruleListed(aBad, "douyin.123456")).toBe(true); // 规则仍在,重试可收敛
+      s.close();
+    });
+
+    it("两半都不存在 → 404", () => {
+      const { s, a } = setup("rooms-del-none-");
+      expect(a.deleteRoom("douyin.999999").status).toBe(404);
+      s.close();
+    });
+
+    it("受管任务(hub 远程副本)→ 403,两半都不动", () => {
+      const s = new TaskStore(":memory:");
+      const dir = hubDeps("rooms-del-managed-");
+      const a = makeApi({ store: s, manager: new MockManager(), ...dir });
+      const t = s.addTask({ room: "https://live.douyin.com/123456", managedBy: "hub" });
+      a.createHubRule({ recording: { sourceTaskId: t.id } });
+
+      expect(a.deleteRoom("douyin.123456").status).toBe(403);
+      expect(s.getTask(t.id)).not.toBeNull();
+      expect(ruleListed(a, "douyin.123456")).toBe(true);
+      s.close();
+    });
+
+    it("任务仍启用 → 409,两半都不动", () => {
+      const { s, a } = setup("rooms-del-enabled-");
+      const id = bindRoom(a, "123456");
+      s.setEnabled(id, true);
+
+      const res = a.deleteRoom("douyin.123456");
+      expect(res.status).toBe(409);
+      expect((res.body as { error: string }).error).toContain("请先停止");
+      expect(s.getTask(id)).not.toBeNull();
+      expect(ruleListed(a, "douyin.123456")).toBe(true);
+      s.close();
+    });
+
+    it("规则还有进行中的 hub job → 409,两半都不动;终态后可删", () => {
+      const s = new TaskStore(":memory:");
+      const syncDbPath = makeSyncDb("rooms-del-active-");
+      const a = makeApi({ store: s, manager: new MockManager(), ...hubDeps("rooms-del-active-"), syncDbPath });
+      const id = bindRoom(a, "123456");
+      const db = new DatabaseSync(syncDbPath);
+      db.prepare("INSERT INTO sync_jobs(streamKey,state,winnerWorker,bv,error,fails,updatedAt) VALUES(?,?,?,?,?,0,?)")
+        .run("douyin:123456:2026-11-01", "merging", "local", null, null, 1_700_000_000_000);
+      db.close();
+
+      const blocked = a.deleteRoom("douyin.123456");
+      expect(blocked.status).toBe(409);
+      expect((blocked.body as { error: string }).error).toContain("进行中");
+      expect(s.getTask(id)).not.toBeNull();
+      expect(ruleListed(a, "douyin.123456")).toBe(true);
+
+      const db2 = new DatabaseSync(syncDbPath);
+      db2.prepare("UPDATE sync_jobs SET state='done' WHERE streamKey=?").run("douyin:123456:2026-11-01");
+      db2.close();
+      expect(a.deleteRoom("douyin.123456").status).toBe(200);
+      expect(roomListed(a, "douyin.123456")).toBe(false);
+      s.close();
+    });
+  });
 });
 
 // ── T17 远端录制状态的「何时核对的」必须透出 ────────────────────────────────────
