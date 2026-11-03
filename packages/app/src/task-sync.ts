@@ -139,15 +139,16 @@ export interface ApplyTasksOptions {
  *  - 受管但不在 desired 的任务 → 两阶段删除。
  * per-node override = cookies / useCookie / outDir / webhook(保留 node 本地配置)。
  *
- * **删除语义矩阵**(T3;唯一真理源 = 函数体内删除循环处的注释):
- * | master 侧表达            | 本节点行为                                   |
- * |-------------------------|----------------------------------------------|
- * | 期望含 enabled:true      | 新建/更新并启用                              |
- * | 期望含 enabled:false     | **停用但保留**任务(不删、不新建)              |
- * | 期望缺席(规则消失/解绑)  | 两阶段删除:先停用,下一轮真删                 |
- * | 期望含 deleted:true      | 一律当缺席;关=两阶段删,`DREC_EXPLICIT_DELETE=1`=直接删 |
- * | force / DREC_ALLOW_SHRINK| 合法缩容/清空,跳过骤减守卫照常删              |
- * 「禁用」与「删除」必须分开:取消勾选一个 worker、临时停用一条规则都**不该**删掉节点上的任务。
+ * **删除语义矩阵**(T3 + #442;唯一真理源 = 函数体内删除循环处的注释):
+ * | master 侧表达                      | 本节点行为                                   |
+ * |-----------------------------------|----------------------------------------------|
+ * | 期望含 enabled:true                 | 新建/更新并启用                              |
+ * | 期望含 enabled:false(未点名删除)    | **停用但保留**任务(不删、不新建)              |
+ * | 期望含 deleted:true(#442 点名)      | 两阶段删除:先停用,下一轮真删(env 开=直接删) |
+ * | 期望缺席(规则消失/解绑)             | 两阶段删除:先停用,下一轮真删                 |
+ * | force / DREC_ALLOW_SHRINK           | 合法缩容/清空,跳过骤减守卫照常删              |
+ * 「禁用」与「删除」必须分开:临时停用一条规则都**不该**删掉节点上的任务;
+ * 而「取消勾选」(#442)是用户明确的重配意图,master 会点名 deleted:true(守卫放行,见 decideGuard)。
  */
 export function applyRemoteTasks(
   store: TaskStore,
@@ -292,6 +293,14 @@ export function applyRemoteTasks(
    */
   const decideGuard = (): Guard | null => {
     if (force || totalManaged === 0) return null;
+    // #442:master 对每个被移出的受管任务**点名 deleted:true** = 明确的删除意图 —— master 只有
+    // 读到了自己的配置才会逐房间点名;配置读不可信时 desired 连条目都不会有。这种缩容不走守卫:
+    // 守卫保护的是「master 误读」(缺席但无点名),不是「用户明确要删」。
+    const shrinkIsExplicit = managedTasks.every((t) => {
+      const k = `${slugOf(t.room).platform}:${slugOf(t.room).roomSlug}`;
+      return retainedKeys.has(k) || deletedKeys.has(k);
+    });
+    if (shrinkIsExplicit) return null;
     // 「被移出期望」= 不在 retainedKeys 里(缺席,或带 deleted 提示)。
     // 显式删除比「骤减」更强,所以 deleted 的房间不进守卫的 disableOnly,由删除循环直接处理。
     const disableOnly = () =>
@@ -359,11 +368,22 @@ export function applyRemoteTasks(
     if (t.managedBy !== "hub") continue;
     const s = slugOf(t.room);
     const key = `${s.platform}:${s.roomSlug}`;
-    // T3 语义矩阵(唯一真理源 = 下面这几行;文档与测试都以此为准):
-    //   期望里有且 enabled:false → 停用但**保留**任务(规则还在,只是不录了)
-    //   期望里没有(缺席)          → 两阶段删除(先停,下轮真删),受 T2 守卫保护
-    //   deleted:true(开关已开)    → 跳过第 1 轮直接删(用户已确认)
-    //   force / DREC_ALLOW_SHRINK  → 合法缩容/清空,跳过守卫照常删
+    // #442(rework-2,review 低危项):master 本机(adopt=false)上的 managedBy='hub' 只可能是旧版本
+    // 同步的遗留标记,不是真正的受管任务 —— 清标记,绝不删源任务(点名/缺席都不删)。
+    // 否则「未勾选本机的房间不再 upsert」后,遗留标记会让本机源任务走进两阶段删除。
+    if (!adopt) {
+      store.setManagedBy(t.id, null);
+      log?.(`[task-sync] 清除本机遗留受管标记 ${t.id}: ${key}(不删除)`);
+      continue;
+    }
+    // T3 + #442 语义矩阵(唯一真理源 = 下面这几行;文档与测试都以此为准):
+    //   期望里有且 enabled:false(未点名删除) → 停用但**保留**任务(规则停用等可逆状态)
+    //   期望里没有(缺席)                     → 两阶段删除(先停,下轮真删),受 T2 守卫保护
+    //   deleted:true(#442 点名)              → 默认两阶段删除(先停,下轮真删);
+    //                                          env 开(DREC_EXPLICIT_DELETE)=跳过第 1 轮直接删
+    //   force / DREC_ALLOW_SHRINK             → 合法缩容/清空,跳过守卫照常删
+    //   注意:守卫触发(误读保护)的那一轮,被点名但不在期望里的房间**既不停也不删**(保守,
+    //   等误读消失后下一轮再走两阶段);与旧行为(enabled:false 会停)不同,属已知取舍。
     if (retainedKeys.has(key)) continue;
     // 开关开:交给 removeDeleted 直接删(不走两阶段)。
     // 开关关:deleted 条目按**普通缺席**处理 —— 即两阶段删除(与「规则消失」完全同一条路径)。

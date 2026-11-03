@@ -208,6 +208,77 @@ describe("applyRemoteTasks", () => {
       expect(store.getTask(doomed.id)).toBeNull();
     });
 
+    // #442:master 对被移出的受管任务点名 deleted:true = 明确的删除意图,守卫放行(两阶段)。
+    it("#442:点名 deleted:true 的缩容守卫放行:先停后删,保留房间不动", () => {
+      const ids = seed(2);          // "90" 留在期望,"91" 被点名删除
+      const doomed = ids[1];
+      const kept = { roomSlug: "90", room: "https://live.douyin.com/90" };
+      const dropped = { roomSlug: "91", room: "https://live.douyin.com/91", deleted: true };
+      const r1 = applyRemoteTasks(store, [spec(kept), spec(dropped)], undefined, { adopt: true });
+      expect(r1.rejected).toBeUndefined();
+      expect(r1.removed).toEqual([]);              // 两阶段:第一轮只停
+      expect(r1.pending).toEqual(["douyin:91"]);
+      expect(store.getTask(doomed)!.enabled).toBe(false);
+      const r2 = applyRemoteTasks(store, [spec(kept), spec(dropped)], undefined, { adopt: true });
+      expect(r2.removed).toEqual(["douyin:91"]);   // 第二轮真删
+      expect(store.getTask(doomed)).toBeNull();
+      expect(store.getTask(ids[0])!.enabled).toBe(true);
+    });
+
+    it("#442:deleted:true 指向节点没有的任务 → 忽略,不凭空建、不报错", () => {
+      const r = applyRemoteTasks(store, [spec({ roomSlug: "777", room: "https://live.douyin.com/777", deleted: true })]);
+      expect(r.applied).toEqual([]);
+      expect(r.removed).toEqual([]);
+      expect(r.rejected).toBeUndefined();
+      expect(store.listTasks()).toHaveLength(0);
+    });
+
+    // review(M4):F2 主场景必须有行为测试钉住 —— 单房间节点被取消勾选后,desired 只剩该房间的
+    // deleted 点名,守卫必须放行(否则 empty-desired 永久卡死,用户意图不生效)。
+    it("#442:单房间节点 1→0:desired 只有 deleted 点名 → 守卫放行,两阶段删干净", () => {
+      const id = seed(1)[0];          // 房间 "90"
+      const dropped = { roomSlug: "90", room: "https://live.douyin.com/90", deleted: true };
+      const r1 = applyRemoteTasks(store, [spec(dropped)], undefined, { adopt: true });
+      expect(r1.rejected).toBeUndefined();          // 不被 empty-desired 拦
+      expect(r1.removed).toEqual([]);               // 两阶段:第一轮只停
+      expect(r1.pending).toEqual(["douyin:90"]);
+      expect(store.getTask(id)!.enabled).toBe(false);
+      const r2 = applyRemoteTasks(store, [spec(dropped)], undefined, { adopt: true });
+      expect(r2.removed).toEqual(["douyin:90"]);    // 第二轮真删
+      expect(store.getTask(id)).toBeNull();
+    });
+
+    // review(M3):「有点名就放行」会绕过误读保护 —— 点名与缺席并存时守卫必须仍拦,
+    // 缺席无点名的任务不删(只停),点名但节点没有的任务忽略。
+    it("#442:点名与缺席并存 → 守卫拦下(mass-shrink),缺席任务只停不删", () => {
+      const ids = seed(2);            // 90,91
+      const r = applyRemoteTasks(store, [
+        spec({ roomSlug: "90", room: "https://live.douyin.com/90" }),
+        spec({ roomSlug: "92", room: "https://live.douyin.com/92", deleted: true }),
+      ], undefined, { adopt: true });
+      expect(r.rejected).toBe("mass-shrink");       // 91 缺席但无点名 → 不放行
+      expect(r.removed).toEqual([]);                // 91 只停不删
+      expect(store.getTask(ids[1])!.enabled).toBe(false);
+      expect(store.getTask(ids[0])!.enabled).toBe(true);
+      // 收敛:下一轮 enabledManaged=1 → 守卫放行 → 缺席任务两阶段删除
+      const r2 = applyRemoteTasks(store, [
+        spec({ roomSlug: "90", room: "https://live.douyin.com/90" }),
+        spec({ roomSlug: "92", room: "https://live.douyin.com/92", deleted: true }),
+      ], undefined, { adopt: true });
+      expect(r2.removed).toEqual(["douyin:91"]);
+    });
+
+    // review(rework-2):master 本机(adopt=false)的 managedBy='hub' 是旧版遗留标记,
+    // 点名/缺席都不得删源任务,只清标记。
+    it("#442:本机遗留受管标记 → 清标记不删除", () => {
+      const t = store.addTask({ room: "888", managedBy: "hub", enabled: true });
+      const r = applyRemoteTasks(store, [spec({ roomSlug: "888", room: "https://live.douyin.com/888", deleted: true })], undefined, { adopt: false });
+      expect(r.removed).toEqual([]);
+      expect(r.pending).toEqual([]);
+      expect(store.getTask(t.id)!.managedBy).toBeNull();
+      expect(store.getTask(t.id)!.enabled).toBe(true);
+    });
+
     it("force=true:骤减照常执行删除", () => {
       seed(4);
       const r = applyRemoteTasks(store, [spec()], undefined, { adopt: true, force: true });

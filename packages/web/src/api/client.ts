@@ -143,6 +143,9 @@ export const api = {
   /** 一次改两半(各自可选);后端第二步失败会回滚第一步,不会留半成功。 */
   updateRoom: (key: string, input: RoomPayload): Promise<RoomDTO> =>
     request("PUT", `/api/rooms/${encodeURIComponent(key)}`, input),
+  /** 删除整个房间:录制任务 + hub 规则一起删(守卫:受管/在录/有进行中 job 会被拒)。 */
+  deleteRoom: (key: string): Promise<{ ok: boolean; key: string; deletedHistory: number }> =>
+    request("DELETE", `/api/rooms/${encodeURIComponent(key)}`),
 
   /** 拖拽排序持久化:keys = 完整送序。 */
   reorderHubRules: (keys: string[]): Promise<HubRuleDTO[]> => request("POST", "/api/hub/rules/reorder", { keys }),

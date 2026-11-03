@@ -32,7 +32,7 @@ import { renderXmlToAss } from "@drec/post-process";
 import { burn } from "@drec/post-process";
 import { FONTS_DIR } from "@drec/post-process";
 import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir, readOutputLayout, LiveUploadReporter, NotifyOutbox } from "@drec/app";
-import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type ZeroDiskNodeStatusDTO, type RollingDeliveryDTO, type HubPoolSnapshotDTO, type HubBlockedBroadcastDTO, type NodeTaskLogsDTO, type NodeTasksDTO, type WorkerStatus } from "@drec/core";
+import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, isWorkerTargeted, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type ZeroDiskNodeStatusDTO, type RollingDeliveryDTO, type HubPoolSnapshotDTO, type HubBlockedBroadcastDTO, type NodeTaskLogsDTO, type NodeTasksDTO, type WorkerStatus } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, resolveUploadAccountKey, type NotifWebhookToggles } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, buildZeroDiskDelivery, zeroDiskStreamMeta, planZeroDiskSpec, APP_VERSION, syncDbPathFor } from "@drec/app";
 import type { HubStarter, TaskStore } from "@drec/app";
@@ -1849,19 +1849,52 @@ const hubStarter: HubStarter = {
       const out: RemoteTaskSpec[] = [];
       const capsOfThis = loadWorkers().find((w) => w.id === workerId)?.capabilities;
       for (const rule of hubStore.listHubRules(hubDir)) {
-        // T3 语义:「规则还在但被禁用 / 不再派给这个 worker」= 停用保留,**不是**删除。
-        // 所以这两种情况都要继续产出 enabled:false 条目,让节点把已有任务停掉;
-        // 只有「规则文件消失 / sourceTaskId 解绑 / 源任务不存在」才是缺席 → 两阶段删除。
-        //
-        // 早前这里对 !rule.enabled / 不在 workers / 能力不满足 都是 continue(直接缺席),
-        // 于是「停用」和「删除」在节点侧无法区分 —— 取消勾选一个 worker 就把它的房间删了。
-        // 归属判定 = core isWorkerAssigned(单一真理源,reconciler/状态探测/本机抑制共用)。
+        // 语义矩阵(#442 返工后,吸收 review F1/F3;删除意图只有一个来源):
+        //   规则启用 ∧ 本节点被勾选维度移除 → 下发 deleted:true **点名删除**
+        //     (节点两阶段删除;这是用户明确的重配意图,#442 的主场景)。
+        //   规则停用 / 能力不满足 → 维持 enabled:false **停用保留**:
+        //     ① 本机源任务的停用就靠这条条目写回 —— 漏掉会让 master 本机在规则停用后
+        //        继续录制(localSuppressedSourceTaskIds 刻意不管停用规则,review F1);
+        //     ② 停用/能力不满足是可逆状态,不该触发节点删除、也不该丢节点重写值。
+        //   规则文件消失 / sourceTaskId 解绑 / 源任务不存在 → continue(缺席,节点两阶段删除)。
+        // 归属判定 = core isWorkerAssigned / isWorkerTargeted(单一真理源,reconciler/状态探测/本机抑制共用)。
         const src = rule.recording?.sourceTaskId ? opts.store.getTask(rule.recording.sourceTaskId) : null;
         if (!src) continue;                        // 真删除意图:规则没绑源任务 / 源任务已删
         const p = platformForRoom(src.room);
         if (p.extractRoomSlug(src.room) !== rule.roomSlug) continue; // 绑定必须同房间
-        // 该 worker 不再被派发这个房间(规则禁用 / 未勾选 / 能力不满足)→ 产 enabled:false,
-        // 让节点**停用但保留**(T3)。字段与正常路径**同源构造**:早前写成两个 push 各抄一遍字段,
+        // #442:删除意图只来自「未勾选」这一个维度。规则停用与能力不满足仍产 enabled:false
+        // (停用保留);deleted 条目不带凭据/回调/输出目录 —— 删除提示用不到它们,也不该
+        // 把这些内容发给不再承担该房间的节点(会进节点审计快照)。
+        const ruleDisabled = rule.enabled === false;
+        const targeted = isWorkerTargeted(rule, workerId);
+        if (!ruleDisabled && !targeted) {
+          out.push({
+            platform: p.id,
+            roomSlug: rule.roomSlug,
+            room: src.room,
+            name: src.name,
+            quality: src.quality,
+            engine: src.engine,
+            danmu: src.danmu,
+            segmentSec: src.segmentSec,
+            outputFormat: src.outputFormat,
+            scheduleStart: src.scheduleStart,
+            scheduleEnd: src.scheduleEnd,
+            enabled: false,
+            useCookie: src.useCookie,
+            cookies: null,
+            outDir: null,
+            webhook: null,
+            anchorName: src.anchorName,
+            rollingUpload: src.rollingUpload,
+            rollingEffective: src.rollingUpload,
+            assigned: false,
+            deleted: true,
+          });
+          continue;
+        }
+        // 停用保留路径(规则停用 / 能力不满足 / 正常已分配)按原逻辑构造完整 spec:
+        // 字段与正常路径**同源构造**:早前写成两个 push 各抄一遍字段,
         // 抄漏一个字段就是「禁用路径丢配置」的静默 bug(自审发现,已合为一条)。
         const { assigned, enabled: specEnabledBase } = resolveSpecAssignment(rule, workerId, capsOfThis, src.enabled);
         // Zero-disk on a side node (issue #331): the master ships the resolved upload metadata and the
