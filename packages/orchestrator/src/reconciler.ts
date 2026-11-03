@@ -1,5 +1,5 @@
 import { abortJob, effectiveReconnectWindowMs, isJobAbort, isJobLive, resolveDiskMinGB, SAME_BROADCAST_GAP_MS, USER_STOP } from "@drec/core";
-import type { Transport, NodeInventory } from "./transport.js";
+import type { Transport, NodeInventory, NodeRecording } from "./transport.js";
 import type { UnclaimedSegment } from "./unclaimed.js";
 import type { JobState, StepName, SyncLedger } from "./ledger.js";
 import type { PipelineDeps, PipelineCfg } from "./pipeline.js";
@@ -10,7 +10,7 @@ import { isDerivedKey, runNowConflict } from "./run-now-guard.js";
 import { DEFAULT_NODE_UPLOAD, type NodeUploadConfig } from "./node-upload-config.js";
 import { completeFromDispatch } from "./node-upload-complete.js";
 import { clusterBroadcasts, type Broadcast } from "./identity.js";
-import type { HubBlockedBroadcastDTO } from "@drec/core";
+import type { HubBlockedBroadcastDTO, StatsSessionInput } from "@drec/core";
 import { gateWorkers, explainRejections, isWorkerAssigned, isWorkerTargeted } from "@drec/core";
 import { JobDispatcher } from "./job-dispatcher.js";
 
@@ -32,6 +32,11 @@ export interface ReconcilerDeps {
   sleep?: (ms: number) => Promise<void>;
   /** 单个租户 listInventory 的超时(ms);挂起即降级为空,防一个 hung 节点锁死整轮对账。默认 60s。 */
   inventoryTimeoutMs?: number;
+  /**
+   * 每轮清单成功后回调(workerId + 该节点清单里的会话子集),用于直播统计落库(plans/041)。
+   * **旁路**:回调内部的异常被吞掉,绝不影响对账/录制;未注入 = 不采集。
+   */
+  observeInventory?: (workerId: string, sessions: StatsSessionInput[]) => void;
   /** 节点连续多少轮清单失联(超时/报错)后发一次「节点失联」通知。默认 6;<=0 关闭。 */
   unreachableAlertRounds?: number;
   /**
@@ -116,6 +121,22 @@ const DEFAULT_MAX_CONCURRENT_PIPELINES = 2;
 const ACK_NOTE_MAX = 500;
 const DEFAULT_SLEEP = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/** 清单行 → 统计采集输入(只取统计需要的字段;orchestrator 不碰统计库)。 */
+function toStatsInput(r: NodeRecording): StatsSessionInput {
+  return {
+    platform: r.platform,
+    roomSlug: r.roomSlug,
+    sessionBase: r.sessionBase,
+    startMs: r.startMs,
+    endMs: r.endMs,
+    durationSec: r.durationSec,
+    totalGapSec: r.totalGapSec,
+    danmuCount: r.danmuCount,
+    totalBytes: r.totalBytes,
+    title: r.title,
+  };
+}
+
 const RETRYABLE = new Set<JobState>(["pending", "failed"]);
 const UNSAFE_RETRY_NODES = new Set(["upload_plain", "append_danmu", "append_livechat"]);
 
@@ -134,6 +155,8 @@ export class Reconciler {
   private settle: SettleConfig;
   private sleep: (ms: number) => Promise<void>;
   private inventoryTimeoutMs: number;
+  /** 清单采集旁路(直播统计);未注入 = 不采集。 */
+  private observeInventory?: (workerId: string, sessions: StatsSessionInput[]) => void;
   private unreachableAlertRounds: number;
   private blockedManualRounds: number;
   /** Broadcasts currently blocked by an unreachable selected worker (rebuilt each reconcileAll round). */
@@ -185,6 +208,7 @@ export class Reconciler {
     this.settle = deps.settle ?? DEFAULT_SETTLE;
     this.sleep = deps.sleep ?? DEFAULT_SLEEP;
     this.inventoryTimeoutMs = deps.inventoryTimeoutMs ?? DEFAULT_INVENTORY_TIMEOUT_MS;
+    this.observeInventory = deps.observeInventory;
     this.unreachableAlertRounds = deps.unreachableAlertRounds ?? DEFAULT_UNREACHABLE_ALERT_ROUNDS;
     this.blockedManualRounds = deps.blockedManualRounds ?? DEFAULT_BLOCKED_MANUAL_ROUNDS;
     this.maxRetries = deps.maxRetries ?? DEFAULT_MAX_RETRIES;
@@ -263,6 +287,23 @@ export class Reconciler {
       console.warn(segs === undefined
         ? `[reconciler] worker ${inv.workerId} orphan state unknown (worker does not report unclaimed segments)`
         : `[reconciler] worker ${inv.workerId} unclaimed segments: ${segs.length} in ${sessions.length} sessions (truncated ${truncated})`);
+    }
+  }
+
+  /**
+   * 把本轮清单里的会话写进统计库(plans/041)。**旁路**:任何异常只记一行,不影响对账。
+   * unreachable 的节点整轮跳过 —— 它这一轮「不知道有没有新录像」,写进去等于把「不知道」当成事实。
+   */
+  private recordStats(invs: InventoryResult[]): void {
+    const observe = this.observeInventory;
+    if (!observe) return;
+    for (const inv of invs) {
+      if (inv.status === "unreachable" || inv.recordings.length === 0) continue;
+      try {
+        observe(inv.workerId, inv.recordings.map(toStatsInput));
+      } catch (e) {
+        console.warn(`[reconciler] worker ${inv.workerId} 统计采集失败(不影响对账): ${String((e as Error)?.message ?? e)}`);
+      }
     }
   }
 
@@ -490,6 +531,7 @@ export class Reconciler {
       console.warn(`[reconciler] worker ${i.workerId} 清单失联(${i.reason}),不当作「无录像」;涉及它的场本轮不选优`);
     }
     this.logUnclaimedSummary(invs);
+    this.recordStats(invs);
 
     const broadcasts = clusterBroadcasts(
       invs.map((i) => ({ workerId: i.workerId, recordings: i.recordings })),

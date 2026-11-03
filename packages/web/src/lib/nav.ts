@@ -35,6 +35,7 @@ export function navSections(hubEnabled: boolean): NavSections {
     primary: [
       { to: "/rooms", labelKey: "nav.rooms" },
       { to: "/nodes", labelKey: "nav.nodes" },
+      { to: "/stats", labelKey: "nav.stats" },
     ],
     advanced: [{ to: "/queue", labelKey: "nav.queue", end: true }],
   };

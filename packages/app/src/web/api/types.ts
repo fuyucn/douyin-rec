@@ -355,6 +355,8 @@ export interface Api {
   listHubJobs(opts?: { room?: string; limit?: number; offset?: number; states?: string[] }): ApiResult;
   /** GET /api/hub/latest-runs — 每个房间最新一条 run 摘要(Hub 房间列表徽标用,不受分页影响)。 */
   latestRuns(): ApiResult;
+  /** GET /api/stats[?days=N] — 直播统计(节点会话起止/时长/热力图;plans/041)。 */
+  getStats(opts?: { days?: number }): ApiResult;
   /**
    * GET /api/hub/queue[?phase=&platform=&q=] — 处理队列视图:进行中(做了什么/正在做什么/下面做什么)
    * + 最近完成 + 资源池占用。phase/platform 可重复传(逗号分隔亦可);q = 主播名/房间号/streamKey 子串。
