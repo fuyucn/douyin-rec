@@ -368,12 +368,22 @@ export function applyRemoteTasks(
     if (t.managedBy !== "hub") continue;
     const s = slugOf(t.room);
     const key = `${s.platform}:${s.roomSlug}`;
+    // #442(rework-2,review 低危项):master 本机(adopt=false)上的 managedBy='hub' 只可能是旧版本
+    // 同步的遗留标记,不是真正的受管任务 —— 清标记,绝不删源任务(点名/缺席都不删)。
+    // 否则「未勾选本机的房间不再 upsert」后,遗留标记会让本机源任务走进两阶段删除。
+    if (!adopt) {
+      store.setManagedBy(t.id, null);
+      log?.(`[task-sync] 清除本机遗留受管标记 ${t.id}: ${key}(不删除)`);
+      continue;
+    }
     // T3 + #442 语义矩阵(唯一真理源 = 下面这几行;文档与测试都以此为准):
     //   期望里有且 enabled:false(未点名删除) → 停用但**保留**任务(规则停用等可逆状态)
     //   期望里没有(缺席)                     → 两阶段删除(先停,下轮真删),受 T2 守卫保护
     //   deleted:true(#442 点名)              → 默认两阶段删除(先停,下轮真删);
     //                                          env 开(DREC_EXPLICIT_DELETE)=跳过第 1 轮直接删
     //   force / DREC_ALLOW_SHRINK             → 合法缩容/清空,跳过守卫照常删
+    //   注意:守卫触发(误读保护)的那一轮,被点名但不在期望里的房间**既不停也不删**(保守,
+    //   等误读消失后下一轮再走两阶段);与旧行为(enabled:false 会停)不同,属已知取舍。
     if (retainedKeys.has(key)) continue;
     // 开关开:交给 removeDeleted 直接删(不走两阶段)。
     // 开关关:deleted 条目按**普通缺席**处理 —— 即两阶段删除(与「规则消失」完全同一条路径)。

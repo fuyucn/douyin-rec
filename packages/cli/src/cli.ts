@@ -1856,8 +1856,8 @@ const hubStarter: HubStarter = {
         const p = platformForRoom(src.room);
         if (p.extractRoomSlug(src.room) !== rule.roomSlug) continue; // 绑定必须同房间
         // #442:删除意图只来自「未勾选」这一个维度。规则停用与能力不满足仍产 enabled:false
-        // (停用保留);deleted 条目不带凭据 —— 删除提示用不到它们,也不该把凭据发给
-        // 不再承担该房间的节点。
+        // (停用保留);deleted 条目不带凭据/回调/输出目录 —— 删除提示用不到它们,也不该
+        // 把这些内容发给不再承担该房间的节点(会进节点审计快照)。
         const ruleDisabled = rule.enabled === false;
         const targeted = isWorkerTargeted(rule, workerId);
         if (!ruleDisabled && !targeted) {
@@ -1876,8 +1876,8 @@ const hubStarter: HubStarter = {
             enabled: false,
             useCookie: src.useCookie,
             cookies: null,
-            outDir: src.outDir,
-            webhook: src.webhook,
+            outDir: null,
+            webhook: null,
             anchorName: src.anchorName,
             rollingUpload: src.rollingUpload,
             rollingEffective: src.rollingUpload,
