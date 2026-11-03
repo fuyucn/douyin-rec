@@ -54,6 +54,7 @@ const DICT = {
   zh: {
     common: { back: "返回", cancel: "取消", confirm: "确定", save: "保存", delete: "删除", refresh: "刷新", close: "关闭", optional: "可选", on: "开", off: "关", yes: "是", no: "否", localTimeTooltip: "当前时区：{serverTz}\n你的本地时间：{local}" },
     nav: { title: "抖音录制控制台", rooms: "房间", nodes: "节点", stats: "统计", tasksList: "录制任务", queue: "处理队列", advanced: "高级", login: "扫码登录", paste: "手动粘贴", clear: "清除", notif: "站内提醒设置" },
+    stats: { title: "统计", subtitle: "最近 {days} 天 · 时区 {tz}" },
     experimental: {
       badge: "实验性", riskPrefix: "风险:", defaultPrefix: "默认:", defaultOff: "关闭,需显式开启", defaultOn: "开启",
       truthNote: "是否开启以 hub 规则配置为准;直接改规则文件开启的,界面照常按规则显示。",
@@ -647,6 +648,7 @@ const DICT = {
   en: {
     common: { back: "Back", cancel: "Cancel", confirm: "Confirm", save: "Save", delete: "Delete", refresh: "Refresh", close: "Close", optional: "optional", on: "On", off: "Off", yes: "Yes", no: "No", localTimeTooltip: "Current timezone: {serverTz}\nYour local time: {local}" },
     nav: { title: "Douyin Recorder", rooms: "Rooms", nodes: "Nodes", stats: "Stats", tasksList: "Tasks", queue: "Queue", advanced: "Advanced", login: "QR Login", paste: "Paste Cookie", clear: "Clear", notif: "Notification settings" },
+    stats: { title: "Stats", subtitle: "Last {days} days · timezone {tz}" },
     experimental: {
       badge: "Experimental", riskPrefix: "Risk: ", defaultPrefix: "Default: ", defaultOff: "off, enable explicitly", defaultOn: "on",
       truthNote: "Whether it is on is decided by the hub rule config; if the rule file was edited directly, the UI shows the rule as-is.",

@@ -23,14 +23,14 @@ export function StatsPage(): ReactNode {
   };
   useEffect(load, [days]);
 
-  const dowLabels = t("stats.dow") === "stats.dow" ? DOW_LABELS : DOW_LABELS; // fallback
+  const dowLabels = DOW_LABELS;
   const heatMax = useMemo(() => {
     if (!data) return 0;
     return Math.max(0.0001, ...data.heatmap.map((c: { hours: number }) => c.hours));
   }, [data]);
 
   if (err) return <div className="text-[var(--danger-fg)]">{err}</div>;
-  if (!data) return <div className="text-muted">{loading ? t("common.loading") : "—"}</div>;
+  if (!data) return <div className="text-muted">{loading ? "加载中…" : "—"}</div>;
 
   const o = data.overview;
   return (
