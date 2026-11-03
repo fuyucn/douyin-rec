@@ -337,6 +337,8 @@ export interface Api {
   getRoom(key: string): ApiResult;
   /** PUT /api/rooms/:key — 一次改两半(各自可选);第二步失败回滚第一步,不留半成功。 */
   updateRoom(key: string, input: RoomPayload): ApiResult;
+  /** DELETE /api/rooms/:key — 删除整个房间(录制任务 + hub 规则),含与两个旧端点一致的守卫。 */
+  deleteRoom(key: string): ApiResult;
   /** POST /api/hub/apply[?force=1] — 立刻触发一次全节点任务同步;force=跳过节点骤减安全阀(T-2)。 */
   applyHubTasks(opts?: { force?: boolean }): ApiResult;
   /** GET /api/hub/rules — 所有多节点 hub 后处理规则(按 {platform}.{roomSlug})。 */
