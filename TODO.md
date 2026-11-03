@@ -14,6 +14,12 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-134 直播统计 tab（issue [#443](https://github.com/fuyucn/douyin-rec/issues/443) → PR [#444](https://github.com/fuyucn/douyin-rec/pull/444)，2026-11-03）**
+  — master 对账旁路采集各节点会话落 `room-stats.db`，新增 /stats 页展示热力图/节点负载/配置总览。
+  **做什么**: 库 + 聚合 + API（/api/stats）+ 前端页；契约在 core。
+  **验收**: 全量门禁通过（typecheck / test 4067 / pr-gate 444 / risk-scan 命中但为关键词误判(见 PR)，待 review 心跳按门禁决定）。
+  — 见 plans/041_stats_tab.md
+
 - [~] **T-134 hub 同步只下发启用且分配的房间，未勾选点名删除（issue [#442](https://github.com/fuyucn/douyin-rec/issues/442)）**（2026-11-03）
   — 未分配/停用的房间也全量下发到所有节点，节点上长期积压隐藏的未分配受管任务，审计快照还明文存未启用房间的凭据。
   **做什么**: `desiredFor` 只对「规则启用但未勾选本节点」的房间下发 `deleted:true` 点名删除（节点两阶段删除，点名缩容不被空期望/骤减守卫拦）；规则停用/能力不满足仍下发 `enabled:false` 停用保留（本机源任务停用靠这条写回，review F1）；deleted 条目不带凭据。
