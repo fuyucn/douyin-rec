@@ -17,6 +17,7 @@ import { RoomsPage } from "./pages/RoomsPage";
 import { QueuePage } from "./pages/QueuePage";
 import { TaskDetail } from "./pages/TaskDetail";
 import { TaskList } from "./pages/TaskList";
+import { StatsPage } from "./pages/StatsPage";
 
 /** App shell: nav + routed main + dark footer + toast host. */
 export function App(): ReactNode {
@@ -44,6 +45,7 @@ export function App(): ReactNode {
           <Route path="/nodes" element={<NodesPage />} />
           <Route path="/task/:id" element={<TaskDetail />} />
           <Route path="/queue" element={<QueuePage />} />
+          <Route path="/stats" element={<StatsPage />} />
           <Route path="/hub" element={<HubPage />} />
           {/* Rooms is the master home; old pages remain as compatibility routes during rollout. */}
           <Route path="/rooms" element={<RoomsPage />} />

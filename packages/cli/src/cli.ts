@@ -36,7 +36,7 @@ import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, resolveUploadAccountKey, type NotifWebhookToggles } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, buildZeroDiskDelivery, zeroDiskStreamMeta, planZeroDiskSpec, APP_VERSION, syncDbPathFor } from "@drec/app";
 import type { HubStarter, TaskStore } from "@drec/app";
-import { applyTimezoneFromDb, dbPathForDataRoot, effectiveTimezone } from "@drec/app";
+import { applyTimezoneFromDb, dbPathForDataRoot, effectiveTimezone, rootStatsDbPath } from "@drec/app";
 import type { UploadOpts } from "@drec/core";
 import { zeroDiskStreamKey } from "@drec/core";
 import type { PipelineCfg, SyncLedger, WorkflowNodeKey } from "@drec/orchestrator";
@@ -1361,7 +1361,7 @@ const hubStarter: HubStarter = {
     const { ffprobeVideo } = await import("@drec/post-process");
     const { handleEnqueue, handleProcStatus, handleProcCancel } = await import("@drec/app");
     const { statSync } = await import("node:fs");
-    const { uploadPlain, appendGroup, countVideoParts, hubStore, workerStore, rootHubDir, rootHubConfig, rootConfigDir, rootStageDir, rootLogsDir, drecRoot, listNodeTasks, applyRemoteTasks, resolveTaskStreamCookies } = await import("@drec/app");
+    const { uploadPlain, appendGroup, countVideoParts, hubStore, workerStore, rootHubDir, rootHubConfig, rootConfigDir, rootStageDir, rootLogsDir, drecRoot, listNodeTasks, applyRemoteTasks, resolveTaskStreamCookies, recordRoomSessions } = await import("@drec/app");
     const { FileLogger } = await import("@drec/observability");
     const { recordExpectedVersion, recordSyncError } = await import("@drec/app");
 
@@ -1826,6 +1826,13 @@ const hubStarter: HubStarter = {
             },
           }
         : {}),
+      observeInventory: (workerId, sessions) => {
+        try {
+          recordRoomSessions(`${drecRoot()}/db/room-stats.db`, workerId, sessions);
+        } catch (e) {
+          console.warn(`[stats] ${workerId} 采集失败:${String((e as Error)?.message ?? e)}`);
+        }
+      },
     });
 
     // hub 受管录制任务同步:对每个 worker 计算「期望任务」并下发。

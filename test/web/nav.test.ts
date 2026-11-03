@@ -11,7 +11,7 @@ describe("navSections", () => {
   });
   it("master: rooms and nodes primary; queue is the only advanced item", () => {
     const nav = navSections(true);
-    expect(nav.primary.map((i) => i.to)).toEqual(["/rooms", "/nodes"]);
+    expect(nav.primary.map((i) => i.to)).toEqual(["/rooms", "/nodes", "/stats"]);
     expect(nav.advanced.map((i) => i.to)).toEqual(["/queue"]);
     expect(nav.advanced[0]?.end).toBe(true);
   });

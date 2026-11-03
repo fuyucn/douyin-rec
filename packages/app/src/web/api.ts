@@ -21,6 +21,7 @@ import { buildHubRules } from "./api/hub-rules.js";
 import { buildHubJobs } from "./api/hub-jobs.js";
 import { buildWorkers } from "./api/workers.js";
 import { buildRooms } from "./api/rooms.js";
+import { buildStats } from "./api/stats.js";
 import type { Api, ApiDeps } from "./api/types.js";
 
 // 公共类型/常量 re-export:既有引用(`web/api.js` 的 makeApi / ApiDeps / ManagerLike …)不变。
@@ -43,5 +44,6 @@ export function makeApi(deps: ApiDeps): Api {
     ...buildHubJobs(ctx),
     ...buildWorkers(ctx),
     ...buildRooms(ctx),
+    ...buildStats(ctx),
   };
 }
