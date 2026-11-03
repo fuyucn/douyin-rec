@@ -37,7 +37,12 @@ export function StatsPage(): ReactNode {
       <button className="btn btn-secondary btn-small" onClick={load} disabled={loading}>{loading ? "…" : "重试"}</button>
     </div>
   ) : null;
-  if (!data) return <div className="text-muted">{loading ? "加载中…" : "—"}</div>;
+  if (!data) return (
+    <div className="space-y-6">
+      {errorBlock}
+      {!err && <div className="text-muted">{loading ? "加载中…" : "—"}</div>}
+    </div>
+  );
 
   const o = data.overview;
   return (

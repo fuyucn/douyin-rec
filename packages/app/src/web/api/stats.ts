@@ -1,6 +1,6 @@
 import type { ApiCtx } from "./context.js";
 import type { ApiResult } from "./types.js";
-import { platformForRoom } from "@drec/core";
+import { platformForRoom, isWorkerAssigned } from "@drec/core";
 import * as hubStore from "../../hub-store.js";
 import * as workerStore from "../../worker-store.js";
 import * as roomStats from "../../room-stats.js";
@@ -35,8 +35,11 @@ export function buildStats(ctx: ApiCtx) {
         // 无规则 → 本机单节点；有规则但 upload.mode 未配 → stage（与 hub 默认一致）
         const uploadMode = rule?.pipeline?.upload?.mode ?? (rule ? "stage" : "local");
         // hub 语义：workers 缺省/空数组 = 全部节点
+        // 用 core.isWorkerAssigned(唯一真理源)算归属:规则启用 ∧ workers 勾选(空=全选) ∧ 能力满足 requires。
+        // 不能只看 workers 数组 —— 规则停用/能力不满足的节点也应在 assignedRooms 里排除。
+        const capsOf = (id: string): readonly string[] | undefined => workersCfg.find((w) => w.id === id)?.capabilities;
         const workers = rule
-          ? (rule.workers && rule.workers.length ? [...rule.workers] : [...allWorkerIds])
+          ? allWorkerIds.filter((id) => isWorkerAssigned(rule as { enabled?: boolean; workers?: readonly string[]; requires?: readonly string[] }, id, capsOf(id)))
           : ["local"];
         rooms.push({
           platform,
@@ -53,6 +56,7 @@ export function buildStats(ctx: ApiCtx) {
 
       const sessions = roomStats.readStatsSessions(rootStatsDbPath(), now - days * 86_400_000);
       const dto = roomStats.buildStats({
+        dbPath: rootStatsDbPath(),
         sessions,
         rooms,
         workerNames,

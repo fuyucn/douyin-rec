@@ -219,6 +219,8 @@ export interface StatsRoomInfo {
 
 export interface BuildStatsInput {
   sessions: StoredSession[];
+  /** 统计库路径;仅用于「窗口内无数据时」兜底读最近采集时间,可为空。 */
+  dbPath?: string;
   rooms: StatsRoomInfo[];
   /** workerId → 显示名(local / video-rec / …)。 */
   workerNames: Record<string, string | null>;
@@ -339,7 +341,7 @@ const round2 = (v: number): number => Math.round(v * 100) / 100;
 
 /** 由库内事实 + 配置快照算出整页统计。窗口外的部分一律不计。 */
 export function buildStats(input: BuildStatsInput): StatsDTO {
-  const { sessions, rooms, workerNames, windowDays, now, timeZone } = input;
+  const { sessions, rooms, workerNames, windowDays, now, timeZone, dbPath } = input;
   const windowStart = now - windowDays * 86_400_000;
   const roomByKey = new Map(rooms.map((r) => [keyOf(r.platform, r.roomSlug), r]));
 
@@ -382,11 +384,9 @@ export function buildStats(input: BuildStatsInput): StatsDTO {
       days.add(localParts(m.endMs, timeZone).date);
     }
 
-    let maxNodes = 0;
-    for (const [, ivs] of perWorker) {
-      const p = peakConcurrent(ivs);
-      if (p > maxNodes) maxNodes = p;
-    }
+    // 跨节点冗余检测:各节点合并后的区间放在一起算同一时刻最多几个节点在录
+    // (按节点分别算再取最大永远是 1,单节点合并后的区间互不重叠)。
+    const maxNodes = peakConcurrent([...perWorker.values()].flat());
     const nodeSessions = new Map<string, number>();
     for (const s of list) nodeSessions.set(s.workerId, (nodeSessions.get(s.workerId) ?? 0) + 1);
 
@@ -470,6 +470,8 @@ export function buildStats(input: BuildStatsInput): StatsDTO {
     rooms: rows,
     heatmap: cellsOf(globalHeat),
     empty: sessions.length === 0,
-    lastCollectedAt: sessions.reduce((max, s) => (s.lastSeenAt > max ? s.lastSeenAt : max), 0) || null,
+    // 采集时间不能被窗口限制:窗口内没有场次(采集仍在跑)时也要能看出「最近采集于何时」,
+    // 否则页面看起来像从没采集过。readStatsSessions 的窗口过滤只影响数据行。
+    lastCollectedAt: sessions.reduce((max, s) => (s.lastSeenAt > max ? s.lastSeenAt : max), 0) || (dbPath ? lastCollectionAt(dbPath) : null) || null,
   };
 }

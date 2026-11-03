@@ -97,6 +97,7 @@ describe("buildStats 聚合", () => {
     expect(merged.rooms[0].sessions).toBe(1);
     expect(merged.rooms[0].totalHours).toBe(2);
     expect(merged.rooms[0].nodes).toHaveLength(2);
+    expect(merged.rooms[0].maxNodes).toBe(2); // 跨节点冗余:同一场两节点同录
     expect(merged.overview.broadcastHours).toBe(2); // 去重后
     const w1 = merged.overview.nodeLoad.find((n) => n.workerId === "w1")!;
     const w2 = merged.overview.nodeLoad.find((n) => n.workerId === "w2")!;
