@@ -44,10 +44,11 @@ import type {
   NodeTasksDTO,
   NodeTaskLogsDTO,
   RoomDTO,
+  StatsDTO,
   RoomPayload,
   HubResources,
 } from "@drec/contracts";
-export type { Task, TaskDetail, TaskRuntime, CookieStatus, BiliupAuthStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobNodeStateDTO, HubJobCandidateDTO, HubJobEventDTO, HubJobsDTO, HubQueueDTO, RollingDeliveryDTO, QueueItemDTO, NodeUploadStatusDTO, HubPoolSnapshotDTO, HubBlockedBroadcastDTO, QueuePhase, HubJobStepDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, NotifWebhookToggles, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult, WorkerStatus, NodeTasksDTO, NodeTaskLogsDTO, RoomDTO, RoomPayload, HubResources };
+export type { Task, TaskDetail, TaskRuntime, CookieStatus, BiliupAuthStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobNodeStateDTO, HubJobCandidateDTO, HubJobEventDTO, HubJobsDTO, HubQueueDTO, RollingDeliveryDTO, QueueItemDTO, NodeUploadStatusDTO, HubPoolSnapshotDTO, HubBlockedBroadcastDTO, QueuePhase, HubJobStepDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, NotifWebhookToggles, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult, WorkerStatus, NodeTasksDTO, NodeTaskLogsDTO, RoomDTO, RoomPayload, HubResources, StatsDTO };
 
 /** POST /api/login/qr → start a QR-login session. */
 export interface QrStart {
@@ -173,6 +174,7 @@ export const api = {
   /** 每个房间最新一条 run(房间列表徽标用;不受分页影响)。 */
   getLatestRuns: (): Promise<{ rooms: Array<{ roomKey: string; streamKey: string; state: string; bv: string | null; updatedAt: number; manualPhase?: string | null }> }> =>
     request("GET", "/api/hub/latest-runs"),
+  getStats: (days = 30): Promise<StatsDTO> => request("GET", `/api/stats?days=${days}`),
   getHubQueue: (
     opts: { phase?: string[]; states?: string[]; platform?: string[]; q?: string; sort?: "newest" | "oldest" } = {},
   ): Promise<HubQueueDTO> => {

@@ -1220,3 +1220,104 @@ export interface ProcActiveDTO {
   /** 该 kind 是否有存活的租约持有者。 */
   leaseAlive: Record<string, boolean>;
 }
+
+// ── 直播统计(GET /api/stats;plans/041)──────────────────────────────────────────
+// 数据从**所有节点的录像清单**采集(master 对账时顺手落库),因此跨节点重复录制天然可去重;
+// 采集与查询都在 master,不改变录制侧任何行为。
+
+/** 采集输入:节点清单里与统计相关的字段子集(orchestrator → app 的窄接口,避免跨层 import)。 */
+export interface StatsSessionInput {
+  platform: string;
+  roomSlug: string;
+  sessionBase?: string;
+  /** 首段开录 epoch ms。 */
+  startMs: number;
+  /** 末段收录 epoch ms(录制中会随后续对账不断右移)。 */
+  endMs: number;
+  /** 分段时长之和(秒);endMs-startMs 含断流缺口。 */
+  durationSec: number;
+  totalGapSec?: number;
+  danmuCount?: number;
+  totalBytes?: number;
+  title?: string;
+}
+
+/** 热力图单元格:`dow` 0=周一 … 6=周日(与 JS `getDay()` 的 0=周日不同,前端按本定义画)。 */
+export interface StatsHeatmapCellDTO {
+  dow: number;
+  hour: number;
+  hours: number;
+}
+
+/** 节点负载:该节点窗口内实际录了多少场/多少小时,以及**峰值同时录制路数**。 */
+export interface StatsNodeLoadDTO {
+  workerId: string;
+  name: string | null;
+  /** 配置上分配给该节点的已启用房间数。 */
+  assignedRooms: number;
+  sessions: number;
+  hours: number;
+  peakConcurrent: number;
+}
+
+/** 单个直播间的统计行。 */
+export interface StatsRoomRowDTO {
+  /** `${platform}.${roomSlug}`。 */
+  key: string;
+  platform: string;
+  roomSlug: string;
+  anchorName: string | null;
+  enabled: boolean;
+  /** rolling / stage / upload(与 hub 规则的上传模式同口径)。 */
+  uploadMode: string;
+  outputFormat: string;
+  sessions: number;
+  totalHours: number;
+  /** totalHours / windowDays —— 与「节点均衡」用的口径一致。 */
+  perDayHours: number;
+  avgHours: number;
+  medianHours: number;
+  firstStartMs: number | null;
+  lastEndMs: number | null;
+  /** 出现次数最多的开播/收播整点(0-23),用于概括「典型时段」。 */
+  typicalStartHour: number | null;
+  typicalEndHour: number | null;
+  /** 窗口内有录制的天数。 */
+  days: number;
+  nodes: { workerId: string; name: string | null; sessions: number }[];
+  /** 同一场同时在录的最大节点数(>1 = 该房间存在多节点冗余录制)。 */
+  maxNodes: number;
+  heatmap: StatsHeatmapCellDTO[];
+}
+
+/** 配置维度总览(与录制数据无关,读任务/规则即时算)。 */
+export interface StatsOverviewDTO {
+  windowDays: number;
+  knownRooms: number;
+  enabledRooms: number;
+  observedRooms: number;
+  sessions: number;
+  /** 去重后的「实际在播时长」合计(小时)。 */
+  broadcastHours: number;
+  uploadModes: { mode: string; count: number }[];
+  outputFormats: { format: string; count: number }[];
+  platforms: { platform: string; count: number }[];
+  engines: { engine: string; count: number }[];
+  danmu: { on: number; off: number };
+  nodeLoad: StatsNodeLoadDTO[];
+}
+
+/** GET /api/stats 响应。 */
+export interface StatsDTO {
+  generatedAt: number;
+  timeZone: string;
+  windowDays: number;
+  overview: StatsOverviewDTO;
+  rooms: StatsRoomRowDTO[];
+  /** 全房间合并热力图(跨节点去重后的「在播小时数」)。 */
+  heatmap: StatsHeatmapCellDTO[];
+  /** 还没有任何采集数据(前端显示空态,而不是 0 值图表)。 */
+  empty: boolean;
+  /** 最近一次采集写入时间;null = 从未采集。 */
+  lastCollectedAt: number | null;
+}
