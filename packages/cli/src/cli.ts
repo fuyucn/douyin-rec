@@ -607,7 +607,7 @@ program
         if (reporter) {
           // Managed side node: the master owns the ledger. Persist an immutable receipt the master
           // polls (`_zero-disk-report`); this node's own ledger is never written.
-          const fin = reporter.finish({ ok: res.ok, ...(res.bvid ? { bvid: res.bvid } : {}), ...(res.error ? { error: res.error } : {}), segments: res.segments.length });
+          const fin = reporter.finish({ ok: res.ok, ...(res.bvid ? { bvid: res.bvid } : {}), ...(res.error ? { error: res.error } : {}), segments: res.segments.filter((x) => !x.uploadError).length });
           if (fin.receiptError) {
             // The archive exists but the master cannot learn about it: say so loudly.
             console.error(`[直播直传] ⚠️ ${fin.receiptError}`);
@@ -622,7 +622,8 @@ program
             // never mistaken for this job and skipped (issue #324).
             streamKey: zeroDiskStreamKey(platform.id, roomSlug, streamStartMs),
             bvid: res.bvid,
-            parts: res.segments.length,
+            // Only parts that reached the archive: a segment kept with an upload error is not a part.
+            parts: res.segments.filter((x) => !x.uploadError).length,
             startMs: streamStartMs,
           });
           // 收尾台账结果统一出口(issue #428):失败除日志外走告警通道(与上方受管分支的

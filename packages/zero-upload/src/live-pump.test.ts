@@ -133,6 +133,8 @@ function installFakeFfmpeg(
     delayMs?: number;
     holdOpen?: boolean | ((spawnIndex: number) => boolean);
     killEndsStdout?: boolean;
+    /** How long after kill() the child reports `close` (slow teardown). */
+    closeDelayMs?: number;
   } = {},
 ): { kills: NodeJS.Signals[]; readonly spawns: number } {
   const kills: NodeJS.Signals[] = [];
@@ -156,7 +158,7 @@ function installFakeFfmpeg(
       kill(sig) {
         kills.push(sig ?? "SIGKILL");
         if (opts.killEndsStdout !== false) stdout.end();
-        setTimeout(() => close(null, "SIGKILL"), 1);
+        setTimeout(() => close(null, "SIGKILL"), opts.closeDelayMs ?? 1);
       },
     };
     (async (): Promise<void> => {
@@ -2331,7 +2333,7 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
     });
     const session = new LivePumpSession({
       cookiesPath: COOKIES, room: "r", spoolDir: dir, title: "t",
-      tid: 21, tag: "x", private: true, fetchImpl: impl,
+      tid: 21, tag: "x", private: true, probeDuration: async () => 60, scanDtsGap: async () => null, fetchImpl: impl,
     });
     const r = await session.resubmitUnconfirmedPart();
     expect(r.ok).toBe(true);
@@ -2376,7 +2378,7 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
     });
     const session = new LivePumpSession({
       cookiesPath: COOKIES, room: "first", spoolDir: dir, title: "t",
-      tid: 21, tag: "x", private: true, fetchImpl: impl,
+      tid: 21, tag: "x", private: true, probeDuration: async () => 60, scanDtsGap: async () => null, fetchImpl: impl,
     });
     const r = await session.resubmitUnconfirmedPart();
     expect(r.ok, r.error ?? "").toBe(true);
@@ -2432,7 +2434,7 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
     const r = await runLivePump({
       cookiesPath: COOKIES, room: "r", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
       sizeCap: 1024, quality: "origin", submit: true, spoolMode: "none", waitForBroadcast: true,
-      fetchImpl: impl, sleep: async () => {}, drainSignal: drain.signal, log: () => {},
+      fetchImpl: impl, probeDuration: async () => 60, scanDtsGap: async () => null, sleep: async () => {}, drainSignal: drain.signal, log: () => {},
       fetch: async () => { drain.abort(); return { living: false }; },
     });
     expect(r).toMatchObject({ ok: true, outcome: "idle" });
@@ -2898,6 +2900,8 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     rateLimit601?: (call: number) => boolean;
     /** UPOS chunk size (default CHUNK). */
     chunk?: number;
+    /** `complete` for this session ignores the abort signal (a request that cannot be cancelled). */
+    completeIgnoresAbort?: (n: number) => boolean;
   }
   /** A UPOS + studio fake that remembers every session's bytes and the archive's part order. */
   function fakeUpos(opts: FakeUposOpts = {}) {
@@ -2946,7 +2950,7 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
         const n = sessionOf(u);
         events.push(`complete-start ${n}`);
         const delay = opts.completeDelayMs?.(n) ?? 0;
-        if (delay) await delayOrAbort(delay, init?.signal);
+        if (delay) await (opts.completeIgnoresAbort?.(n) ? new Promise<void>((r) => setTimeout(r, delay)) : delayOrAbort(delay, init?.signal));
         if (opts.failComplete?.(n)) return json({ OK: 0, message: "complete boom" });
         events.push(`complete ${n}`);
         return json({ OK: 1, key: `b/p${n}.ts` });
@@ -3175,7 +3179,97 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
       expect(r.ok, r.error ?? "").toBe(true);
     } else {
       expect(logs.join("\n")).toMatch(/无本地副本/);
+      // Video was lost to the stop: this must not read as a clean stop.
+      expect(r.ok).toBe(false);
     }
+  }, 30_000);
+
+  it.each(["none", "full"] as const)("[%s] a finalize that ignores abort: the run returns after budget+grace, reports it, and the result is never touched afterwards", async (spoolMode) => {
+    installFakeFfmpeg(tsStream({ gops: 40 }), { chunkEvery: 752, delayMs: 3 });
+    const ac = new AbortController();
+    const u = fakeUpos({ completeDelayMs: (n) => (n === 1 ? 2_500 : 0), completeIgnoresAbort: (n) => n === 1 });
+    const t = setInterval(() => { if (u.events.includes("complete-start 1")) { ac.abort(); clearInterval(t); } }, 5);
+    const logs: string[] = [];
+    const alerts: string[] = [];
+    const t0 = Date.now();
+    let r;
+    try {
+      r = await runLivePump(baseOpts(u, { spoolMode, signal: ac.signal, log: (m) => logs.push(m), onAlert: (m) => alerts.push(m), finalizeBudgetMs: 200, autoRetryUpload: false }));
+    } finally { clearInterval(t); }
+    expect(Date.now() - t0).toBeLessThan(2_000);
+    expect(logs.join("\n")).toContain("停止后收尾超时");
+    const snap = JSON.stringify(r);
+    const archiveAtReturn = [...u.archive];
+    await new Promise((res) => setTimeout(res, 2_800)); // the uncancellable request now finishes
+    expect(JSON.stringify(r)).toBe(snap);
+    expect(u.archive).toEqual(archiveAtReturn); // nothing was submitted after the run returned
+    if (spoolMode === "none") {
+      expect(r.ok).toBe(false);
+      expect(r.lostParts).toBeGreaterThanOrEqual(1);
+      expect(alerts.join("\n")).toContain("丢失");
+    } else {
+      const st = readLivePumpState(livePumpStatePath(dir, "sm"))!;
+      const unconfirmed = st.parts.filter((p) => !p.confirmed);
+      expect(unconfirmed.length).toBeGreaterThanOrEqual(1);
+      for (const p of unconfirmed) expect(existsSync(p.spoolPath)).toBe(true);
+    }
+  }, 30_000);
+
+  it("the finalize budget runs from the stop signal: a slow ffmpeg teardown counts against it", async () => {
+    installFakeFfmpeg(tsStream({ gops: 40 }), { chunkEvery: 752, delayMs: 3, closeDelayMs: 700 });
+    const ac = new AbortController();
+    const u = fakeUpos({ completeDelayMs: (n) => (n === 1 ? 20_000 : 0) });
+    let abortedAt = 0;
+    const t = setInterval(() => { if (u.events.includes("complete-start 1")) { abortedAt = Date.now(); ac.abort(); clearInterval(t); } }, 5);
+    try {
+      await runLivePump(baseOpts(u, { spoolMode: "full", signal: ac.signal, finalizeBudgetMs: 900, autoRetryUpload: false }));
+    } finally { clearInterval(t); }
+    // Teardown (700ms) + a budget that only started after it (900ms) would be >= 1600ms.
+    expect(Date.now() - abortedAt).toBeLessThan(1_300);
+  }, 30_000);
+
+  const seedRecovered = (names: string[]): string[] => {
+    const paths = names.map((n) => join(dir, n));
+    paths.forEach((p) => writeFileSync(p, tsStream({ gops: 6 })));
+    writeLivePumpState(livePumpStatePath(dir, "sm"), {
+      schemaVersion: 1, room: "sm", createdAt: Date.now(), title: "t", tid: 21, tag: "x", private: true,
+      bvid: "BILIfake1", aid: 7,
+      parts: paths.map((p, i) => ({ index: i, spoolPath: p, filename: basename(p), stem: "", title: `P${i + 1}`, bytes: statSync(p).size, durationSec: 1, confirmed: false })),
+      updatedAt: Date.now(),
+    });
+    return paths;
+  };
+
+  it("recovered spools go through the same gate as a fresh part: a dts-gap spool is held (alert, not submitted), the clean ones are resubmitted in order", async () => {
+    const [s0, s1, s2] = seedRecovered(["s0.live.ts", "s1.live.ts", "s2.live.ts"]) as [string, string, string];
+    const u = fakeUpos();
+    const alerts: string[] = [];
+    const r = await runLivePump(baseOpts(u, {
+      spoolMode: "full", fetch: async () => ({ living: false }), onAlert: (m) => alerts.push(m),
+      scanDtsGap: async (path: string) => (path.includes("s0.live") ? { streamIndex: 0, fromSec: 1, toSec: 9000 } : null),
+    }));
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(existsSync(s0)).toBe(false);
+    expect(existsSync(join(dir, "s0.held-gap.ts")) || existsSync(join(dir, "s0.live.held-gap.ts"))).toBe(true);
+    expect(alerts.join("\n")).toMatch(/时间戳跳变/);
+    expect(u.archive).toHaveLength(2);
+    const st = readLivePumpState(livePumpStatePath(dir, "sm"))!;
+    expect(st.parts.map((p) => p.index)).toEqual([1, 2]);
+    expect(st.parts.every((p) => p.confirmed)).toBe(true);
+    void s1; void s2;
+  }, 30_000);
+
+  it("a recovered spool that ffprobe cannot read is not resubmitted, and the run stops loudly", async () => {
+    seedRecovered(["u0.live.ts"]);
+    const u = fakeUpos();
+    const r = await runLivePump(baseOpts(u, {
+      spoolMode: "full", fetch: async () => ({ living: false }),
+      probeDuration: async () => { throw new Error("moov atom not found"); },
+    }));
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/not readable/);
+    expect(u.events.filter((e) => e.startsWith("preupload"))).toHaveLength(0);
+    expect(readLivePumpState(livePumpStatePath(dir, "sm"))!.parts.every((p) => !p.confirmed)).toBe(true);
   }, 30_000);
 
   it.each(["none", "full"] as const)("[%s] a 601 on the prefetched preupload is not fatal: the part is delivered", async (spoolMode) => {

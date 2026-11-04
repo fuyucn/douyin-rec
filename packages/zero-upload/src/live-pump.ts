@@ -489,6 +489,10 @@ export interface LivePumpSessionOpts {
   line?: string;
   /** Chunk progress observer for resubmission. */
   onChunk?: (streamedBytes: number, chunksDone: number) => void;
+  /** Readability/duration probe for a recovered spool (default ffprobe); same gate as a freshly recorded part. */
+  probeDuration?: (path: string) => Promise<number>;
+  /** dts-gap scan for a recovered spool (default ffprobe); same gate as a freshly recorded part. */
+  scanDtsGap?: (path: string) => Promise<DtsGap | null | undefined>;
   /** Optional Bilibili season section id; added after the first successful create. */
   seasonSectionId?: number;
   /** Display-only run timeline sink; errors are swallowed. */
@@ -604,14 +608,30 @@ export class LivePumpSession {
    * Re-submit every unconfirmed part in index order (a failed part can leave later, already-cut
    * parts behind it). Stops at the first failure: a later part must never be submitted past an
    * unconfirmed earlier one.
+   *
+   * A part held by the dts-gap gate is the one exception: like on the normal path it never enters
+   * the archive, its spool is kept as `.held-gap` and a loud alert is raised. Its row is dropped,
+   * so it does not block the parts after it (the archive only needs the remaining parts in order;
+   * the held part is a known, reported hole, never a silent one).
    */
-  async resubmitAllUnconfirmed(signal?: AbortSignal): Promise<{ ok: boolean; bvid?: string; aid?: number; error?: string }> {
+  async resubmitAllUnconfirmed(signal?: AbortSignal): Promise<{ ok: boolean; bvid?: string; aid?: number; error?: string; held?: number[] }> {
     let last: { ok: boolean; bvid?: string; aid?: number; error?: string } = { ok: true, bvid: this.state.bvid, aid: this.state.aid };
+    const held: number[] = [];
     while (this.lowestUnconfirmed()) {
-      last = await this.resubmitUnconfirmedPart(signal);
-      if (!last.ok) return last;
+      const before = this.lowestUnconfirmed()!.index;
+      const r = await this.resubmitUnconfirmedPart(signal);
+      if (r.held) { held.push(before); continue; }
+      last = { ok: r.ok, bvid: r.bvid, aid: r.aid, error: r.error };
+      if (!r.ok) return { ...last, ...(held.length ? { held } : {}) };
     }
-    return last;
+    return { ...last, ...(held.length ? { held } : {}) };
+  }
+
+  /** Drop a part's row (a held part that will never enter the archive). Persists. */
+  dropPart(index: number): void {
+    if (!this.state.parts.some((p) => p.index === index)) return;
+    this.state = { ...this.state, parts: this.state.parts.filter((p) => p.index !== index) };
+    try { this.persist(); } catch { /* the caller already reports the held part */ }
   }
 
   /**
@@ -624,7 +644,7 @@ export class LivePumpSession {
    * check. Callers must only invoke this when no other part is pending; a missing archive identity
    * is safe for the first unconfirmed part because `submitPart` then creates the archive path.
    */
-  async resubmitUnconfirmedPart(signal?: AbortSignal): Promise<{ ok: boolean; bvid?: string; aid?: number; error?: string }> {
+  async resubmitUnconfirmedPart(signal?: AbortSignal): Promise<{ ok: boolean; bvid?: string; aid?: number; error?: string; held?: boolean }> {
     if (this.stateUntrusted) return { ok: false, error: "state sidecar is untrusted" };
     if (this.state.pending) return { ok: false, error: "another submit is pending" };
     const target = this.lowestUnconfirmed();
@@ -635,6 +655,25 @@ export class LivePumpSession {
       return { ok: false, error: `spool missing for unconfirmed part ${target.index}: ${target.spoolPath}` };
     }
     if (bytes <= 0) return { ok: false, error: `spool empty for unconfirmed part ${target.index}` };
+    // Same gate as a freshly recorded part: a spool can reach the recovery state without ever being
+    // probed (written when a stop cut its finalize short, or behind a failed part).
+    let durationSec = 0;
+    try { durationSec = await (this.o.probeDuration ?? ffprobeDuration)(target.spoolPath); } catch { durationSec = 0; }
+    if (!(durationSec > 0)) {
+      return { ok: false, error: `spool of part ${target.index} is not readable (no duration), not resubmitting: ${target.spoolPath}` };
+    }
+    let gap: DtsGap | null | undefined;
+    try { gap = await (this.o.scanDtsGap ?? defaultScanDtsGap)(target.spoolPath); } catch { gap = undefined; }
+    if (gap) {
+      const heldPath = target.spoolPath.replace(/(\.[^./]+)?$/, ".held-gap$1");
+      let kept = target.spoolPath;
+      try { renameSync(target.spoolPath, heldPath); kept = heldPath; } catch { /* keep under the original name */ }
+      const msg = `分 P ${target.index} 时间戳跳变(流${gap.streamIndex}: ${gap.fromSec.toFixed(1)}s → ${gap.toSec.toFixed(1)}s),不投稿,spool 保留为 ${kept};稿件缺少这一 P,需人工处理`;
+      this.log(`[直播直传] ⚠️ ${msg}`);
+      try { this.o.onAlert?.(msg); } catch { /* alert channel must not break recovery */ }
+      this.dropPart(target.index);
+      return { ok: false, held: true, error: msg };
+    }
     this.log(`[直播直传] 分 P ${target.index} 未确认,按整文件重传补齐(${target.spoolPath})`);
     const fb = await reuploadSpoolFile({
       cookiesPath: this.o.cookiesPath,
@@ -657,7 +696,7 @@ export class LivePumpSession {
       stem: fb.stem,
       title: target.title,
       bytes: fb.bytes,
-      durationSec: target.durationSec,
+      durationSec,
     }, signal);
     if (!submitted.ok) return { ok: false, error: submitted.error };
     return { ok: true, bvid: submitted.bvid, aid: submitted.aid };
@@ -1135,8 +1174,11 @@ export interface PartSinkOpts {
    * that stands between those bytes and losing the part.
    */
   onSessionLate?: (info: { lossy: boolean; bufferLimitBytes: number }) => void;
-  /** Called when a full-mode part stopped waiting for its session (whole-file fallback instead). */
-  onSessionAbandoned?: () => void;
+  /**
+   * Called when a part stopped waiting for its session: full mode falls back to a whole-file upload,
+   * zero-disk (`lossy`) lost the part. Either way the pending preupload should be cancelled.
+   */
+  onSessionAbandoned?: (info: { lossy: boolean }) => void;
   /** Aborts this part's upload (the part being recorded when a stop arrives). */
   signal?: AbortSignal;
 }
@@ -1432,10 +1474,8 @@ export class PartSink {
     if (this.lateDegraded || this.waitAbandoned) {
       // Do not wait for a session that may take minutes (rate limit backoff). Full mode: the
       // whole-file fallback does its own preupload. Zero-disk: the bytes are already lost.
-      if (this.lateDegraded) {
-        this.uploadError ??= "下一分 P 的上传会话未及时就绪,按整文件回退上传";
-        this.o.onSessionAbandoned?.();
-      }
+      if (this.lateDegraded) this.uploadError ??= "下一分 P 的上传会话未及时就绪,按整文件回退上传";
+      this.o.onSessionAbandoned?.({ lossy: this.waitAbandoned });
       this.queue.close();
     } else {
       await this.settledP;
@@ -2391,6 +2431,10 @@ export interface RunLivePumpResult {
    * `segments` for what was already delivered.
    */
   outcome?: "uploaded" | "no-stream" | "idle";
+  /** Parts lost because of a stop (zero-disk without a local copy, or a recovery-state write that failed). */
+  lostParts?: number;
+  /** Zero-disk parts whose archive submit was in flight when the run was cut off; outcome unknown, not lost. */
+  unknownParts?: number;
   /** The archive already exists, so creating a new one is forbidden. */
   archiveExists?: boolean;
   bvid?: string;
@@ -2534,6 +2578,9 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       // real network (real bug: a fake-UPOS run hit live Bilibili and got -400).
       fetchImpl: o.fetchImpl,
       ...(o.reporter ? { reporter: o.reporter } : {}),
+      ...(o.probeDuration ? { probeDuration: o.probeDuration } : {}),
+      ...(o.scanDtsGap ? { scanDtsGap: o.scanDtsGap } : {}),
+      ...(o.sleep ? { sleep: o.sleep } : {}),
     });
     const info = session.sessionInfo;
     emit({
@@ -2566,6 +2613,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         if (pending.length >= 1 && pending.every((p) => existsSync(p.spoolPath))) {
           log(`[直播直传] 有 ${pending.length} 个未确认分 P(索引 ${pending.map((p) => p.index).join(",")}),按整文件重传补齐`);
           const fixed = await session.resubmitAllUnconfirmed();
+          if (fixed.held?.length) log(`[直播直传] ⚠️ 恢复时有 ${fixed.held.length} 个分 P 因时间戳跳变被扣留(索引 ${fixed.held.join(",")}),稿件缺这几 P,需人工处理`);
           if (!fixed.ok) {
             return { fail: {
               ok: false, error: fixed.error, bvid: session.bvid, aid: session.aid,
@@ -2681,8 +2729,22 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     ac: AbortController;
     sealed: boolean;
     part?: SealedPart;
+    /** The archive submit request is in flight (outcome unknown if the run is cut off now). */
+    submitting: boolean;
+    /** Cancels this part's pending preupload (backoff) once it stopped waiting for it. */
+    sessionAbort?: AbortController;
   }
   const ctxs = new Map<PartSink, PartCtx>();
+  /** When the stop signal fired: the finalize budget runs from here, not from when we start waiting. */
+  let stopAt: number | undefined = o.signal?.aborted ? Date.now() : undefined;
+  if (o.signal && !o.signal.aborted) o.signal.addEventListener("abort", () => { stopAt = Date.now(); }, { once: true });
+  /** Set when the run returns: the background chain must not touch the returned result after that. */
+  let closed = false;
+  const pushSegment = (x: LivePumpSegmentReport): void => { if (!closed) segments.push(x); };
+  /** Parts lost for good because of a stop (zero-disk, or a state write that failed). */
+  const stopLost: string[] = [];
+  /** Zero-disk parts whose archive submit was in flight when the run was cut off (outcome unknown). */
+  const stopUnknown: string[] = [];
   /** What the connection loop should do after a part's background finalize. */
   type Disposition = { kind: "continue" } | { kind: "ended" } | { kind: "stall-empty" };
   /** First background failure (the same result shape the sequential code returned). */
@@ -2717,6 +2779,8 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       ...(o.sleep ? { sleep: o.sleep } : {}),
       keepSpool: true,
     });
+    // The run already returned (budget cut-off): leave the archive and the returned result alone.
+    if (closed) return { kind: "ended" };
     const base: LivePumpSegmentReport = {
       seg: seg + 1,
       chunks: r.chunksUploaded,
@@ -2746,6 +2810,9 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       // existing error return; treating it as a source stall would spin preupload forever.
     }
 
+    // A held part (dts gap) never enters the archive and its spool was renamed: it must not stay in
+    // the recovery state pointing at a path that no longer exists.
+    if (r.tsGap) session.dropPart(index);
     const unconfirmedIndex = index;
     const persistUnconfirmed = (): string | undefined => {
       if (r.tsGap || spoolMode !== "full" || o.submit === false || r.spooledBytes <= 0) {
@@ -2830,7 +2897,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         const retried = await retryUnconfirmed();
         if (retried.ok) {
           const recovered = session.parts.find((p) => p.index === unconfirmedIndex && p.confirmed);
-          segments.push({
+          pushSegment({
             ...base,
             ...(recovered?.stem ? { stem: recovered.stem } : {}),
             spooled: r.spooledBytes,
@@ -2857,14 +2924,14 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       // by the stop signal.
       if (r.sealedBy === "abort" && segments.some((x) => x.stem)) {
         log("[直播直传] 已停止,此前分 P 均已入稿:按成功收尾");
-        segments.push({ ...base, uploadError: error });
+        pushSegment({ ...base, uploadError: error });
         return { kind: "ended" };
       }
       // A part cut off by a stop is not a failure of the run when it is recoverable: in full mode
       // its spool is in the recovery state and the next run delivers it, in order.
       if (o.signal?.aborted && session.parts.some((x) => x.index === index && !x.confirmed)) {
         log(`[直播直传] 已停止:段${seg + 1} 未传完,已记入恢复状态,下次运行按整文件补传`);
-        segments.push({ ...base, uploadError: error });
+        pushSegment({ ...base, uploadError: error });
         return { kind: "ended" };
       }
       emit({ at: Date.now(), kind: "part_failed", part: unconfirmedIndex, message: error });
@@ -2883,6 +2950,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     const report: LivePumpSegmentReport = { ...base, stem, spoolDurationSec: r.spoolDurationSec };
     if (o.submit !== false) {
       emit({ at: Date.now(), kind: "part_submit", part: index });
+      ctx.submitting = true;
       const submitted = await session.submitPart({
         index,
         spoolPath,
@@ -2891,6 +2959,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         bytes: r.spooledBytes,
         durationSec: r.spoolDurationSec,
       }, sig);
+      ctx.submitting = false;
       if (!submitted.ok) {
         log(`[直播直传] 段${seg + 1} 稿件提交失败${spoolMode === "none" ? "(无本地副本)" : ",保留 spool"}: ${submitted.error}`);
         emit({ at: Date.now(), kind: "part_failed", part: index, message: submitted.error });
@@ -2911,7 +2980,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         o.onPartConfirmed?.({ count: session.parts.filter((p) => p.confirmed).length, ...(bv ? { bvid: bv } : {}) });
       } catch { /* progress reporting must never fail an upload */ }
     }
-    segments.push(report);
+    pushSegment(report);
     // A normal part with bytes proves the source is producing again. Do not let an old stall
     // deadline cut off a healthy broadcast later in the same run.
     recoveryDeadline = part.final ? recoveryDeadlineAfterPart(r.sealedBy, Date.now(), recoverWindowMs) : undefined;
@@ -2938,14 +3007,45 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     return { kind: "continue" };
   };
 
+  /** Duration estimate for a sealed part before ffprobe has seen it (PTS span, else wall clock). */
+  const estimateDuration = (part: SealedPart): number =>
+    part.timing && part.timing.durationSec > 0 ? part.timing.durationSec : Math.max(0.001, part.sealedMs / 1000);
+  const titleOf = (ctx: PartCtx): string =>
+    o.partTitle?.(ctx.index + 1, liveTitle) ?? ctx.fileName.replace(/\.live(?=\.[^.]+$)/, "").replace(/\.[^.]+$/, "");
+
+  /**
+   * Full mode: put a sealed part into the recovery state the moment it is sealed (its spool is
+   * complete and closed), and let the confirmation clear it. A SIGKILL (or a finalize that never
+   * ends) then cannot orphan the spool: the orphan sweep only trusts what the state references.
+   * The recovered spool is probed and gap-scanned before it is resubmitted (see the session).
+   */
+  const noteSealed = (ctx: PartCtx, part: SealedPart): void => {
+    if (spoolMode !== "full" || o.submit === false) return;
+    const bytes = part.sink.spooledBytes;
+    if (bytes <= 0 || session.parts.some((p) => p.index === ctx.index)) return;
+    const note = session.noteUnconfirmedPart({
+      index: ctx.index, spoolPath: ctx.spoolPath, title: titleOf(ctx), bytes, durationSec: estimateDuration(part),
+    });
+    if (!note.ok) log(`[直播直传] ⚠️ 段${ctx.seg + 1} 无法提前记入恢复状态: ${note.error}`);
+  };
+
   /**
    * A sealed part that will not be finalized (an earlier part failed, or a stop cut it off).
-   * Full mode: record it in the recovery state so the next run re-uploads it, in index order.
-   * None mode: there is no local copy, so it is lost; say so loudly.
+   * Full mode: it is (or is now put) in the recovery state so the next run re-uploads it, in index
+   * order. None mode: there is no local copy, so it is lost (or, with a submit in flight, unknown);
+   * say so loudly and remember it so the run does not end as a success.
    */
   const keepOrLose = async (ctx: PartCtx, part: SealedPart, why: string, probe: boolean): Promise<void> => {
     const label = `段${ctx.seg + 1}`;
+    const row = session.parts.find((p) => p.index === ctx.index);
+    if (row?.confirmed) return; // already in the archive: nothing was lost
     if (spoolMode === "none") {
+      if (ctx.submitting) {
+        stopUnknown.push(label);
+        log(`[直播直传] ⚠️ ${label} ${why};归档提交请求进行中,结果未知(下次启动按状态文件核对),不是已丢失`);
+        return;
+      }
+      stopLost.push(label);
       log(`[直播直传] ⚠️ ${label} ${why};零落盘无本地副本,该分 P 已丢失`);
       emit({ at: Date.now(), kind: "part_failed", part: ctx.index, message: `${why};无本地副本,已丢失` });
       return;
@@ -2955,24 +3055,23 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       log(`[直播直传] ${label} ${why}(spool 保留: ${ctx.spoolPath})`);
       return;
     }
-    let durationSec = part.timing && part.timing.durationSec > 0 ? part.timing.durationSec : Math.max(0.001, part.sealedMs / 1000);
+    if (row) {
+      log(`[直播直传] ⚠️ ${label} ${why};已在恢复状态,下次运行按整文件补传(${ctx.spoolPath})`);
+      return;
+    }
+    let durationSec = estimateDuration(part);
     if (probe) {
       try {
         const d = await (o.probeDuration ?? ffprobeDuration)(ctx.spoolPath);
         if (Number.isFinite(d) && d > 0) durationSec = d;
       } catch { /* keep the PTS/wall estimate */ }
     }
-    const note = session.noteUnconfirmedPart({
-      index: ctx.index,
-      spoolPath: ctx.spoolPath,
-      title: o.partTitle?.(ctx.index + 1, liveTitle) ?? ctx.fileName.replace(/\.live(?=\.[^.]+$)/, "").replace(/\.[^.]+$/, ""),
-      bytes,
-      durationSec,
-    });
+    const note = session.noteUnconfirmedPart({ index: ctx.index, spoolPath: ctx.spoolPath, title: titleOf(ctx), bytes, durationSec });
     if (note.ok) {
       emit({ at: Date.now(), kind: "part_unconfirmed", part: ctx.index, bytes });
       log(`[直播直传] ⚠️ ${label} ${why};已记入恢复状态,下次运行按整文件补传(${ctx.spoolPath})`);
     } else {
+      stopLost.push(`${label}(恢复状态写入失败)`);
       log(`[直播直传] ⚠️ ${label} ${why};且无法记入恢复状态(${note.error}),spool 保留: ${ctx.spoolPath}`);
     }
   };
@@ -3006,16 +3105,21 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     return run;
   };
   /**
-   * Wait for the finalize chain. After a stop it only waits `finalizeBudgetMs`, then cuts the
-   * unfinished parts off (their own signals) and records them, so the process ends before the
-   * supervisor's SIGKILL. Returns after the chain settled or the cut-off grace passed.
+   * Wait for the finalize chain. After a stop it waits until `finalizeBudgetMs` after the stop
+   * signal fired (runStream teardown counts), then cuts the unfinished parts off through their own
+   * signals; what cannot be cut off is reported. Total from the signal stays under the budget plus
+   * a short grace, i.e. before the supervisor's SIGKILL.
    */
   const settleFinalize = async (): Promise<void> => {
     const chain = finalizeTail;
+    const budgetMs = Math.max(0, o.finalizeBudgetMs ?? 7_000);
     let timer: NodeJS.Timeout | undefined;
     let onAbort: (() => void) | undefined;
     const budget = new Promise<"budget">((resolve) => {
-      const arm = (): void => { timer = setTimeout(() => resolve("budget"), Math.max(0, o.finalizeBudgetMs ?? 7_000)); };
+      const arm = (): void => {
+        const left = Math.max(0, (stopAt ?? Date.now()) + budgetMs - Date.now());
+        timer = setTimeout(() => resolve("budget"), left);
+      };
       if (o.signal?.aborted) arm();
       else if (o.signal) { onAbort = arm; o.signal.addEventListener("abort", arm, { once: true }); }
     });
@@ -3023,7 +3127,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     if (timer) clearTimeout(timer);
     if (onAbort) o.signal?.removeEventListener("abort", onAbort);
     if (first === "done") return;
-    log(`[直播直传] ⚠️ 停止后 ${o.finalizeBudgetMs ?? 7_000}ms 内仍有 ${ctxs.size} 个分 P 未收尾,中止并记入恢复状态`);
+    log(`[直播直传] ⚠️ 停止后 ${budgetMs}ms 内仍有 ${ctxs.size} 个分 P 未收尾,中止并记入恢复状态`);
     const pendingCtxs = [...ctxs.entries()];
     for (const [, c] of pendingCtxs) c.ac.abort();
     // Aborted work normally settles within moments; do not wait on something that ignores abort.
@@ -3117,7 +3221,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       return p;
     };
     /** Allocate the part index and open its sink; the index is fixed here, not at submit time. */
-    const openPart = (session: PreuploadResult | Promise<PreuploadResult>, fileName: string): PartSink => {
+    const openPart = (session: PreuploadResult | Promise<PreuploadResult>, fileName: string, sessionAbort?: AbortController): PartSink => {
       const seg = partSeq++;
       const index = nextIndex++;
       partsOpened++;
@@ -3141,19 +3245,31 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
             ? `[直播直传] ⚠️ 段${seg + 1} 上传会话未及时就绪(预取 preupload 被限流/超时);零落盘仅能缓冲 ${(bufferLimitBytes / MiB).toFixed(0)}MiB,超出该分 P 将丢失`
             : `[直播直传] 段${seg + 1} 上传会话未及时就绪,继续写 spool;会话就绪后补传,否则整文件回退`);
         },
-        onSessionAbandoned: () => log(`[直播直传] ⚠️ 段${seg + 1} 上传会话始终未就绪,改为整文件回退上传`),
+        onSessionAbandoned: ({ lossy }) => {
+          // Stop the pending preupload (and its 601 backoff): the whole-file fallback does its own.
+          ctx.sessionAbort?.abort();
+          log(lossy
+            ? `[直播直传] ⚠️ 段${seg + 1} 上传会话始终未就绪,缓冲已满:该分 P 丢失`
+            : `[直播直传] ⚠️ 段${seg + 1} 上传会话始终未就绪,改为整文件回退上传`);
+        },
       });
-      const ctx: PartCtx = { index, seg, fileName, spoolPath, openedAt: Date.now(), onChunk, ac, sealed: false };
+      const ctx: PartCtx = { index, seg, fileName, spoolPath, openedAt: Date.now(), onChunk, ac, sealed: false, submitting: false, ...(sessionAbort ? { sessionAbort } : {}) };
       ctxs.set(sink, ctx);
       if (connSignal.aborted) ac.abort();
-      else connSignal.addEventListener("abort", () => { if (!ctx.sealed) ac.abort(); }, { once: true });
+      else {
+        const onConnAbort = (): void => { if (!ctx.sealed) ac.abort(); };
+        connSignal.addEventListener("abort", onConnAbort, { once: true });
+        void sink.finished.then(() => connSignal.removeEventListener("abort", onConnAbort));
+      }
       return sink;
     };
     const openNext = (): PartSink => {
       const fileName = fileNameFor(partSeq);
       const pre = prefetch;
       prefetch = undefined;
-      return openPart(pre ? pre.promise : startPreupload(fileName, connSignal), fileName);
+      if (pre) return openPart(pre.promise, fileName, pre.abort);
+      const own = new AbortController();
+      return openPart(startPreupload(fileName, AbortSignal.any([connSignal, own.signal])), fileName, own);
     };
     /** At ~80% of the size/duration threshold: get the next part's session ready before the cut. */
     const onPrefetch = (): void => {
@@ -3191,6 +3307,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
           const c = ctxs.get(part.sink)!;
           c.sealed = true;
           c.part = part;
+          noteSealed(c, part);
           emit({ at: Date.now(), kind: "part_sealed", part: c.index, bytes: part.sink.spooledBytes });
           void enqueueFinalize(part);
         },
@@ -3223,6 +3340,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       const fc = ctxs.get(fp.sink)!;
       fc.sealed = true;
       fc.part = fp;
+      noteSealed(fc, fp);
       emit({ at: Date.now(), kind: "part_sealed", part: fc.index, bytes: fp.sink.spooledBytes });
       finalRun = enqueueFinalize(fp, stream.exit);
     } else if (stream.discardedTail) {
@@ -3256,13 +3374,27 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       bvid: session.bvid,
       aid: session.aid,
       title: session.archiveTitle,
-      segments,
+      segments: [...segments],
       spoolDir: o.spoolDir,
       statePath: livePumpStatePath(o.spoolDir, o.room),
     };
   }
+  // A stop that cost video must not look like a clean stop: callers (exit code, ledger) read `ok`.
+  if (stopLost.length) {
+    const error = `停止时 ${stopLost.length} 个分 P 丢失(${stopLost.join(",")})${stopUnknown.length ? `;另有 ${stopUnknown.length} 个提交结果未知` : ""}`;
+    try { o.onAlert?.(error); } catch { /* alert channel must not break the return */ }
+    return {
+      ok: false, error, bvid: session.bvid, aid: session.aid, title: session.archiveTitle,
+      segments: [...segments], spoolDir: o.spoolDir, statePath: livePumpStatePath(o.spoolDir, o.room),
+      lostParts: stopLost.length, ...(stopUnknown.length ? { unknownParts: stopUnknown.length } : {}),
+    };
+  }
+  if (stopUnknown.length) {
+    try { o.onAlert?.(`停止时 ${stopUnknown.length} 个分 P 的归档提交结果未知,下次启动将按状态文件核对`); } catch { /* alert channel */ }
+  }
   return {
     ok: true,
+    ...(stopUnknown.length ? { unknownParts: stopUnknown.length } : {}),
     // No part from this run. With `waitForBroadcast` that is a stop/drain while waiting, or a room
     // that dropped right after it was seen live; both are normal endings (the next run waits
     // in-process again). Without it, the stream could not be acquired and the run gave up.
@@ -3272,11 +3404,14 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     bvid: session.bvid,
     aid: session.aid,
     title: session.archiveTitle,
-    segments,
+    segments: [...segments],
     spoolDir: o.spoolDir,
     statePath: livePumpStatePath(o.spoolDir, o.room),
   };
   } finally {
+    // Whatever is still running on the chain must not touch the returned result any more.
+    closed = true;
+    for (const c of ctxs.values()) c.ac.abort();
     await session.drainSeason();
     await stopDanmu();
   }
