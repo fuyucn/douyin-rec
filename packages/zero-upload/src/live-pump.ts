@@ -200,6 +200,8 @@ export interface SegmentExit {
  * reported failures were thousands of seconds).
  */
 export const DTS_GAP_FORWARD_SEC = 30;
+/** Where a gap-held spool is kept: `name.held-gap.ext`. The orphan sweep only matches the plain name. */
+export const heldGapPath = (spoolPath: string): string => spoolPath.replace(/(\.[^./]+)?$/, ".held-gap$1");
 const defaultScanDtsGap = (path: string): Promise<DtsGap | null | undefined> => ffprobeDtsGap(path, DTS_GAP_FORWARD_SEC);
 
 /** Matches the ffmpeg warnings emitted when input timestamps jump or go backwards. */
@@ -652,6 +654,14 @@ export class LivePumpSession {
     const doFetch = this.o.fetchImpl ?? fetch;
     let bytes = 0;
     try { bytes = statSync(target.spoolPath).size; } catch {
+      if (existsSync(heldGapPath(target.spoolPath))) {
+        // A crash between renaming a gap spool and dropping its row: the part is already held.
+        const msg = `分 P ${target.index} 已因时间戳跳变扣留(${heldGapPath(target.spoolPath)}),稿件缺少这一 P,需人工处理`;
+        this.log(`[直播直传] ⚠️ ${msg}`);
+        try { this.o.onAlert?.(msg); } catch { /* alert channel must not break recovery */ }
+        this.dropPart(target.index);
+        return { ok: false, held: true, error: msg };
+      }
       return { ok: false, error: `spool missing for unconfirmed part ${target.index}: ${target.spoolPath}` };
     }
     if (bytes <= 0) return { ok: false, error: `spool empty for unconfirmed part ${target.index}` };
@@ -660,18 +670,34 @@ export class LivePumpSession {
     let durationSec = 0;
     try { durationSec = await (this.o.probeDuration ?? ffprobeDuration)(target.spoolPath); } catch { durationSec = 0; }
     if (!(durationSec > 0)) {
+      // By design this blocks the room: an unreadable spool is not a known gap, so dropping its row
+      // would silently lose the only copy (and the next parts must not pass an unconfirmed one).
+      // Manual fix: repair or delete the spool and remove its row from the state file (plans/043).
       return { ok: false, error: `spool of part ${target.index} is not readable (no duration), not resubmitting: ${target.spoolPath}` };
     }
     let gap: DtsGap | null | undefined;
     try { gap = await (this.o.scanDtsGap ?? defaultScanDtsGap)(target.spoolPath); } catch { gap = undefined; }
     if (gap) {
-      const heldPath = target.spoolPath.replace(/(\.[^./]+)?$/, ".held-gap$1");
-      let kept = target.spoolPath;
-      try { renameSync(target.spoolPath, heldPath); kept = heldPath; } catch { /* keep under the original name */ }
-      const msg = `分 P ${target.index} 时间戳跳变(流${gap.streamIndex}: ${gap.fromSec.toFixed(1)}s → ${gap.toSec.toFixed(1)}s),不投稿,spool 保留为 ${kept};稿件缺少这一 P,需人工处理`;
+      const heldPath = heldGapPath(target.spoolPath);
+      const why = `分 P ${target.index} 时间戳跳变(流${gap.streamIndex}: ${gap.fromSec.toFixed(1)}s → ${gap.toSec.toFixed(1)}s),不投稿`;
+      // Drop the row BEFORE renaming: a crash in between then leaves a stray `.held-gap` file, never a
+      // row pointing at a missing spool. If the rename fails the row goes back (the orphan sweep keeps
+      // what the state references, so the only copy survives) and the room waits for a human.
+      const row = this.state.parts.find((x) => x.index === target.index)!;
+      this.dropPart(target.index);
+      try {
+        renameSync(target.spoolPath, heldPath);
+      } catch (e) {
+        this.state = { ...this.state, parts: [...this.state.parts, row].sort((a, b) => a.index - b.index) };
+        try { this.persist(); } catch { /* the alert below carries the situation */ }
+        const msg = `${why},但 spool 无法改名扣留(${String((e as Error)?.message ?? e).slice(0, 120)}),保留在恢复状态,需人工处理: ${target.spoolPath}`;
+        this.log(`[直播直传] ⚠️ ${msg}`);
+        try { this.o.onAlert?.(msg); } catch { /* alert channel must not break recovery */ }
+        return { ok: false, error: msg };
+      }
+      const msg = `${why},spool 保留为 ${heldPath};稿件缺少这一 P,需人工处理`;
       this.log(`[直播直传] ⚠️ ${msg}`);
       try { this.o.onAlert?.(msg); } catch { /* alert channel must not break recovery */ }
-      this.dropPart(target.index);
       return { ok: false, held: true, error: msg };
     }
     this.log(`[直播直传] 分 P ${target.index} 未确认,按整文件重传补齐(${target.spoolPath})`);
@@ -782,7 +808,7 @@ export class LivePumpSession {
       this.state = {
         ...this.state,
         parts: existing
-          ? this.state.parts.map((x) => x.index === p.partIndex ? { ...x, confirmed } : x)
+          ? this.state.parts.map((x) => x.index === p.partIndex ? { ...x, confirmed, ...(p.stem ? { stem: p.stem } : {}) } : x)
           : [...this.state.parts, part],
         pending: undefined,
       };
@@ -1932,6 +1958,8 @@ async function finalizeRecordedPart(o: {
   scanDtsGap?: (path: string) => Promise<DtsGap | null | undefined>;
   /** Sleep seam for the fallback preupload 601 backoff (tests). */
   sleep?: (ms: number) => Promise<void>;
+  /** Called right before a gap-held spool is renamed (drop its recovery row). */
+  onHold?: () => void;
   keepSpool?: boolean;
 }): Promise<SegmentRunResult & { session?: PreuploadResult }> {
   const { rec, session, spoolPath, spoolMode } = o;
@@ -1988,7 +2016,10 @@ async function finalizeRecordedPart(o: {
       rec.tsGap = gap;
       // Rename so the orphan sweep (which only matches the plain spool name) keeps the sample.
       let kept = spoolPath;
-      const heldPath = spoolPath.replace(/(\.[^./]+)?$/, ".held-gap$1");
+      const heldPath = heldGapPath(spoolPath);
+      // Drop the recovery row first (see the session's recovery path): a crash between the two steps
+      // must not leave a row pointing at a spool that was renamed away.
+      o.onHold?.();
       try { renameSync(spoolPath, heldPath); kept = heldPath; } catch { /* keep under the original name */ }
       const why = `时间戳跳变(流${gap.streamIndex}: ${gap.fromSec.toFixed(1)}s → ${gap.toSec.toFixed(1)}s),不投稿,spool 保留为 ${kept}`;
       rec.uploadError = rec.uploadError ? `${rec.uploadError};${why}` : why;
@@ -2431,7 +2462,10 @@ export interface RunLivePumpResult {
    * `segments` for what was already delivered.
    */
   outcome?: "uploaded" | "no-stream" | "idle";
-  /** Parts lost because of a stop (zero-disk without a local copy, or a recovery-state write that failed). */
+  /**
+   * Parts lost because of a stop (zero-disk without a local copy, or a recovery-state write that failed).
+   * Set on `ok:true` runs too: a run that delivered parts stays successful so its archive is ledgered.
+   */
   lostParts?: number;
   /** Zero-disk parts whose archive submit was in flight when the run was cut off; outcome unknown, not lost. */
   unknownParts?: number;
@@ -2610,7 +2644,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         const pending = session.parts.filter((p) => !p.confirmed);
         // Unconfirmed parts whose spools all survived are recoverable: re-upload each whole file and
         // append them in index order. A missing spool means a real gap, so stop for a human.
-        if (pending.length >= 1 && pending.every((p) => existsSync(p.spoolPath))) {
+        if (pending.length >= 1 && pending.every((p) => existsSync(p.spoolPath) || existsSync(heldGapPath(p.spoolPath)))) {
           log(`[直播直传] 有 ${pending.length} 个未确认分 P(索引 ${pending.map((p) => p.index).join(",")}),按整文件重传补齐`);
           const fixed = await session.resubmitAllUnconfirmed();
           if (fixed.held?.length) log(`[直播直传] ⚠️ 恢复时有 ${fixed.held.length} 个分 P 因时间戳跳变被扣留(索引 ${fixed.held.join(",")}),稿件缺这几 P,需人工处理`);
@@ -2777,6 +2811,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       onFallback: (p, b) => log(`[直播直传] ↺ 段${seg + 1} 走整文件回退重传: ${(b / MiB).toFixed(1)}MiB (${p})`),
       probeDuration: o.probeDuration, scanDtsGap: o.scanDtsGap,
       ...(o.sleep ? { sleep: o.sleep } : {}),
+      onHold: () => session.dropPart(index),
       keepSpool: true,
     });
     // The run already returned (budget cut-off): leave the archive and the returned result alone.
@@ -2923,6 +2958,11 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       // exit code) discard real uploaded parts just because the *last* segment was cut short
       // by the stop signal.
       if (r.sealedBy === "abort" && segments.some((x) => x.stem)) {
+        if (spoolMode === "none" && r.spooledBytes > 0) {
+          // The part being recorded at the stop had no local copy: it is lost. Not silent any more.
+          stopLost.push(`段${seg + 1}`);
+          log(`[直播直传] ⚠️ 段${seg + 1} 停止时正在录制,零落盘无本地副本,该分 P 已丢失`);
+        }
         log("[直播直传] 已停止,此前分 P 均已入稿:按成功收尾");
         pushSegment({ ...base, uploadError: error });
         return { kind: "ended" };
@@ -3379,26 +3419,36 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       statePath: livePumpStatePath(o.spoolDir, o.room),
     };
   }
-  // A stop that cost video must not look like a clean stop: callers (exit code, ledger) read `ok`.
-  if (stopLost.length) {
-    const error = `停止时 ${stopLost.length} 个分 P 丢失(${stopLost.join(",")})${stopUnknown.length ? `;另有 ${stopUnknown.length} 个提交结果未知` : ""}`;
-    try { o.onAlert?.(error); } catch { /* alert channel must not break the return */ }
-    return {
-      ok: false, error, bvid: session.bvid, aid: session.aid, title: session.archiveTitle,
-      segments: [...segments], spoolDir: o.spoolDir, statePath: livePumpStatePath(o.spoolDir, o.room),
-      lostParts: stopLost.length, ...(stopUnknown.length ? { unknownParts: stopUnknown.length } : {}),
-    };
+  // "Archive delivered" and "video lost" are separate signals. A run that put at least one part into
+  // an archive stays `ok:true` with its `bvid` (the ledger / master receipt record it, exit code 0 as
+  // before); the loss rides along as `lostParts` / `unknownParts` plus an alert. Only a run that
+  // delivered nothing and lost video reports failure.
+  const delivered = !!session.bvid && session.parts.some((p) => p.confirmed);
+  const lossNote = stopLost.length
+    ? `停止时 ${stopLost.length} 个分 P 丢失(${stopLost.join(",")})${stopUnknown.length ? `;另有 ${stopUnknown.length} 个提交结果未知` : ""}`
+    : undefined;
+  if (lossNote) {
+    log(`[直播直传] ⚠️ ${lossNote}${delivered ? "(其余分 P 已入稿,按已交付收尾)" : ""}`);
+    try { o.onAlert?.(lossNote); } catch { /* alert channel must not break the return */ }
+    if (!delivered) {
+      return {
+        ok: false, error: lossNote, bvid: session.bvid, aid: session.aid, title: session.archiveTitle,
+        segments: [...segments], spoolDir: o.spoolDir, statePath: livePumpStatePath(o.spoolDir, o.room),
+        lostParts: stopLost.length, ...(stopUnknown.length ? { unknownParts: stopUnknown.length } : {}),
+      };
+    }
   }
   if (stopUnknown.length) {
     try { o.onAlert?.(`停止时 ${stopUnknown.length} 个分 P 的归档提交结果未知,下次启动将按状态文件核对`); } catch { /* alert channel */ }
   }
   return {
     ok: true,
+    ...(stopLost.length ? { lostParts: stopLost.length } : {}),
     ...(stopUnknown.length ? { unknownParts: stopUnknown.length } : {}),
     // No part from this run. With `waitForBroadcast` that is a stop/drain while waiting, or a room
     // that dropped right after it was seen live; both are normal endings (the next run waits
     // in-process again). Without it, the stream could not be acquired and the run gave up.
-    ...(segments.some((x) => x.stem)
+    ...(segments.some((x) => x.stem) || (stopLost.length > 0 && delivered)
       ? { outcome: "uploaded" as const }
       : { outcome: o.waitForBroadcast ? "idle" as const : "no-stream" as const }),
     bvid: session.bvid,

@@ -506,7 +506,7 @@ export function createZeroDiskReporter(o: {
   running(): void;
   partConfirmed(info: { count: number; bvid?: string }): void;
   /** `receiptError` is set when the archive exists but the receipt could not be persisted. */
-  finish(res: { ok: boolean; bvid?: string; error?: string; segments: number }): { receiptWritten: boolean; receiptError?: string };
+  finish(res: { ok: boolean; bvid?: string; error?: string; segments: number; lostParts?: number; unknownParts?: number }): { receiptWritten: boolean; receiptError?: string };
   failed(message: string): void;
 } {
   const now = o.now ?? Date.now;
@@ -543,7 +543,9 @@ export function createZeroDiskReporter(o: {
         const atMs = now();
         const streamKey = zeroDiskStreamKey(o.platform, o.roomSlug, startMs);
         const r = writeZeroDiskReceipt({ id: `${o.platform}:${o.roomSlug}:${startMs}`, platform: o.platform, roomSlug: o.roomSlug, streamKey, startMs, bvid: res.bvid, parts, atMs }, atMs);
-        write("finished");
+        // The receipt has no field for it; the status message carries the loss to the master console.
+        const note = res.lostParts ? `${res.lostParts} 个分 P 在停止时丢失` : res.unknownParts ? `${res.unknownParts} 个分 P 提交结果未知` : undefined;
+        write("finished", note);
         return { receiptWritten: r.written };
       } catch (e) {
         const msg = `archive uploaded but the receipt could not be written, the master ledger will not record it: ${(e as Error).message}`;

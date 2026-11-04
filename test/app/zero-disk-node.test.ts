@@ -503,6 +503,16 @@ describe("createZeroDiskReporter — one managed run: status trail + exactly one
     expect(rep.receipts[0]!.streamKey).toMatch(/-zd$/);
     expect(rep.status[0]).toMatchObject({ state: "finished", parts: 2, bvid: "BVfake1" });
   });
+  it("a run that delivered parts but lost some at stop still writes its receipt, and the loss rides on the status", () => {
+    const r = mk();
+    const fin = r.finish({ ok: true, bvid: "BVfake1", segments: 2, lostParts: 1 });
+    expect(fin).toEqual({ receiptWritten: true });
+    const rep = buildZeroDiskReport({ isAlive: () => false });
+    expect(rep.receipts).toHaveLength(1);
+    expect(rep.receipts[0]).toMatchObject({ bvid: "BVfake1", parts: 2 });
+    expect(rep.status[0]).toMatchObject({ state: "finished", bvid: "BVfake1" });
+    expect(String(rep.status[0]!.message)).toContain("丢失");
+  });
   it("parts = the larger of confirmed-so-far and this run's segments", () => {
     const r = mk();
     r.finish({ ok: true, bvid: "BVfake1", segments: 3 });

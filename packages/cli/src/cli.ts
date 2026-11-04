@@ -607,7 +607,7 @@ program
         if (reporter) {
           // Managed side node: the master owns the ledger. Persist an immutable receipt the master
           // polls (`_zero-disk-report`); this node's own ledger is never written.
-          const fin = reporter.finish({ ok: res.ok, ...(res.bvid ? { bvid: res.bvid } : {}), ...(res.error ? { error: res.error } : {}), segments: res.segments.filter((x) => !x.uploadError).length });
+          const fin = reporter.finish({ ok: res.ok, ...(res.bvid ? { bvid: res.bvid } : {}), ...(res.error ? { error: res.error } : {}), segments: res.segments.filter((x) => !x.uploadError).length, ...(res.lostParts ? { lostParts: res.lostParts } : {}), ...(res.unknownParts ? { unknownParts: res.unknownParts } : {}) });
           if (fin.receiptError) {
             // The archive exists but the master cannot learn about it: say so loudly.
             console.error(`[直播直传] ⚠️ ${fin.receiptError}`);
@@ -616,6 +616,7 @@ program
             console.log(`[直播直传] 回执已写入,等待 master 拉取并记台账: ${res.bvid}`);
           }
         } else if (res.ok && res.bvid) {
+          if (res.lostParts) console.log(`[直播直传] ⚠️ 本场有 ${res.lostParts} 个分 P 在停止时丢失,其余已入稿,照常记台账`);
           const r = recordStreamUpload({
             syncDbPath: syncDbPathFor(dbPathForDataRoot(process.env.DOUYIN_REC_ROOT ?? process.cwd())),
             // Own key namespace + real start time, so a regular recording of the same room and day is

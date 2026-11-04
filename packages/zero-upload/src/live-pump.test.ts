@@ -7,7 +7,7 @@ import { build } from "esbuild";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
-import { mkdtempSync, rmSync, readFileSync, statSync, writeFileSync, existsSync, writeSync, mkdirSync, readdirSync, utimesSync, truncateSync } from "node:fs";
+import { mkdtempSync, chmodSync, rmSync, readFileSync, statSync, writeFileSync, existsSync, writeSync, mkdirSync, readdirSync, utimesSync, truncateSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -2902,6 +2902,8 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     chunk?: number;
     /** `complete` for this session ignores the abort signal (a request that cannot be cancelled). */
     completeIgnoresAbort?: (n: number) => boolean;
+    /** Filenames already in the archive before the run. */
+    initialArchive?: string[];
   }
   /** A UPOS + studio fake that remembers every session's bytes and the archive's part order. */
   function fakeUpos(opts: FakeUposOpts = {}) {
@@ -2911,7 +2913,7 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     const names: string[] = [];
     const events: string[] = [];
     const sessions = new Map<number, Array<{ partNumber: number; body: Buffer }>>();
-    let archive: string[] = [];
+    let archive: string[] = [...(opts.initialArchive ?? [])];
     const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
     const sessionOf = (u: URL): number => Number(/p(\d+)\.ts/.exec(u.pathname)?.[1] ?? 0);
     /** Wait `ms`, but reject like fetch does when the caller's signal aborts. */
@@ -3239,6 +3241,97 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     });
     return paths;
   };
+
+  it.each(["none"] as const)("[%s] a run that delivered parts stays ok with its bvid when a stop loses the part being recorded (lostParts + alert)", async (spoolMode) => {
+    installFakeFfmpeg(tsStream({ gops: 40 }), { chunkEvery: 752, delayMs: 3 });
+    const ac = new AbortController();
+    const u = fakeUpos();
+    const alerts: string[] = [];
+    const r = await runLivePump(baseOpts(u, {
+      spoolMode, signal: ac.signal, onAlert: (m) => alerts.push(m),
+      onPartConfirmed: ({ count }) => { if (count === 1) ac.abort(); },
+    }));
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(r.bvid).toBe("BILIfake1");
+    expect(r.outcome).toBe("uploaded");
+    expect(r.lostParts).toBeGreaterThanOrEqual(1);
+    expect(alerts.join("\n")).toContain("丢失");
+  }, 30_000);
+
+  it("a run that delivered part 1 and lost part 2 to the finalize cut-off is still ok with its bvid", async () => {
+    installFakeFfmpeg(tsStream({ gops: 40 }), { chunkEvery: 752, delayMs: 3 });
+    const ac = new AbortController();
+    const u = fakeUpos({ completeDelayMs: (n) => (n === 2 ? 2_500 : 0), completeIgnoresAbort: (n) => n === 2 });
+    const t = setInterval(() => { if (u.events.includes("complete-start 2")) { ac.abort(); clearInterval(t); } }, 5);
+    const alerts: string[] = [];
+    let r;
+    try {
+      r = await runLivePump(baseOpts(u, { spoolMode: "none", signal: ac.signal, onAlert: (m) => alerts.push(m), finalizeBudgetMs: 200 }));
+    } finally { clearInterval(t); }
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(r.bvid).toBe("BILIfake1");
+    expect(r.lostParts).toBeGreaterThanOrEqual(1);
+    expect(r.segments.some((x) => x.stem === "p1")).toBe(true);
+    expect(alerts.join("\n")).toContain("丢失");
+    await new Promise((res) => setTimeout(res, 2_800));
+  }, 30_000);
+
+  it("a recovery row whose spool is gone but whose .held-gap sibling exists is treated as held, not as a blocker", async () => {
+    const [good] = seedRecovered(["h1.live.ts"]) as [string];
+    // Part 0 was renamed to .held-gap, but the crash happened before its row was dropped.
+    const gone = join(dir, "h0.live.ts");
+    writeFileSync(join(dir, "h0.live.held-gap.ts"), tsStream({ gops: 2 }));
+    const st = readLivePumpState(livePumpStatePath(dir, "sm"))!;
+    writeLivePumpState(livePumpStatePath(dir, "sm"), { ...st, parts: [{ ...st.parts[0]!, index: 0, spoolPath: gone, filename: "h0.live.ts", stem: "" }, { ...st.parts[0]!, index: 1, spoolPath: good }] });
+    const u = fakeUpos();
+    const alerts: string[] = [];
+    const r = await runLivePump(baseOpts(u, { spoolMode: "full", fetch: async () => ({ living: false }), onAlert: (m) => alerts.push(m) }));
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(alerts.join("\n")).toMatch(/扣留/);
+    expect(readLivePumpState(livePumpStatePath(dir, "sm"))!.parts.map((p) => p.index)).toEqual([1]);
+    expect(u.archive).toHaveLength(1);
+  }, 30_000);
+
+  it("a held spool that cannot be renamed keeps its row (the only copy stays referenced) and alerts", async () => {
+    const sub = join(dir, "sub");
+    mkdirSync(sub);
+    const spool = join(sub, "r0.live.ts");
+    writeFileSync(spool, tsStream({ gops: 6 }));
+    writeLivePumpState(livePumpStatePath(dir, "sm"), {
+      schemaVersion: 1, room: "sm", createdAt: Date.now(), title: "t", tid: 21, tag: "x", private: true, bvid: "BILIfake1", aid: 7,
+      parts: [{ index: 0, spoolPath: spool, filename: "r0.live.ts", stem: "", title: "P1", bytes: statSync(spool).size, durationSec: 1, confirmed: false }],
+      updatedAt: Date.now(),
+    });
+    const u = fakeUpos();
+    const alerts: string[] = [];
+    chmodSync(sub, 0o555); // rename inside it fails
+    let r;
+    try {
+      r = await runLivePump(baseOpts(u, {
+        spoolMode: "full", fetch: async () => ({ living: false }), onAlert: (m) => alerts.push(m),
+        scanDtsGap: async () => ({ streamIndex: 0, fromSec: 1, toSec: 9000 }),
+      }));
+    } finally { chmodSync(sub, 0o755); }
+    expect(r.ok).toBe(false);
+    expect(alerts.join("\n")).toMatch(/无法改名/);
+    expect(existsSync(spool)).toBe(true);
+    expect(readLivePumpState(livePumpStatePath(dir, "sm"))!.parts.map((p) => p.index)).toEqual([0]);
+  }, 30_000);
+
+  it("recovering a pending append keeps the pending stem on the existing row", async () => {
+    const [sp] = seedRecovered(["m0.live.ts"]) as [string];
+    const st = readLivePumpState(livePumpStatePath(dir, "sm"))!;
+    writeLivePumpState(livePumpStatePath(dir, "sm"), {
+      ...st,
+      pending: { kind: "append", partIndex: 0, stem: "p9", title: "P1", bytes: statSync(sp).size, durationSec: 1, spoolPath: sp },
+    });
+    const u = fakeUpos({ initialArchive: ["p9"] });
+    const r = await runLivePump(baseOpts(u, { spoolMode: "full", fetch: async () => ({ living: false }) }));
+    expect(r.ok, r.error ?? "").toBe(true);
+    const row = readLivePumpState(livePumpStatePath(dir, "sm"))!.parts[0]!;
+    expect(row.confirmed).toBe(true);
+    expect(row.stem).toBe("p9");
+  }, 30_000);
 
   it("recovered spools go through the same gate as a fresh part: a dts-gap spool is held (alert, not submitted), the clean ones are resubmitted in order", async () => {
     const [s0, s1, s2] = seedRecovered(["s0.live.ts", "s1.live.ts", "s2.live.ts"]) as [string, string, string];
