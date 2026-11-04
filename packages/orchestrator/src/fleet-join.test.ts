@@ -25,6 +25,17 @@ describe("joinFleetNode", () => {
     expect(verifyFleetToken(p, "n1", sent.token)).toBe(true);
   });
 
+  it("failed delivery keeps the node's current token valid (no rotation before the node has the new one)", async () => {
+    const p = tokenPath();
+    const base = { host: "h", dataRoot: "/r", nodeId: "n1", controllerUrl: "http://m", tokenPath: p };
+    let first = "";
+    await joinFleetNode({ ...base, ssh: async (_h, _l, input) => { first = (JSON.parse(input) as { token: string }).token; return '{"ok":true}\n'; } });
+    expect(verifyFleetToken(p, "n1", first)).toBe(true);
+    expect((await joinFleetNode({ ...base, ssh: async () => { throw new Error("ssh rc=255"); } })).result).toBe("failed");
+    expect((await joinFleetNode({ ...base, ssh: async () => '{"ok":false,"error":"disk full"}\n' })).result).toBe("failed");
+    expect(verifyFleetToken(p, "n1", first)).toBe(true);
+  });
+
   it("old bundle (unknown command) → unsupported; other errors → failed", async () => {
     const base = { host: "h", dataRoot: "/r", nodeId: "n1", controllerUrl: "http://m", tokenPath: tokenPath() };
     expect((await joinFleetNode({ ...base, ssh: async () => { throw new Error("error: unknown command '_fleet-join'"); } })).result).toBe("unsupported");

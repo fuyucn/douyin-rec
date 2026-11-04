@@ -14,6 +14,7 @@ import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "n
 import { dirname, resolve } from "node:path";
 import {
   FLEET_CLOSE,
+  FLEET_HEARTBEAT_COMMAND_TIMEOUT_MS,
   FLEET_HEARTBEAT_COMMANDS,
   FLEET_HEARTBEAT_MS,
   FLEET_IDLE_TIMEOUT_MS,
@@ -94,7 +95,17 @@ export interface FleetAgentOptions {
   WebSocketImpl?: typeof WebSocket;
   heartbeatMs?: number;
   idleTimeoutMs?: number;
+  heartbeatCommandTimeoutMs?: number;
   now?: () => number;
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms);
+    timer.unref?.();
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 }
 
 export interface FleetAgent {
@@ -111,6 +122,7 @@ export function startFleetAgent(o: FleetAgentOptions): FleetAgent {
   const now = o.now ?? Date.now;
   const heartbeatMs = o.heartbeatMs ?? FLEET_HEARTBEAT_MS;
   const idleTimeoutMs = o.idleTimeoutMs ?? FLEET_IDLE_TIMEOUT_MS;
+  const heartbeatCommandTimeoutMs = o.heartbeatCommandTimeoutMs ?? FLEET_HEARTBEAT_COMMAND_TIMEOUT_MS;
   const url = fleetSocketUrl(o.config.controllerUrl);
   const ownRoot = resolve(o.dataRoot);
 
@@ -143,7 +155,8 @@ export function startFleetAgent(o: FleetAgentOptions): FleetAgent {
         const run = o.commands[cmd];
         if (!run) continue;
         try {
-          const r = await run(o.dataRoot, []);
+          // Bounded: a command that never settles must not wedge every later heartbeat.
+          const r = await withTimeout(run(o.dataRoot, []), heartbeatCommandTimeoutMs, cmd);
           outputs[cmd] = { stdout: r.stdout, exitCode: r.exitCode, at: now() };
         } catch (e) {
           // Leave it out: the master then falls back to asking (req / ssh) instead of trusting a stale value.
@@ -228,6 +241,7 @@ export function startFleetAgent(o: FleetAgentOptions): FleetAgent {
       const frame = parseFleetFrame(typeof ev.data === "string" ? ev.data : "");
       if (!frame) return;
       if (frame.t === "welcome") {
+        if (welcomed) return; // duplicate welcome: the heartbeat timer is already running
         welcomed = true;
         failures = 0;
         log(`[fleet] connected to ${o.config.controllerUrl}`);
@@ -248,8 +262,9 @@ export function startFleetAgent(o: FleetAgentOptions): FleetAgent {
       welcomed = false;
       clearTimers();
       if (stopped) return;
-      if (ev.code === FLEET_CLOSE.unauthorized) {
-        log("[fleet] master rejected this node's token; retrying in 10 minutes (ssh fallback stays active)");
+      if (ev.code === FLEET_CLOSE.unauthorized || ev.code === FLEET_CLOSE.protocol) {
+        const why = ev.code === FLEET_CLOSE.unauthorized ? "this node's token" : "the protocol version";
+        log(`[fleet] master rejected ${why}; retrying in 10 minutes (ssh fallback stays active)`);
         scheduleReconnect(FLEET_UNAUTHORIZED_BACKOFF_MS);
       } else if (ev.code === FLEET_CLOSE.superseded) {
         scheduleReconnect(FLEET_SUPERSEDED_BACKOFF_MS);

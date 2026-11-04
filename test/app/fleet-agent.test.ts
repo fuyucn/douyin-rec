@@ -141,13 +141,42 @@ describe("fleet agent", () => {
     expect(m.sockets.length).toBe(2);
   });
 
-  it("unauthorized close → does not reconnect soon", async () => {
+  it.each([["unauthorized", FLEET_CLOSE.unauthorized], ["protocol", FLEET_CLOSE.protocol]])(
+    "%s close → does not reconnect soon",
+    async (_name, code) => {
+      const m = await startMaster();
+      agent(m.url);
+      await m.next("hello");
+      m.sockets[0].close(code);
+      await new Promise((r) => setTimeout(r, 1500));
+      expect(m.sockets.length).toBe(1);
+    },
+  );
+
+  it("a heartbeat command that never settles is skipped, later heartbeats still flow", async () => {
     const m = await startMaster();
-    agent(m.url);
+    agent(m.url, {
+      commands: { ...commands, disk: () => new Promise(() => {}) },
+      heartbeatCommandTimeoutMs: 50,
+    });
     await m.next("hello");
-    m.sockets[0].close(FLEET_CLOSE.unauthorized);
-    await new Promise((r) => setTimeout(r, 1500));
-    expect(m.sockets.length).toBe(1);
+    m.sockets[0].send(JSON.stringify({ t: "welcome", protocol: 1 }));
+    const first = await m.next("heartbeat");
+    expect(Object.keys(first.outputs as object).sort()).toEqual(["node-status", "recording-status"]);
+    const at = m.frames.indexOf(first) + 1;
+    await m.next("heartbeat", at);
+  });
+
+  it("a duplicate welcome does not start a second heartbeat timer", async () => {
+    const m = await startMaster();
+    agent(m.url, { heartbeatMs: 200 });
+    await m.next("hello");
+    m.sockets[0].send(JSON.stringify({ t: "welcome", protocol: 1 }));
+    m.sockets[0].send(JSON.stringify({ t: "welcome", protocol: 1 }));
+    await new Promise((r) => setTimeout(r, 1100));
+    const beats = m.frames.filter((f) => f.t === "heartbeat").length;
+    // One timer: the immediate beat + ~5 ticks. Two timers would roughly double that.
+    expect(beats).toBeLessThanOrEqual(7);
   });
 
   it("idle link (no frame from master) is closed and redialed", async () => {

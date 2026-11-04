@@ -21,6 +21,14 @@ export const FLEET_HEARTBEAT_MS = 10_000;
 export const FLEET_PING_MS = 15_000;
 /** Either side treats a connection with no frame for this long as dead. */
 export const FLEET_IDLE_TIMEOUT_MS = 45_000;
+/**
+ * The master only routes requests to a node heard from within this window (a live agent sends a heartbeat
+ * every FLEET_HEARTBEAT_MS). A half-open link stops producing frames long before FLEET_IDLE_TIMEOUT_MS
+ * drops it; without this, requests in that gap would each wait out their full timeout before falling back.
+ */
+export const FLEET_ROUTE_FRESH_MS = 25_000;
+/** A heartbeat command that has not settled after this long is skipped for that heartbeat. */
+export const FLEET_HEARTBEAT_COMMAND_TIMEOUT_MS = 20_000;
 
 /** Close codes (4000–4999 is the application range). */
 export const FLEET_CLOSE = Object.freeze({
@@ -31,6 +39,7 @@ export const FLEET_CLOSE = Object.freeze({
   /** Protocol version mismatch or malformed frame. */
   protocol: 4400,
 });
+/** Agent backoff after `unauthorized` or `protocol` (retrying sooner cannot succeed). */
 export const FLEET_UNAUTHORIZED_BACKOFF_MS = 10 * 60_000;
 export const FLEET_SUPERSEDED_BACKOFF_MS = 30_000;
 

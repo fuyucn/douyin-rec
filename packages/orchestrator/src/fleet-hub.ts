@@ -22,6 +22,7 @@ import {
   FLEET_MAX_FRAME_BYTES,
   FLEET_PING_MS,
   FLEET_PROTOCOL,
+  FLEET_ROUTE_FRESH_MS,
   FLEET_WS_PATH,
   parseFleetFrame,
   type FleetCommandOutput,
@@ -30,7 +31,7 @@ import {
 
 /** What `SshTransport` needs from the hub (an interface so tests can fake it). */
 export interface FleetLink {
-  /** Node is connected, authenticated and answering. */
+  /** Node is connected, authenticated and was heard from recently (FLEET_ROUTE_FRESH_MS). */
   connected(nodeId: string): boolean;
   /** Node's agent advertised this command. */
   supports(nodeId: string, cmd: string): boolean;
@@ -65,9 +66,18 @@ function readTokenFile(path: string): TokenFile {
   }
 }
 
+/** A fresh random node token (plaintext; persist only its hash with {@link saveFleetToken}). */
+export const newFleetToken = (): string => randomBytes(32).toString("hex");
+
 /** Issue (or rotate) a node's token; returns the plaintext once — only its hash is stored. */
 export function issueFleetToken(path: string, nodeId: string, now = Date.now()): string {
-  const token = randomBytes(32).toString("hex");
+  const token = newFleetToken();
+  saveFleetToken(path, nodeId, token, now);
+  return token;
+}
+
+/** Store `token`'s hash as the node's only valid token (replaces any previous one). */
+export function saveFleetToken(path: string, nodeId: string, token: string, now = Date.now()): void {
   const file = readTokenFile(path);
   file.nodes[nodeId] = { sha256: sha256(token), issuedAt: now };
   mkdirSync(dirname(path), { recursive: true });
@@ -75,7 +85,6 @@ export function issueFleetToken(path: string, nodeId: string, now = Date.now()):
   writeFileSync(tmp, JSON.stringify(file, null, 2) + "\n", { mode: 0o600 });
   chmodSync(tmp, 0o600);
   renameSync(tmp, path);
-  return token;
 }
 
 /** Constant-time check of a presented token against the stored hash. */
@@ -103,6 +112,7 @@ export interface FleetHubOptions {
   now?: () => number;
   pingMs?: number;
   idleTimeoutMs?: number;
+  routeFreshMs?: number;
   /** Called when a node's recording rooms change between heartbeats (lets the master reconcile at once). */
   onRecordingChange?: (nodeId: string) => void;
 }
@@ -113,6 +123,7 @@ export class FleetHub implements FleetLink {
   private readonly log: (m: string) => void;
   private readonly now: () => number;
   private readonly idleTimeoutMs: number;
+  private readonly routeFreshMs: number;
   private readonly pingTimer: ReturnType<typeof setInterval>;
   private nextId = 1;
 
@@ -120,6 +131,7 @@ export class FleetHub implements FleetLink {
     this.log = o.log ?? (() => {});
     this.now = o.now ?? Date.now;
     this.idleTimeoutMs = o.idleTimeoutMs ?? FLEET_IDLE_TIMEOUT_MS;
+    this.routeFreshMs = o.routeFreshMs ?? FLEET_ROUTE_FRESH_MS;
     this.pingTimer = setInterval(() => this.sweep(), o.pingMs ?? FLEET_PING_MS);
     this.pingTimer.unref?.();
   }
@@ -133,11 +145,17 @@ export class FleetHub implements FleetLink {
   }
 
   connected(nodeId: string): boolean {
-    return this.conns.has(nodeId);
+    return this.live(nodeId) !== null;
   }
 
   supports(nodeId: string, cmd: string): boolean {
-    return this.conns.get(nodeId)?.commands.has(cmd) ?? false;
+    return this.live(nodeId)?.commands.has(cmd) ?? false;
+  }
+
+  /** The node's connection if it was heard from recently enough to route a request to it. */
+  private live(nodeId: string): Conn | null {
+    const c = this.conns.get(nodeId);
+    return c && this.now() - c.state.lastFrameAt <= this.routeFreshMs ? c : null;
   }
 
   cached(nodeId: string, cmd: FleetHeartbeatCommand, maxAgeMs: number): FleetCommandOutput | null {

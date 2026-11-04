@@ -119,6 +119,19 @@ describe("FleetHub", () => {
     expect(hub.connected("n1")).toBe(true);
   });
 
+  it("a node not heard from within routeFreshMs is not routable, before the idle sweep drops it", async () => {
+    let t = 0;
+    const { hub, url } = await startHub({ now: () => t, routeFreshMs: 100, idleTimeoutMs: 10_000 });
+    const n = await node(url);
+    await n.next("welcome");
+    expect(hub.connected("n1")).toBe(true);
+    t = 200;
+    expect(hub.connected("n1")).toBe(false);
+    expect(hub.supports("n1", "tasks")).toBe(false);
+    n.ws.send(JSON.stringify({ t: "heartbeat", outputs: {} }));
+    await until(() => hub.connected("n1"));
+  });
+
   it("silent node is dropped by the sweep", async () => {
     let t = 0;
     const { hub, url } = await startHub({ now: () => t, pingMs: 30, idleTimeoutMs: 100 });

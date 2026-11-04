@@ -1,12 +1,13 @@
 /**
  * fleet-join.ts — hand a worker its fleet credentials over ssh (plans/042 Task 3).
  *
- * The master issues a fresh token (only its hash is kept), then runs `_fleet-join <dataRoot>` on the node
- * with the config JSON on stdin, so the token never appears in argv on either machine. The node's serve
- * picks the file up within a minute and dials in.
+ * The master generates a fresh token and runs `_fleet-join <dataRoot>` on the node with the config JSON on
+ * stdin, so the token never appears in argv on either machine. Only after the node confirms the write is
+ * the token's hash stored: a failed delivery (node briefly unreachable) must not revoke the token the node
+ * still holds. The node's serve picks the file up within a minute and dials in.
  */
 import { spawn } from "node:child_process";
-import { issueFleetToken } from "./fleet-hub.js";
+import { newFleetToken, saveFleetToken } from "./fleet-hub.js";
 
 export type FleetJoinResult = "joined" | "unsupported" | "failed";
 
@@ -39,12 +40,14 @@ export async function joinFleetNode(o: {
   ssh?: SshWithStdin;
 }): Promise<{ result: FleetJoinResult; detail?: string }> {
   const nodePrefix = o.remoteNode ?? `node ${o.dataRoot}/dist/douyin-rec.mjs`;
-  const token = issueFleetToken(o.tokenPath, o.nodeId);
+  const token = newFleetToken();
   const payload = JSON.stringify({ controllerUrl: o.controllerUrl, nodeId: o.nodeId, token });
   try {
     const out = await (o.ssh ?? defaultSshWithStdin)(o.host, `${nodePrefix} _fleet-join ${o.dataRoot}`, payload, 20_000);
     const v = JSON.parse(out.trim().split("\n").pop() ?? "{}") as { ok?: boolean; error?: string };
-    return v.ok ? { result: "joined" } : { result: "failed", detail: v.error ?? "no ok in reply" };
+    if (!v.ok) return { result: "failed", detail: v.error ?? "no ok in reply" };
+    saveFleetToken(o.tokenPath, o.nodeId, token);
+    return { result: "joined" };
   } catch (e) {
     const msg = String((e as Error)?.message ?? e);
     // Old bundle without the command: ssh fallback stays in place, nothing else to do.
