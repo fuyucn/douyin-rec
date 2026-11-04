@@ -40,8 +40,8 @@ import {
   type SpawnFn,
 } from "./live-pump.js";
 import type { PreuploadResult } from "./upos-stream.js";
-import { stream as tsStream } from "./ts-fixture.js";
-import { TS_PACKET as TS_PACKET_BYTES } from "./ts-cutter.js";
+import { stream as tsStream, pat, pmt, VIDEO, AUDIO } from "./ts-fixture.js";
+import { TS_PACKET as TS_PACKET_BYTES, TsCutter } from "./ts-cutter.js";
 
 const CHUNK = 1024;
 
@@ -2877,6 +2877,16 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     return path;
   };
 
+  /** Duration of a synthetic TS file from its video PTS (stands in for ffprobe). */
+  const ptsProbe = async (path: string): Promise<number> => {
+    const c = new TsCutter({ maxPartBytes: Number.MAX_SAFE_INTEGER });
+    c.push(readFileSync(path));
+    c.flush();
+    const t = c.currentTiming();
+    if (!t) throw new Error("no pts");
+    return t.durationSec;
+  };
+
   interface FakeUposOpts {
     /** Delay before a session's `complete` answers (ms), by 1-based session number. */
     completeDelayMs?: (n: number) => number;
@@ -2884,28 +2894,49 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     putDelayMs?: (n: number) => number;
     /** Answer `complete` with a failure for this session number. */
     failComplete?: (n: number) => boolean;
+    /** Answer the Nth preupload request (1-based, counting every request) with a 601 rate limit. */
+    rateLimit601?: (call: number) => boolean;
+    /** UPOS chunk size (default CHUNK). */
+    chunk?: number;
   }
   /** A UPOS + studio fake that remembers every session's bytes and the archive's part order. */
   function fakeUpos(opts: FakeUposOpts = {}) {
     let preuploads = 0;
+    let preuploadCalls = 0;
+    /** The `name` each successful preupload was opened with, in order. */
+    const names: string[] = [];
     const events: string[] = [];
     const sessions = new Map<number, Array<{ partNumber: number; body: Buffer }>>();
     let archive: string[] = [];
     const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
     const sessionOf = (u: URL): number => Number(/p(\d+)\.ts/.exec(u.pathname)?.[1] ?? 0);
+    /** Wait `ms`, but reject like fetch does when the caller's signal aborts. */
+    const delayOrAbort = (ms: number, signal?: AbortSignal | null): Promise<void> => new Promise((resolve, reject) => {
+      if (signal?.aborted) return reject(new DOMException("aborted", "AbortError"));
+      const t = setTimeout(() => { signal?.removeEventListener("abort", onAbort); resolve(); }, ms);
+      const onAbort = (): void => { clearTimeout(t); reject(new DOMException("aborted", "AbortError")); };
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
     const fake = (async (input: string | URL | Request, init?: RequestInit) => {
       const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
       const m = (init?.method ?? "GET").toUpperCase();
+      if (init?.signal?.aborted) throw new DOMException("aborted", "AbortError");
       if (u.pathname === "/preupload") {
+        const call = ++preuploadCalls;
+        if (opts.rateLimit601?.(call)) {
+          events.push(`preupload-601 ${call}`);
+          return new Response(JSON.stringify({ code: 601, message: "too fast" }), { status: 406 });
+        }
         const n = ++preuploads;
         events.push(`preupload ${n}`);
-        return json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: `upos://b/p${n}.ts` });
+        names.push(u.searchParams.get("name") ?? "");
+        return json({ OK: 1, chunk_size: opts.chunk ?? CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: `upos://b/p${n}.ts` });
       }
       if (m === "POST" && u.searchParams.has("uploads")) return json({ upload_id: `uid-${sessionOf(u)}` });
       if (m === "PUT") {
         const n = sessionOf(u);
         const delay = opts.putDelayMs?.(n) ?? 0;
-        if (delay) await new Promise((r) => setTimeout(r, delay));
+        if (delay) await delayOrAbort(delay, init?.signal);
         const list = sessions.get(n) ?? [];
         list.push({ partNumber: Number(u.searchParams.get("partNumber")), body: Buffer.from(init!.body as ArrayBuffer) });
         sessions.set(n, list);
@@ -2913,8 +2944,9 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
       }
       if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) {
         const n = sessionOf(u);
+        events.push(`complete-start ${n}`);
         const delay = opts.completeDelayMs?.(n) ?? 0;
-        if (delay) await new Promise((r) => setTimeout(r, delay));
+        if (delay) await delayOrAbort(delay, init?.signal);
         if (opts.failComplete?.(n)) return json({ OK: 0, message: "complete boom" });
         events.push(`complete ${n}`);
         return json({ OK: 1, key: `b/p${n}.ts` });
@@ -2932,7 +2964,7 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     }) as unknown as typeof fetch;
     /** The bytes uploaded to session n, in part order. */
     const uploaded = (n: number): Buffer => Buffer.concat((sessions.get(n) ?? []).sort((a, b) => a.partNumber - b.partNumber).map((x) => x.body));
-    return { fake, events, uploaded, get archive() { return archive; }, get preuploads() { return preuploads; } };
+    return { fake, events, uploaded, get preuploadCalls() { return preuploadCalls; }, names, get archive() { return archive; }, get preuploads() { return preuploads; } };
   }
 
   const baseOpts = (u: ReturnType<typeof fakeUpos>, o: Partial<Parameters<typeof runLivePump>[0]> = {}) => ({
@@ -2941,6 +2973,9 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     quality: "origin", submit: true, spoolMode: "none" as "full" | "none",
     fetch: async () => ({ living: true, url: "http://x/y.ts" }),
     sleep: async () => {}, fetchImpl: u.fake, scanDtsGap: async () => null,
+    // ffprobe is the real duration source in full mode; the synthetic TS cannot be probed, so read
+    // the same PTS span back from the spool file.
+    probeDuration: ptsProbe,
     ...o,
   });
   const keyframeAt = (b: Buffer, o: number): boolean => ((b[o + 1] & 0x1f) << 8 | b[o + 2]) === 0x100 && (b[o + 1] & 0x40) !== 0 && (b[o + 5] & 0x40) !== 0;
@@ -3094,6 +3129,155 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     expect(r.segments).toHaveLength(2);
     expect(ff.spawns).toBe(1);
   }, 30_000);
+
+  // ── review fixes (#452 follow-up) ───────────────────────────────────────────────────────────────
+  it.each(["none", "full"] as const)("[%s] SIGTERM while an earlier part is finalizing does not kill it: it completes and is submitted", async (spoolMode) => {
+    installFakeFfmpeg(tsStream({ gops: 40 }), { chunkEvery: 752, delayMs: 3 });
+    const ac = new AbortController();
+    const u = fakeUpos({ completeDelayMs: (n) => (n === 1 ? 300 : 0) });
+    // Stop the moment part 1's complete is in flight (part 1 is sealed; a later part is recording).
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const res = await u.fake(input, init);
+      return res;
+    }) as typeof fetch;
+    const t = setInterval(() => { if (u.events.includes("complete-start 1")) { ac.abort(); clearInterval(t); } }, 5);
+    const logs: string[] = [];
+    let r;
+    try {
+      r = await runLivePump(baseOpts(u, { spoolMode, signal: ac.signal, fetchImpl, log: (m) => logs.push(m), finalizeBudgetMs: 5_000 }));
+    } finally { clearInterval(t); }
+    expect(ac.signal.aborted).toBe(true);
+    expect(u.events).toContain("complete 1");
+    expect(u.archive[0]).toBe("p1");
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(r.segments.some((x) => x.stem === "p1")).toBe(true);
+  }, 30_000);
+
+  it.each(["none", "full"] as const)("[%s] after a stop, unfinished sealed parts are cut off within the finalize budget (full: recoverable, none: reported lost)", async (spoolMode) => {
+    installFakeFfmpeg(tsStream({ gops: 40 }), { chunkEvery: 752, delayMs: 3 });
+    const ac = new AbortController();
+    // Part 1's complete would take far longer than the budget.
+    const u = fakeUpos({ completeDelayMs: (n) => (n === 1 ? 20_000 : 0) });
+    const t = setInterval(() => { if (u.events.includes("complete-start 1")) { ac.abort(); clearInterval(t); } }, 5);
+    const logs: string[] = [];
+    const t0 = Date.now();
+    let r;
+    try {
+      r = await runLivePump(baseOpts(u, { spoolMode, signal: ac.signal, log: (m) => logs.push(m), finalizeBudgetMs: 300, autoRetryUpload: false }));
+    } finally { clearInterval(t); }
+    expect(Date.now() - t0).toBeLessThan(5_000);
+    expect(logs.join("\n")).toContain("仍有");
+    const st = readLivePumpState(livePumpStatePath(dir, "sm"));
+    if (spoolMode === "full") {
+      const unconfirmed = st!.parts.filter((p) => !p.confirmed);
+      expect(unconfirmed.length).toBeGreaterThanOrEqual(1);
+      for (const p of unconfirmed) expect(existsSync(p.spoolPath)).toBe(true);
+      expect(r.ok, r.error ?? "").toBe(true);
+    } else {
+      expect(logs.join("\n")).toMatch(/无本地副本/);
+    }
+  }, 30_000);
+
+  it.each(["none", "full"] as const)("[%s] a 601 on the prefetched preupload is not fatal: the part is delivered", async (spoolMode) => {
+    // Calls: 1 = first part, 2 and 3 = the next part's prefetch (rate limited twice), then fine.
+    installFakeFfmpeg(tsStream({ gops: 24 }), { chunkEvery: 752, delayMs: 3 });
+    const u = fakeUpos({ rateLimit601: (c) => c === 2 || c === 3 });
+    const logs: string[] = [];
+    const r = await runLivePump(baseOpts(u, {
+      spoolMode, log: (m) => logs.push(m),
+      sleep: () => new Promise((res) => setTimeout(res, 120)),
+    }));
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(u.events.filter((e) => e.startsWith("preupload-601"))).toHaveLength(2);
+    expect(r.segments.length).toBeGreaterThanOrEqual(2);
+    expect(u.archive.length).toBe(r.segments.length);
+    expect(r.segments.every((x) => !x.backpressured)).toBe(true);
+    const all = logs.join("\n");
+    expect(all).toContain("命中限流");
+    // The late session must be visible the moment it is late.
+    expect(all).toContain("上传会话未及时就绪");
+    if (spoolMode === "none") expect(all).toMatch(/零落盘仅能缓冲/);
+  }, 30_000);
+
+  it("[full] part N fails with N+1 already cut: both stay recoverable and the next run submits them in index order", async () => {
+    installFakeFfmpeg(tsStream({ gops: 24 }), { chunkEvery: 752, delayMs: 3 });
+    let failing = true;
+    // Part 2 (session 2) fails slowly, so later parts are already cut when it fails.
+    const u = fakeUpos({ completeDelayMs: (n) => (n === 2 ? 150 : 0), failComplete: (n) => failing && n >= 2 });
+    const logs: string[] = [];
+    const r1 = await runLivePump(baseOpts(u, { spoolMode: "full", log: (m) => logs.push(m), autoRetryUpload: false }));
+    expect(r1.ok).toBe(false);
+    const st1 = readLivePumpState(livePumpStatePath(dir, "sm"))!;
+    const unconfirmed = st1.parts.filter((p) => !p.confirmed).map((p) => p.index).sort((a, b) => a - b);
+    expect(unconfirmed.length, JSON.stringify(st1.parts)).toBeGreaterThanOrEqual(2);
+    expect(unconfirmed[0]).toBe(1);
+    unconfirmed.forEach((idx, i) => expect(idx).toBe(1 + i));
+    for (const p of st1.parts.filter((x) => !x.confirmed)) expect(existsSync(p.spoolPath)).toBe(true);
+
+    // Next run: nothing live; recovery re-uploads and appends every unconfirmed part, in order.
+    failing = false;
+    const before = u.events.length;
+    const r2 = await runLivePump(baseOpts(u, { spoolMode: "full", fetch: async () => ({ living: false }), log: (m) => logs.push(m) }));
+    expect(r2.ok, r2.error ?? "").toBe(true);
+    const st2 = readLivePumpState(livePumpStatePath(dir, "sm"))!;
+    expect(st2.parts.every((p) => p.confirmed)).toBe(true);
+    const sessionOrder = u.archive.map((f) => Number(/p(\d+)/.exec(f)![1]));
+    expect(sessionOrder).toEqual([...sessionOrder].sort((a, b) => a - b));
+    expect(u.archive).toHaveLength(1 + unconfirmed.length);
+    expect(u.events.slice(before).filter((e) => e.startsWith("submit")).length).toBe(unconfirmed.length);
+  }, 30_000);
+
+  it("a part's file name is computed once: the prefetched session and the spool use the same name", async () => {
+    installFakeFfmpeg(tsStream({ gops: 24 }), { chunkEvery: 752, delayMs: 3 });
+    const u = fakeUpos();
+    // A name that differs on every call: recomputing it for the prefetch and for the open would disagree.
+    const r = await runLivePump(baseOpts(u, { spoolMode: "full", spoolName: (seg) => `s${seg}_${Math.random().toString(36).slice(2)}.live.ts` }));
+    expect(r.ok, r.error ?? "").toBe(true);
+    const st = readLivePumpState(livePumpStatePath(dir, "sm"))!;
+    expect(st.parts.length).toBeGreaterThanOrEqual(3);
+    expect(u.names.slice(0, st.parts.length)).toEqual(st.parts.map((p) => p.filename));
+  }, 30_000);
+
+  it("a state file from before the ordered list (one unconfirmed part) still loads and recovers", async () => {
+    // Legacy shape: a single unconfirmed part with an empty stem, as the old WAL wrote it.
+    const spool = join(dir, "old_001.live.ts");
+    writeFileSync(spool, tsStream({ gops: 6 }));
+    writeLivePumpState(livePumpStatePath(dir, "sm"), {
+      schemaVersion: 1, room: "sm", createdAt: Date.now(), title: "t", tid: 21, tag: "x", private: true,
+      bvid: "BILIfake1", aid: 7,
+      parts: [{ index: 0, spoolPath: spool, filename: "old_001.live.ts", stem: "", title: "p", bytes: statSync(spool).size, durationSec: 1, confirmed: false }],
+      updatedAt: Date.now(),
+    });
+    const u = fakeUpos();
+    const r = await runLivePump(baseOpts(u, { spoolMode: "full", fetch: async () => ({ living: false }) }));
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(readLivePumpState(livePumpStatePath(dir, "sm"))!.parts.every((p) => p.confirmed)).toBe(true);
+  }, 30_000);
+
+  it.each([
+    ["size cuts at keyframes", 30, 4],
+    ["forced cuts (no keyframe inside the cap)", 4, 40],
+  ] as const)("small sizeCap, chunk = PAT+PMT: %s go through PartSink and the uploader, parts end on a chunk boundary", async (_name, gops, framesPerGop) => {
+    const chunk = TS_PACKET_BYTES * 2;
+    const input = tsStream({ gops, framesPerGop });
+    installFakeFfmpeg(input, { chunkEvery: 1000 });
+    const u = fakeUpos({ chunk });
+    const r = await runLivePump(baseOpts(u, { spoolMode: "full", sizeCap: chunk * 40, maxMs: 0 }));
+    expect(r.ok, r.error ?? "").toBe(true);
+    const n = r.segments.length;
+    expect(n).toBeGreaterThanOrEqual(3);
+    expect(u.archive).toEqual(Array.from({ length: n }, (_, i) => `p${i + 1}`));
+    // Every part went through the streaming path: a wrong tail length would show up as a failed part
+    // that only the whole-file fallback rescues.
+    expect(r.segments.every((x) => !x.usedFileFallback && !x.uploadError && !x.backpressured)).toBe(true);
+    const parts = Array.from({ length: n }, (_, i) => u.uploaded(i + 1));
+    // Byte conservation through the real PartSink + uploader.
+    expect(Buffer.concat(parts.map((p, i) => (i === 0 ? p : p.subarray(HEAD)))).equals(input)).toBe(true);
+    // No part exceeds the declared size.
+    for (const p of parts) expect(p.length).toBeLessThanOrEqual(chunk * 40);
+    // At least one part is an exact multiple of the chunk size (no partial tail chunk).
+    expect(parts.some((p) => p.length % chunk === 0)).toBe(true);
+  }, 30_000);
 });
 
 describe("runStream: cutting and stopping", () => {
@@ -3150,18 +3334,102 @@ describe("runStream: cutting and stopping", () => {
     expect(keyframeAtOffset(input, kept.length)).toBe(true);
   });
 
-  it("a head-only tail after the last cut is dropped, not uploaded as a part", async () => {
-    // PAT+PMT+exactly the bytes up to the cut: the stream ends right after the cut.
-    const input = tsStream({ gops: 2 });
-    installFakeFfmpeg(input.subarray(0, 376 + 3008), { chunkEvery: 1000 });
+  // One GOP of 8 frames fills a part exactly (PAT+PMT+6016 bytes); the next packet is a repeated PAT,
+  // which forces a cut with no keyframe. What follows decides whether the new part is a part at all.
+  const exactFill = (): Buffer => tsStream({ gops: 1, framesPerGop: 8 });
+  const runTail = async (tail: Buffer) => {
+    const input = Buffer.concat([exactFill(), pat(), pmt([[0x1b, VIDEO], [0x0f, AUDIO]]), tail]);
+    installFakeFfmpeg(input, { chunkEvery: 1000 });
     const sinks = [sinkFor("a.ts")];
+    const sealed: SealedPart[] = [];
     const res = await runStream({
-      args: ["-fake"], sizeCap: CHUNK * 1000, firstSink: sinks[0]!,
-      openNext: () => { const s = sinkFor("b.ts"); sinks.push(s); return s; },
-      onPartSealed: () => {},
+      args: ["-fake"], sizeCap: exactFill().length, firstSink: sinks[0]!,
+      openNext: () => { const s = sinkFor(`b${sinks.length}.ts`); sinks.push(s); return s; },
+      onPartSealed: (p) => sealed.push(p),
     });
-    expect(res.discardedTail).toBe(false); // no cut happened at all: one part only
-    expect(res.finalPart?.sink).toBe(sinks[0]);
+    return { res, sealed, sinks, input };
+  };
+
+  it("a tail that holds only repeated PAT/PMT after the last cut is dropped, not uploaded as a part", async () => {
+    const { res, sealed, sinks } = await runTail(Buffer.alloc(0));
+    expect(sealed).toHaveLength(1);
+    expect(sealed[0]!.sink).toBe(sinks[0]);
+    expect(res.discardedTail).toBe(true);
+    expect(res.finalPart).toBeUndefined();
+    expect(res.discardedSink).toBe(sinks[1]);
+  });
+
+  it("a tail that carries real bytes from ffmpeg is never discarded, even if it is not a whole packet", async () => {
+    const { res, sealed, sinks, input } = await runTail(Buffer.alloc(100, 0xaa));
+    expect(res.discardedTail).toBe(false);
+    expect(res.finalPart?.sink).toBe(sinks[1]);
+    const kept = Buffer.concat([...sealed.map((p) => readFileSync(p.sink.spoolPath)), readFileSync(res.finalPart!.sink.spoolPath)]);
+    // Every ffmpeg byte is in some part (the second part's own head is the only addition).
+    expect(kept.length).toBe(input.length + TS_PACKET_BYTES * 2);
+    expect(readFileSync(res.finalPart!.sink.spoolPath).subarray(-100).equals(Buffer.alloc(100, 0xaa))).toBe(true);
+  });
+
+  it.each(["full", "none"] as const)("[%s] a session that never arrives: full keeps the spool for a whole-file upload, none overflows loudly", async (spoolMode) => {
+    const late: Array<{ lossy: boolean }> = [];
+    let abandoned = 0;
+    const sink = new PartSink({
+      sizeCap: 64 * 1024 * 1024, spoolPath: join(dir, "late.ts"), spoolMode, queueCapacity: 1,
+      session: new Promise<PreuploadResult>(() => {}),
+      onSessionLate: (i) => late.push(i),
+      onSessionAbandoned: () => { abandoned++; },
+    });
+    const block = Buffer.alloc(1024 * 1024, 7);
+    for (let i = 0; i < 12; i++) sink.write(block); // past the 10 MiB wait buffer
+    sink.seal();
+    const res = await sink.finished;
+    expect(late).toEqual([{ lossy: spoolMode === "none", bufferLimitBytes: 10 * 1024 * 1024 }]);
+    if (spoolMode === "full") {
+      expect(res.backpressured).toBe(false); // not a loss: the spool is complete
+      expect(res.uploadError).toBeTruthy(); // so the caller falls back to a whole-file upload
+      expect(res.spooledBytes).toBe(12 * 1024 * 1024);
+      expect(statSync(join(dir, "late.ts")).size).toBe(12 * 1024 * 1024);
+      expect(abandoned).toBe(1);
+    } else {
+      expect(res.backpressured).toBe(true);
+    }
+  });
+
+  it("a PTS jump inside a part does not cut it early", async () => {
+    // 24 GOPs of ~133ms; a +10h timestamp reset in the middle.
+    const input = tsStream({ gops: 24, jump: { atGop: 9, ticks: 10 * 3600 * 90_000 } });
+    installFakeFfmpeg(input, { chunkEvery: 1000 });
+    const sinks = [sinkFor("a.ts")];
+    const sealed: SealedPart[] = [];
+    const warns: string[] = [];
+    const res = await runStream({
+      args: ["-fake"], sizeCap: CHUNK * 1000, maxMs: 400, firstSink: sinks[0]!,
+      openNext: () => { const s = sinkFor(`p${sinks.length}.ts`); sinks.push(s); return s; },
+      onPartSealed: (p) => sealed.push(p),
+      onWarn: (m) => warns.push(m),
+    });
+    expect(warns.length).toBeGreaterThanOrEqual(1);
+    // Every part that ended by the duration rule really spans about the threshold: a jump counted
+    // as media time would have cut right after it, leaving a ~1 GOP part.
+    for (const p of sealed) {
+      expect(p.timing!.durationSec).toBeGreaterThanOrEqual(0.39);
+      expect(p.timing!.durationSec).toBeLessThan(1);
+    }
+    expect(res.finalPart).toBeTruthy();
+  });
+
+  it("a stream with no video PTS still ends parts by wall clock", async () => {
+    const input = tsStream({ gops: 40, noPts: true });
+    installFakeFfmpeg(input, { chunkEvery: 752, delayMs: 4 });
+    const sinks = [sinkFor("a.ts")];
+    const sealed: SealedPart[] = [];
+    const res = await runStream({
+      args: ["-fake"], sizeCap: CHUNK * 1000, maxMs: 120, firstSink: sinks[0]!,
+      openNext: () => { const s = sinkFor(`p${sinks.length}.ts`); sinks.push(s); return s; },
+      onPartSealed: (p) => sealed.push(p),
+    });
+    expect(res.endedBy).toBe("eof");
+    expect(sealed.length).toBeGreaterThanOrEqual(2);
+    for (const p of sealed) expect(p.timing).toBeNull();
   });
 });
 

@@ -52,17 +52,27 @@ function ptsBytes(pts: number): number[] {
 
 export const pes = (pts: number): Buffer => Buffer.from([0, 0, 1, 0xe0, 0, 0, 0x80, 0x80, 5, ...ptsBytes(pts)]);
 
-/** A synthetic stream: PAT, PMT, then `gops` GOPs of `framesPerGop` frames, each frame `pkts` packets + one audio packet. */
-export function stream(o: { gops: number; framesPerGop?: number; pkts?: number; video?: boolean; startPts?: number }): Buffer {
+/** A PES header with no PTS (a stream whose video carries no media clock). */
+export const pesNoPts = (): Buffer => Buffer.from([0, 0, 1, 0xe0, 0, 0, 0x80, 0x00, 0]);
+
+/**
+ * A synthetic stream: PAT, PMT, then `gops` GOPs of `framesPerGop` frames, each frame `pkts` packets + one audio packet.
+ * `noPts` strips the video PTS; `jump` adds `ticks` to the PTS from GOP `atGop` on (a timestamp reset).
+ */
+export function stream(o: {
+  gops: number; framesPerGop?: number; pkts?: number; video?: boolean; startPts?: number;
+  noPts?: boolean; jump?: { atGop: number; ticks: number };
+}): Buffer {
   const framesPerGop = o.framesPerGop ?? 4;
   const pkts = o.pkts ?? 3;
   const video = o.video ?? true;
   const out: Buffer[] = [pat(), pmt(video ? [[0x1b, VIDEO], [0x0f, AUDIO]] : [[0x0f, AUDIO]])];
   let pts = o.startPts ?? 90_000;
   for (let g = 0; g < o.gops; g++) {
+    if (o.jump && g === o.jump.atGop) pts = (pts + o.jump.ticks) % 2 ** 33;
     for (let f = 0; f < framesPerGop; f++) {
       if (video) {
-        out.push(packet(VIDEO, { pusi: true, rai: f === 0, payload: pes(pts) }));
+        out.push(packet(VIDEO, { pusi: true, rai: f === 0, payload: o.noPts ? pesNoPts() : pes(pts) }));
         for (let k = 1; k < pkts; k++) out.push(packet(VIDEO));
       }
       out.push(packet(AUDIO, { pusi: true, payload: pes(pts) }));

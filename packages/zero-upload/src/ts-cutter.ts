@@ -44,13 +44,23 @@ export interface TsCutterOptions {
    * per packet, so it does not depend on how stdout happened to be sliced into reads.
    */
   maxDurationMs?: number;
+  /**
+   * A PTS step larger than this (either direction, milliseconds) is a timestamp jump, not media
+   * time: it is ignored when measuring the part's duration. Default 10 s.
+   */
+  ptsJumpMs?: number;
+  /** Called for every ignored PTS jump (seconds, as seen on the wire). */
+  onPtsJump?: (info: { fromSec: number; toSec: number }) => void;
 }
 
 /** Media time covered by one part, from the primary stream's PTS (video, or first stream). */
 export interface PartTiming {
   firstPts: number;
   lastPts: number;
-  /** (last - first) / 90 kHz, wrap-safe. 0 when fewer than two timestamps were seen. */
+  /**
+   * Media time covered, wrap-safe: the sum of forward PTS steps, with jumps ignored (see
+   * {@link TsCutterOptions.ptsJumpMs}). 0 when fewer than two timestamps were seen.
+   */
   durationSec: number;
 }
 
@@ -98,6 +108,8 @@ export class TsCutter {
   private readonly maxPartBytes: number;
   private readonly minMarginBytes: number;
   private readonly maxDurationTicks: number;
+  private readonly ptsJumpTicks: number;
+  private readonly onPtsJump?: (info: { fromSec: number; toSec: number }) => void;
   private carry: Buffer = Buffer.alloc(0);
   private pmtPid = -1;
   private videoPid = -1;
@@ -106,18 +118,24 @@ export class TsCutter {
   private pat: Buffer | null = null;
   private pmt: Buffer | null = null;
   private partBytes = 0;
-  /** Bytes in the current part that are not PAT/PMT: a cut is pointless while this is 0. */
+  /**
+   * Bytes in the current part that came from ffmpeg and are not a PAT/PMT packet (including
+   * unsynced pass-through and a trailing partial packet). A cut is pointless while this is 0, and
+   * a part with 0 holds nothing but the head we prepended, so it may be dropped.
+   */
   private mediaBytes = 0;
   private cutPending: CutReason | null = null;
   private lastKeyAt = -1;
   private maxGopBytes = 0;
   private streamBytes = 0;
-  private timing: { first: number; last: number; prev: number } | null = null;
+  private timing: { first: number; last: number; prev: number; high: number; span: number } | null = null;
 
   constructor(o: TsCutterOptions) {
     if (!(o.maxPartBytes > TS_PACKET * 4)) throw new Error("TsCutter: maxPartBytes too small");
     this.maxPartBytes = o.maxPartBytes;
     this.minMarginBytes = o.minMarginBytes ?? 16 * 1024 * 1024;
+    this.ptsJumpTicks = ((o.ptsJumpMs ?? 10_000) * PTS_HZ) / 1000;
+    this.onPtsJump = o.onPtsJump;
     this.maxDurationTicks = o.maxDurationMs && o.maxDurationMs > 0 ? (o.maxDurationMs * PTS_HZ) / 1000 : 0;
   }
 
@@ -145,7 +163,7 @@ export class TsCutter {
   currentTiming(): PartTiming | null {
     const t = this.timing;
     if (!t) return null;
-    return { firstPts: t.first, lastPts: t.last, durationSec: Math.max(0, t.last - t.first) / PTS_HZ };
+    return { firstPts: t.first, lastPts: t.last, durationSec: t.span / PTS_HZ };
   }
 
   /** Feed stdout bytes; returns data and cut events in stream order. */
@@ -199,6 +217,7 @@ export class TsCutter {
     // A partial packet still counts against the declared size: never let the tail overflow it.
     if (this.partBytes + bytes.length > this.maxPartBytes) this.cut("size", true, out);
     this.partBytes += bytes.length;
+    this.mediaBytes += bytes.length;
     this.streamBytes += bytes.length;
     out.push({ kind: "data", bytes });
     return out;
@@ -223,6 +242,7 @@ export class TsCutter {
       }
       const take = Math.min(room, to - from);
       this.partBytes += take;
+      this.mediaBytes += take; // bytes from ffmpeg, whatever they are: never droppable as "head only"
       this.streamBytes += take;
       from += take;
     }
@@ -284,7 +304,7 @@ export class TsCutter {
     const pts = pesPts(d, o);
     if (pts === null) return;
     if (!this.timing) {
-      this.timing = { first: pts, last: pts, prev: pts };
+      this.timing = { first: pts, last: pts, prev: pts, high: pts, span: 0 };
       return;
     }
     // Unwrap the 33-bit counter relative to the previous timestamp.
@@ -292,10 +312,22 @@ export class TsCutter {
     if (delta < -PTS_WRAP / 2) delta += PTS_WRAP;
     else if (delta > PTS_WRAP / 2) delta -= PTS_WRAP;
     const abs = this.timing.prev + delta;
-    this.timing.prev = abs;
-    if (abs > this.timing.last) this.timing.last = abs;
-    if (abs < this.timing.first) this.timing.first = abs;
-    if (this.maxDurationTicks > 0 && this.cutPending === null && this.timing.last - this.timing.first >= this.maxDurationTicks) {
+    const t = this.timing;
+    t.prev = abs;
+    if (abs > t.last) t.last = abs;
+    if (abs < t.first) t.first = abs;
+    // Duration is the sum of forward steps past the high-water mark: small backward steps are
+    // B-frame reordering and add nothing; a step beyond the jump limit is a timestamp reset that
+    // must neither inflate the duration nor trigger an early duration cut.
+    const step = abs - t.high;
+    if (Math.abs(step) > this.ptsJumpTicks) {
+      this.onPtsJump?.({ fromSec: t.high / PTS_HZ, toSec: abs / PTS_HZ });
+      t.high = abs;
+    } else if (step > 0) {
+      t.span += step;
+      t.high = abs;
+    }
+    if (this.maxDurationTicks > 0 && this.cutPending === null && t.span >= this.maxDurationTicks) {
       this.cutPending = "duration";
     }
   }
