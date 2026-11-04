@@ -9,7 +9,7 @@ import { scanRecordings } from "../../packages/orchestrator/src/scan.js";
 const BASE = "anchor_2026-11-01_20-00-00";
 const CURRENT = `${BASE}_000.live.ts`;
 const CURRENT_N = `${BASE}_001-2.live.ts`;
-const LEGACY = "1762000000000_000.live.ts";
+const LEGACY = `${Date.UTC(2025, 10, 1)}_000.live.ts`; // legacy `<epochMs>_<NNN>` name
 
 describe("isLivePumpPartName", () => {
   it("matches current, legacy and path forms, case-insensitively", () => {
