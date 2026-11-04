@@ -53,3 +53,5 @@ export * from "./survivors.js";
 export * from "./child-identity.js";
 // Output path resolver (issue #333): stage / recording / job-log paths and the one name-sanitize rule.
 export * from "./output-paths.js";
+// Master ↔ worker control-plane protocol fleet/1 (plans/042): shared by the node agent and the master hub.
+export * from "./fleet-protocol.js";

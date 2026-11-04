@@ -117,9 +117,15 @@ export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freez
     const { scanInventory, segmentSecByAnchorOf } = await import("@drec/orchestrator");
 
     // anchorName/name → roomSlug from this node's own task db
+    // Close every store we open: inside the resident serve (fleet agent) a leaked handle would pile up.
     const store = new TaskStore(join(dataRoot, "db", "douyin-rec.db"));
     const taskRooms: Record<string, string> = {};
-    const tasks = store.listTasks();
+    let tasks;
+    try {
+      tasks = store.listTasks();
+    } finally {
+      store.close();
+    }
     for (const task of tasks) {
       try {
         const slug = platformForRoom(task.room).extractRoomSlug(task.room);
@@ -155,61 +161,69 @@ export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freez
   tasks: async (dataRoot) => {
     const { TaskStore, listNodeTasks } = await import("@drec/app");
     const store = new TaskStore(join(dataRoot, "db", "douyin-rec.db"));
-    return json({ tasks: listNodeTasks(store) });
+    try {
+      return json({ tasks: listNodeTasks(store) });
+    } finally {
+      store.close();
+    }
   },
 
   // Apply the master's desired tasks.
   "apply-tasks": async (dataRoot, [b64]) => {
     const { TaskStore, applyTasksPayload } = await import("@drec/app");
     const store = new TaskStore(join(dataRoot, "db", "douyin-rec.db"));
-    // T16: expectedVersion travels in the payload; an old master without it → version 0.
-    const result = applyTasksPayload(store, b64, undefined, {
-      // Audit snapshot dir is derived from dataRoot explicitly (no DOUYIN_REC_ROOT here; see managed-state.ts).
-      managedStateDir: join(dataRoot, "config", "managed"),
-    });
-    // Managed tasks that are no longer desired must be hard-stopped (not drained): the user explicitly
-    // stopped the source task / removed the rule, and draining would keep the hub settle waiting for the
-    // broadcast to end. Only the local serve holds the TaskManager, so ask it via
-    // POST /api/tasks/:id/stop (internal=1 is accepted from loopback only).
-    if (result.pending.length > 0) {
-      for (const key of result.pending) {
-        const task = store.listTasks().find((x) => {
+    try {
+      // T16: expectedVersion travels in the payload; an old master without it → version 0.
+      const result = applyTasksPayload(store, b64, undefined, {
+        // Audit snapshot dir is derived from dataRoot explicitly (no DOUYIN_REC_ROOT here; see managed-state.ts).
+        managedStateDir: join(dataRoot, "config", "managed"),
+      });
+      // Managed tasks that are no longer desired must be hard-stopped (not drained): the user explicitly
+      // stopped the source task / removed the rule, and draining would keep the hub settle waiting for the
+      // broadcast to end. Only the local serve holds the TaskManager, so ask it via
+      // POST /api/tasks/:id/stop (internal=1 is accepted from loopback only).
+      if (result.pending.length > 0) {
+        for (const key of result.pending) {
+          const task = store.listTasks().find((x) => {
+            try {
+              const p = platformForRoom(x.room);
+              return `${p.id}:${p.extractRoomSlug(x.room)}` === key;
+            } catch {
+              return false;
+            }
+          });
+          if (!task) continue;
           try {
-            const p = platformForRoom(x.room);
-            return `${p.id}:${p.extractRoomSlug(x.room)}` === key;
-          } catch {
-            return false;
+            const res = await fetch(`${serveApiBase()}/api/tasks/${task.id}/stop?internal=1`, { method: "POST" });
+            if (!res.ok) {
+              console.error(`[task-sync] 硬停任务 id=${task.id}(${key}) 失败: HTTP ${res.status}`);
+            }
+          } catch (e) {
+            // serve down/restarting → the next sync puts it back in pending; daemon drain is the last resort.
+            console.error(`[task-sync] 硬停任务 id=${task.id}(${key}) 失败: ${(e as Error).message}`);
           }
-        });
-        if (!task) continue;
-        try {
-          const res = await fetch(`${serveApiBase()}/api/tasks/${task.id}/stop?internal=1`, { method: "POST" });
-          if (!res.ok) {
-            console.error(`[task-sync] 硬停任务 id=${task.id}(${key}) 失败: HTTP ${res.status}`);
-          }
-        } catch (e) {
-          // serve down/restarting → the next sync puts it back in pending; daemon drain is the last resort.
-          console.error(`[task-sync] 硬停任务 id=${task.id}(${key}) 失败: ${(e as Error).message}`);
         }
       }
+      // Managed tasks without an anchorName yet: ask the local serve to refetch it in the background
+      // (fetching needs the platform runtime). Fire concurrently with a short timeout so a slow serve never
+      // blocks task sync.
+      const needsAnchor = store.listTasks().filter((t) => t.managedBy === "hub" && !t.anchorName);
+      await Promise.allSettled(
+        needsAnchor.map(async (t) => {
+          try {
+            await fetch(`${serveApiBase()}/api/tasks/${t.id}/refresh-anchor`, {
+              method: "POST",
+              signal: AbortSignal.timeout(3000),
+            });
+          } catch {
+            // serve down/timeout → ignore; task-manager falls back to scraping the name from logs on live.
+          }
+        }),
+      );
+      return json(result);
+    } finally {
+      store.close();
     }
-    // Managed tasks without an anchorName yet: ask the local serve to refetch it in the background
-    // (fetching needs the platform runtime). Fire concurrently with a short timeout so a slow serve never
-    // blocks task sync.
-    const needsAnchor = store.listTasks().filter((t) => t.managedBy === "hub" && !t.anchorName);
-    await Promise.allSettled(
-      needsAnchor.map(async (t) => {
-        try {
-          await fetch(`${serveApiBase()}/api/tasks/${t.id}/refresh-anchor`, {
-            method: "POST",
-            signal: AbortSignal.timeout(3000),
-          });
-        } catch {
-          // serve down/timeout → ignore; task-manager falls back to scraping the name from logs on live.
-        }
-      }),
-    );
-    return json(result);
   },
 
   // Tail of one task's recording log (F3). Logs live in the serve's in-memory ring buffer, so ask it.
@@ -254,9 +268,13 @@ export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freez
     let managedCount = 0;
     try {
       const store = new TaskStore(join(dataRoot, "db", "douyin-rec.db"));
-      const tasks = store.listTasks();
-      taskCount = tasks.length;
-      managedCount = tasks.filter((t) => t.managedBy === "hub").length;
+      try {
+        const tasks = store.listTasks();
+        taskCount = tasks.length;
+        managedCount = tasks.filter((t) => t.managedBy === "hub").length;
+      } finally {
+        store.close();
+      }
     } catch {
       /* db unreadable → counts stay 0; version info is still useful */
     }

@@ -18,7 +18,7 @@ import { zeroDiskUploadCookie } from "./zero-disk-upload-cookie.js";
 import { Command } from "commander";
 // 节点侧上传(experimental,plans/027)的节点侧命令(隔离在独立文件,便于快速开关/回退)。
 import { applyNodeDataRoot, registerNodePipelineCommands } from "./node-pipeline-commands.js";
-import { notifyOutboxArgs, runNodeCommandCli } from "./node-commands.js";
+import { NODE_COMMANDS, notifyOutboxArgs, runNodeCommandCli } from "./node-commands.js";
 import { registerRecoverOrderCommands } from "./hub-recover-order-commands.js";
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
@@ -2406,6 +2406,7 @@ taskCmd
         process.env.DISCORD_WEBHOOK ||
         undefined,
       hubStarter,
+      fleetCommands: NODE_COMMANDS,
     });
   });
 
@@ -2506,6 +2507,25 @@ program
   });
 
 // 输出本节点全部任务的隐私安全投影(无 cookies)。master 的任务同步对账用。
+// (internal) Join the fleet long connection (plans/042): the master writes this node's agent config
+// (controller URL + node id + token) over ssh once. Takes effect when `task serve` (re)starts.
+// The JSON payload is read from stdin so the token never shows up in argv / `ps`; it is never echoed back.
+program
+  .command("_fleet-join <dataRoot>", { hidden: true })
+  .description("(内部) 从 stdin 写入节点长连接配置 config/fleet.json(供 master ssh 调用)")
+  .action(async (dataRoot: string) => {
+    const { writeFleetConfig } = await import("@drec/app");
+    try {
+      const chunks: Buffer[] = [];
+      for await (const c of process.stdin) chunks.push(c as Buffer);
+      const cfg = writeFleetConfig(join(dataRoot, "config", "fleet.json"), JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      process.stdout.write(JSON.stringify({ ok: true, nodeId: cfg.nodeId, controllerUrl: cfg.controllerUrl }) + "\n");
+    } catch (e) {
+      process.stdout.write(JSON.stringify({ ok: false, error: String((e as Error)?.message ?? e) }) + "\n");
+      process.exitCode = 1;
+    }
+  });
+
 program
   .command("_tasks <dataRoot>", { hidden: true })
   .description("(内部) 输出节点任务清单 JSON(供 master ssh 调用)")
