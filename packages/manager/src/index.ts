@@ -6,7 +6,10 @@ import type {
 import { XmlDanmuWriter } from "./danmu-xml/index.js";
 import { writeSessionSidecar } from "./session-sidecar.js";
 export { writeSessionSidecar, type SidecarWriteHooks } from "./session-sidecar.js";
-import { createLogger, decorateRecordEvent, platformForRoom, processTimeZone, sessionBaseOf, stripVideoExt } from "@drec/core";
+import {
+  announceRecorderStatus, createLogger, decorateRecordEvent, platformForRoom, processTimeZone, sessionBaseOf, setRecorderPhase, setRecorderSession,
+  stripVideoExt,
+} from "@drec/core";
 
 // 0 落盘流式直传(plans/039)在 record 进程里自己连弹幕,不复用 RecordingSession;
 // 它需要同一个 writer 保证 xml 格式一致,所以从这里公开导出(格式的唯一实现仍在 danmu-xml)。
@@ -285,7 +288,7 @@ export class RecordingSession {
 
     // 进程已起、录制器在轮询开播但尚未拿到流 → 「等待开播」。父进程 TaskManager 解析
     // `[状态] X` → UI 区分「等待开播中」vs「录制中」（避免未开播也显示录制中）。
-    console.log(`[状态] 等待开播`);
+    announceRecorderStatus("等待开播", "polling");
 
     const ev: RecorderEvents = {
       onLive: (i) => {
@@ -301,7 +304,7 @@ export class RecordingSession {
         // 判据 = offlineNotified(offline 时查权威 getLiving=false → 已确认下播);
         // 抖动断流(仍在播)不清 —— 同一场重连保留首值,避免被后续空值清掉。
         if (this.offlineNotified) this.liveTitle = "";
-        console.log(`[状态] 录制中`); // 真正拿到流、开始录视频
+        announceRecorderStatus("录制中", "recording"); // 真正拿到流、开始录视频
         const resolved = i.anchorName || this.anchor;
         // 抓到主播名后打一行可解析日志（父进程 TaskManager 解析 → UI 显示主播名）。
         // 只在首次拿到非空主播名、且与上次不同时打，避免重连刷屏。
@@ -367,6 +370,7 @@ export class RecordingSession {
       },
       // Only open our writer for a new segment when we are responsible for the xml.
       onSegment: (tsPath) => {
+        setRecorderSession(sessionBaseOf(tsPath)); // state file: the session now being written
         if (ownWriter) this.openWriterForSegment(tsPath);
         else log.info(`新分段 (biliLive 自管 xml): ${tsPath}`);
         // 边录边传(T-33):通知钩子有新分段(未封口;由钩子自己按封口规则决定何时上传)。
@@ -406,6 +410,8 @@ export class RecordingSession {
     if (this.draining) { await this._finishDrain(); return; }
     if (this.reconnecting) return;       // already reconnecting — ignore duplicate event
     this.reconnecting = true;
+    // No longer pulling; the previous session's tail (seal / rolling upload / remux) may still be in flight.
+    setRecorderPhase("finalizing");
 
     // 标记断流缺口起点(重连成功 onLive 时用于算中断时长 + 区分「重连」vs「首次开播」)。
     this.offlineSince = Date.now();
@@ -453,6 +459,8 @@ export class RecordingSession {
 
     // Check again after async teardown — user may have called stop() during teardown
     if (this.userStopped) { this.reconnecting = false; return; }
+    // Previous session fully finalized: from here on we only wait to reconnect to the next broadcast.
+    setRecorderPhase("polling", null);
 
     // 指数退避 + 封顶:_startInner 持续抛错(如短链解析/取流初始化失败)时不再每隔
     // reconnectDelaySec 死循环刷屏/打 API。delay = reconnectDelaySec * 2^fails,封顶 300s。
@@ -609,6 +617,7 @@ export class RecordingSession {
   async stop(reason = "手动停止"): Promise<void> {
     if (this.userStopped) return;
     this.userStopped = true;
+    setRecorderPhase("finalizing"); // stop pulling, then seal + wait for the tail hook; the process exits after
     if (!this.recorder.providesDanmu && this.danmu) {
       await this.danmu.stop().catch(() => {});
       this.danmu = null;

@@ -15,7 +15,10 @@
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { freeGBOf, listProcessors, platformForRoom, redactLogLines, type ProcActiveDTO } from "@drec/core";
+import {
+  EXITED_STATE_IGNORE_AFTER_MS, freeGBOf, linuxProcProbe, listProcessors, platformForRoom, readRecorderStates, redactLogLines,
+  roomActivities, type ProcActiveDTO, type ProcProbe, type RecorderStateFile,
+} from "@drec/core";
 import { applyNodeDataRoot } from "./node-pipeline-commands.js";
 
 export interface NodeCommandResult {
@@ -99,6 +102,73 @@ export function scanRecordingRooms(): { platform: string; roomSlug: string }[] {
   return [...rooms.values()];
 }
 
+/** Everything the room judgement touches outside the state files; injected by tests. */
+export interface RoomProbeDeps {
+  /** /proc process scan: fallback for rooms without a state file (older bundles, standalone runs). */
+  scan: () => { platform: string; roomSlug: string }[];
+  proc: ProcProbe;
+  now: () => number;
+  log: (msg: string) => void;
+}
+
+const defaultRoomProbe = (): RoomProbeDeps => ({
+  scan: scanRecordingRooms,
+  proc: linuxProcProbe,
+  now: Date.now,
+  // stderr: stdout of these commands is a parsed contract.
+  log: (m) => console.error(m),
+});
+
+/**
+ * State files for the judgement. Exited files older than a week are ignored (not deleted): a task that was
+ * removed long ago must not keep its room "known" forever.
+ */
+function readLiveStates(dataRoot: string, deps: RoomProbeDeps): RecorderStateFile[] {
+  const cutoff = deps.now() - EXITED_STATE_IGNORE_AFTER_MS;
+  return readRecorderStates(dataRoot, deps.log).filter((st) => !(st.phase === "exited" && st.updatedAt < cutoff));
+}
+
+/**
+ * `is-done` judgement (plans/044): NOT done when a verified-active child of the room is recording or still
+ * finalizing, OR the /proc scan sees a downloader for the room. A dead or exited state file never silences the
+ * scan (a standalone / older-bundle `record` for the same room has no state file of its own).
+ */
+export function isRoomDone(dataRoot: string, roomSlug: string, deps: RoomProbeDeps = defaultRoomProbe()): boolean {
+  const states = readLiveStates(dataRoot, deps).filter((st) => st.roomSlug === roomSlug);
+  for (const room of roomActivities(states, deps.now(), deps.proc).values()) {
+    if (room.recording || room.finalizing) return false;
+  }
+  return !deps.scan().some((room) => room.roomSlug === roomSlug);
+}
+
+/**
+ * `recording-status` rooms = "a stream is being pulled right now": verified-active children in phase
+ * `recording`, plus /proc-scan rooms that have no verified-active state file. A room that is only `finalizing`
+ * is deliberately NOT listed here (it is not pulling); `isRoomDone` is what keeps it from being settled early.
+ */
+export function recordingRoomsOf(dataRoot: string, deps: RoomProbeDeps = defaultRoomProbe()): { platform: string; roomSlug: string }[] {
+  const rooms = roomActivities(readLiveStates(dataRoot, deps), deps.now(), deps.proc);
+  const out = [...rooms.values()].filter((r) => r.recording).map((r) => ({ platform: r.platform, roomSlug: r.roomSlug }));
+  for (const r of deps.scan()) {
+    if (!rooms.get(`${r.platform}:${r.roomSlug}`)?.active) out.push(r);
+  }
+  return out;
+}
+
+/**
+ * The master's own `local` worker must judge through the same functions as ssh / fleet nodes: the serve-side
+ * `[状态]`-line flag flips to false on `录制停滞` while the tail part is still uploading.
+ */
+export function localRoomProbes(dataRoot: () => string, deps?: RoomProbeDeps): {
+  isRoomRecording: (roomSlug: string) => boolean;
+  activeRecordingRooms: () => { platform: string; roomSlug: string }[];
+} {
+  return {
+    isRoomRecording: (roomSlug) => !isRoomDone(dataRoot(), roomSlug, deps),
+    activeRecordingRooms: () => recordingRoomsOf(dataRoot(), deps),
+  };
+}
+
 /** Read `--name value` options out of `args`; unknown flags are ignored. */
 function readOptions(args: string[]): Record<string, string> {
   const out: Record<string, string> = {};
@@ -128,16 +198,16 @@ let probeSegment: ((file: string) => Promise<{ durationMs: number; endMs: number
 const serveApiBase = (): string => process.env.DREC_SERVE_API ?? "http://localhost:7860"; // loopback; Node 24 fetch tries both IPv6 and IPv4 loopback
 
 export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freeze({
-  // "true" once no downloader is writing for this room (master settle polls this).
+  // "true" once nothing is recording or finalizing for this room (master settle polls this).
   // Only this room counts: a global ffmpeg count made other rooms' recordings stall this room's settle.
-  "is-done": async (_dataRoot, [roomSlug]) => ({
-    stdout: (scanRecordingRooms().some((room) => room.roomSlug === roomSlug) ? "false" : "true") + "\n",
+  "is-done": async (dataRoot, [roomSlug]) => ({
+    stdout: (isRoomDone(dataRoot, roomSlug) ? "true" : "false") + "\n",
     exitCode: 0,
   }),
 
   // Recording rooms + live-upload progress (F1). Progress is best-effort: failures leave it empty.
   "recording-status": async (dataRoot) => {
-    const rooms = scanRecordingRooms();
+    const rooms = recordingRoomsOf(dataRoot);
     let rolling: unknown[] = [];
     try {
       const { scanRollingSessions } = await import("@drec/orchestrator");

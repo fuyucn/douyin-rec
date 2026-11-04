@@ -18,7 +18,7 @@ import { zeroDiskUploadCookie } from "./zero-disk-upload-cookie.js";
 import { Command } from "commander";
 // 节点侧上传(experimental,plans/027)的节点侧命令(隔离在独立文件,便于快速开关/回退)。
 import { applyNodeDataRoot, registerNodePipelineCommands } from "./node-pipeline-commands.js";
-import { NODE_COMMANDS, notifyOutboxArgs, runNodeCommandCli } from "./node-commands.js";
+import { NODE_COMMANDS, localRoomProbes, notifyOutboxArgs, runNodeCommandCli } from "./node-commands.js";
 import { registerRecoverOrderCommands } from "./hub-recover-order-commands.js";
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
@@ -32,7 +32,8 @@ import { groupSessionsInDir, mergeSession, mergeSessions } from "@drec/post-proc
 import { renderXmlToAss } from "@drec/post-process";
 import { burn } from "@drec/post-process";
 import { FONTS_DIR } from "@drec/post-process";
-import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir, readOutputLayout, LiveUploadReporter } from "@drec/app";
+import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, drecRoot, rootOutputDir, readOutputLayout, LiveUploadReporter } from "@drec/app";
+import { initRecorderState, noteRecorderDraining, noteRecorderSignal, setRecorderPhase } from "@drec/core";
 import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, isWorkerTargeted, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type ZeroDiskNodeStatusDTO, type RollingDeliveryDTO, type HubPoolSnapshotDTO, type HubBlockedBroadcastDTO, type NodeTaskLogsDTO, type NodeTasksDTO, type WorkerStatus } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, resolveUploadAccountKey, type NotifWebhookToggles } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, buildZeroDiskDelivery, zeroDiskStreamMeta, planZeroDiskSpec, APP_VERSION, syncDbPathFor } from "@drec/app";
@@ -304,6 +305,18 @@ program
       console.error("[rec] --stream-upload 与 --rolling-upload 互斥,请只开一个");
       process.exit(2);
     }
+    // Process state file (plans/044): only a child launched by serve (has --task-id) writes one. The writer is
+    // started before any mode-specific work, so the file exists while the child is still waiting for a broadcast.
+    // The exit hook covers every exit path except SIGKILL; write failures are logged once and never fatal.
+    if (o.taskId !== undefined && /^\d+$/.test(o.taskId)) {
+      initRecorderState({
+        root: drecRoot(),
+        taskId: Number(o.taskId),
+        platform: platform.id,
+        roomSlug: platform.extractRoomSlug(roomToUrl(o.room)),
+        mode: streamUploadEnabled ? "live" : rollingEnabled ? "rolling" : "file",
+      }).installExitHook(process);
+    }
     if (streamUploadEnabled) {
       // 直连新包(不再经 processors re-export):生产路径的依赖要明确,否则"换实现"
       // 看起来像改 processors,容易连带碰到后处理插件层。
@@ -502,6 +515,7 @@ program
       const abort = new AbortController();
       const onSig = (sig: string): void => {
         console.log(`[直播直传] 收到 ${sig},停止录制并中止当前分 P`);
+        noteRecorderSignal(sig);
         abort.abort();
       };
       process.on("SIGINT", () => onSig("SIGINT"));
@@ -516,6 +530,7 @@ program
       const drain = new AbortController();
       process.on("SIGUSR2", () => {
         if (drain.signal.aborted) return; // the daemon re-sends every tick; idempotent
+        noteRecorderDraining();
         drain.abort();
       });
       const run = runLivePump({
@@ -585,6 +600,7 @@ program
         drainSignal: drain.signal,
         // Wait in-process for the next broadcast instead of exiting (issue #308).
         waitForBroadcast: true,
+        onPhase: (p) => setRecorderPhase(p),
         danmu,
         log: (m) => console.log(m),
         onAlert: (message) => { void notifier.notify({ kind: "error", stage: "直播直传", message }).catch(() => {}); },
@@ -717,6 +733,7 @@ program
     const shutdown = (sig: string) => {
       if (stopping) return;
       stopping = true;
+      noteRecorderSignal(sig);
       console.log(`\n[rec] 收到 ${sig}，正在停止…`);
       void session.stop().then(() => closeRemuxQueue()).then(() => {
         console.log("[rec] 已停止");
@@ -735,6 +752,7 @@ program
     process.on("SIGUSR2", () => {
       if (stopping || draining) return;
       draining = true;
+      noteRecorderDraining();
       console.log("[rec] 收到 SIGUSR2，窗口结束排空：等待当前直播自然收播…");
       void session.drain().then(() => closeRemuxQueue()).then(() => {
         console.log("[rec] 排空完成，已停止");
@@ -1447,22 +1465,15 @@ const hubStarter: HubStarter = {
       }
       return map;
     };
-    // 某 roomSlug 是否还在本机录制(local transport settle 用):匹配该 slug 的任务有在录的就算「未收播」,
-    // 防周期对账在录制中途就合并残片(settle 等录完才处理)。
-    const isRoomRecording = (slug: string): boolean =>
-      opts.store.listTasks().some(
-        (t) => platformForRoom(t.room).extractRoomSlug(t.room) === slug && opts.manager.isRecording(t.id),
-      );
+    // Local worker: same judgement as ssh / fleet nodes (state files + /proc fallback), NOT the serve-side
+    // `[状态]` flag, which flips to "not recording" on `录制停滞` while the tail part is still uploading.
+    const { isRoomRecording, activeRecordingRooms } = localRoomProbes(drecRoot);
     registerBuiltinTransports({
       ffprobe,
       fleet: fleetLink,
       taskRooms: buildTaskRooms,
       isRoomRecording,
-      activeRecordingRooms: () => opts.store.listTasks().flatMap((t) => {
-        if (!opts.manager.isRecording(t.id)) return [];
-        const platform = platformForRoom(t.room);
-        return [{ platform: platform.id, roomSlug: platform.extractRoomSlug(t.room) }];
-      }),
+      activeRecordingRooms,
       // local worker = master 自身:hub 任务同步直接落在本机 store(与远端 `_tasks` / `_apply-tasks` 同路径)。
       listTasks: () => listNodeTasks(opts.store),
       // 处理任务表通道(T9a):local worker 与远端 `_enqueue` / `_proc-status` 同一执行体(无派发方,仅可被调用)。

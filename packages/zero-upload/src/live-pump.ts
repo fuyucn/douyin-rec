@@ -2420,6 +2420,12 @@ export interface RunLivePumpOptions {
    * stop/drain ends the wait. Default false keeps the one-shot behavior of manual runs.
    */
   waitForBroadcast?: boolean;
+  /**
+   * Phase reports for the process state file (plans/044): `polling` while waiting for a stream,
+   * `recording` while the stream is pulled, `finalizing` once pulling stopped but parts are still being
+   * sealed / uploaded. Observability only: a throwing callback never affects the run.
+   */
+  onPhase?: (phase: "polling" | "recording" | "finalizing") => void;
   /** Poll interval while waiting for a broadcast (default 30s, same as the file recorder). */
   idlePollMs?: number;
   /**
@@ -2592,7 +2598,13 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
   // TaskManager derives the task's recording phase from these exact markers
   // (`[状态] 录制中` / `[状态] 等待开播`). Without them a zero-disk task shows as "running"
   // but never "recording", so the UI cannot tell waiting-for-stream from actually recording.
+  let curPhase: "polling" | "recording" | "finalizing" = "polling";
+  const phase = (p: "polling" | "recording" | "finalizing"): void => {
+    curPhase = p;
+    try { o.onPhase?.(p); } catch { /* observability only */ }
+  };
   emit({ at: Date.now(), kind: "waiting" });
+  phase("polling");
   log("[状态] 等待开播");
   const idlePollMs = o.idlePollMs ?? IDLE_POLL_MS;
   const stopRequested = async (): Promise<boolean> =>
@@ -2657,6 +2669,11 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     });
 
     if (o.submit !== false) {
+      // Whenever this child owns unconfirmed upload work the phase is `finalizing` (plans/044): WAL recovery and
+      // the whole-file re-upload of a previous run's parts must never look like "idle, waiting for a broadcast".
+      const resumePhase = curPhase;
+      phase("finalizing");
+      try {
       const recovered = await session.recover();
       if (!recovered.ok) {
         log(
@@ -2697,6 +2714,9 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
             statePath: livePumpStatePath(o.spoolDir, o.room),
           } };
         }
+      }
+      } finally {
+        phase(resumePhase);
       }
     }
     return { session };
@@ -3255,6 +3275,9 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     // ending here (exit 0) is safe — the next run waits in-process and re-decides the session.
     // Waiting again *here* would keep a session opened hours earlier for the next broadcast.
     let s: StreamAcquirer | null;
+    // Every part of the previous connection has settled; we are waiting for a stream again. Parts that stayed
+    // unconfirmed (kept spool, held gap) are still upload work this child owns → finalizing, not idle polling.
+    phase(session.hasUnconfirmed ? "finalizing" : "polling");
     if (recoveryDeadline !== undefined) {
       s = await waitForBroadcast(recoveryDeadline);
       if (!s) {
@@ -3285,6 +3308,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       const nextTitle = o.titleForLive("");
       if (session.setTitleIfFresh(nextTitle)) log(`[直播直传] 稿件标题已按取流信息重渲染: ${nextTitle}`);
     }
+    phase("recording");
     log("[状态] 录制中");
 
     // ── One ffmpeg for this whole connection; parts are cut by TsCutter at video keyframes ────────
@@ -3406,6 +3430,8 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       prefetch = undefined;
     }
 
+    // The stream is no longer pulled; the tail parts are still sealing / uploading on the finalize chain.
+    phase("finalizing");
     let finalDisposition: Disposition | undefined;
     let finalRun: Promise<Disposition> | undefined;
     if (stream.endedBy === "stalled") {

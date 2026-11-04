@@ -2,7 +2,7 @@
 // 共享录像扫描函数：被 LocalTransport 和 _inventory CLI 子命令复用。
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { epochFromZonedParts, listPlatforms, parseRoomDirName, processTimeZone } from "@drec/core";
+import { epochFromZonedParts, listPlatforms, parseRoomDirName, processTimeZone, ROLLING_ACTIVE_MAX_QUIET_MS } from "@drec/core";
 import { groupSessionsInDir } from "@drec/post-process";
 import type { ActiveRecordingRoom, NodeRecording, NodeRollingProgress, NodeRollingSession } from "./transport.js";
 import { readGaps, totalGapSecOf } from "./gaps.js";
@@ -72,7 +72,8 @@ function readSession(dir: string, base: string): {
  * Issue #309: an owner that is still alive and has not closed its session is still working on it (slot wait or
  * tail upload). Bounded by the last sidecar write, so a stale pid (reused by another process) stops counting.
  */
-export const ROLLING_ACTIVE_MAX_QUIET_MS = 3 * 3600_000;
+// The constant lives in core (shared with the recorder state judge); re-exported for existing importers.
+export { ROLLING_ACTIVE_MAX_QUIET_MS };
 
 function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException)?.code === "EPERM"; }

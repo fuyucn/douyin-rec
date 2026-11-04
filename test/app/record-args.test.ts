@@ -75,6 +75,8 @@ describe("buildRecordArgs", () => {
       "1800",
       "--name",
       "anchor",
+      "--task-id",
+      "1",
     ]);
   });
 
@@ -145,12 +147,18 @@ describe("buildRecordArgs", () => {
     expect(args[args.indexOf("--room") + 1]).toBe("https://live.douyin.com/999");
   });
 
-  it("outputFormat 生效时带 --task-id(封口转换行归属任务);original 不带", () => {
-    const withFmt = buildRecordArgs(mkTask({ id: 42, outputFormat: "mkv" }));
-    const i = withFmt.indexOf("--task-id");
-    expect(i).toBeGreaterThan(-1);
-    expect(withFmt[i + 1]).toBe("42");
-    expect(buildRecordArgs(mkTask({ id: 42 }))).not.toContain("--task-id");
-    expect(buildRecordArgs(mkTask({ id: 42, outputFormat: "original" }))).not.toContain("--task-id");
+  it("always passes --task-id (the child's state file is keyed by it), with or without outputFormat", () => {
+    for (const outputFormat of [undefined, "original", "mkv"] as const) {
+      const args = buildRecordArgs(mkTask({ id: 42, ...(outputFormat ? { outputFormat } : {}) }));
+      const i = args.indexOf("--task-id");
+      expect(i, `outputFormat=${outputFormat}`).toBeGreaterThan(-1);
+      expect(args[i + 1]).toBe("42");
+    }
+  });
+
+  it("keeps --output-format last and only for a non-original format", () => {
+    const mkv = buildRecordArgs(mkTask({ id: 42, outputFormat: "mkv" }));
+    expect(mkv.slice(-2)).toEqual(["--output-format", "mkv"]);
+    expect(buildRecordArgs(mkTask({ id: 42, outputFormat: "original" }))).not.toContain("--output-format");
   });
 });
