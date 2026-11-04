@@ -6,7 +6,7 @@
 
 **Architecture:** 参照 biliup Fleet（PR #1754）：节点只出站连接 controller，长连接上跑心跳 + 事件 + 请求/应答；节点 agent 跑在已常驻的 `task serve` 进程内，不新增进程。我们已有 tailscale（网络 + 加密），不需要 iroh/relay，传输用 WebSocket（`ws@8.21.0` 已是现有依赖，零新增）。ssh 只保留给 rsync 拉文件与部署；旧 bundle / 连接断开时控制面回落现有 ssh 路径。数据面（录像文件）不变。
 
-**Tech Stack:** Node 24 / TypeScript / `ws` / vitest。第二期 Rust worker daemon 另立 plan，复用本期协议。
+**Tech Stack:** Node 24 / TypeScript / `ws` / vitest。
 
 **Spec:** 本文件「背景与实测」「协议」两节。
 
@@ -130,13 +130,12 @@ export interface FleetLink {
 - [ ] 测试：同版本不重复 probe；mtime 变化重探；probe 抛错不缓存；rev 不变 master 不发 req。
 - [ ] 实现、全量测试 → commit `perf(hub): inventory 增量与 ffprobe 缓存`。
 
-### Task 5: 录制进程内存构成实测（只出数据）
+### Task 5: 开播后内存验收（只出数据）
 
-**Files:** Modify `packages/cli/src/cli.ts`（`record`：env `DREC_MEM_REPORT_SEC` 周期打 `[mem]` 行；env `DREC_HEAP_SNAPSHOT_AT_SEC` 写一次堆快照，默认关闭零开销）；Create `docs/perf/2026-11-worker-memory.md`
+**Files:** Create `docs/perf/2026-11-worker-memory.md`
 
-- [ ] 单测：未设置 env 不注册 timer。
-- [ ] VPS 上用**独立测试任务**录 10 分钟（弹幕开 / 关各一次），不碰生产进程。
-- [ ] 结论：170MB 中弹幕（`webmssdk.js` 562KB、`proto.js` 1.1MB、WS 缓冲）与录制器各占多少；决定是否立「共享弹幕进程」任务。
+- [ ] Task 6 部署后，在 VPS 上用独立测试任务同时录 3 路（历史峰值 = 3，见「背景与实测」），记录 serve + 3 个 `record` + ffmpeg 的 RssAnon+VmSwap 与 PSI。
+- [ ] 验收：总私有内存 < 700MB、memory PSI full avg60 < 1%。不达标 → 立「录制子进程瘦身」任务（堆快照定位 ~90MB 非弹幕部分）。
 
 ### Task 6: serve 判活闸门（按需拉起 record 子进程）
 
@@ -156,8 +155,12 @@ export interface FleetLink {
 
 ---
 
-## 第二期（另立 plan，前置：第一期上线复测）
+## 不做（已评估）
 
-Rust worker daemon 替换 worker 的 `task serve`：实现同一 `fleet/1` 协议与 `NODE_COMMANDS` 契约、调度窗口 + 时区、任务库（rusqlite，表结构仍由 Node 迁移负责）、判活（rquickjs 跑 vendored `sign.js`）、拉起 Node `record` 子进程。共享 JSON fixtures 双跑（vitest + cargo test）防两套逻辑漂移。预计第一期后 worker 待命仅 serve ~50MB，Rust 再省 ~40MB；以复测数据决定是否做。worker 在长连接全面上线后可改 `--host 127.0.0.1`，不再暴露无鉴权 API。
+- **单进程录制**：失去每房间进程隔离（单房间异常 / 泄漏 / 事件循环阻塞会波及全部房间），而历史峰值仅 3 路，Task 6 已足够。
+- **换 A1.Flex**：用户确认不可行。
+- **按开播时段排布房间**：单机峰值 3 路，Task 6 后收益很小；房间增多再议。
+- **Rust worker daemon**：Task 1–4、6 后 worker 待命仅 serve ~60MB，重写收益不抵双语言维护成本；复测不达标再议（协议 `fleet/1` 已为其留好边界）。
+- **部署不打断录制（ffmpeg 脱离 + 接管）**：独立需求，另立任务。
 
 参考：[biliup PR #1754](https://github.com/biliup/biliup/pull/1754)、[biliup Issue #1744](https://github.com/biliup/biliup/issues/1744)。
