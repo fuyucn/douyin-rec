@@ -1619,6 +1619,148 @@ describe("降级可见性(#461):当场上报 + 原因保留", () => {
     expect(degraded).toEqual([]);
     expect(r.uploadError).toBeTruthy();
   });
+
+  it("停止信号带自定义 reason(非 AbortError):signal 一半也压制,不告警", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("stopped by user")); // throwIfAborted 抛的是它,name 不是 AbortError
+    installFakeFfmpeg(Buffer.alloc(CHUNK * 4, 1));
+    const { fake } = makeFetch();
+    const degraded: string[] = [];
+    const r = await runSegment({
+      args: ["-fake"], sizeCap: CHUNK * 4, spoolPath: join(dir, "abort-reason.mkv"), session: session(),
+      fetchImpl: fake, signal: controller.signal, onDegrade: (reason) => degraded.push(reason),
+    });
+    expect(degraded).toEqual([]);
+    expect(r.uploadError).toContain("stopped by user");
+  });
+
+  it("PUT 抛 AbortError 但信号未中止:name 一半压制,不告警", async () => {
+    const total = CHUNK * 3;
+    installFakeFfmpeg(Buffer.alloc(total, 6));
+    const fake = (async (input: string | URL | Request, init?: RequestInit) => {
+      const u = new URL(typeof input === "string" ? input : (input as Request).url);
+      if ((init?.method ?? "GET").toUpperCase() === "POST" && u.searchParams.has("uploads")) {
+        return new Response(JSON.stringify({ upload_id: "uid" }), { status: 200 });
+      }
+      if ((init?.method ?? "GET").toUpperCase() === "PUT") {
+        const e = new Error("The operation was aborted");
+        e.name = "AbortError";
+        throw e;
+      }
+      return new Response("", { status: 200 });
+    }) as unknown as typeof fetch;
+    const degraded: string[] = [];
+    const r = await runSegment({
+      args: ["-fake"], sizeCap: total, spoolPath: join(dir, "abort-put.mkv"), session: session(),
+      fetchImpl: fake, onDegrade: (reason) => degraded.push(reason),
+    });
+    expect(degraded).toEqual([]);
+    expect(r.uploadError).toContain("The operation was aborted");
+  });
+
+  it("discard() 主动丢弃尾巴:不触发降级告警", async () => {
+    const { fake } = makeFetch();
+    const degraded: string[] = [];
+    const sink = new PartSink({
+      sizeCap: CHUNK * 2, spoolPath: join(dir, "discard.mkv"), session: session(), fetchImpl: fake,
+      onDegrade: (reason) => degraded.push(reason),
+    });
+    sink.write(Buffer.alloc(376, 1));
+    sink.discard();
+    const res = await sink.finished;
+    expect(degraded).toEqual([]);
+    expect(res.uploadError).toBe("discarded");
+  });
+
+  it("fail()(非上传原因,如 stdout 读错):不触发降级告警", async () => {
+    const { fake } = makeFetch();
+    const degraded: string[] = [];
+    const sink = new PartSink({
+      sizeCap: CHUNK * 2, spoolPath: join(dir, "readerr.mkv"), session: session(), fetchImpl: fake,
+      onDegrade: (reason) => degraded.push(reason),
+    });
+    sink.write(Buffer.alloc(376, 1));
+    sink.fail("stdout read error: stream destroyed");
+    sink.seal();
+    const res = await sink.finished;
+    expect(degraded).toEqual([]);
+    expect(res.uploadError).toContain("stdout read error");
+  });
+
+  it("preupload 失败:当场降级记录,原因随 uploadError", async () => {
+    const { fake } = makeFetch();
+    const degraded: string[] = [];
+    const sink = new PartSink({
+      sizeCap: CHUNK * 2, spoolPath: join(dir, "preup-fail.mkv"),
+      session: Promise.reject(new Error("preupload exploded")),
+      fetchImpl: fake, onDegrade: (reason) => degraded.push(reason),
+    });
+    sink.seal();
+    const res = await sink.finished;
+    expect(degraded).toEqual([expect.stringMatching(/preupload 失败.*preupload exploded/)]);
+    expect(res.uploadError).toContain("preupload 失败");
+  });
+
+  it("complete 失败不是流式降级:不触发 onDegrade,失败随 uploadError 显式落地", async () => {
+    const cap = CHUNK * 3;
+    installFakeFfmpeg(Buffer.alloc(cap, 7));
+    const { fake } = makeUploadFetch({ completeReject: true });
+    const degraded: string[] = [];
+    const r = await pumpSegment({
+      cookiesPath: COOKIES, args: ["-fake"], fileName: "cf.ts", sizeCap: cap, spoolDir: dir, line: "txa",
+      fetchImpl: fake, probeDuration: async () => 60, signal: new AbortController().signal,
+      onDegrade: (reason) => degraded.push(reason),
+    });
+    expect(degraded).toEqual([]);
+    expect(r.uploadError).toMatch(/complete 失败/);
+  }, 30000);
+
+  it("零落盘背压:原因带该分 P 丢失", async () => {
+    const total = CHUNK * 6;
+    installFakeFfmpeg(Buffer.alloc(total, 5));
+    const { fake } = makeFetch();
+    const degraded: string[] = [];
+    const r = await runSegment({
+      args: ["-fake"], sizeCap: total, spoolPath: join(dir, "none-bp.mkv"), spoolMode: "none",
+      session: session(), fetchImpl: fake, queueCapacity: 1, onDegrade: (reason) => degraded.push(reason),
+    });
+    expect(degraded).toEqual([expect.stringMatching(/上传跟不上录制,队列已满.*该分 P 丢失/)]);
+    expect(r.degradedReason).toBe(degraded[0]);
+    expect(r.backpressured).toBe(true);
+  });
+
+  it("零落盘块失败:原因带该分 P 丢失", async () => {
+    const total = CHUNK * 3;
+    installFakeFfmpeg(Buffer.alloc(total, 2));
+    const { fake } = makeFetch({ failPutAt: 1 });
+    const degraded: string[] = [];
+    const r = await runSegment({
+      args: ["-fake"], sizeCap: total, spoolPath: join(dir, "none-fail.mkv"), spoolMode: "none",
+      session: session(), fetchImpl: fake, onDegrade: (reason) => degraded.push(reason),
+    });
+    expect(degraded).toEqual([expect.stringMatching(/分块 0 上传失败.*该分 P 丢失/)]);
+    expect(r.degradedReason).toBe(degraded[0]);
+  }, 20000);
+
+  it("零落盘会话迟到到缓冲满:原因是会话迟到+该分 P 丢失,不误报队列已满", async () => {
+    const { fake } = makeFetch();
+    const degraded: string[] = [];
+    let resolveSession!: (s: PreuploadResult) => void;
+    const late = new Promise<PreuploadResult>((resolve) => { resolveSession = resolve; });
+    const sink = new PartSink({
+      sizeCap: CHUNK_UNIT * 2, spoolPath: join(dir, "late-none.mkv"), session: late, fetchImpl: fake,
+      spoolMode: "none", queueCapacity: 1, onDegrade: (reason) => degraded.push(reason),
+    });
+    sink.write(Buffer.alloc(CHUNK_UNIT + 1, 1));
+    expect(degraded).toEqual([expect.stringMatching(/会话未及时就绪.*该分 P 丢失/)]);
+    expect(degraded[0]).not.toMatch(/队列已满/);
+    resolveSession(session());
+    sink.seal();
+    const res = await sink.finished;
+    expect(res.degradedReason).toBe(degraded[0]);
+    // 零落盘等待缓冲满走 waitAbandoned,backpressured 仍为 true(泵级会升级为该分 P 硬失败)。
+    expect(res.backpressured).toBe(true);
+  });
 });
 
 describe("封口信号来自进程退出而非后继段(设计约束回归)", () => {

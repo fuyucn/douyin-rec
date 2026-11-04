@@ -1293,6 +1293,9 @@ export class PartSink {
   /** Why streaming degraded (first reason wins); survives a successful whole-file fallback. */
   private degradedReason: string | undefined;
   private degradedNotified = false;
+  /** Set by fail()/discard(): the part already failed for a non-upload reason, so the uploader's
+   *  end-of-queue error is expected bookkeeping, not a degradation. */
+  private nonUploadFail = false;
   /** Zero-disk: the wait buffer overflowed before the session arrived; the part is lost, do not wait for it. */
   private waitAbandoned = false;
   private sealed = false;
@@ -1326,6 +1329,7 @@ export class PartSink {
 
   /** Record a failure that is not an upload error (e.g. a stdout read error) so the part is not submitted. */
   fail(message: string): void {
+    this.nonUploadFail = true;
     this.uploadError ??= message;
   }
 
@@ -1361,7 +1365,9 @@ export class PartSink {
         // spool: running out of buffer here is real data loss and is reported as backpressure.
         if (this.fd !== undefined) this.degradeLate();
         else {
-          this.overflowNow();
+          // Zero-disk late session: the cause is the missing session, not a slow uploader — the
+          // part is lost, say exactly that instead of a queue-full line with a wrong chunk count.
+          this.overflowNow(`下一分 P 的上传会话未及时就绪,零落盘等待缓冲已满(${Math.round(this.waitingLimit / MiB)}MiB),该分 P 丢失`);
           this.waitAbandoned = true;
         }
       }
@@ -1381,6 +1387,7 @@ export class PartSink {
 
   /** Drop a part that holds nothing worth uploading (a head-only tail after the last cut). */
   discard(): void {
+    this.nonUploadFail = true;
     this.uploadError ??= "discarded";
     this.seal();
     this.queue.close();
@@ -1422,7 +1429,7 @@ export class PartSink {
     this.uploadError ??= why;
     // Same immediate-report rule as the other degradations — but a stop aborting the pending
     // preupload is the stop paths' business, not a degradation.
-    if (!this.o.signal?.aborted && (e as Error)?.name !== "AbortError") this.degrade(why);
+    if (!this.nonUploadFail && !this.o.signal?.aborted && (e as Error)?.name !== "AbortError") this.degrade(why);
     this.waiting = [];
     this.waitingBytes = 0;
     this.markSettled();
@@ -1437,7 +1444,7 @@ export class PartSink {
     this.degrade(`下一分 P 的上传会话未及时就绪,等待缓冲已满(${Math.round(this.waitingLimit / MiB)}MiB),按整文件回退上传`);
   }
 
-  private overflowNow(): void {
+  private overflowNow(reason?: string): void {
     this.overflow = true;
     this.waiting = [];
     this.waitingBytes = 0;
@@ -1445,9 +1452,9 @@ export class PartSink {
     this.carryLen = 0;
     // Backpressure must be explicit: silent degradation turns "streaming upload" into "disk only".
     this.o.onBackpressure?.(this.spooled, this.queuedChunks);
-    this.degrade(this.fd !== undefined
+    this.degrade(reason ?? (this.fd !== undefined
       ? `上传跟不上录制,队列已满(${this.queuedChunks} 块),本段降级为纯落盘`
-      : `上传跟不上录制,队列已满(${this.queuedChunks} 块),零落盘无本地副本`);
+      : `上传跟不上录制,队列已满(${this.queuedChunks} 块),零落盘无本地副本,该分 P 丢失`));
   }
 
   /** Slice residue into full chunks and queue them; a full queue means the uploader fell behind. */
@@ -1543,7 +1550,11 @@ export class PartSink {
         // The chunk failure must be visible the moment it happens (it used to sit silently in
         // uploadError until the part summary — or vanish entirely once the fallback succeeded).
         // A stop aborting the in-flight part is not a degradation: the stop paths report it.
-        if (!o.signal?.aborted && (e as Error)?.name !== "AbortError") this.degrade(msg);
+        // Neither is a deliberate drop / non-upload sink failure: the uploader's end-of-queue
+        // error is expected bookkeeping then, not a degradation.
+        if (this.nonUploadFail || o.signal?.aborted || (e as Error)?.name === "AbortError") return;
+        // Zero-disk has no local copy: a failed chunk upload loses the part, say so.
+        this.degrade(this.o.spoolMode === "none" ? `${msg};零落盘无本地副本,该分 P 丢失` : msg);
       },
     );
   }
@@ -3147,10 +3158,6 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       `${r.degradedReason ? `,降级: ${r.degradedReason}` : ""}` +
       `${r.usedFileFallback ? ",整文件回退成功" : ""}`,
     );
-    // Degradation must be explicit: silent backpressure turns streaming upload into "disk only".
-    if (r.backpressured) {
-      log(`[直播直传] ⚠️ 上传跟不上录制,本段已降级为纯落盘(${(r.streamedBytes / MiB).toFixed(1)}/${(r.spooledBytes / MiB).toFixed(1)}MiB 流出)`);
-    }
     if (r.sessionLeaked) log("[直播直传] ⚠️ UPOS 会话半截泄漏:协议无 abort,须按原文件重传覆盖");
     if (!part.final) return { kind: "continue" };
     if (r.sealedBy === "abort") return { kind: "ended" };
@@ -3409,12 +3416,10 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
             ? `[直播直传] ⚠️ 段${seg + 1} 上传会话未及时就绪(预取 preupload 被限流/超时);零落盘仅能缓冲 ${(bufferLimitBytes / MiB).toFixed(0)}MiB,超出该分 P 将丢失`
             : `[直播直传] 段${seg + 1} 上传会话未及时就绪,继续写 spool;会话就绪后补传,否则整文件回退`);
         },
-        onSessionAbandoned: ({ lossy }) => {
+        onSessionAbandoned: () => {
           // Stop the pending preupload (and its 601 backoff): the whole-file fallback does its own.
+          // No log here: the late-session degradation already reported via onDegrade, with the cause.
           ctx.sessionAbort?.abort();
-          log(lossy
-            ? `[直播直传] ⚠️ 段${seg + 1} 上传会话始终未就绪,缓冲已满:该分 P 丢失`
-            : `[直播直传] ⚠️ 段${seg + 1} 上传会话始终未就绪,改为整文件回退上传`);
         },
         onDegrade: (reason) => {
           // Say why the moment streaming degrades (chunk failure / backpressure / late session);
