@@ -88,6 +88,9 @@ export function notifyOutboxArgs(o: { after?: string; limit?: string; ack?: stri
   return args;
 }
 
+/** Process-lifetime ffprobe duration cache for `inventory` (see there). */
+let probeDuration: ((file: string) => Promise<number>) | undefined;
+
 /** Local serve API used by commands that need state only the serve process holds. */
 const serveApiBase = (): string => process.env.DREC_SERVE_API ?? "http://127.0.0.1:7860"; // issue-guard: allow (loopback)
 
@@ -135,9 +138,14 @@ export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freez
     }
     const segmentSecByAnchor = segmentSecByAnchorOf(tasks);
 
-    // durationMs via ffprobe + mtime → startMs/endMs
+    // durationMs via ffprobe + mtime → startMs/endMs. Durations are cached per file version for the
+    // lifetime of this process (the resident serve under the fleet agent); a CLI call starts empty.
+    // Probe failures are not cached (they fall back to 0 per call, as before) so a transient error on a
+    // finished segment cannot pin its duration to 0 for the life of the serve.
+    probeDuration ??= (await import("@drec/orchestrator")).createProbeCache(async (file: string) => (await ffprobeVideo(file)).durationMs);
+    const durationOf = probeDuration;
     const ffprobe = async (file: string): Promise<{ durationSec: number; startMs: number; endMs: number }> => {
-      const { durationMs } = await ffprobeVideo(file).catch(() => ({ durationMs: 0 }));
+      const durationMs = await durationOf(file).catch(() => 0);
       const endMs = statSync(file).mtimeMs;
       return { durationSec: durationMs / 1000, endMs, startMs: endMs - durationMs };
     };

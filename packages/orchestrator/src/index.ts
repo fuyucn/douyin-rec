@@ -121,3 +121,4 @@ export function registerBuiltinTransports(deps: {
 export { FleetHub, issueFleetToken, verifyFleetToken, setFleetLink, getFleetLink, type FleetLink, type FleetNodeState } from "./fleet-hub.js";
 export { withFleet, parseNodeCommand, FLEET_CACHE_MAX_AGE_MS } from "./fleet-run.js";
 export { joinFleetNode, type FleetJoinResult } from "./fleet-join.js";
+export { createProbeCache } from "./probe-cache.js";
