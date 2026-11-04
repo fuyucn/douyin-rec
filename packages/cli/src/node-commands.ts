@@ -74,8 +74,15 @@ function taskRoomKey(room: string): string | null {
  * downloader is writing). Waiting for a broadcast, with no downloader child, is not recording.
  * Non-Linux hosts (local macOS development) have no `/proc` → empty.
  */
-export function scanRecordingRooms(): { platform: string; roomSlug: string }[] {
-  const rooms = new Map<string, { platform: string; roomSlug: string }>();
+export interface ScannedRoom {
+  platform: string;
+  roomSlug: string;
+  /** `--task-id` of the scanned `record` process, when it carries one (used only for the data-root mismatch warning). */
+  taskId?: number;
+}
+
+export function scanRecordingRooms(): ScannedRoom[] {
+  const rooms = new Map<string, ScannedRoom>();
   try {
     for (const entry of readdirSync("/proc", { withFileTypes: true })) {
       if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
@@ -91,7 +98,11 @@ export function scanRecordingRooms(): { platform: string; roomSlug: string }[] {
         const platform = platformForRoom(cmdline[roomIdx + 1]);
         const roomSlug = platform.extractRoomSlug(cmdline[roomIdx + 1]);
         const children = readFileSync(`/proc/${entry.name}/task/${entry.name}/children`, "utf8").trim();
-        if (children) rooms.set(`${platform.id}:${roomSlug}`, { platform: platform.id, roomSlug });
+        if (children) {
+          const idIdx = cmdline.indexOf("--task-id");
+          const taskId = idIdx >= 0 ? Number(cmdline[idIdx + 1]) : NaN;
+          rooms.set(`${platform.id}:${roomSlug}`, { platform: platform.id, roomSlug, ...(Number.isSafeInteger(taskId) ? { taskId } : {}) });
+        }
       } catch {
         /* process just exited, or the room cannot be parsed */
       }
@@ -105,13 +116,19 @@ export function scanRecordingRooms(): { platform: string; roomSlug: string }[] {
 /** Everything the room judgement touches outside the state files; injected by tests. */
 export interface RoomProbeDeps {
   /** /proc process scan: fallback for rooms without a state file (older bundles, standalone runs). */
-  scan: () => { platform: string; roomSlug: string }[];
+  scan: () => ScannedRoom[];
   proc: ProcProbe;
   now: () => number;
   log: (msg: string) => void;
+  /** False suppresses the data-root mismatch warning (one-shot ssh invocations; its dedup cannot span calls). */
+  warnMismatch?: boolean;
 }
 
+/** Set by the one-shot hidden-CLI entry: every ssh `_is-done` is a fresh process, so a per-process dedup is useless. */
+let oneShotInvocation = false;
+
 const defaultRoomProbe = (): RoomProbeDeps => ({
+  warnMismatch: !oneShotInvocation,
   scan: scanRecordingRooms,
   proc: linuxProcProbe,
   now: Date.now,
@@ -128,17 +145,44 @@ function readLiveStates(dataRoot: string, deps: RoomProbeDeps): RecorderStateFil
   return readRecorderStates(dataRoot, deps.log).filter((st) => !(st.phase === "exited" && st.updatedAt < cutoff));
 }
 
+const warnedMismatch = new Set<string>();
+
+/** Test seam: forget which (room, task) pairs already produced a mismatch warning. */
+export function resetScanMismatchWarningsForTest(): void {
+  warnedMismatch.clear();
+}
+
+/**
+ * A `record` process that carries `--task-id` always writes a state file for that task under the data root it
+ * runs with. If the scan sees such a process but THIS data root has no file for the task, the node command is
+ * most likely reading a different data root than the recorder uses (the #456 failure mode). The verdict is
+ * unchanged (the scan still counts); we only say so once per (room, task) per process lifetime.
+ */
+function warnScanWithoutState(scanned: readonly ScannedRoom[], states: readonly RecorderStateFile[], deps: RoomProbeDeps): void {
+  if (deps.warnMismatch === false) return;
+  for (const r of scanned) {
+    if (r.taskId === undefined) continue;
+    const key = `${r.platform}:${r.roomSlug}:${r.taskId}`;
+    if (warnedMismatch.has(key) || states.some((s) => s.taskId === r.taskId)) continue;
+    warnedMismatch.add(key);
+    deps.log(`[recorder-state] /proc shows a record process for ${r.platform}:${r.roomSlug} (task ${r.taskId}) but there is no state file for that task under this data root; check that the data root being read is the one the recorder writes to`);
+  }
+}
+
 /**
  * `is-done` judgement (plans/044): NOT done when a verified-active child of the room is recording or still
  * finalizing, OR the /proc scan sees a downloader for the room. A dead or exited state file never silences the
  * scan (a standalone / older-bundle `record` for the same room has no state file of its own).
  */
 export function isRoomDone(dataRoot: string, roomSlug: string, deps: RoomProbeDeps = defaultRoomProbe()): boolean {
-  const states = readLiveStates(dataRoot, deps).filter((st) => st.roomSlug === roomSlug);
+  const all = readLiveStates(dataRoot, deps);
+  const states = all.filter((st) => st.roomSlug === roomSlug);
   for (const room of roomActivities(states, deps.now(), deps.proc).values()) {
     if (room.recording || room.finalizing) return false;
   }
-  return !deps.scan().some((room) => room.roomSlug === roomSlug);
+  const scanned = deps.scan();
+  warnScanWithoutState(scanned.filter((r) => r.roomSlug === roomSlug), all, deps);
+  return !scanned.some((room) => room.roomSlug === roomSlug);
 }
 
 /**
@@ -147,25 +191,42 @@ export function isRoomDone(dataRoot: string, roomSlug: string, deps: RoomProbeDe
  * is deliberately NOT listed here (it is not pulling); `isRoomDone` is what keeps it from being settled early.
  */
 export function recordingRoomsOf(dataRoot: string, deps: RoomProbeDeps = defaultRoomProbe()): { platform: string; roomSlug: string }[] {
-  const rooms = roomActivities(readLiveStates(dataRoot, deps), deps.now(), deps.proc);
+  const states = readLiveStates(dataRoot, deps);
+  const rooms = roomActivities(states, deps.now(), deps.proc);
   const out = [...rooms.values()].filter((r) => r.recording).map((r) => ({ platform: r.platform, roomSlug: r.roomSlug }));
-  for (const r of deps.scan()) {
-    if (!rooms.get(`${r.platform}:${r.roomSlug}`)?.active) out.push(r);
+  const scanned = deps.scan();
+  warnScanWithoutState(scanned, states, deps);
+  for (const r of scanned) {
+    if (!rooms.get(`${r.platform}:${r.roomSlug}`)?.active) out.push({ platform: r.platform, roomSlug: r.roomSlug });
   }
   return out;
 }
 
+/** Rooms with a verified-active child that is still sealing / uploading its tail (not necessarily pulling). */
+export function finalizingRoomsOf(dataRoot: string, deps: RoomProbeDeps = defaultRoomProbe()): { platform: string; roomSlug: string }[] {
+  const rooms = roomActivities(readLiveStates(dataRoot, deps), deps.now(), deps.proc);
+  return [...rooms.values()].filter((r) => r.finalizing).map((r) => ({ platform: r.platform, roomSlug: r.roomSlug }));
+}
+
 /**
- * The master's own `local` worker must judge through the same functions as ssh / fleet nodes: the serve-side
- * `[状态]`-line flag flips to false on `录制停滞` while the tail part is still uploading.
+ * Judgement for hosts where the state files cannot be verified (no `/proc`: local macOS `serve --hub`). There
+ * every state file judges `dead` and the scan is empty, so the state-file judgement would always say "done".
  */
-export function localRoomProbes(dataRoot: () => string, deps?: RoomProbeDeps): {
+export interface LocalRoomFallback {
   isRoomRecording: (roomSlug: string) => boolean;
   activeRecordingRooms: () => { platform: string; roomSlug: string }[];
-} {
+}
+
+/**
+ * The master's own `local` worker must judge through the same functions as ssh / fleet nodes: the serve-side
+ * `[状态]`-line flag flips to false on `录制停滞` while the tail part is still uploading. When the proc probe
+ * cannot verify anything (boot id unreadable), `fallback` (the serve-side flag) answers instead.
+ */
+export function localRoomProbes(dataRoot: () => string, deps?: RoomProbeDeps, fallback?: LocalRoomFallback): LocalRoomFallback {
+  const unverifiable = (): boolean => !!fallback && (deps?.proc ?? linuxProcProbe).bootId() === null;
   return {
-    isRoomRecording: (roomSlug) => !isRoomDone(dataRoot(), roomSlug, deps),
-    activeRecordingRooms: () => recordingRoomsOf(dataRoot(), deps),
+    isRoomRecording: (roomSlug) => (unverifiable() ? fallback!.isRoomRecording(roomSlug) : !isRoomDone(dataRoot(), roomSlug, deps)),
+    activeRecordingRooms: () => (unverifiable() ? fallback!.activeRecordingRooms() : recordingRoomsOf(dataRoot(), deps)),
   };
 }
 
@@ -213,7 +274,9 @@ export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freez
       const { scanRollingSessions } = await import("@drec/orchestrator");
       rolling = scanRollingSessions(join(dataRoot, "recordings"), rooms);
     } catch { /* progress is auxiliary */ }
-    return json({ rooms, rolling });
+    // `finalizing`: rooms that stopped pulling but still upload their tail. Kept out of `rooms` (not pulling) so
+    // the UI semantics are unchanged; the master needs it to answer `is-done` from the heartbeat (#456).
+    return json({ rooms, finalizing: finalizingRoomsOf(dataRoot), rolling });
   },
 
   // Scan <dataRoot>/recordings and return the inventory the master clusters into broadcasts.
@@ -449,6 +512,7 @@ export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freez
 
 /** Run a registry command for the hidden CLI entry point: same stdout bytes and exit code as before. */
 export async function runNodeCommandCli(name: string, dataRoot: string, args: string[]): Promise<void> {
+  oneShotInvocation = true;
   const r = await NODE_COMMANDS[name](dataRoot, args);
   process.stdout.write(r.stdout);
   if (r.exitCode !== 0) process.exitCode = r.exitCode;

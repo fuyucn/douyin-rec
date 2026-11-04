@@ -5,7 +5,7 @@
  * plateau for minutes while bytes still flow, tcp.acked does not). Only `step=transfer` can stall;
  * gate_wait and submit never do. Missing evidence (no `ss`, unreadable sockets) never kills.
  */
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 
 /** Per-socket bytes_acked keyed by "local>peer"; null = progress unknown. */
 export type AckSample = ReadonlyMap<string, number> | null;
@@ -64,6 +64,19 @@ export function readTcpAcked(pid: number): AckSample {
   } catch {
     return null;
   }
+}
+
+/** Async variant of {@link readTcpAcked} (same 5s timeout) for callers that must not block the event loop. */
+export function readTcpAckedAsync(pid: number): Promise<AckSample> {
+  return new Promise((resolve) => {
+    try {
+      execFile("ss", ["-tinpH"], { encoding: "utf-8", timeout: 5_000 }, (err, stdout) => {
+        resolve(err ? null : parseSsAcked(String(stdout), pid));
+      });
+    } catch {
+      resolve(null);
+    }
+  });
 }
 
 export type WatchVerdict = { kind: "ok" } | { kind: "stall"; idleMs: number } | { kind: "wall"; step: string };

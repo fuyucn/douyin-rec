@@ -24,6 +24,20 @@ export const FINALIZING_HEARTBEAT_MS = 30_000;
  */
 export const ROLLING_ACTIVE_MAX_QUIET_MS = 3 * 3600_000;
 
+/**
+ * A finalizing child that has reported no upload progress for this long is treated as stuck. A single chunk
+ * attempt may take up to CHUNK_TIMEOUT_MS (4 min) and is retried several times with backoff, so one healthy
+ * stall can last well over 10 minutes; 45 min covers several full retry cycles. Elapsed time alone must never
+ * decide: a 2 GiB part at 2 Mbps legitimately uploads for ~2.3 h while progress keeps arriving.
+ */
+export const FINALIZING_STALL_MS = 45 * 60_000;
+
+/** Loose backstop for a finalizing phase that keeps reporting "progress" forever (a bug, not a slow upload). */
+export const FINALIZING_MAX_MS = 24 * 3600_000;
+
+/** Progress notes are written to the state file at most this often. */
+export const PROGRESS_WRITE_THROTTLE_MS = 10_000;
+
 export type RecorderMode = "file" | "rolling" | "live";
 export type RecorderPhase = "polling" | "recording" | "finalizing" | "exited";
 export type RecorderActivity = "active" | "ended" | "dead";
@@ -59,6 +73,10 @@ export interface RecorderStateFile {
   session: string | null;
   /** Set on every write; refreshed every FINALIZING_HEARTBEAT_MS only while phase=finalizing. */
   heartbeatAt: number;
+  /** Epoch ms of entering `finalizing`; null in any other phase (and in files written by older bundles). */
+  finalizingSince: number | null;
+  /** Epoch ms of the last upload progress (chunk / part confirmed) while finalizing; null otherwise or in older files. */
+  progressAt: number | null;
   exit: RecorderExit | null;
   updatedAt: number;
 }
@@ -124,7 +142,11 @@ export const linuxProcProbe: ProcProbe = {
  *  - phase `exited` → `ended` (the child said goodbye itself).
  *  - otherwise the owner must be the very process that wrote the file: same pid start time and same boot
  *    id (guards pid reuse and reboots). Unverifiable (null ticks/boot id, e.g. non-Linux) → `dead`.
- *  - `finalizing` additionally needs a heartbeat newer than ROLLING_ACTIVE_MAX_QUIET_MS.
+ *  - `finalizing` additionally needs a heartbeat newer than ROLLING_ACTIVE_MAX_QUIET_MS. The heartbeat is a
+ *    plain timer (a hung tail keeps it fresh), so when the file carries `progressAt` the judge also requires
+ *    progress within FINALIZING_STALL_MS and a finalizing phase younger than FINALIZING_MAX_MS. Elapsed time
+ *    alone is never a reason: slow healthy uploads run for hours. Files without `progressAt` (older bundles)
+ *    keep the heartbeat-only rule.
  */
 export function recorderActivity(state: RecorderStateFile, now: number, proc: ProcProbe): RecorderActivity {
   if (state.phase === "exited") return "ended";
@@ -133,7 +155,13 @@ export function recorderActivity(state: RecorderStateFile, now: number, proc: Pr
   const liveTicks = proc.startTicks(pid);
   if (liveTicks === null || liveTicks !== startTicks) return "dead";
   if (proc.bootId() !== bootId) return "dead";
-  if (state.phase === "finalizing" && now - state.heartbeatAt > ROLLING_ACTIVE_MAX_QUIET_MS) return "dead";
+  if (state.phase === "finalizing") {
+    if (now - state.heartbeatAt > ROLLING_ACTIVE_MAX_QUIET_MS) return "dead";
+    if (state.progressAt !== null) {
+      if (now - state.progressAt > FINALIZING_STALL_MS) return "dead";
+      if (state.finalizingSince !== null && now - state.finalizingSince > FINALIZING_MAX_MS) return "dead";
+    }
+  }
   return "active";
 }
 
@@ -170,6 +198,8 @@ export function parseRecorderState(raw: unknown): RecorderStateFile | null {
     phase: r.phase as RecorderPhase,
     session: r.session as string | null,
     heartbeatAt: r.heartbeatAt,
+    finalizingSince: isNum(r.finalizingSince) ? r.finalizingSince : null,
+    progressAt: isNum(r.progressAt) ? r.progressAt : null,
     exit,
     updatedAt: r.updatedAt,
   };
@@ -259,6 +289,9 @@ export class RecorderStateWriter {
   private exit: RecorderExit | null = null;
   private signal: string | null = null;
   private draining = false;
+  private finalizingSince: number | null = null;
+  private progressAt: number | null = null;
+  private lastProgressWriteAt = 0;
   private warned = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly now: () => number;
@@ -283,6 +316,16 @@ export class RecorderStateWriter {
     if (this.exit) return; // exited is terminal
     const same = phase === this.phase && (session === undefined || session === this.session);
     if (session !== undefined) this.session = session;
+    if (phase === "finalizing") {
+      if (this.phase !== "finalizing") {
+        this.finalizingSince = this.now();
+        this.progressAt = this.finalizingSince;
+        this.lastProgressWriteAt = this.finalizingSince;
+      }
+    } else {
+      this.finalizingSince = null;
+      this.progressAt = null;
+    }
     this.phase = phase;
     this.syncTimer();
     if (!same) this.flush();
@@ -292,6 +335,24 @@ export class RecorderStateWriter {
     if (this.exit || session === this.session) return;
     this.session = session;
     this.flush();
+  }
+
+  /**
+   * Upload progress (a chunk completed, a part confirmed). Only meaningful while finalizing; elsewhere ignored.
+   * Writes are throttled: the judge only needs progress within FINALIZING_STALL_MS.
+   */
+  noteProgress(): void {
+    if (this.exit || this.phase !== "finalizing") return;
+    const t = this.now();
+    if (t - this.lastProgressWriteAt < PROGRESS_WRITE_THROTTLE_MS) return;
+    this.lastProgressWriteAt = t;
+    this.progressAt = t;
+    this.flush();
+  }
+
+  /** True while the child is sealing / uploading its tail (progress sampling is only worth doing then). */
+  get isFinalizing(): boolean {
+    return !this.exit && this.phase === "finalizing";
   }
 
   noteSignal(signal: string): void {
@@ -309,6 +370,8 @@ export class RecorderStateWriter {
     const at = this.now();
     this.exit = { code, signal: this.signal, at, draining: this.draining };
     this.phase = "exited";
+    this.finalizingSince = null;
+    this.progressAt = null;
     this.flush();
   }
 
@@ -340,6 +403,8 @@ export class RecorderStateWriter {
       phase: this.phase,
       session: this.session,
       heartbeatAt: t,
+      finalizingSince: this.finalizingSince,
+      progressAt: this.progressAt,
       exit: this.exit,
       updatedAt: t,
     };
@@ -381,6 +446,16 @@ export function setRecorderPhase(phase: RecorderPhase, session?: string | null):
 
 export function setRecorderSession(session: string | null): void {
   current?.setSession(session);
+}
+
+/** True when the process-wide writer is in the `finalizing` phase (false without a writer). */
+export function recorderIsFinalizing(): boolean {
+  return current?.isFinalizing ?? false;
+}
+
+/** Upload progress report (no-op without a process-wide writer, or outside the finalizing phase). */
+export function noteRecorderProgress(): void {
+  current?.noteProgress();
 }
 
 export function noteRecorderSignal(signal: string): void {

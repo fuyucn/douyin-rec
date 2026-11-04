@@ -61,7 +61,7 @@ describe("NODE_COMMANDS", () => {
   it("recording-status: no recorder processes → {rooms: [], rolling: []}", async () => {
     const r = await NODE_COMMANDS["recording-status"](makeRoot(), []);
     expect(r.exitCode).toBe(0);
-    expect(oneJsonLine(r.stdout)).toEqual({ rooms: [], rolling: [] });
+    expect(oneJsonLine(r.stdout)).toEqual({ rooms: [], finalizing: [], rolling: [] });
   });
 
   it("task-logs: non-numeric taskId → error payload with exit 0", async () => {

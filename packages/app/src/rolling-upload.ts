@@ -54,6 +54,8 @@ import {
   segmentSessionBase,
   stripVideoExt,
   UploadGate,
+  noteRecorderProgress,
+  recorderIsFinalizing,
   isSlotBusy,
   SLOT_BUSY_MARKER,
   addArchiveToSeasonIfConfigured,
@@ -63,7 +65,8 @@ import {
   type UploadSlot,
   type RollingSegment,
 } from "@drec/core";
-import { appendGroup, countVideoParts, uploadPlain } from "./upload/biliup.js";
+import { appendGroup, countVideoParts, uploadPlain, type BiliupHooks } from "./upload/biliup.js";
+import { readTcpAckedAsync, type AckSample } from "@drec/processors";
 import { rootBiliupCookies } from "./paths.js";
 import { openNodeUploadGate, openNodeUploadSlot, resolveUploadAccountKey } from "./node-pipeline.js";
 
@@ -290,6 +293,14 @@ export interface RollingUploaderOpts {
   /** 上传接缝(测试注入)。 */
   uploadPlainRaw?: typeof uploadPlain;
   appendGroupRaw?: typeof appendGroup;
+  /** Per-socket TCP acked reader for the biliup child (test seam); default async `ss`. */
+  readAcked?: (pid: number) => AckSample | Promise<AckSample>;
+  /** Whether sampling is worth doing now (test seam); default: the recorder is in the finalizing phase. */
+  shouldSample?: () => boolean;
+  /** Progress report sink (test seam); default reports to the recorder state file. */
+  noteProgress?: () => void;
+  /** How often the live biliup child is sampled for progress; default 30s. */
+  progressIntervalMs?: number;
   /** 删源接缝(测试注入);缺省 fs.rm。返回是否删除成功。 */
   removeFile?: (p: string) => boolean;
   /** 时间源(测试注入)。 */
@@ -768,10 +779,10 @@ export class RollingUploader {
       // WAL:先落「建稿中」意图,再真正建稿。崩溃后据此转人工,绝不自动重建稿(重复投稿不可逆)。
       // Issue #309: written only once the slot and the gate let biliup start, so a wait never leaves an intent.
       const up = this.o.uploadPlainRaw ?? uploadPlain;
-      const bv = await this.withSlot(() => this.gate.run(this.accountKey, () => {
+      const bv = await this.withUploadProgress((hooks) => this.withSlot(() => this.gate.run(this.accountKey, () => {
         this.writeIntent(seg.index, "create");
-        return up({ plain: { ...meta, video: seg.path, title } });
-      }));
+        return up({ plain: { ...meta, video: seg.path, title }, hooks });
+      })));
       // 把「当段已确认」并入同一次写:建稿成功即确认段 0,防止 bv 与 confirmed 分两次写之间崩溃。
       confirmed.add(seg.index);
       // Persist the BV BEFORE the best-effort season call: a kill during that call must not lose the BV.
@@ -781,6 +792,7 @@ export class RollingUploader {
         updatedAt: this.now(),
       };
       if (!this.persist()) throw new Error(`sidecar 写失败(建稿结果 BV=${bv}),状态不可信,保留源`);
+      noteRecorderProgress(); // a confirmed segment is progress for the finalizing stall judge (plans/044)
       this.log(`[rolling] 段 ${seg.index} 建稿 BV=${bv}`);
       this.queueSeason(bv, false);
       return;
@@ -789,7 +801,7 @@ export class RollingUploader {
     // WAL:先落「追加第 index 段中」意图。崩溃后凭分 P 数核对是否已提交(见 recoverDanglingUpload)。
     // Written right before biliup starts (issue #309), same as the create intent.
     const ap = this.o.appendGroupRaw ?? appendGroup;
-    await this.withSlot(() => this.gate.run(this.accountKey, () => {
+    await this.withUploadProgress((hooks) => this.withSlot(() => this.gate.run(this.accountKey, () => {
       this.writeIntent(seg.index, "append");
       return ap({
         ...meta,
@@ -797,13 +809,68 @@ export class RollingUploader {
         files: [seg.path],
         // 幂等核对:失败后重查分 P 数,变多 = 其实已成功;查不到 → 抛 ambiguous 标记转人工。
         countParts: () => this.countPartsInner(bv, cookies),
+        hooks,
       });
-    }));
+    })));
     // 与建稿同口径:确认并入同一次写,防止 append 成功后、补 confirmed 前崩溃导致重复 append。
     confirmed.add(seg.index);
     this.state = { ...this.state, uploading: undefined, confirmed: [...confirmed], updatedAt: this.now() };
     if (!this.persist()) throw new Error(`sidecar 写失败(append 结果段 ${seg.index}),状态不可信,保留源`);
+    noteRecorderProgress(); // a confirmed segment is progress for the finalizing stall judge (plans/044)
     this.log(`[rolling] 段 ${seg.index} append 到 ${bv}`);
+  }
+
+  /**
+   * Report upload progress for the recorder's finalizing stall judge (plans/044) for the whole upload attempt:
+   * slot wait, rate-limit gate wait, then each biliup child (line retries included).
+   *  - Waiting (no child yet, or between retries): a legitimate pause (slot up to 30 min, gate window or a
+   *    30 min cooldown after 601/21566) counts as progress every tick; the judge's 24h backstop bounds it.
+   *  - Child alive: biliup's output is NOT a signal (no progress bar on a pipe, plans/038); TCP bytes acked on its
+   *    sockets is. Any socket whose acked bytes grew (or a new socket carrying bytes) is progress, as in
+   *    TransferWatch. No usable reading (no `ss`, non-Linux, no visible sockets) is no evidence: a live child counts.
+   * `ss` is only spawned while the recorder is finalizing, and asynchronously. One interval for the whole attempt,
+   * cleared in `finally`.
+   */
+  private async withUploadProgress<T>(run: (hooks: BiliupHooks) => Promise<T>): Promise<T> {
+    const note = this.o.noteProgress ?? noteRecorderProgress;
+    const read = this.o.readAcked ?? readTcpAckedAsync;
+    const shouldSample = this.o.shouldSample ?? recorderIsFinalizing;
+    let childPid: number | null = null;
+    let prev: AckSample = null;
+    let generation = 0; // a sample that finishes after its child closed must not count
+    let sampling = false;
+    const tick = async (): Promise<void> => {
+      if (childPid === null) { note(); return; } // waiting for a turn / between retries
+      if (sampling || !shouldSample()) return;
+      sampling = true;
+      const gen = generation;
+      try {
+        let sample: AckSample = null;
+        try { sample = await read(childPid); } catch { sample = null; }
+        if (gen !== generation) return;
+        if (sample === null || sample.size === 0) { prev = null; note(); return; }
+        let gained = false;
+        for (const [k, v] of sample) {
+          const before = prev?.get(k);
+          if (before === undefined ? v > 0 : v > before) gained = true;
+        }
+        prev = sample;
+        if (gained) note();
+      } finally {
+        sampling = false;
+      }
+    };
+    const timer = setInterval(() => { void tick(); }, this.o.progressIntervalMs ?? 30_000);
+    timer.unref?.();
+    const hooks: BiliupHooks = {
+      onSpawn: (pid) => { generation++; prev = null; childPid = pid ?? null; },
+      onClose: () => { generation++; prev = null; childPid = null; },
+    };
+    try {
+      return await run(hooks);
+    } finally {
+      clearInterval(timer);
+    }
   }
 
   /**

@@ -1467,7 +1467,19 @@ const hubStarter: HubStarter = {
     };
     // Local worker: same judgement as ssh / fleet nodes (state files + /proc fallback), NOT the serve-side
     // `[状态]` flag, which flips to "not recording" on `录制停滞` while the tail part is still uploading.
-    const { isRoomRecording, activeRecordingRooms } = localRoomProbes(drecRoot);
+    // Hosts without /proc (macOS) cannot verify state files: there the serve-side flag is the only signal.
+    // Dev-only, non-Linux limitation: that flag still flips to "not recording" on `录制停滞` while a tail is
+    // uploading (the original #456 stall flip). Production masters run Linux/Docker and never take this path.
+    const { isRoomRecording, activeRecordingRooms } = localRoomProbes(drecRoot, undefined, {
+      isRoomRecording: (slug) => opts.store.listTasks().some(
+        (t) => platformForRoom(t.room).extractRoomSlug(t.room) === slug && opts.manager.isRecording(t.id),
+      ),
+      activeRecordingRooms: () => opts.store.listTasks().flatMap((t) => {
+        if (!opts.manager.isRecording(t.id)) return [];
+        const platform = platformForRoom(t.room);
+        return [{ platform: platform.id, roomSlug: platform.extractRoomSlug(t.room) }];
+      }),
+    });
     registerBuiltinTransports({
       ffprobe,
       fleet: fleetLink,

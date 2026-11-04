@@ -19,7 +19,7 @@
  * 由分层保证而不是靠人记得。processors 只 re-export 它(保持旧导入点),不反向依赖。
  */
 import { existsSync, readFileSync } from "node:fs";
-import { biliupCookieHeader, biliupCsrf } from "@drec/core";
+import { biliupCookieHeader, biliupCsrf, noteRecorderProgress } from "@drec/core";
 
 /**
  * Read biliup cookies.json into a Cookie header, or null when the file is missing/unreadable.
@@ -673,6 +673,7 @@ export async function uploadChunks(o: UploadOptions): Promise<UposPart[]> {
     if (!ok) throw new Error(`分块 ${i} 上传失败(已重试 ${retries} 次)`);
     parts.push({ partNumber: i + 1, eTag: "etag" });
     uploadedBytes += body.length;
+    noteRecorderProgress(); // finalizing stall judge (plans/044): a completed chunk is real upload progress
     o.onProgress?.({ uploadedBytes, chunksDone: i + 1 });
     if (isTail) break;
   }

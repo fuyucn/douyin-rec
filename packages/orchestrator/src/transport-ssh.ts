@@ -1,6 +1,6 @@
 // packages/orchestrator/src/transport-ssh.ts
 import type { FleetLink } from "./fleet-hub.js";
-import { cachedRecordingRooms, runOverFleet } from "./fleet-run.js";
+import { cachedRoomDone, runOverFleet } from "./fleet-run.js";
 import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { encodeEnqueue, isJobAbort, normalizeNodeResultFile, normalizeZeroDiskReport, type ZeroDiskReport, registerChild, throwIfAborted, type EnqueueRequest, type EnqueueResponse, type ProcessReceipt, type RemoteTaskSpec } from "@drec/core";
@@ -509,9 +509,10 @@ export class SshTransport implements Transport {
     // 每房间判定:远端 `_is-done <dataRoot> <roomSlug>` 只查该房间 record 进程是否还有
     // ffmpeg/mesio 孙进程。旧实现 `grep -ic ffmpeg` 是全机计数 —— 别的房间还在录会把
     // 本房间也判成未收播,settle 一直空等、hub 迟迟不建 job(实测踩过)。
-    // A fresh heartbeat already says which rooms are recording: no round trip at all.
-    const rooms = cachedRecordingRooms(this.o.fleet?.() ?? null, this.o.id);
-    if (rooms) return !rooms.has(roomSlug);
+    // A fresh heartbeat that lists both recording AND finalizing rooms answers without a round trip. One without
+    // the finalizing list (older node) cannot see a tail upload, so it falls through to the `is-done` command.
+    const cached = cachedRoomDone(this.o.fleet?.() ?? null, this.o.id, roomSlug);
+    if (cached !== null) return cached;
     const out = await this.node("is-done", [roomSlug]);
     const trimmed = out.trim().toLowerCase();
     // 未知/乱码输出 → 视为未收播(安全默认：编排器等待而非提前同步)

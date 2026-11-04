@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  FINALIZING_HEARTBEAT_MS, ROLLING_ACTIVE_MAX_QUIET_MS, RecorderStateWriter, parseRecorderState, parseStartTicks,
+  FINALIZING_HEARTBEAT_MS, FINALIZING_MAX_MS, FINALIZING_STALL_MS, PROGRESS_WRITE_THROTTLE_MS, ROLLING_ACTIVE_MAX_QUIET_MS, RecorderStateWriter, parseRecorderState, parseStartTicks,
   readRecorderStates, recorderActivity, recorderStateDir, recorderStatePath, roomActivities,
   type ProcProbe, type RecorderPhase, type RecorderStateFile,
 } from "../../packages/core/src/recorder-state.js";
@@ -17,7 +17,7 @@ function state(over: Partial<RecorderStateFile> = {}): RecorderStateFile {
   return {
     schemaVersion: 1, taskId: 7, platform: "douyin", roomSlug: "555", mode: "file",
     owner: { pid: 4242, startTicks: TICKS, bootId: BOOT },
-    phase: "recording", session: null, heartbeatAt: NOW, exit: null, updatedAt: NOW,
+    phase: "recording", session: null, heartbeatAt: NOW, finalizingSince: null, progressAt: null, exit: null, updatedAt: NOW,
     ...over,
   };
 }
@@ -75,6 +75,18 @@ describe("recorderActivity", () => {
     expect(recorderActivity(f(1000), NOW, probe())).toBe("active");
     expect(recorderActivity(f(ROLLING_ACTIVE_MAX_QUIET_MS), NOW, probe())).toBe("active");
     expect(recorderActivity(f(ROLLING_ACTIVE_MAX_QUIET_MS + 1), NOW, probe())).toBe("dead");
+  });
+
+  it("finalizing: judged by progress, not elapsed time (long healthy upload stays active past 3h)", () => {
+    const f = (since: number, progress: number | null) => state({ phase: "finalizing", heartbeatAt: NOW - 1000, finalizingSince: since, progressAt: progress });
+    const longAgo = NOW - 5 * 3600_000;
+    expect(recorderActivity(f(longAgo, NOW - 60_000), NOW, probe())).toBe("active"); // 5h in, progress a minute ago
+    expect(recorderActivity(f(longAgo, NOW - FINALIZING_STALL_MS), NOW, probe())).toBe("active");
+    expect(recorderActivity(f(longAgo, NOW - FINALIZING_STALL_MS - 1), NOW, probe())).toBe("dead"); // no progress
+    expect(recorderActivity(f(NOW - FINALIZING_MAX_MS, NOW - 1000), NOW, probe())).toBe("active");
+    expect(recorderActivity(f(NOW - FINALIZING_MAX_MS - 1, NOW - 1000), NOW, probe())).toBe("dead"); // backstop
+    // older file without progressAt: heartbeat-only rule, even with a very old finalizingSince
+    expect(recorderActivity(f(NOW - 30 * 3600_000, null), NOW, probe())).toBe("active");
   });
 
   it("recording / polling do not need a fresh heartbeat (owner verification is enough)", () => {
@@ -172,6 +184,71 @@ describe("RecorderStateWriter", () => {
     w.setPhase("polling", null); // session rotation: the previous session must not stay attached
     expect(read(r)).toMatchObject({ phase: "polling", session: null });
     expect(readdirSync(recorderStateDir(r)).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("finalizingSince / progressAt: set on entering finalizing, kept when re-reported, reset on leave + re-enter", () => {
+    const r = root();
+    const { w, tick } = mk(r);
+    w.start();
+    w.setPhase("recording");
+    expect(read(r)).toMatchObject({ finalizingSince: null, progressAt: null });
+    w.setPhase("finalizing");
+    const since = read(r).finalizingSince!;
+    expect(since).not.toBeNull();
+    expect(read(r).progressAt).toBe(since);
+    tick(60_000);
+    w.setPhase("finalizing"); // repeated report: no reset
+    expect(read(r).finalizingSince).toBe(since);
+    w.setPhase("polling");
+    expect(read(r)).toMatchObject({ finalizingSince: null, progressAt: null });
+    tick(60_000);
+    w.setPhase("finalizing");
+    expect(read(r).finalizingSince).toBeGreaterThan(since);
+    expect(read(r).progressAt).toBe(read(r).finalizingSince);
+  });
+
+  it("noteProgress refreshes progressAt only while finalizing and at most once per throttle window", () => {
+    const r = root();
+    const { w, tick } = mk(r);
+    w.start();
+    w.noteProgress(); // not finalizing: ignored
+    w.setPhase("recording");
+    w.noteProgress();
+    expect(read(r).progressAt).toBeNull();
+    w.setPhase("finalizing");
+    const t0 = read(r).progressAt!;
+    tick(PROGRESS_WRITE_THROTTLE_MS - 1);
+    w.noteProgress();
+    expect(read(r).progressAt).toBe(t0); // throttled
+    tick(1);
+    w.noteProgress();
+    expect(read(r).progressAt).toBe(t0 + PROGRESS_WRITE_THROTTLE_MS);
+  });
+
+  it("end to end: a 5h finalize with steady progress stays active; the same finalize without progress dies after 45 min", () => {
+    vi.useFakeTimers();
+    const run = (withProgress: boolean, hours: number): string => {
+      const r = root();
+      let t = NOW;
+      const w = new RecorderStateWriter({
+        file: recorderStatePath(r, 7), taskId: 7, platform: "douyin", roomSlug: "555", mode: "live",
+        owner: { pid: 4242, startTicks: TICKS, bootId: BOOT }, now: () => t,
+      });
+      w.start();
+      w.setPhase("finalizing");
+      const step = 5 * 60_000;
+      for (let i = 0; i < (hours * 3600_000) / step; i++) {
+        t += step;
+        vi.advanceTimersByTime(step); // heartbeat timer keeps heartbeatAt fresh, as in production
+        if (withProgress) w.noteProgress();
+      }
+      const st = JSON.parse(readFileSync(recorderStatePath(r, 7), "utf-8")) as RecorderStateFile;
+      const verdict = recorderActivity(st, t, probe());
+      w.markExited(0);
+      return verdict;
+    };
+    expect(run(true, 5)).toBe("active");
+    expect(run(false, 1)).toBe("dead");
   });
 
   it("does not rewrite on a repeated identical phase", () => {

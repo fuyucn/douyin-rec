@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { cachedRecordingRooms, runOverFleet } from "./fleet-run.js";
+import { cachedRoomDone, runOverFleet } from "./fleet-run.js";
 import type { FleetLink } from "./fleet-hub.js";
 
 function fakeLink(over: Partial<FleetLink> = {}): FleetLink {
@@ -7,6 +7,7 @@ function fakeLink(over: Partial<FleetLink> = {}): FleetLink {
     supports: () => true,
     cached: () => null,
     recordingRooms: () => null,
+    finalizingRooms: () => null,
     request: async () => ({ stdout: "fleet\n", exitCode: 0 }),
     ...over,
   };
@@ -69,10 +70,22 @@ describe("runOverFleet", () => {
   });
 });
 
-describe("cachedRecordingRooms", () => {
-  it("reads the link's fresh room set; null without a link", () => {
-    const rooms = new Set(["a"]);
-    expect(cachedRecordingRooms(fakeLink({ recordingRooms: () => rooms }), "n1")).toBe(rooms);
-    expect(cachedRecordingRooms(null, "n1")).toBeNull();
+describe("cachedRoomDone", () => {
+  const link = (rooms: string[] | null, finalizing: string[] | null) => fakeLink({
+    recordingRooms: () => (rooms ? new Set(rooms) : null),
+    finalizingRooms: () => (finalizing ? new Set(finalizing) : null),
+  });
+
+  it("room in neither list → done; recording → not done; finalizing → not done (#456)", () => {
+    expect(cachedRoomDone(link(["a"], ["b"]), "n1", "c")).toBe(true);
+    expect(cachedRoomDone(link(["a"], ["b"]), "n1", "a")).toBe(false);
+    expect(cachedRoomDone(link(["a"], ["b"]), "n1", "b")).toBe(false);
+  });
+
+  it("heartbeat without the finalizing list (older node) or without rooms → no verdict, the caller asks the node", () => {
+    expect(cachedRoomDone(link(["a"], null), "n1", "c")).toBeNull();
+    expect(cachedRoomDone(link(null, null), "n1", "c")).toBeNull();
+    expect(cachedRoomDone(link(null, []), "n1", "c")).toBeNull();
+    expect(cachedRoomDone(null, "n1", "c")).toBeNull();
   });
 });

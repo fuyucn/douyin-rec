@@ -35,11 +35,13 @@ import {
   PartSink,
   runLivePump,
   setSpawnForTest,
+  sleepUnlessAborted,
   type ChildProcessLike,
   type SealedPart,
   type SpawnFn,
 } from "./live-pump.js";
 import type { PreuploadResult } from "./upos-stream.js";
+import { initRecorderState, parseRecorderState, recorderActivity, recorderStatePath, resetRecorderStateForTest, setRecorderPhase } from "@drec/core";
 import { stream as tsStream, pat, pmt, VIDEO, AUDIO } from "./ts-fixture.js";
 import { TS_PACKET as TS_PACKET_BYTES, TsCutter } from "./ts-cutter.js";
 
@@ -2496,6 +2498,29 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
     expect(phases).toEqual(["polling", "finalizing", "polling"]);
   });
 
+  it("plans/044: a startup recovery that gives up with unconfirmed parts left stays finalizing (never restored to polling)", async () => {
+    const statePath = join(dir, "live-pump-r.state.json");
+    writeLivePumpState(statePath, {
+      schemaVersion: 1, room: "r", createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
+      parts: [
+        // Spool and held-gap sibling are both gone: a real gap, so recovery refuses and the part stays unconfirmed.
+        { index: 0, spoolPath: join(dir, "missing.ts"), filename: "missing.ts", stem: "stem0", title: "P1", bytes: 1, durationSec: 1, confirmed: false },
+      ],
+      updatedAt: Date.now(),
+    });
+    const phases: string[] = [];
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "r", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: 1024, quality: "origin", submit: true, spoolMode: "none", waitForBroadcast: true,
+      fetchImpl: (async () => new Response("{}", { status: 200 })) as unknown as typeof fetch,
+      probeDuration: async () => 60, scanDtsGap: async () => null, sleep: async () => {}, log: () => {},
+      onPhase: (p) => phases.push(p),
+      fetch: async () => ({ living: false }),
+    });
+    expect(r.ok).toBe(false);
+    expect(phases.at(-1)).toBe("finalizing");
+  });
+
   it("recovers create intent by exact title and does not create a second archive", async () => {
     const { impl, posts, videos } = makeSessionFetch();
     videos().push({ cid: 10, filename: "stem0", title: "P1" });
@@ -3746,3 +3771,29 @@ describe("runStream: cutting and stopping", () => {
 function keyframeAtOffset(b: Buffer, o: number): boolean {
   return ((b[o + 1]! & 0x1f) << 8 | b[o + 2]!) === 0x100 && (b[o + 1]! & 0x40) !== 0 && (b[o + 5]! & 0x40) !== 0;
 }
+
+describe("plans/044: bounded upload waits are progress for the finalizing judge", () => {
+  const run = async (): Promise<string> => {
+    const root = mkdtempSync(join(tmpdir(), "live-pump-wait-"));
+    let t = 1_700_000_000_000;
+    try {
+      const w = initRecorderState({ root, taskId: 7, platform: "douyin", roomSlug: "r", mode: "live", now: () => t, owner: { pid: 1, startTicks: 5, bootId: "b" } });
+      setRecorderPhase("finalizing");
+      // 10 backoff sleeps of 5 min (601 preupload / submit backoff, upload retry pacing): 50 min without a chunk.
+      for (let i = 0; i < 10; i++) {
+        await sleepUnlessAborted(300_000, [], async () => { t += 300_000; });
+      }
+      const st = parseRecorderState(JSON.parse(readFileSync(recorderStatePath(root, 7), "utf-8")))!;
+      const verdict = recorderActivity(st, t, { startTicks: () => 5, bootId: () => "b" });
+      w.markExited(0);
+      return verdict;
+    } finally {
+      resetRecorderStateForTest();
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  it("a 50 min chain of backoff sleeps keeps the finalizing child active", async () => {
+    expect(await run()).toBe("active");
+  });
+});
