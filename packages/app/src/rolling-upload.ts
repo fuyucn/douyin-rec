@@ -820,7 +820,7 @@ export class RollingUploader {
   /**
    * Report upload progress for the recorder's finalizing stall judge (plans/044) while a biliup child runs.
    * biliup's output is NOT a signal (no progress bar on a pipe, plans/038); TCP bytes acked on its sockets is.
-   * Each tick samples the child: acked grew → progress. No reading (no `ss`, non-Linux) → a live child counts
+   * Each tick samples the child: acked grew → progress. No reading (no `ss`, non-Linux, no visible sockets) → a live child counts
    * as progress (the judge's 24h backstop still bounds it). The timer lives exactly as long as one child
    * (cleared on close, and again in `finally` for any path that skips `onClose`).
    */
@@ -839,7 +839,8 @@ export class RollingUploader {
         timer = setInterval(() => {
           let sample: AckSample = null;
           try { sample = read(pid); } catch { sample = null; }
-          if (sample === null) { note(); return; }
+          // No sockets visible (ss denied / child between connections) is no evidence either: live child = progress.
+          if (sample === null || sample.size === 0) { note(); return; }
           let sum = 0;
           for (const v of sample.values()) sum += v;
           if (sum > last) note();

@@ -1586,6 +1586,11 @@ describe("RollingUploader finalizing progress from the biliup child (plans/044)"
     expect(r.verdict).toBe("active");
   });
 
+  it("empty reading (ss cannot see the child's sockets) with the child alive is no evidence: stays active", async () => {
+    const r = await scenario({ readAcked: () => new Map(), minutes: 50 });
+    expect(r.verdict).toBe("active");
+  });
+
   it("acked flat for 46 min with the child alive: dead", async () => {
     const r = await scenario({ readAcked: () => new Map([["a>b", 5_000_000]]), minutes: 46 });
     expect(r.verdict).toBe("dead");
