@@ -117,3 +117,7 @@ export function registerBuiltinTransports(deps: {
     new SshTransport({ id: cfg.id, host: cfg.host!, dataRoot: cfg.dataRoot! }),
   );
 }
+// Fleet long connection, master side (plans/042).
+export { FleetHub, issueFleetToken, verifyFleetToken, setFleetLink, getFleetLink, type FleetLink, type FleetNodeState } from "./fleet-hub.js";
+export { withFleet, parseNodeCommand, FLEET_CACHE_MAX_AGE_MS } from "./fleet-run.js";
+export { joinFleetNode, type FleetJoinResult } from "./fleet-join.js";

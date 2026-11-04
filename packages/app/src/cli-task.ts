@@ -281,6 +281,11 @@ export interface HubStarter {
     log: (msg: string) => void;
     warn: (msg: string) => void;
   }): Promise<(() => void) | undefined>;
+  /**
+   * Fleet long connection (plans/042): hand an http `upgrade` to the master's fleet hub. Returns false when
+   * the path is not the fleet route or the hub is off (serve then destroys the socket).
+   */
+  fleetUpgrade?: (req: import("node:http").IncomingMessage, socket: import("node:stream").Duplex, head: Buffer) => boolean;
   /** 连接测试(cli L5 用 orchestrator getTransport + listInventory 实现)。 */
   testWorker?: (cfg: { kind: string; host?: string; dataRoot?: string; id?: string; apiUrl?: string }) => Promise<import("@drec/core").WorkerTestResult>;
   /** 批量存活探针(cli L5 用 orchestrator scoped transport ping 实现)。省略 → status 端点返回 []。 */

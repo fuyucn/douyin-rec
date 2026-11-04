@@ -1189,6 +1189,8 @@ program
 // app 不直接依赖 @drec/orchestrator（orchestrator 依赖 app），由 cli 作为 L5 入口注入。
 // web API 在 hub 规则/worker 变更后立即触发一次任务同步(不等 60s 周期 tick)。
 let hubSyncTasks: ((opts?: { force?: boolean }) => Promise<void>) | undefined;
+/** Master side of the fleet long connection (plans/042); null when `fleet.controllerUrl` is not configured. */
+let hubFleet: import("@drec/orchestrator").FleetHub | null = null;
 
 const hubSyncGate = new SyncGate();
 const requestHubSync = (opts?: { force?: boolean }): void => {
@@ -1345,6 +1347,7 @@ const requestHubRunNow = async (
 };
 
 const hubStarter: HubStarter = {
+  fleetUpgrade: (req, socket, head) => hubFleet?.handleUpgrade(req, socket, head) ?? false,
   requestSyncTasks: requestHubSync,
   recordingWorkers: readRecordingWorkers,
   zeroDiskStatus: readZeroDiskStatus,
@@ -1416,6 +1419,11 @@ const hubStarter: HubStarter = {
         uploadRateWindowMs?: number;
         uploadCooldownMs?: number;
       };
+      /**
+       * Fleet long connection (plans/042). Opt-in: set `controllerUrl` to this master's address as the
+       * workers reach it (tailscale), e.g. "http://100.64.0.1:7860". Absent → ssh only, as before.
+       */
+      fleet?: { controllerUrl?: string };
     };
     if (!hubCfg) {
       opts.warn("[hub] --hub 已设置但 --hub-config / settings.hubConfig 未提供，跳过");
@@ -1479,6 +1487,19 @@ const hubStarter: HubStarter = {
       const fromFile = workerStore.listWorkers(rootHubConfig());
       return fromFile.length ? fromFile : workers;
     };
+    // Fleet long connection (plans/042): workers dial in; SshTransport consults it before spawning over ssh.
+    const fleetControllerUrl = hubCfg.fleet?.controllerUrl?.trim();
+    const fleetTokenPath = join(rootConfigDir(), "fleet-nodes.json");
+    if (fleetControllerUrl) {
+      const { FleetHub, setFleetLink, verifyFleetToken } = await import("@drec/orchestrator");
+      hubFleet = new FleetHub({
+        verifyToken: (nodeId, token) => verifyFleetToken(fleetTokenPath, nodeId, token),
+        log: opts.log,
+        // A worker's recording rooms changed: refresh the console snapshot now (it reads the fresh heartbeat).
+        onRecordingChange: () => void refreshRecordingStatus(),
+      });
+      setFleetLink(hubFleet);
+    }
     let refreshingRecordingStatus = false;
     /** 状态探测与 pipeline 共用同一批 transport 实例(避免每 5s 重建 SshTransport)。 */
     let statusTransports: Map<string, ReturnType<typeof getTransport>> | null = null;
@@ -2254,7 +2275,34 @@ const hubStarter: HubStarter = {
     };
     scheduleRecordingStatusProbe(RECORDING_IDLE_POLL_MS);
     opts.log(`[hub] 已启用，${loadWorkers().length} 个 worker`);
+    // Hand fleet credentials to ssh workers that are not connected (old bundle / never joined / token lost).
+    // Retried at most every 30 minutes per node; a join takes effect once the node's serve reloads fleet.json.
+    const fleetJoinAttempt = new Map<string, number>();
+    const fleetJoinTimer = fleetControllerUrl
+      ? setInterval(() => {
+          void (async () => {
+            const { joinFleetNode } = await import("@drec/orchestrator");
+            for (const w of loadWorkers()) {
+              if ((w.kind !== "ssh" && w.kind !== "tailscale-ssh") || !w.host || !w.dataRoot) continue;
+              if (hubFleet?.connected(w.id)) continue;
+              const last = fleetJoinAttempt.get(w.id) ?? 0;
+              if (Date.now() - last < 30 * 60_000) continue;
+              fleetJoinAttempt.set(w.id, Date.now());
+              const r = await joinFleetNode({ host: w.host, dataRoot: w.dataRoot, nodeId: w.id, controllerUrl: fleetControllerUrl, tokenPath: fleetTokenPath });
+              if (r.result === "joined") opts.log(`[fleet] credentials sent to ${w.id}`);
+              else if (r.result === "failed") opts.warn(`[fleet] join ${w.id} failed (ssh fallback stays): ${r.detail ?? ""}`);
+            }
+          })().catch((e) => opts.warn(`[fleet] join loop: ${(e as Error)?.message ?? e}`));
+        }, 60_000)
+      : null;
+    fleetJoinTimer?.unref?.();
     return () => {
+      if (fleetJoinTimer) clearInterval(fleetJoinTimer);
+      if (hubFleet) {
+        hubFleet.close();
+        hubFleet = null;
+        void import("@drec/orchestrator").then(({ setFleetLink }) => setFleetLink(null));
+      }
       stop();
       recordingProbeStopped = true;
       if (recordingStatusTimer) clearTimeout(recordingStatusTimer);
