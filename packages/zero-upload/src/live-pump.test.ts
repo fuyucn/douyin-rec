@@ -4301,6 +4301,10 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
         expect(confirmed).toBeGreaterThanOrEqual(2);
         expect(alerts).toHaveLength(1);
         expect(logs.some((m) => m.includes("抑制"))).toBe(true);
+        // The end-of-run summary line (contains 共抑制, unlike the alert note 已抑制) must
+        // appear exactly once on a normal exit: this pins the suppressedLogged guard — without
+        // it the post-loop call and the finally both print the same line.
+        expect(logs.filter((m) => m.includes("共抑制"))).toHaveLength(1);
       } finally {
         vi.useRealTimers();
         setSpawnForTest(undefined);
