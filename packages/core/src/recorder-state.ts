@@ -350,6 +350,11 @@ export class RecorderStateWriter {
     this.flush();
   }
 
+  /** True while the child is sealing / uploading its tail (progress sampling is only worth doing then). */
+  get isFinalizing(): boolean {
+    return !this.exit && this.phase === "finalizing";
+  }
+
   noteSignal(signal: string): void {
     this.signal = signal;
   }
@@ -441,6 +446,11 @@ export function setRecorderPhase(phase: RecorderPhase, session?: string | null):
 
 export function setRecorderSession(session: string | null): void {
   current?.setSession(session);
+}
+
+/** True when the process-wide writer is in the `finalizing` phase (false without a writer). */
+export function recorderIsFinalizing(): boolean {
+  return current?.isFinalizing ?? false;
 }
 
 /** Upload progress report (no-op without a process-wide writer, or outside the finalizing phase). */

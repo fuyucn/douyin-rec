@@ -2555,11 +2555,15 @@ export const IDLE_POLL_MS = 30_000;
  * Sleep that ends early when any signal aborts. `sleepImpl` is the test seam; it is still raced
  * against the signals so a stop is never delayed by a long poll interval.
  */
-async function sleepUnlessAborted(
+export async function sleepUnlessAborted(
   ms: number,
   signals: Array<AbortSignal | undefined>,
   sleepImpl?: (ms: number) => Promise<void>,
 ): Promise<void> {
+  // Every wait in this file (601 / submit backoff, upload retry pacing, idle poll) is a bounded pause (<= 5 min)
+  // inside work this child still owns: it is not a stall for the finalizing judge (plans/044). The 24h backstop
+  // bounds an endless wait.
+  noteRecorderProgress();
   const live = signals.filter((x): x is AbortSignal => !!x);
   if (live.some((x) => x.aborted)) return;
   let timer: NodeJS.Timeout | undefined;

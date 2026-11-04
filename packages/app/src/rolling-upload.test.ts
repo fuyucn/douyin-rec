@@ -1534,6 +1534,7 @@ describe("RollingUploader finalizing progress from the biliup child (plans/044)"
     readAcked: (pid: number) => AckSample;
     minutes: number;
     spawns?: number; // sequential children inside the one upload call (line retries)
+    block?: "gate" | "slot"; // the upload is held back before any child starts (rate-limit window / node slot)
   }): Promise<{ verdict: RecorderActivity; timersAfter: number }> {
     vi.useFakeTimers();
     vi.setSystemTime(NOW_MS);
@@ -1549,13 +1550,21 @@ describe("RollingUploader finalizing progress from the biliup child (plans/044)"
       let release: () => void = () => {};
       const gateOpen = new Promise<void>((r) => { release = r; });
       const spawns = opts.spawns ?? 1;
+      class BlockedGate extends UploadGate {
+        async run<T>(_key: string, fn: () => Promise<T>): Promise<T> { await gateOpen; return fn(); }
+      }
+      const blockedSlot = {
+        index: 0, acquire: async () => { await gateOpen; return true; }, release: () => {}, touch: () => {}, close: () => {},
+      };
       const u = new RollingUploader({
-        room, uploadMeta, gate: new FakeGate(), appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0,
-        readAcked: opts.readAcked, noteProgress: () => w.noteProgress(), progressIntervalMs: STEP,
+        room, uploadMeta, gate: opts.block === "gate" ? new BlockedGate() : new FakeGate(),
+        ...(opts.block === "slot" ? { slot: blockedSlot } : {}),
+        appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0,
+        readAcked: opts.readAcked, noteProgress: () => w.noteProgress(), shouldSample: () => true, progressIntervalMs: STEP,
         uploadPlainRaw: async (o) => {
           for (let i = 0; i < spawns - 1; i++) { o.hooks?.onSpawn?.(4242 + i); o.hooks?.onClose?.(); } // retried lines: children that died
           o.hooks?.onSpawn?.(9999); // the last child hangs
-          await gateOpen;
+          if (!opts.block) await gateOpen;
           o.hooks?.onClose?.();
           return FAKE_BV;
         },
@@ -1594,6 +1603,43 @@ describe("RollingUploader finalizing progress from the biliup child (plans/044)"
   it("acked flat for 46 min with the child alive: dead", async () => {
     const r = await scenario({ readAcked: () => new Map([["a>b", 5_000_000]]), minutes: 46 });
     expect(r.verdict).toBe("dead");
+  });
+
+  it("waiting for the node upload slot for 50 min (no child yet) is not a stall", async () => {
+    const r = await scenario({ readAcked: () => new Map([["a>b", 1]]), minutes: 50, block: "slot" });
+    expect(r.verdict).toBe("active");
+    expect(r.timersAfter).toBe(0);
+  });
+
+  it("waiting in the upload gate (rate-limit window / cooldown) for 50 min is not a stall", async () => {
+    const r = await scenario({ readAcked: () => new Map([["a>b", 1]]), minutes: 50, block: "gate" });
+    expect(r.verdict).toBe("active");
+    expect(r.timersAfter).toBe(0);
+  });
+
+  it("a socket closing and a new one carrying bytes counts as progress (per-socket comparison)", async () => {
+    let n = 0;
+    const r = await scenario({ readAcked: () => new Map([[`sock${n++}`, 1_000]]), minutes: 50 });
+    expect(r.verdict).toBe("active");
+  });
+
+  it("does not sample (no ss) while the recorder is not finalizing", async () => {
+    const read = vi.fn(() => new Map([["a>b", 1]]));
+    vi.useFakeTimers();
+    const { paths } = mkSession(segNames(1));
+    let release: () => void = () => {};
+    const gateOpen = new Promise<void>((r) => { release = r; });
+    const u = new RollingUploader({
+      room, uploadMeta, gate: new FakeGate(), appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0,
+      readAcked: read, noteProgress: () => {}, shouldSample: () => false, progressIntervalMs: STEP,
+      uploadPlainRaw: async (o) => { o.hooks?.onSpawn?.(9999); await gateOpen; o.hooks?.onClose?.(); return FAKE_BV; },
+    });
+    u.noteSegment(paths[0]);
+    const done = u.flush({ recordingActive: false });
+    await vi.advanceTimersByTimeAsync(10 * STEP);
+    expect(read).not.toHaveBeenCalled();
+    release();
+    await done;
   });
 
   it("the sampling interval is cleared after close and across retries (no leaked timers)", async () => {
