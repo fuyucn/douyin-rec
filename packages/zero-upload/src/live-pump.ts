@@ -2893,6 +2893,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
   let recoveryTimedOut = false;
   let lastMediaWallAlertAt = 0;
   let mediaWallAlertsSuppressed = 0;
+  let suppressedLogged = false;
   let archivePartsWarned = false;
   const spoolMode = o.spoolMode ?? "full";
   const spoolDirClean = o.spoolDir.replace(/\/$/, "");
@@ -2970,9 +2971,20 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     const confirmed = session.parts.filter((p) => p.confirmed).length;
     if (confirmed < ARCHIVE_PARTS_WARN_AT) return;
     archivePartsWarned = true;
-    const msg = `稿件分 P 已达 ${confirmed} 个(预警线 ${ARCHIVE_PARTS_WARN_AT}):平台对单稿件分 P 数有 believed 上限,继续追加可能失败,请人工关注`;
+    const msg = `稿件分 P 已达 ${confirmed} 个(预警线 ${ARCHIVE_PARTS_WARN_AT}):平台对单稿件分 P 数有据信上限,继续追加可能失败,请人工关注`;
     log(`[直播直传] ⚠️ ${msg}`);
     try { o.onAlert?.(msg); } catch { /* alert channel must not break the run */ }
+  };
+
+  /**
+   * The suppressed-alert count must reach the log on every exit path — including `return fatal`
+   * and the rethrown `fatalThrown` inside the connection loop, which bypass the post-loop code.
+   * Guarded so the finally cannot double-log what the post-loop call already reported.
+   */
+  const logSuppressedRatioAlerts = (): void => {
+    if (mediaWallAlertsSuppressed <= 0 || suppressedLogged) return;
+    suppressedLogged = true;
+    log(`[直播直传] ⚠️ 分段媒体/墙钟告警冷却期(每 ${Math.round(RATIO_ALERT_COOLDOWN_MS / 60_000)} 分钟至多一条)内共抑制 ${mediaWallAlertsSuppressed} 条`);
   };
 
   /** complete → dts scan → submit for one sealed part. Mirrors the sequential per-part code. */
@@ -3640,9 +3652,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
 
   // Suppressed ratio alerts must not vanish: the count rides in the next alert when one fires,
   // and in this end-of-run line when none does.
-  if (mediaWallAlertsSuppressed > 0) {
-    log(`[直播直传] ⚠️ 分段媒体/墙钟告警冷却期(每 ${Math.round(RATIO_ALERT_COOLDOWN_MS / 60_000)} 分钟至多一条)内共抑制 ${mediaWallAlertsSuppressed} 条`);
-  }
+  logSuppressedRatioAlerts();
 
   if (recoveryTimedOut && segments.length === 0) {
     return {
@@ -3700,6 +3710,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
   } finally {
     // Whatever is still running on the chain must not touch the returned result any more.
     closed = true;
+    logSuppressedRatioAlerts();
     for (const c of ctxs.values()) c.ac.abort();
     await session.drainSeason();
     await stopDanmu();
