@@ -313,6 +313,28 @@ describe("SshTransport", () => {
     expect(cmdStr).toContain("411");
     expect(cmdStr).not.toContain("ffmpeg");
   });
+  it("isDone：新格式心跳(含 finalizing)缓存命中 → 不走命令;房间在 finalizing → false(#456)", async () => {
+    const run = vi.fn(async () => "true\n");
+    const link = {
+      supports: () => false, cached: () => null, request: async () => { throw new Error("no"); },
+      recordingRooms: () => new Set(["rec"]), finalizingRooms: () => new Set(["fin"]),
+    };
+    const t = new SshTransport({ id: "n", host: "h", dataRoot: "/d", rsync: async () => {}, run, fleet: () => link });
+    expect(await t.isDone("fin")).toBe(false);
+    expect(await t.isDone("rec")).toBe(false);
+    expect(await t.isDone("other")).toBe(true);
+    expect(run).not.toHaveBeenCalled();
+  });
+  it("isDone：旧格式心跳(无 finalizing)不能证明收播 → 回落 is-done 命令", async () => {
+    const run = vi.fn(async () => "false\n");
+    const link = {
+      supports: () => false, cached: () => null, request: async () => { throw new Error("no"); },
+      recordingRooms: () => new Set<string>(), finalizingRooms: () => null,
+    };
+    const t = new SshTransport({ id: "n", host: "h", dataRoot: "/d", rsync: async () => {}, run, fleet: () => link });
+    expect(await t.isDone("411")).toBe(false);
+    expect(run).toHaveBeenCalledTimes(1);
+  });
   it("isDone：支持 remoteNode 覆盖", async () => {
     const capturedArgv: string[][] = [];
     const t = new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec",

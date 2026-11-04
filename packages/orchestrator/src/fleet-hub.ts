@@ -52,6 +52,11 @@ export interface FleetLink {
   cached(nodeId: string, cmd: FleetHeartbeatCommand, maxAgeMs: number): FleetCommandOutput | null;
   /** Room slugs recording on the node per the latest `recording-status` heartbeat, or null if unknown / stale. */
   recordingRooms(nodeId: string, maxAgeMs: number): ReadonlySet<string> | null;
+  /**
+   * Room slugs still finalizing (tail upload) per the latest `recording-status` heartbeat. Null when unknown /
+   * stale OR when the node's bundle predates the `finalizing` field: such a heartbeat cannot prove a room is done.
+   */
+  finalizingRooms(nodeId: string, maxAgeMs: number): ReadonlySet<string> | null;
   /** Run a node command over the connection. Rejects on disconnect / timeout (caller falls back to ssh). */
   request(nodeId: string, cmd: string, args: string[], timeoutMs: number): Promise<FleetReply>;
 }
@@ -102,7 +107,7 @@ interface Conn {
   commands: Set<string>;
   outputs: Partial<Record<FleetHeartbeatCommand, FleetCommandOutput>>;
   /** Parsed once per `recording-status` heartbeat: the slugs, and an order-free identity for change detection. */
-  rooms: { slugs: ReadonlySet<string>; key: string; at: number } | null;
+  rooms: { slugs: ReadonlySet<string>; finalizing: ReadonlySet<string> | null; key: string; at: number } | null;
   pending: Map<number, { resolve: (r: FleetReply) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>;
 }
 
@@ -161,6 +166,11 @@ export class FleetHub implements FleetLink {
   recordingRooms(nodeId: string, maxAgeMs: number): ReadonlySet<string> | null {
     const rooms = this.conns.get(nodeId)?.rooms;
     return rooms && this.now() - rooms.at <= maxAgeMs ? rooms.slugs : null;
+  }
+
+  finalizingRooms(nodeId: string, maxAgeMs: number): ReadonlySet<string> | null {
+    const rooms = this.conns.get(nodeId)?.rooms;
+    return rooms && this.now() - rooms.at <= maxAgeMs ? rooms.finalizing : null;
   }
 
   request(nodeId: string, cmd: string, args: string[], timeoutMs: number): Promise<FleetReply> {
@@ -265,9 +275,16 @@ export class FleetHub implements FleetLink {
       conn.rooms = null; // unknown: callers fall back to asking
       return;
     }
-    const key = parsed.map((r) => `${r.platform}:${r.roomSlug}`).sort().join(",");
+    const finalizing = parseFinalizingRooms(stdout);
+    const key = parsed.map((r) => `${r.platform}:${r.roomSlug}`).sort().join(",")
+      + "|" + (finalizing ?? []).map((r) => `${r.platform}:${r.roomSlug}`).sort().join(",");
     const changed = conn.rooms !== null && conn.rooms.key !== key;
-    conn.rooms = { slugs: new Set(parsed.map((r) => r.roomSlug)), key, at };
+    conn.rooms = {
+      slugs: new Set(parsed.map((r) => r.roomSlug)),
+      finalizing: finalizing ? new Set(finalizing.map((r) => r.roomSlug)) : null,
+      key,
+      at,
+    };
     if (changed) this.o.onRecordingChange?.(conn.nodeId);
   }
 
@@ -301,6 +318,23 @@ export function parseRecordingRooms(stdout: string): Array<{ platform: string; r
     const v = JSON.parse(stdout) as { rooms?: unknown };
     if (!Array.isArray(v.rooms)) return null;
     return v.rooms.map((r) => {
+      const x = (r ?? {}) as { platform?: unknown; roomSlug?: unknown };
+      return { platform: String(x.platform), roomSlug: String(x.roomSlug) };
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The finalizing rooms in a `recording-status` stdout, or null when the field is absent / malformed (a node
+ * bundle that predates it): callers must then not treat absence from `rooms` as "done".
+ */
+export function parseFinalizingRooms(stdout: string): Array<{ platform: string; roomSlug: string }> | null {
+  try {
+    const v = JSON.parse(stdout) as { finalizing?: unknown };
+    if (!Array.isArray(v.finalizing)) return null;
+    return v.finalizing.map((r) => {
       const x = (r ?? {}) as { platform?: unknown; roomSlug?: unknown };
       return { platform: String(x.platform), roomSlug: String(x.roomSlug) };
     });

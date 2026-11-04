@@ -178,6 +178,23 @@ describe("FleetHub", () => {
     expect(hub.recordingRooms("n1", 100)).toBeNull();
   });
 
+  it("finalizingRooms: present only when the heartbeat carries the field (older bundle → null), changes fire onRecordingChange", async () => {
+    const changes: string[] = [];
+    const { hub, url } = await startHub({ onRecordingChange: (id) => changes.push(id) });
+    const n = await node(url);
+    await n.next("welcome");
+    const send = (o: object) => n.ws.send(JSON.stringify({ t: "heartbeat", outputs: { "recording-status": { stdout: JSON.stringify(o) + "\n", exitCode: 0 } } }));
+    send({ rooms: [], rolling: [] });
+    await until(() => hub.recordingRooms("n1", 1000) !== null);
+    expect(hub.finalizingRooms("n1", 1000)).toBeNull(); // no field: cannot prove a room is done
+    send({ rooms: [], finalizing: [{ platform: "douyin", roomSlug: "f" }], rolling: [] });
+    await until(() => hub.finalizingRooms("n1", 1000) !== null);
+    expect([...hub.finalizingRooms("n1", 1000)!]).toEqual(["f"]);
+    send({ rooms: [], finalizing: [], rolling: [] });
+    await until(() => hub.finalizingRooms("n1", 1000)?.size === 0);
+    await until(() => changes.length >= 2);
+  });
+
   it("close() rejects pending requests", async () => {
     const { hub, url } = await startHub();
     const n = await node(url);

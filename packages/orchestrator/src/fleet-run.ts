@@ -41,7 +41,15 @@ export async function runOverFleet(
   return settle(r, o.cmd);
 }
 
-/** Recording room slugs from a fresh heartbeat, or null when the master has to ask the node. */
-export function cachedRecordingRooms(link: FleetLink | null, nodeId: string): ReadonlySet<string> | null {
-  return link?.recordingRooms(nodeId, FLEET_HEARTBEAT_PLAN["recording-status"].maxAgeMs) ?? null;
+/**
+ * `is-done` verdict from a fresh heartbeat, or null when the master has to ask the node. Only a heartbeat that
+ * carries the `finalizing` list can prove "done" (done = in neither list): the `rooms` list alone excludes rooms
+ * that stopped pulling but are still uploading their tail (#456), so an older node's heartbeat must not decide.
+ */
+export function cachedRoomDone(link: FleetLink | null, nodeId: string, roomSlug: string): boolean | null {
+  const maxAge = FLEET_HEARTBEAT_PLAN["recording-status"].maxAgeMs;
+  const rooms = link?.recordingRooms(nodeId, maxAge);
+  const finalizing = link?.finalizingRooms(nodeId, maxAge);
+  if (!rooms || !finalizing) return null;
+  return !rooms.has(roomSlug) && !finalizing.has(roomSlug);
 }

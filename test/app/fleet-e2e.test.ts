@@ -27,7 +27,7 @@ describe("fleet end to end", () => {
     const port = (server.address() as { port: number }).port;
 
     const commands: Record<string, FleetNodeCommand> = {
-      "recording-status": async () => ({ stdout: '{"rooms":[{"platform":"douyin","roomSlug":"r1"}],"rolling":[]}\n', exitCode: 0 }),
+      "recording-status": async () => ({ stdout: '{"rooms":[{"platform":"douyin","roomSlug":"r1"}],"finalizing":[{"platform":"douyin","roomSlug":"r3"}],"rolling":[]}\n', exitCode: 0 }),
       disk: async () => ({ stdout: '{"freeGB":12.5}\n', exitCode: 0 }),
       "node-status": async () => ({ stdout: '{"appVersion":"x","appliedVersion":null,"appliedAt":null,"taskCount":0,"managedCount":0}\n', exitCode: 0 }),
       tasks: async () => ({ stdout: '{"tasks":[]}\n', exitCode: 0 }),
@@ -44,6 +44,7 @@ describe("fleet end to end", () => {
     expect(await t.diskFreeGB()).toBe(12.5);
     expect(await t.isDone("r1")).toBe(false);
     expect(await t.isDone("r2")).toBe(true);
+    expect(await t.isDone("r3")).toBe(false); // finalizing: not pulling, still uploading its tail (#456)
     expect((await t.recordingStatus()).rooms).toEqual([{ platform: "douyin", roomSlug: "r1" }]);
     expect((await t.listTasks()).tasks).toEqual([]);
     expect(ssh).not.toHaveBeenCalled();

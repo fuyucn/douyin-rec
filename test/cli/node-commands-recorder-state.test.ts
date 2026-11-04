@@ -4,11 +4,11 @@
  * The regression for issue #456: a live-pump child whose ffmpeg already exited but which is still uploading
  * its last part (phase=finalizing) must keep is-done=false; the old /proc scan saw no downloader and said done.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isRoomDone, localRoomProbes, recordingRoomsOf, type RoomProbeDeps } from "../../packages/cli/src/node-commands.js";
+import { finalizingRoomsOf, isRoomDone, localRoomProbes, recordingRoomsOf, resetScanMismatchWarningsForTest, type RoomProbeDeps } from "../../packages/cli/src/node-commands.js";
 import { LocalTransport } from "../../packages/orchestrator/src/transport-local.js";
 import { recorderStateDir, recorderStatePath, type ProcProbe, type RecorderStateFile } from "@drec/core";
 
@@ -18,6 +18,7 @@ const BOOT = "boot-1";
 const ALIVE_PID = 4242;
 
 const roots: string[] = [];
+beforeEach(() => resetScanMismatchWarningsForTest());
 afterEach(() => {
   for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
 });
@@ -31,7 +32,7 @@ function put(root: string, over: Partial<RecorderStateFile> & { taskId: number }
   const s: RecorderStateFile = {
     schemaVersion: 1, platform: "douyin", roomSlug: "555", mode: "live",
     owner: { pid: ALIVE_PID, startTicks: TICKS, bootId: BOOT },
-    phase: "recording", session: null, heartbeatAt: NOW, exit: null, updatedAt: NOW,
+    phase: "recording", session: null, heartbeatAt: NOW, finalizingSince: null, exit: null, updatedAt: NOW,
     ...over,
   };
   mkdirSync(recorderStateDir(root), { recursive: true });
@@ -201,5 +202,77 @@ describe("master local worker uses the same judgement (issue #456)", () => {
     const root = makeRoot();
     put(root, { taskId: 1, phase: "recording" });
     expect(await mkLocal(root, deps()).activeRecordingRooms()).toEqual([{ platform: "douyin", roomSlug: "555" }]);
+  });
+});
+
+describe("finalizingRoomsOf (recording-status `finalizing` list, #456)", () => {
+  it("lists only verified-active finalizing rooms; recording / polling / exited / dead are excluded", () => {
+    const root = makeRoot();
+    put(root, { taskId: 1, roomSlug: "rec", phase: "recording" });
+    put(root, { taskId: 2, roomSlug: "fin", phase: "finalizing" });
+    put(root, { taskId: 3, roomSlug: "poll", phase: "polling" });
+    put(root, { taskId: 4, roomSlug: "gone", phase: "exited", exit: exited });
+    put(root, { taskId: 5, roomSlug: "dead", phase: "finalizing", owner: { pid: 1, startTicks: TICKS, bootId: BOOT } });
+    expect(finalizingRoomsOf(root, deps())).toEqual([{ platform: "douyin", roomSlug: "fin" }]);
+  });
+
+  it("a finalizing tail past the 3h cap is no longer listed even though its heartbeat is fresh", () => {
+    const root = makeRoot();
+    put(root, { taskId: 1, phase: "finalizing", finalizingSince: NOW - 3 * 3600_000 - 1 });
+    expect(finalizingRoomsOf(root, deps())).toEqual([]);
+    expect(isRoomDone(root, "555", deps())).toBe(true);
+  });
+});
+
+describe("localRoomProbes on hosts without /proc (macOS serve --hub)", () => {
+  const noProc: ProcProbe = { startTicks: () => null, bootId: () => null };
+  const fb = {
+    isRoomRecording: (slug: string) => slug === "555",
+    activeRecordingRooms: () => [{ platform: "douyin", roomSlug: "555" }],
+  };
+
+  it("unverifiable proc probe → the fallback answers (state files judge dead there, which would always say done)", () => {
+    const root = makeRoot();
+    put(root, { taskId: 1, phase: "recording" });
+    const d = { ...deps(), proc: noProc };
+    const p = localRoomProbes(() => root, d, fb);
+    expect(p.isRoomRecording("555")).toBe(true);
+    expect(p.isRoomRecording("other")).toBe(false);
+    expect(p.activeRecordingRooms()).toEqual([{ platform: "douyin", roomSlug: "555" }]);
+    // Without a fallback the state-file judgement stays authoritative (and says done here).
+    expect(localRoomProbes(() => root, d).isRoomRecording("555")).toBe(false);
+  });
+
+  it("verifiable proc probe → the fallback is ignored", () => {
+    const root = makeRoot();
+    const p = localRoomProbes(() => root, deps(), fb);
+    expect(p.isRoomRecording("555")).toBe(false);
+    expect(p.activeRecordingRooms()).toEqual([]);
+  });
+});
+
+describe("data-root mismatch warning", () => {
+  const scan = (taskId?: number) => () => [{ platform: "douyin", roomSlug: "555", ...(taskId !== undefined ? { taskId } : {}) }];
+
+  it("warns once per (room, task) when the scan sees a --task-id process with no state file; the verdict is unchanged", () => {
+    const root = makeRoot();
+    put(root, { taskId: 9, roomSlug: "other", phase: "polling" });
+    const d = deps(scan(42));
+    expect(isRoomDone(root, "555", d)).toBe(false);
+    expect(recordingRoomsOf(root, d)).toEqual([{ platform: "douyin", roomSlug: "555" }]);
+    isRoomDone(root, "555", d);
+    const warns = d.logs.filter((l) => l.includes("task 42"));
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain("douyin:555");
+  });
+
+  it("no warning when the task has a state file, or when the process carries no --task-id", () => {
+    const root = makeRoot();
+    put(root, { taskId: 42, phase: "polling" });
+    const a = deps(scan(42));
+    isRoomDone(root, "555", a);
+    const b = deps(scan());
+    isRoomDone(root, "555", b);
+    expect([...a.logs, ...b.logs].filter((l) => l.includes("no state file"))).toEqual([]);
   });
 });
