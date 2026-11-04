@@ -1958,8 +1958,10 @@ async function finalizeRecordedPart(o: {
   scanDtsGap?: (path: string) => Promise<DtsGap | null | undefined>;
   /** Sleep seam for the fallback preupload 601 backoff (tests). */
   sleep?: (ms: number) => Promise<void>;
-  /** Called right before a gap-held spool is renamed (drop its recovery row). */
+  /** Called after a gap-held spool was renamed to `.held-gap` (drop its recovery row). */
   onHold?: () => void;
+  /** Called when that rename failed: the row must stay and a human must be told. */
+  onHoldFailed?: (detail: string) => void;
   keepSpool?: boolean;
 }): Promise<SegmentRunResult & { session?: PreuploadResult }> {
   const { rec, session, spoolPath, spoolMode } = o;
@@ -2017,10 +2019,15 @@ async function finalizeRecordedPart(o: {
       // Rename so the orphan sweep (which only matches the plain spool name) keeps the sample.
       let kept = spoolPath;
       const heldPath = heldGapPath(spoolPath);
-      // Drop the recovery row first (see the session's recovery path): a crash between the two steps
-      // must not leave a row pointing at a spool that was renamed away.
-      o.onHold?.();
-      try { renameSync(spoolPath, heldPath); kept = heldPath; } catch { /* keep under the original name */ }
+      // Rename first, drop the recovery row only after it succeeded: if the rename fails the row must
+      // stay (the orphan sweep keeps what the state references, so the only copy survives). A crash
+      // between the two steps leaves a row whose spool is gone but whose `.held-gap` sibling exists,
+      // which recovery treats as held.
+      let renamed = false;
+      try { renameSync(spoolPath, heldPath); kept = heldPath; renamed = true; } catch (e) {
+        o.onHoldFailed?.(`${spoolPath}: ${String((e as Error)?.message ?? e).slice(0, 120)}`);
+      }
+      if (renamed) o.onHold?.();
       const why = `时间戳跳变(流${gap.streamIndex}: ${gap.fromSec.toFixed(1)}s → ${gap.toSec.toFixed(1)}s),不投稿,spool 保留为 ${kept}`;
       rec.uploadError = rec.uploadError ? `${rec.uploadError};${why}` : why;
       // Chunks may already be on UPOS but this part will never complete.
@@ -2812,6 +2819,11 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       probeDuration: o.probeDuration, scanDtsGap: o.scanDtsGap,
       ...(o.sleep ? { sleep: o.sleep } : {}),
       onHold: () => session.dropPart(index),
+      onHoldFailed: (detail) => {
+        const msg = `段${seg + 1} 时间戳跳变的 spool 无法改名扣留,保留在恢复状态,需人工处理(${detail})`;
+        log(`[直播直传] ⚠️ ${msg}`);
+        try { o.onAlert?.(msg); } catch { /* alert channel must not break the run */ }
+      },
       keepSpool: true,
     });
     // The run already returned (budget cut-off): leave the archive and the returned result alone.
@@ -2845,9 +2857,6 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       // existing error return; treating it as a source stall would spin preupload forever.
     }
 
-    // A held part (dts gap) never enters the archive and its spool was renamed: it must not stay in
-    // the recovery state pointing at a path that no longer exists.
-    if (r.tsGap) session.dropPart(index);
     const unconfirmedIndex = index;
     const persistUnconfirmed = (): string | undefined => {
       if (r.tsGap || spoolMode !== "full" || o.submit === false || r.spooledBytes <= 0) {
@@ -3423,7 +3432,9 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
   // an archive stays `ok:true` with its `bvid` (the ledger / master receipt record it, exit code 0 as
   // before); the loss rides along as `lostParts` / `unknownParts` plus an alert. Only a run that
   // delivered nothing and lost video reports failure.
-  const delivered = !!session.bvid && session.parts.some((p) => p.confirmed);
+  // Parts confirmed by THIS run only: rows inherited from a resumed run must not make a run that
+  // delivered nothing look delivered (it would be ledgered a second time).
+  const delivered = !!session.bvid && segments.some((x) => x.stem && !x.uploadError);
   const lossNote = stopLost.length
     ? `停止时 ${stopLost.length} 个分 P 丢失(${stopLost.join(",")})${stopUnknown.length ? `;另有 ${stopUnknown.length} 个提交结果未知` : ""}`
     : undefined;

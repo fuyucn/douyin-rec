@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import { mkdtempSync, chmodSync, rmSync, readFileSync, statSync, writeFileSync, existsSync, writeSync, mkdirSync, readdirSync, utimesSync, truncateSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import {
   acquireStreamWithBackoff,
@@ -3274,6 +3274,47 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     expect(r.segments.some((x) => x.stem === "p1")).toBe(true);
     expect(alerts.join("\n")).toContain("丢失");
     await new Promise((res) => setTimeout(res, 2_800));
+  }, 30_000);
+
+  it("a resumed run that delivered nothing itself and loses its only part is not ok (inherited confirmed rows do not count as delivered)", async () => {
+    writeLivePumpState(livePumpStatePath(dir, "sm"), {
+      schemaVersion: 1, room: "sm", createdAt: Date.now(), title: "t", tid: 21, tag: "x", private: true, bvid: "BILIfake1", aid: 7,
+      parts: [{ index: 0, spoolPath: join(dir, "old.live.ts"), filename: "old.live.ts", stem: "old", title: "P1", bytes: 1, durationSec: 1, confirmed: true }],
+      updatedAt: Date.now(),
+    });
+    installFakeFfmpeg(tsStream({ gops: 40 }), { chunkEvery: 752, delayMs: 3 });
+    const ac = new AbortController();
+    const u = fakeUpos({ completeDelayMs: (n) => (n === 1 ? 2_500 : 0), completeIgnoresAbort: (n) => n === 1 });
+    const t = setInterval(() => { if (u.events.includes("complete-start 1")) { ac.abort(); clearInterval(t); } }, 5);
+    let r;
+    try {
+      r = await runLivePump(baseOpts(u, { spoolMode: "none", signal: ac.signal, finalizeBudgetMs: 200 }));
+    } finally { clearInterval(t); }
+    expect(r.ok).toBe(false);
+    expect(r.lostParts).toBeGreaterThanOrEqual(1);
+    expect(r.outcome).toBeUndefined();
+    await new Promise((res) => setTimeout(res, 2_800));
+  }, 30_000);
+
+  it("a gap spool that cannot be renamed keeps its recovery row on the normal finalize path and alerts", async () => {
+    installFakeFfmpeg(tsStream({ gops: 24 }), { chunkEvery: 752, delayMs: 3 });
+    const sub = join(dir, "sub");
+    const u = fakeUpos();
+    const alerts: string[] = [];
+    let r;
+    try {
+      r = await runLivePump(baseOpts(u, {
+        spoolMode: "full", maxSegments: 1, onAlert: (m) => alerts.push(m), autoRetryUpload: false,
+        spoolName: (seg: number) => `sub/g${seg}.live.ts`,
+        // The rename happens right after this scan: make the directory read-only first.
+        scanDtsGap: async (path: string) => { chmodSync(dirname(path), 0o555); return { streamIndex: 0, fromSec: 1, toSec: 9000 }; },
+      }));
+    } finally { chmodSync(sub, 0o755); }
+    expect(r.ok).toBe(false);
+    expect(alerts.join("\n")).toMatch(/无法改名/);
+    const st = readLivePumpState(livePumpStatePath(dir, "sm"))!;
+    expect(st.parts.map((p) => p.index)).toEqual([0]);
+    expect(existsSync(st.parts[0]!.spoolPath)).toBe(true);
   }, 30_000);
 
   it("a recovery row whose spool is gone but whose .held-gap sibling exists is treated as held, not as a blocker", async () => {
