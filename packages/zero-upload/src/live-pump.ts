@@ -1,23 +1,27 @@
 /**
- * live-pump.ts — 「每段一个 ffmpeg 进程」的边录边传最小实现 (T-63 阶段 2)。
+ * live-pump.ts — record-and-upload in one pass: one ffmpeg per stream connection, parts cut by us
+ * (T-63 phase 2; plans/043).
  *
- * 为什么必须「一段一进程」而不是一个 ffmpeg 常驻滚动分段:录制进程还活着时,没有任何权威信号
- * 告诉上传层「这一段写完了」。`RollingUploader` 因此只能用「出现后继段」当封口代理信号 ——
- * 上传永远落后一个分 P。分 P 是 30s 时无所谓,分 P 是 1 GiB(约 20 分钟)时上传就永久落后 20 分钟。
- * **ffmpeg 进程退出 = stdout EOF = 本段封口**,这是唯一不依赖后继段的权威信号。
+ * Nothing authoritative tells the upload layer "this part is finished" while a recorder is still
+ * running, so `RollingUploader` used the appearance of the next file as its seal signal and always
+ * lagged one part behind. Here the pump owns the cut point instead: ffmpeg writes one continuous
+ * mpegts stream to stdout and {@link TsCutter} ends a part on a video keyframe (size bound or PTS
+ * duration, whichever comes first). The part is sealed at that instant, with no dependence on a
+ * successor and without stopping the pull.
  *
- * 数据流(对齐 biliup `sync_downloader.rs` 的 pump_chunks,但上传走自研 upos-stream):
+ * Data flow (chunking follows biliup's `sync_downloader.rs` pump_chunks; the upload is the in-house
+ * upos-stream):
  *
- *   ffmpeg -fs <cap> -f mpegts pipe:1
- *     |- stdout --> spool 文件(始终写)
- *     \- 失败   --> 按整文件重传(reuploadSpoolFile;spool 是唯一可回退的源)
- *     \- exit   --> 本段封口 --> complete --> append 追 P(不等下一个分 P)
+ *   ffmpeg -f mpegts pipe:1                       (one process per connection)
+ *     |- stdout --> TsCutter --> PartSink k --> UPOS chunks (+ spool file in "full" mode)
+ *     \- cut     --> part k sealed; bytes flow into PartSink k+1 at once
+ *                    part k: complete --> dts scan --> submit   (background, strictly in order)
  *
- * spool 文件在分 P 确认前是回退安全网；LivePumpSession 在稿件确认该分 P 后删除它。
- * 这样进程/网络故障不丢内容，正常路径也不会把整场直播长期留在盘上。
+ * The spool is the fallback safety net until the archive confirms the part; LivePumpSession removes
+ * it then. A failed upload falls back to a whole-file re-upload (reuploadSpoolFile).
  *
- * 调用方:隐藏命令 `_live-pump`(手动/测试)与生产任务开关 `record --stream-upload`
- * (任务字段 streamUpload,plans/039)。
+ * Callers: the hidden `_live-pump` command (manual/test) and the production task switch
+ * `record --stream-upload` (task field streamUpload, plans/039).
  */
 import { spawn } from "node:child_process";
 import {
@@ -58,6 +62,7 @@ import {
   type LivePumpReporter,
 } from "@drec/core";
 import { ffprobeDuration, ffprobeDtsGap, type DtsGap } from "@drec/post-process";
+import { TsCutter, type CutterEvent, type PartTiming } from "./ts-cutter.js";
 
 export const FFMPEG = process.env.FFMPEG_PATH || "ffmpeg";
 
@@ -127,8 +132,6 @@ export interface SealPolicy {
 export interface FfmpegPipeArgs {
   url: string;
   headers?: Record<string, string>;
-  /** 本段字节上界(= UPOS 预声明的 size)。 */
-  sizeCap: number;
 }
 
 /**
@@ -157,8 +160,8 @@ export function buildPipeFfmpegArgs(a: FfmpegPipeArgs): string[] {
   // `-reconnect*` 是 **http protocol 的 input 选项**:必须放在 `-i` 之前。
   // 实测两个坑:①放在 `-i` 之后会被当成 output 选项 → `Option reconnect not found`;
   // ②它们**只对 http 源有效**,喂本地文件路径时同样报这个错(protocol 不支持),
-  // 所以只在 `isHttp` 时加。注意 `-fs` 到点时 ffmpeg 的退出码是 **1 而非 0**
-  // —— 那是「输出已满」的正常收尾,不是故障(真实直播段段如此,别被 exit=1 骗)。
+  // 所以只在 `isHttp` 时加。没有 `-fs`:一个连接只起一个 ffmpeg,分 P 由 TsCutter 在视频关键帧处切
+  // (plans/043),ffmpeg 只在收播 / 停滞 / 被停止时退出。
   // `live_flv` makes the flv demuxer treat the input as a live stream, so ffmpeg applies one
   // offset per input file when the CDN resets timestamps mid-connection: audio and video stay
   // on a common base. With the plain demuxer a forward jump passes through and a backward
@@ -176,7 +179,6 @@ export function buildPipeFfmpegArgs(a: FfmpegPipeArgs): string[] {
     ...reconnect,
     ...liveFlv,
     "-i", a.url,
-    "-fs", String(a.sizeCap),
     "-c", "copy", "-map", "0",
     "-reset_timestamps", "1",
     "-avoid_negative_ts", "make_zero",
@@ -238,6 +240,8 @@ export interface SegmentRunResult {
   /** Wall-clock recording duration of this part (ms). In zero-disk mode this is the only
    *  duration source, since there is no local file to probe. */
   sealedMs?: number;
+  /** Media duration of this part from video PTS (seconds); absent when the stream carried no timestamp. */
+  ptsDurationSec?: number;
   /** 投稿前自检得到的时长(秒);0/undefined = 未测或不合格(**不得投稿**)。 */
   spoolDurationSec?: number;
   /** complete 成功时的 UPOS stem;建稿 `videos[].filename` 必须用它。 */
@@ -1073,39 +1077,349 @@ class BoundedQueue<T> {
   }
 }
 
-export interface RunSegmentOpts {
-  /** ffmpeg argv(由 {@link buildPipeFfmpegArgs} 产出)。 */
-  args: string[];
-  /** 覆盖分块大小(默认取 session.bucket.chunkSize);spool-only 模式没有真会话,需显式给。 */
-  chunkSize?: number;
-  /** 本段字节上界(= UPOS 预声明的 size)。 */
+/** Why a part ended; see {@link SegmentRunResult.sealedBy}. */
+type SealedBy = NonNullable<SegmentRunResult["sealedBy"]>;
+
+const NO_EXIT: SegmentExit = { code: null, signal: null, stderrTail: "" };
+
+export interface PartSinkOpts {
+  /** Declared upper bound for this part (= the size passed to preupload). */
   sizeCap: number;
-  /** spool 路径(同步写)。 */
+  /** Spool path (written synchronously in "full" mode). */
   spoolPath: string;
-  session: PreuploadResult;
+  /**
+   * The UPOS session. May still be in flight (a prefetched preupload): bytes written before it
+   * resolves are held in a bounded buffer and replayed, so the stream never waits for it.
+   */
+  session: PreuploadResult | Promise<PreuploadResult>;
+  /** Override the chunk size (default: the session's). */
+  chunkSize?: number;
   fetchImpl?: typeof fetch;
-  /** 每完成一个块回调一次(含耗时观测 —— PoC 要的就是「块在 ffmpeg 退出前就流出」)。 */
+  /** Called per uploaded chunk. */
   onChunk?: (streamedBytes: number, chunksDone: number) => void;
-  /** 队列容量(块数);超限即停止预传、只落盘。 */
+  /** Queue depth in chunks (default 4). {@link SPOOL_ONLY} = spool only. */
   queueCapacity?: number;
   /**
-   * Whether to mirror the stream into a spool file.
-   *   - "full" (default): every byte is written, so a failed upload can fall back to a
-   *     whole-file re-upload, and ffprobe can self-check the exact bytes.
-   *   - "none": true zero-disk. Nothing is written; a failed upload has no local fallback.
-   * Callers pick "none" only when disk saving is the explicit goal (plans/039).
+   * "full" (default): mirror every byte into the spool (whole-file fallback, dts scan).
+   * "none": true zero-disk; nothing is written.
    */
   spoolMode?: "full" | "none";
-  /**
-   * 分 P 结算策略。缺省 = 只用字节兜底(`sizeCap`)。
-   * 传了 `maxMs` 时,**时长先到也结算**:用已累积的满块 + 尾块 complete(UPOS 允许少传)。
-   */
-  seal?: SealPolicy;
-  /**
-   * 背压回调:上传跟不上录制、已降级为纯落盘时调用一次。
-   * **不是可选观测** —— 调用方必须据此告知用户/记日志,否则降级完全静默。
-   */
+  /** Backpressure callback: upload fell behind and the part degraded to spool-only (called once). */
   onBackpressure?: (spooledBytes: number, queuedChunks: number) => void;
+  signal?: AbortSignal;
+}
+
+/** Upload-side outcome of one part, available once the part is sealed and its upload settled. */
+export interface PartSinkResult {
+  /** The session the part was uploaded to; absent when preupload itself failed. */
+  session?: PreuploadResult;
+  chunksUploaded: number;
+  streamedBytes: number;
+  spooledBytes: number;
+  uploadError?: string;
+  sessionLeaked: boolean;
+  backpressured: boolean;
+}
+
+/**
+ * One part's upload side: an UPOS session + bounded chunk queue + optional spool file.
+ *
+ * `write()` takes the part's bytes in order; `seal()` ends the part (tail chunk, queue close) and
+ * `finished` settles when the upload task has. The tail/`totalSizeOfNow` semantics are exactly the
+ * ones the one-ffmpeg-per-part code had: the uploader asks for "the real total" before sizing a
+ * chunk, so the tail must be queued before it reads again (a wrong tail length silently drops the
+ * last seconds of a part).
+ *
+ * Nothing here throws on a bad upload: failures land in `uploadError`, the spool stays complete,
+ * and the caller falls back to a whole-file re-upload (full mode) or reports the part lost (none).
+ */
+export class PartSink {
+  readonly finished: Promise<PartSinkResult>;
+  readonly spoolPath: string;
+  private readonly fd: number | undefined;
+  private readonly queue: BoundedQueue<Uint8Array>;
+  private readonly spoolOnly: boolean;
+  private readonly waitingLimit: number;
+  private session: PreuploadResult | undefined;
+  private chunkSize = 0;
+  private ready = false;
+  /** Bytes written before the session was known (bounded by {@link waitingLimit}). */
+  private waiting: Buffer[] = [];
+  private waitingBytes = 0;
+  /** Residue shorter than a chunk; kept as a list so it is concatenated once per chunk, not per read. */
+  private carryList: Buffer[] = [];
+  private carryLen = 0;
+  private spooled = 0;
+  private queuedChunks = 0;
+  /** Full chunks queued (the tail is not counted). */
+  private fullChunks = 0;
+  private tailLen = 0;
+  private chunksUploaded = 0;
+  private streamed = 0;
+  private uploadError: string | undefined;
+  private overflow = false;
+  private sealed = false;
+  private uploadTask: Promise<void> = Promise.resolve();
+  private markSettled!: () => void;
+  private markSealed!: () => void;
+  private readonly settledP: Promise<void>;
+  private readonly sealedP: Promise<void>;
+
+  constructor(private readonly o: PartSinkOpts) {
+    this.spoolPath = o.spoolPath;
+    mkdirSync(dirname(o.spoolPath), { recursive: true });
+    // spoolMode "none" = true zero-disk: no file at all (not even a zero-length placeholder).
+    this.fd = (o.spoolMode ?? "full") === "full" ? openSync(o.spoolPath, "w") : undefined;
+    const capacity = o.queueCapacity ?? 4;
+    this.queue = new BoundedQueue<Uint8Array>(capacity);
+    this.spoolOnly = this.queue.disabled;
+    this.waitingLimit = capacity * CHUNK_UNIT;
+    this.settledP = new Promise<void>((r) => { this.markSettled = r; });
+    this.sealedP = new Promise<void>((r) => { this.markSealed = r; });
+    const s = o.session;
+    if (typeof (s as Promise<PreuploadResult>).then === "function") {
+      (s as Promise<PreuploadResult>).then((v) => this.attach(v), (e: unknown) => this.sessionFailed(e));
+    } else {
+      this.attach(s as PreuploadResult);
+    }
+    this.finished = this.finish();
+  }
+
+  get spooledBytes(): number { return this.spooled; }
+
+  /** Record a failure that is not an upload error (e.g. a stdout read error) so the part is not submitted. */
+  fail(message: string): void {
+    this.uploadError ??= message;
+  }
+
+  /** Append the part's next bytes. Never throws for upload reasons; spool write errors do throw. */
+  write(buf: Buffer): void {
+    if (this.sealed) throw new Error("PartSink: write after seal");
+    if (this.fd !== undefined) writeSync(this.fd, buf);
+    this.spooled += buf.length;
+    if (this.spooled > this.o.sizeCap) {
+      // The cutter bounds every part to the declared size; reaching this is a bug, and a part
+      // larger than what was declared to UPOS must not be completed as if it were fine.
+      this.uploadError ??= `分 P 超出声明大小 ${this.o.sizeCap}B(${this.spooled}B)`;
+    }
+    if (this.uploadError || this.overflow) return;
+    if (!this.ready) {
+      this.waiting.push(buf);
+      this.waitingBytes += buf.length;
+      if (this.waitingBytes > this.waitingLimit) this.overflowNow();
+      return;
+    }
+    this.feed(buf);
+  }
+
+  /** No more bytes: queue the tail, close the queue, close the spool. Idempotent. */
+  seal(): void {
+    if (this.sealed) return;
+    this.sealed = true;
+    this.closeSpool();
+    if (this.ready) this.closeQueue();
+    this.markSealed();
+  }
+
+  /** Drop a part that holds nothing worth uploading (a head-only tail after the last cut). */
+  discard(): void {
+    this.uploadError ??= "discarded";
+    this.seal();
+    this.queue.close();
+    if (this.fd !== undefined) {
+      try { rmSync(this.o.spoolPath, { force: true }); } catch { /* best effort */ }
+    }
+  }
+
+  private closeSpool(): void {
+    if (this.fd === undefined) return;
+    try { closeSync(this.fd); } catch { /* already closed */ }
+  }
+
+  private closeQueue(): void {
+    this.pushTail();
+    this.queue.close();
+  }
+
+  private attach(session: PreuploadResult): void {
+    this.session = session;
+    this.chunkSize = this.o.chunkSize ?? session.bucket.chunkSize;
+    this.ready = true;
+    if (!this.spoolOnly) this.uploadTask = this.startUpload(session);
+    const held = this.waiting;
+    this.waiting = [];
+    this.waitingBytes = 0;
+    for (const b of held) this.feed(b);
+    if (this.sealed) this.closeQueue();
+    this.markSettled();
+  }
+
+  private sessionFailed(e: unknown): void {
+    this.uploadError ??= `preupload 失败: ${String((e as Error)?.message ?? e).slice(0, 200)}`;
+    this.waiting = [];
+    this.waitingBytes = 0;
+    this.markSettled();
+  }
+
+  private overflowNow(): void {
+    this.overflow = true;
+    this.waiting = [];
+    this.waitingBytes = 0;
+    this.carryList = [];
+    this.carryLen = 0;
+    // Backpressure must be explicit: silent degradation turns "streaming upload" into "disk only".
+    this.o.onBackpressure?.(this.spooled, this.queuedChunks);
+  }
+
+  /** Slice residue into full chunks and queue them; a full queue means the uploader fell behind. */
+  private feed(buf: Buffer): void {
+    if (this.uploadError || this.overflow) return;
+    this.carryList.push(buf);
+    this.carryLen += buf.length;
+    if (this.carryLen < this.chunkSize) return;
+    const all = this.carryList.length === 1 ? this.carryList[0]! : Buffer.concat(this.carryList, this.carryLen);
+    let off = 0;
+    while (all.length - off >= this.chunkSize) {
+      const chunk = Buffer.from(all.subarray(off, off + this.chunkSize));
+      if (!this.queue.push(chunk)) {
+        this.overflowNow();
+        return;
+      }
+      off += this.chunkSize;
+      this.queuedChunks++;
+      this.fullChunks++;
+    }
+    const rest = all.subarray(off);
+    this.carryList = rest.length ? [Buffer.from(rest)] : [];
+    this.carryLen = rest.length;
+  }
+
+  /**
+   * Queue the residue as the tail chunk. MUST happen before the uploader reads again (see class
+   * doc). Idempotent: a second call is a no-op because `tailLen` is already set.
+   */
+  private pushTail(): void {
+    if (this.uploadError || this.overflow || this.carryLen === 0 || this.tailLen > 0) return;
+    const tail = Buffer.concat(this.carryList, this.carryLen);
+    this.carryList = [];
+    this.carryLen = 0;
+    if (this.spoolOnly) return;
+    if (!this.queue.push(tail)) {
+      // No room for the tail: it can neither be uploaded nor silently dropped.
+      this.overflowNow();
+      return;
+    }
+    this.queuedChunks++;
+    this.tailLen = tail.length;
+  }
+
+  /**
+   * The part's real size: exact once sealed (full chunks + tail), the declared bound before that.
+   * The uploader sizes its next chunk and its stop point from this.
+   */
+  private totalSizeNow(): number {
+    return this.tailLen > 0 || (this.sealed && this.fullChunks > 0)
+      ? this.fullChunks * this.chunkSize + this.tailLen
+      : this.o.sizeCap;
+  }
+
+  /** True when the part ended with data and nothing was lost to backpressure or errors. */
+  private sealedWithData(): boolean {
+    return this.sealed && !this.overflow && (this.fullChunks > 0 || this.tailLen > 0);
+  }
+
+  private startUpload(session: PreuploadResult): Promise<void> {
+    const o = this.o;
+    return uploadChunks({
+      session,
+      // `totalSize` stays the declared upper bound; `totalSizeOf` tells the uploader the real
+      // amount, so the tail length is not always computed as a full chunk.
+      totalSize: o.sizeCap,
+      totalSizeOf: () => this.totalSizeNow(),
+      fetchImpl: o.fetchImpl ?? fetch,
+      retries: 3,
+      signal: o.signal,
+      maxChunks: () => Math.ceil(this.totalSizeNow() / this.chunkSize),
+      // The only trusted "chunks uploaded" count: uploadChunks drops its own progress on failure.
+      onProgress: (p) => {
+        this.chunksUploaded = p.chunksDone;
+        this.streamed = p.uploadedBytes;
+        o.onChunk?.(p.uploadedBytes, p.chunksDone);
+      },
+      readChunk: async (index, size) => {
+        const chunk = await this.queue.shift();
+        if (!chunk) throw new Error(`流比声明的 ${o.sizeCap}B 短:第 ${index} 块(${size}B)没有数据`);
+        // Length validation belongs to uploadChunks, which accepts a tail shorter than `size`.
+        return chunk;
+      },
+    }).then(
+      () => undefined,
+      (e: unknown) => {
+        const msg = String((e as Error)?.message ?? e).slice(0, 300);
+        // A sealed part with data ends exactly where its queue closes: the uploader asking for
+        // one more chunk is the end-of-part signal, not a failure (it would otherwise look like
+        // a stream cut short and mark the session leaked).
+        if (this.sealedWithData() && /没有数据|流比声明的/.test(msg)) return;
+        this.uploadError ??= msg;
+      },
+    );
+  }
+
+  private async finish(): Promise<PartSinkResult> {
+    await this.sealedP;
+    await this.settledP;
+    await this.uploadTask;
+    return {
+      ...(this.session ? { session: this.session } : {}),
+      chunksUploaded: this.chunksUploaded,
+      streamedBytes: this.streamed,
+      spooledBytes: this.spooled,
+      uploadError: this.uploadError,
+      // "Half session" = bytes PUT but the part can neither complete nor abort (UPOS has no
+      // abort). Size-/duration-sealed parts uploading fewer chunks than the bound are NOT leaks.
+      sessionLeaked: this.uploadError != null && this.chunksUploaded > 0,
+      backpressured: this.overflow,
+    };
+  }
+}
+
+/** A part the stream has finished cutting; hand it to {@link finalizeRecordedPart} for complete/submit. */
+export interface SealedPart {
+  sink: PartSink;
+  sealedBy: SealedBy;
+  /** Part size in bytes, PAT/PMT head included. */
+  bytes: number;
+  /** Media time of the part from video PTS; null when no timestamp was seen. */
+  timing: PartTiming | null;
+  tsDiscontinuities: number;
+  /** Wall-clock the part was open (a stall window is excluded). */
+  sealedMs: number;
+  stalledMs?: number;
+  /** True when this part ended the connection (EOF, stall, abort, or stop at a cut). */
+  final: boolean;
+  /** True when `stopAtCut` ended the connection here (the stream itself was still healthy). */
+  stopped?: boolean;
+}
+
+export interface RunStreamOpts {
+  /** ffmpeg argv ({@link buildPipeFfmpegArgs}). */
+  args: string[];
+  /** Hard size bound per part (= UPOS-declared size). */
+  sizeCap: number;
+  /** Duration threshold per part from video PTS; the part ends at the next keyframe once reached. 0/undefined = size only. */
+  maxMs?: number;
+  /** The first part's sink (the caller already has its session). */
+  firstSink: PartSink;
+  /** Open the next part's sink at a cut. Must not throw. */
+  openNext: () => PartSink;
+  /** Called once per part when it reaches `prefetchRatio` of its size/duration threshold. */
+  onPrefetch?: () => void;
+  /** Fraction of the threshold at which {@link onPrefetch} fires (default 0.8). */
+  prefetchRatio?: number;
+  /** Evaluated at each cut: true = seal the part, stop ffmpeg, open nothing. */
+  stopAtCut?: () => boolean | Promise<boolean>;
+  /** A part that ended at a cut while the stream keeps going. */
+  onPartSealed: (part: SealedPart) => void;
   signal?: AbortSignal;
   /** Kill ffmpeg after this long without a stdout chunk. Default 5 minutes; 0 disables. */
   stallTimeoutMs?: number;
@@ -1115,119 +1429,39 @@ export interface RunSegmentOpts {
   exitGraceMs?: number;
 }
 
+export interface StreamRunResult {
+  exit: SegmentExit;
+  /** Why the connection ended. `stopped` = {@link RunStreamOpts.stopAtCut} fired at a cut. */
+  endedBy: SealedBy | "stopped";
+  /** The part that ended the connection; absent when the tail held nothing worth uploading. */
+  finalPart?: SealedPart;
+  /** A head-only tail part (right after the last cut) was dropped instead of uploaded. */
+  discardedTail: boolean;
+  /** The dropped sink, so the caller can forget it. */
+  discardedSink?: PartSink;
+  stalledMs?: number;
+}
+
 /**
- * 跑一段:ffmpeg stdout 同步落 spool,同时按 chunk 切块**在 ffmpeg 还在录的时候就**上传。
+ * One ffmpeg for the whole stream connection (plans/043).
  *
- * 块的上传与 ffmpeg 并行:`uploadChunks` 在后台跑,主循环只负责喂块。这就是
- * 「P1 不必等 P2 开录」—— ffmpeg 进程退出(stdout EOF)本身就是本段封口的权威信号。
+ * The old design ran one ffmpeg per part and lost the broadcast for the whole
+ * complete/submit/re-acquire/preupload gap at every switch. Here ffmpeg keeps pulling and the
+ * {@link TsCutter} ends parts on video keyframes; at a cut the bytes simply start flowing into the
+ * next part's sink. ffmpeg only ends on EOF, a stall (no stdout for `stallTimeoutMs`), an abort,
+ * or `stopAtCut`.
  *
- * 失败路径一个都不抛:
- *  - 上传块失败 → 停止预传,spool 仍完整 → 调用方按 `spooledBytes` 回退文件上传;
- *  - 流比声明短 → `uploadChunks` 抛「长度不符」,同样回退;
- *  - 取消 → ffmpeg 被杀,已写字节留在 spool。
- * 三种情况都**不补零、不伪造媒体长度**(B 站会先收下再在转码阶段拒,比本地报错更糟)。
+ * Process handling is unchanged from the per-part code: kill only the ffmpeg child, bounded waits
+ * for stdout EOF and for the close event, and a stderr scan for timestamp-discontinuity warnings.
  */
-export async function runSegment(o: RunSegmentOpts): Promise<SegmentRunResult> {
-  const spoolMode = o.spoolMode ?? "full";
-  mkdirSync(dirname(o.spoolPath), { recursive: true });
-  // spoolMode "none" = true zero-disk: no file at all (not even a zero-length placeholder).
-  const fd = spoolMode === "full" ? openSync(o.spoolPath, "w") : undefined;
-  const chunkSize = o.chunkSize ?? o.session.bucket.chunkSize;
-  const doFetch = o.fetchImpl ?? fetch;
-  const queue = new BoundedQueue<Uint8Array>(o.queueCapacity ?? 4);
-  const spoolOnly = queue.disabled;
-
-  let chunksUploaded = 0;
-  let streamedBytes = 0;
-  let uploadError: string | undefined;
-
-  // 上传侧:`readChunk` 从队列取块,与录制并行。进度回调是本模块唯一可信的「已成功块数」——
-  // `uploadChunks` 失败时会把内部进度一起丢掉,所以必须在这里记账。
-  // 时长先到时,后续块不再入队 → 已入队的满块就是这一 P 的全部。
-  // 用 maxChunks 让上传侧**干净地停在前 N 块**(而不是 readChunk 取不到块而抛错):
-  // 时长结算不该长得像「流断了」,调用方必须能区分两者。
-  let sealedEarly = false;
-  /** 时长阈值是否已到(上传侧据此把「没有数据」识别为收尾信号而非故障)。 */
-  let durationHit = false;
-  /** 尾块实际长度:真实总量 = 满块字节 + 尾块(上传侧 `totalSizeOfNow` 靠它收敛尾块 size)。 */
-  let tailLen = 0;
-  /** 已入队的**满块**数(不含尾块;`queuedChunks` 的定义见切块处)。 */
-  let fullChunks = 0;
-  /**
-   * 本 P **真实**要传的字节数(满块合计 + 尾块),实时求值。
-   * 结算前 = 声明的上界 o.sizeCap;尾块入队后 = 精确值。
-   * 上传侧的 `totalSize` 与 `maxChunks` 都以它为准 —— 尾块长度算错的代价是
-   * 分 P 尾部丢失(实测每段丢 5.5MB ≈ 3 秒视频,而日志只看块数毫无异常)。
-   */
-  // 真实总量:**尾块入队后**即冻结(那一刻满块数 + 尾块长度都确定了)。
-  // 判据用 tailLen>0 而非 sealedEarly —— eof(流比声明短)同样要走这条。
-  // 未结算前返回声明的上界;上传侧会随着尾块入队收敛到精确值。
-  const totalSizeOfNow = (): number =>
-    tailLen > 0 ? fullChunks * chunkSize + tailLen : o.sizeCap;
-
-  /**
-   * 把当前残余收成尾块并入队(**必须在上传侧读它之前调用**)。
-   *
-   * 顺序即正确性:上传侧 readChunk 先问「真实总量」再决定这一块该多大。若尾块尚未
-   * 入队,它按 sizeCap 算出满块长度,而尾块只有几百 KB → 「长度不符」抛错;或更糟:
-   * 尾块被静默丢弃(实测 3 段各丢 5.5MB ≈ 3 秒视频,日志只看块数毫无异常)。
-   * 幂等:第二次调用是 no-op(tailLen 已 >0)。
-   */
-  const pushTail = (): void => {
-    if (uploadError || queueOverflow || carry.length === 0 || tailLen > 0) return;
-    queue.push(Buffer.from(carry));
-    queuedChunks++;
-    fullChunks = queuedChunks - 1;
-    tailLen = carry.length;
-    carry = Buffer.alloc(0);
-  };
-  // spool-only:根本没有上传会话,不启动上传器(块在 push 处就被丢弃)。
-  const uploadTask = spoolOnly
-    ? Promise.resolve()
-    : uploadChunks({
-    session: o.session,
-    // `totalSize` 仍是 preupload 声明的**上界**(300MiB 之类);
-    // `totalSizeOf` 给上传器真实要传的量,尾块长度由它算出,而不是永远按满块算。
-    totalSize: o.sizeCap,
-    totalSizeOf: totalSizeOfNow,
-    fetchImpl: doFetch,
-    retries: 3,
-    signal: o.signal,
-    // 结算后允许的块数 = 已入队满块 + 尾块。**不能用 queuedChunks+1**:
-    // 尾块是在 finally 才 push 的,那一刻 queuedChunks 已含它,而 +1 会让上传侧
-    // 多读一次 → `size` 算成负数 → 假故障。用「满块 + 尾块」表达真实总量即可。
-    maxChunks: () => Math.ceil(totalSizeOfNow() / chunkSize),
-    onProgress: (p) => {
-      chunksUploaded = p.chunksDone;
-      streamedBytes = p.uploadedBytes;
-      o.onChunk?.(p.uploadedBytes, p.chunksDone);
-    },
-    readChunk: async (index, size) => {
-      const chunk = await queue.shift();
-      if (!chunk) {
-        throw new Error(`流比声明的 ${o.sizeCap}B 短:第 ${index} 块(${size}B)没有数据`);
-      }
-      // 长度校验交给 uploadChunks:它已支持「尾块短于本块声明」并按实际长度收尾。
-      // 这里再判一次会把合法尾块当成故障(实测:`第 3 块长度不符: 期望 1024, 实际 528`)。
-      return chunk;
-    },
-  }).then(
-    () => undefined,
-    (e: unknown) => {
-      const msg = String((e as Error)?.message ?? e).slice(0, 300);
-      // 时长/容量结算时队列被主动 close,readChunk 会抛「没有数据」—— 这是**收尾信号**,
-      // 不是失败。留成 uploadError 会让调用方看到一条假故障(且 sessionLeaked 被误判)。
-      if (durationHit && /没有数据|流比声明的/.test(msg)) return;
-      uploadError = msg;
-    },
-  );
-
-  const recordStartedAt = Date.now();
+export async function runStream(o: RunStreamOpts): Promise<StreamRunResult> {
+  const cutter = new TsCutter({ maxPartBytes: o.sizeCap, ...(o.maxMs && o.maxMs > 0 ? { maxDurationMs: o.maxMs } : {}) });
+  const startedAt = Date.now();
   const spawnNow: SpawnFn = spawnOverride ?? ((cmd, args, opts) => spawn(cmd, args as string[], opts as never) as unknown as ChildProcessLike);
   const proc = spawnNow(FFMPEG, o.args, { stdio: ["ignore", "pipe", "pipe"] });
   let stderrTail = "";
   let stderrPartial = "";
-  let tsDiscontinuities = 0;
+  let tsDisc = 0;
   if (proc.stderr) {
     (proc.stderr as NodeJS.ReadableStream & { setEncoding(e: string): void }).setEncoding("utf-8");
     proc.stderr.on("data", (c: unknown) => {
@@ -1237,7 +1471,7 @@ export async function runSegment(o: RunSegmentOpts): Promise<SegmentRunResult> {
       stderrPartial += text;
       const nl = stderrPartial.lastIndexOf("\n");
       if (nl >= 0) {
-        tsDiscontinuities += countTsDiscontinuities(stderrPartial.slice(0, nl));
+        tsDisc += countTsDiscontinuities(stderrPartial.slice(0, nl));
         stderrPartial = stderrPartial.slice(nl + 1);
       }
     });
@@ -1279,78 +1513,86 @@ export async function runSegment(o: RunSegmentOpts): Promise<SegmentRunResult> {
   const onAbort = (): void => { stopChild(); };
   if (o.signal) {
     // An already-aborted signal never fires "abort", so check it explicitly — otherwise the
-    // ffmpeg spawned below is never killed and outlives the run.
+    // ffmpeg spawned above is never killed and outlives the run.
     if (o.signal.aborted) onAbort();
     else o.signal.addEventListener("abort", onAbort, { once: true });
   }
 
-  let spooledBytes = 0;
-  let carry = Buffer.alloc(0);
-  let queueOverflow = false;
-  /** 已入队的块数(**本地**计数,不信 onProgress —— 它滞后于 push,尾块判定必须精确)。 */
-  let queuedChunks = 0;
-  let sealedBy: "cap" | "duration" | "eof" | "abort" | "stalled" = "cap";
-  let lastDataAt = recordStartedAt;
+  let cur = o.firstSink;
+  let curStartedAt = startedAt;
+  let discBase = 0;
+  let prefetched = false;
+  let lastDataAt = startedAt;
   let stalled = false;
   let stalledAt = 0;
+  let stoppedAtCut = false;
   let readError: string | undefined;
-  // 时长到点时**立即 close 队列**(durationHit 在上方声明,上传侧的拒绝回调要读它):上传侧的 readChunk 正在等下一块,close 让它
-  // 拿到 `undefined` 从而抛「没有数据」——那是收尾信号,不是失败。
-  // 必须在这里 close(而不是等 finally):finally 要等读循环退出才执行,而读循环
-  // 只在 durationHit 后结束,但 uploadChunks 已经卡在 readChunk 上等下一块了。
-  const sealTimer = o.seal?.maxMs && o.seal.maxMs > 0
-    ? setTimeout(() => {
-      durationHit = true;
-      sealedEarly = true;
-      if (!o.signal?.aborted && sealedBy === "cap") sealedBy = "duration";
-      stopChild();
-    }, o.seal.maxMs)
-    : undefined;
+  let finalPart: SealedPart | undefined;
   const stallTimeoutMs = o.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
   const stallTimer = stallTimeoutMs > 0
     ? setInterval(() => {
-      if (childClosed || o.signal?.aborted || sealedBy !== "cap") return;
+      if (childClosed || o.signal?.aborted || stalled) return;
       if (Date.now() - lastDataAt < stallTimeoutMs) return;
       stalled = true;
       stalledAt = Date.now();
-      sealedBy = "stalled";
       stopChild();
     }, Math.max(25, Math.min(5_000, Math.floor(stallTimeoutMs / 4))))
     : undefined;
+
+  const sealCurrent = (sealedBy: SealedBy, final: boolean, timing: PartTiming | null, bytes: number): SealedPart => {
+    cur.seal();
+    const part: SealedPart = {
+      sink: cur, sealedBy, bytes, timing, final,
+      ...(final && stoppedAtCut ? { stopped: true } : {}),
+      tsDiscontinuities: tsDisc - discBase,
+      sealedMs: (stalled ? lastDataAt : Date.now()) - curStartedAt,
+      ...(final && stalled ? { stalledMs: stalledAt - lastDataAt } : {}),
+    };
+    discBase = tsDisc;
+    return part;
+  };
+  const apply = async (events: CutterEvent[], finalizing: boolean): Promise<void> => {
+    for (const ev of events) {
+      if (ev.kind === "data") {
+        cur.write(ev.bytes);
+        continue;
+      }
+      const stop = finalizing ? false : !!(await o.stopAtCut?.());
+      if (stop) stoppedAtCut = true;
+      const part = sealCurrent(ev.reason === "requested" || ev.reason === "duration" ? "duration" : "cap", stop, ev.timing, ev.partBytes);
+      if (stop) {
+        // Whatever follows the cut (and the stream itself) is dropped on purpose: the run was told
+        // to end here (window drain / part limit), and ffmpeg is killed below.
+        finalPart = part;
+        stopChild();
+        return;
+      }
+      o.onPartSealed(part);
+      cur = o.openNext();
+      curStartedAt = Date.now();
+      prefetched = false;
+    }
+  };
+  const afterPush = (): void => {
+    const t = cutter.currentTiming();
+    const durMs = t ? t.durationSec * 1000 : 0;
+    if (prefetched || !o.onPrefetch) return;
+    const ratio = o.prefetchRatio ?? 0.8;
+    if (cutter.currentPartBytes >= cutter.sizeTriggerBytes * ratio || (o.maxMs && o.maxMs > 0 && durMs >= o.maxMs * ratio)) {
+      prefetched = true;
+      o.onPrefetch();
+    }
+  };
+
   try {
     for await (const data of proc.stdout!) {
-      // 结算点:**立刻**收尾块 + 停止读。不能等循环自然退出 ——
-      // 上传侧此刻就卡在 readChunk 上等这一块,晚一步它就会按 sizeCap 算错长度。
-      if (o.signal?.aborted) { sealedBy = "abort"; pushTail(); break; }
-      if (durationHit) { sealedBy = "duration"; pushTail(); break; }
+      if (o.signal?.aborted) break;
       if (!stalled) lastDataAt = Date.now();
-      // stdout 可能是 Buffer / Uint8Array / string(测试用 PassThrough 推的都算)。
-      const buf = typeof data === "string" ? Buffer.from(data) : Buffer.from(data as Uint8Array);
-      // `-fs` 是「到点停止」,实测略微超出 → 超出的部分既不入盘也不能成为合法尾块。
-      const room = o.sizeCap - spooledBytes;
-      const keep = buf.length <= room ? buf : buf.subarray(0, room);
-      if (fd !== undefined) writeSync(fd, keep);
-      spooledBytes += keep.length;
-      if (uploadError || queueOverflow) continue;
-      carry = carry.length ? Buffer.concat([carry, keep]) : Buffer.from(keep);
-      while (carry.length >= chunkSize) {
-        const chunk = Buffer.from(carry.subarray(0, chunkSize));
-        carry = carry.subarray(chunkSize);
-        if (!queue.push(chunk)) {
-          // 背压:上传跟不上录制。**必须显式告知** —— 静默降级会让「以为边录边传成功了」
-          // 变成「其实全程只落盘」,而调用方只看到块数停止增长。
-          queueOverflow = true;
-          o.onBackpressure?.(spooledBytes, queuedChunks);
-          break;
-        }
-        queuedChunks++;
-        fullChunks++;
-      }
-      // `-fs` 到点后 ffmpeg 仍可能多吐几 KB;已写满声明值就没必要继续读了。
-      if (spooledBytes >= o.sizeCap) break;
-      // The watchdog may have fired just as the pipe delivered a final chunk. Persist that
-      // chunk first, then stop; do not discard bytes that were already read.
-      if (stalled) { sealedBy = "stalled"; pushTail(); break; }
+      // stdout may be a Buffer / Uint8Array / string (tests push through a PassThrough).
+      const buf = Buffer.isBuffer(data) ? data : typeof data === "string" ? Buffer.from(data) : Buffer.from(data as Uint8Array);
+      await apply(cutter.push(buf), false);
+      if (stoppedAtCut || stalled) break;
+      afterPush();
     }
   } catch (e) {
     // Destroying stdout after a watchdog kill is expected to reject the async iterator. Keep
@@ -1359,130 +1601,173 @@ export async function runSegment(o: RunSegmentOpts): Promise<SegmentRunResult> {
       readError = String((e as Error)?.message ?? e).slice(0, 300);
     }
   } finally {
-    // 尾块按**结算方式**分别处理(两种都合法,少传都能 complete):
-    //  · 时长结算:当前残余 carry 就是尾块,**不论多大** —— 分 P 大小 = 实际流出字节;
-    //  · 字节兜底:`-fs` 到点,残余通常不足一块,同样照发(它就是这个 P 的尾块);
-    //  · 流比声明短(eof):残余也照发 —— 已上传的和尾块合起来 = spool 实际长度,
-    //    sizeCap 只是上界,UPOS 接受「声明 N 块、实传 M<N 个连续 part」。
-    // ⚠️ 唯一不发的情形:出错或已背压降级(此时必须整体回退文件上传)。
-    // 其它结算(cap / eof / 异常)走这里;pushTail 幂等,时长路径已收过不会重复。
-    pushTail();
-    sealedEarly = true;
+    if (!stoppedAtCut) {
+      // A trailing partial packet still belongs to the stream: never drop bytes.
+      try { await apply(cutter.flush(), true); } catch (e) { readError ??= String((e as Error)?.message ?? e).slice(0, 300); }
+    }
+    o.signal?.removeEventListener("abort", onAbort);
+    if (stallTimer) clearInterval(stallTimer);
+    if (stdoutDestroyTimer) clearTimeout(stdoutDestroyTimer);
+  }
+
+  let endedBy: SealedBy | "stopped" = "stopped";
+  let discardedTail = false;
+  let discardedSink: PartSink | undefined;
+  if (!stoppedAtCut) {
     // An abort that lands before any data (or right at EOF) never reaches the in-loop check,
     // so classify it here. Callers rely on "abort" to tell "stopped on purpose" from "stream
     // ended" — mislabelling it makes a stopped run with delivered parts look like a failure.
-    if (o.signal?.aborted) sealedBy = "abort";
-    else if (stalled) sealedBy = "stalled";
-    else if (sealedBy === "cap" && spooledBytes < o.sizeCap) sealedBy = "eof"; // 流比声明短
-    if (readError) uploadError = uploadError ?? readError;
-    queue.close();
-    o.signal?.removeEventListener("abort", onAbort);
-    if (sealTimer) clearTimeout(sealTimer);
-    if (stallTimer) clearInterval(stallTimer);
-    if (stdoutDestroyTimer) clearTimeout(stdoutDestroyTimer);
-    if (fd !== undefined) {
-      try { closeSync(fd); } catch { /* already closed */ }
+    endedBy = o.signal?.aborted ? "abort" : stalled ? "stalled" : cutter.currentPartBytes >= o.sizeCap ? "cap" : "eof";
+    if (readError) cur.fail(readError);
+    if (cur !== o.firstSink && cutter.currentMediaBytes === 0 && !readError) {
+      // Nothing but the PAT/PMT head after the last cut: not a part.
+      cur.discard();
+      discardedTail = true;
+      discardedSink = cur;
+    } else {
+      finalPart = sealCurrent(endedBy, true, cutter.currentTiming(), cutter.currentPartBytes);
     }
   }
-  await uploadTask;
   const exit = await Promise.race([
     exited,
     new Promise<SegmentExit>((resolve) => {
       const timer = setTimeout(() => {
         stopChild();
-        resolve({
-          code: null,
-          signal: sealedBy === "abort" ? "SIGTERM" : "SIGKILL",
-          stderrTail,
-        });
+        resolve({ code: null, signal: endedBy === "abort" ? "SIGTERM" : "SIGKILL", stderrTail });
       }, o.exitGraceMs ?? 10_000);
       timer.unref?.();
     }),
   ]);
-  tsDiscontinuities += countTsDiscontinuities(stderrPartial);
+  tsDisc += countTsDiscontinuities(stderrPartial);
+  if (finalPart) finalPart.tsDiscontinuities = tsDisc - discBase;
   return {
-    exit, tsDiscontinuities, chunksUploaded, streamedBytes, spooledBytes, uploadError,
-    // 「半截会话」= 有字节已 PUT、但调用方**无法 complete** 的情形:
-    //   ① 真上传失败(网络/5xx)—— parts 可能不连续,不能 complete;
-    //   ② 零块成功(从没传出去过,也没有会话可泄漏)。
-    // ⚠️ 时长/字节结算导致的「块数 < ceil(sizeCap/chunkSize)」**不是泄漏** ——
-    // UPOS 接受少传,调用方照常 complete 即可。这里不能拿 sizeCap 反推,否则每次
-    // 时长结算都会被误判成泄漏。
-    sessionLeaked: uploadError != null && chunksUploaded > 0,
-    backpressured: queueOverflow,
-    // A stalled window is not media time. Use the last observed chunk for the only duration
-    // source available in true zero-disk mode, so the silent five minutes is not counted.
-    sealedMs: (stalled ? lastDataAt : Date.now()) - recordStartedAt,
-    sealedBy,
+    exit, endedBy, discardedTail,
+    ...(discardedSink ? { discardedSink } : {}),
+    ...(finalPart ? { finalPart } : {}),
     ...(stalled ? { stalledMs: stalledAt - lastDataAt } : {}),
   };
 }
 
-/**
- * 单段闭环(边录边传版,TS 容器):
- *
- *   1. preupload(size = 结算上界)  —— 字节还没产生就先申请会话;
- *   2. ffmpeg 边录,stdout 切块**当场** PUT(录制与上传并行);
- *   3. 结算点(字节兜底 / 时长阈值谁先到)→ complete 已传出的连续 parts。
- *
- * 为什么可以这样:UPOS 的 `complete` 接受「声明 chunks=N、实际只传 M<N 个连续 part」
- * (实测:声明 20MiB、只传 1 个 10MiB 块 → `OK:1`)。所以 `size` 是**上界**而非精确值,
- * 分 P 的真实大小就是实际流出的字节数 —— 不需要预知总长。
- *
- * 对比上一版(必须先录完再传):那次卡在 matroska 需要 remux 补 trailer,而 remux 会改变
- * 字节数,所以上传前不可能知道大小。TS 无此问题,峰值占用从「一个分段」降到「队列缓冲」。
- *
- * spool **仍然写**,且失败时真的会用它回退({@link reuploadSpoolFile}):块失败 /
- * 背压降级 / complete 失败 / 自检不过但内容可读 —— 四种都按**整文件**重传,
- * 不补零伪造媒体长度。自检读不出时长的除外(那种内容本身就不可投)。
- */
-export async function pumpSegment(o: {
-  cookiesPath: string;
+/** Per-part result as the old one-ffmpeg-per-part code reported it. */
+function segmentResultOf(part: SealedPart, sink: PartSinkResult, exit: SegmentExit): SegmentRunResult {
+  return {
+    exit,
+    tsDiscontinuities: part.tsDiscontinuities,
+    chunksUploaded: sink.chunksUploaded,
+    streamedBytes: sink.streamedBytes,
+    spooledBytes: sink.spooledBytes,
+    uploadError: sink.uploadError,
+    sessionLeaked: sink.sessionLeaked,
+    backpressured: sink.backpressured,
+    sealedMs: part.sealedMs,
+    sealedBy: part.sealedBy,
+    ...(part.sealedBy === "duration" ? { durationSealHit: true } : {}),
+    ...(part.stalledMs !== undefined ? { stalledMs: part.stalledMs } : {}),
+    ...(part.timing && part.timing.durationSec > 0 ? { ptsDurationSec: part.timing.durationSec } : {}),
+  };
+}
+
+export interface RunSegmentOpts {
+  /** ffmpeg argv(由 {@link buildPipeFfmpegArgs} 产出)。 */
   args: string[];
-  /** 分 P 文件名(同时是 spool 名;UPOS `name` 用同一个;容器为 .ts)。 */
-  fileName: string;
-  /** 结算上界(= preupload 声明的 size)。 */
+  /** 覆盖分块大小(默认取 session.bucket.chunkSize);spool-only 模式没有真会话,需显式给。 */
+  chunkSize?: number;
+  /** 本段字节上界(= UPOS 预声明的 size)。 */
   sizeCap: number;
-  spoolDir: string;
-  line: string;
-  /** 时长阈值(毫秒);与 sizeCap 谁先到算一 P。 */
-  maxMs?: number;
-  /** Kill ffmpeg after this long without a stdout chunk (default 5 minutes). */
-  stallTimeoutMs?: number;
+  /** spool 路径(同步写)。 */
+  spoolPath: string;
+  session: PreuploadResult;
   fetchImpl?: typeof fetch;
+  /** 每完成一个块回调一次(含耗时观测 —— PoC 要的就是「块在 ffmpeg 退出前就流出」)。 */
   onChunk?: (streamedBytes: number, chunksDone: number) => void;
-  onBackpressure?: (spooledBytes: number, queuedChunks: number) => void;
-  /** Progress/diagnostic log (preupload backoff). Without it a long backoff looks like a hang. */
-  log?: (msg: string) => void;
-  /** 回退整文件重传成功时回调一次(调用方须告知用户:这一段不是流式传上去的)。 */
-  onFallback?: (spoolPath: string, bytes: number) => void;
-  /** 时长自检接缝(测试注入;缺省 {@link ffprobeDuration})。 */
-  probeDuration?: (path: string) => Promise<number>;
-  /** dts gap scan seam (tests inject; default {@link ffprobeDtsGap}). `undefined` = could not judge. */
-  scanDtsGap?: (path: string) => Promise<DtsGap | null | undefined>;
-  signal?: AbortSignal;
-  /** Keep the spool after completion (the caller confirms submission and cleans it up). */
-  keepSpool?: boolean;
-  /** Upload queue depth in chunks (default 4). Tests use 1 to force backpressure. */
+  /** 队列容量(块数);超限即停止预传、只落盘。 */
   queueCapacity?: number;
   /**
-   * "full" (default) writes a fallback spool; "none" is true zero-disk. In "none" mode there is
-   * no file to ffprobe or to re-upload, so the self-check and whole-file fallback are skipped —
-   * a failed chunk upload is a hard failure for that part (logged, never silently dropped).
+   * Whether to mirror the stream into a spool file.
+   *   - "full" (default): every byte is written, so a failed upload can fall back to a
+   *     whole-file re-upload, and ffprobe can self-check the exact bytes.
+   *   - "none": true zero-disk. Nothing is written; a failed upload has no local fallback.
+   * Callers pick "none" only when disk saving is the explicit goal (plans/039).
    */
   spoolMode?: "full" | "none";
-}): Promise<SegmentRunResult & { session: PreuploadResult }> {
-  const spoolPath = `${o.spoolDir.replace(/\/$/, "")}/${o.fileName}`;
+  /**
+   * 分 P 结算策略。缺省 = 只用字节兜底(`sizeCap`)。
+   * 传了 `maxMs` 时,**时长先到也结算**(按视频 PTS 在下一个关键帧切):用已累积的满块 + 尾块 complete(UPOS 允许少传)。
+   */
+  seal?: SealPolicy;
+  /**
+   * 背压回调:上传跟不上录制、已降级为纯落盘时调用一次。
+   * **不是可选观测** —— 调用方必须据此告知用户/记日志,否则降级完全静默。
+   */
+  onBackpressure?: (spooledBytes: number, queuedChunks: number) => void;
+  signal?: AbortSignal;
+  /** Kill ffmpeg after this long without a stdout chunk. Default 5 minutes; 0 disables. */
+  stallTimeoutMs?: number;
+  /** Test seam: how long to wait for stdout EOF after killing ffmpeg before destroying it. */
+  destroyGraceMs?: number;
+  /** Test seam: maximum wait for the child close event after killing ffmpeg. */
+  exitGraceMs?: number;
+}
 
-  // preupload 带 601 限流退避(只在建新会话时发生;实测多段连续传 10 块零退避)。
-  let session!: PreuploadResult;
+/**
+ * 跑一段(单 P):一个 ffmpeg、一个 {@link PartSink},到字节兜底 / 时长阈值 / 流结束即收尾。
+ *
+ * 这是 {@link runStream} 的单 P 封装(`stopAtCut` 恒为真):一次性调用与测试用它;
+ * 直播直传主循环直接用 `runStream`,一个连接产出多个分 P。
+ *
+ * 块的上传与 ffmpeg 并行,ffmpeg 还在录的时候就上传。失败路径一个都不抛:
+ *  - 上传块失败 → 停止预传,spool 仍完整 → 调用方按 `spooledBytes` 回退文件上传;
+ *  - 流比声明短 → 尾块按实际长度传出,不补零;
+ *  - 取消 → ffmpeg 被杀,已写字节留在 spool。
+ * 三种情况都**不补零、不伪造媒体长度**(B 站会先收下再在转码阶段拒,比本地报错更糟)。
+ */
+export async function runSegment(o: RunSegmentOpts): Promise<SegmentRunResult> {
+  const sink = new PartSink({
+    sizeCap: o.sizeCap,
+    spoolPath: o.spoolPath,
+    session: o.session,
+    ...(o.chunkSize !== undefined ? { chunkSize: o.chunkSize } : {}),
+    ...(o.spoolMode ? { spoolMode: o.spoolMode } : {}),
+    ...(o.queueCapacity !== undefined ? { queueCapacity: o.queueCapacity } : {}),
+    ...(o.fetchImpl ? { fetchImpl: o.fetchImpl } : {}),
+    ...(o.onChunk ? { onChunk: o.onChunk } : {}),
+    ...(o.onBackpressure ? { onBackpressure: o.onBackpressure } : {}),
+    ...(o.signal ? { signal: o.signal } : {}),
+  });
+  const stream = await runStream({
+    args: o.args,
+    sizeCap: o.sizeCap,
+    ...(o.seal?.maxMs ? { maxMs: o.seal.maxMs } : {}),
+    firstSink: sink,
+    openNext: () => { throw new Error("runSegment: single-part run must not open a second part"); },
+    stopAtCut: () => true,
+    onPartSealed: () => {},
+    ...(o.signal ? { signal: o.signal } : {}),
+    ...(o.stallTimeoutMs !== undefined ? { stallTimeoutMs: o.stallTimeoutMs } : {}),
+    ...(o.destroyGraceMs !== undefined ? { destroyGraceMs: o.destroyGraceMs } : {}),
+    ...(o.exitGraceMs !== undefined ? { exitGraceMs: o.exitGraceMs } : {}),
+  });
+  // The first part is never discarded, so it is always the final part.
+  const part = stream.finalPart!;
+  return segmentResultOf(part, await sink.finished, stream.exit);
+}
+
+/** preupload with the 601 rate-limit backoff (only a fresh session can hit it). */
+async function preuploadWithBackoff(o: {
+  cookiesPath: string;
+  fileName: string;
+  sizeCap: number;
+  line: string;
+  fetchImpl?: typeof fetch;
+  signal?: AbortSignal;
+  log?: (msg: string) => void;
+}): Promise<PreuploadResult> {
   for (let attempt = 0; ; attempt++) {
     try {
-      session = await preupload({
+      return await preupload({
         cookiesPath: o.cookiesPath, fileName: o.fileName, totalSize: o.sizeCap,
         line: o.line, fetchImpl: o.fetchImpl, ...(o.signal ? { signal: o.signal } : {}),
       });
-      break;
     } catch (e) {
       if (!(e instanceof UposRateLimited) || attempt >= 8) throw e;
       // Must log: this backoff can total ~48 minutes (30s doubling, capped at 300s, 8 tries).
@@ -1493,23 +1778,38 @@ export async function pumpSegment(o: {
       if (o.signal?.aborted) throw new Error("live-pump aborted during preupload backoff");
     }
   }
+}
 
-  const spoolMode = o.spoolMode ?? "full";
-  const rec = await runSegment({
-    args: o.args,
-    sizeCap: o.sizeCap,
-    spoolPath,
-    spoolMode,
-    queueCapacity: o.queueCapacity,
-    session,
-    fetchImpl: o.fetchImpl,
-    signal: o.signal,
-    // 时长阈值必须传下去,否则"谁先到"永远只可能是字节先到。
-    seal: { maxBytes: o.sizeCap, maxMs: o.maxMs },
-    stallTimeoutMs: o.stallTimeoutMs,
-    onChunk: o.onChunk,
-    onBackpressure: o.onBackpressure,
-  });
+/**
+ * Everything that happens to a sealed part before it can be submitted: duration, dts-gap scan,
+ * UPOS `complete`, whole-file fallback. Shared by the per-part wrapper ({@link pumpSegment}) and the
+ * background finalize chain of {@link runLivePump}.
+ *
+ * Duration comes from the part's video PTS ({@link SegmentRunResult.ptsDurationSec}); only when
+ * the stream carried no timestamp does it fall back to ffprobe (full mode) or wall-clock (none).
+ *
+ * spool stays unless `keepSpool` is false and the part was completed (the caller owns the file until
+ * the archive acknowledges the part).
+ */
+async function finalizeRecordedPart(o: {
+  rec: SegmentRunResult;
+  session: PreuploadResult | undefined;
+  cookiesPath: string;
+  fileName: string;
+  spoolPath: string;
+  spoolMode: "full" | "none";
+  line: string;
+  fetchImpl?: typeof fetch;
+  signal?: AbortSignal;
+  onChunk?: (streamedBytes: number, chunksDone: number) => void;
+  log?: (msg: string) => void;
+  onFallback?: (spoolPath: string, bytes: number) => void;
+  probeDuration?: (path: string) => Promise<number>;
+  scanDtsGap?: (path: string) => Promise<DtsGap | null | undefined>;
+  keepSpool?: boolean;
+}): Promise<SegmentRunResult & { session?: PreuploadResult }> {
+  const { rec, session, spoolPath, spoolMode } = o;
+  const withSession = <T extends object>(x: T): T & { session?: PreuploadResult } => ({ ...x, ...(session ? { session } : {}) });
 
   // A zero-byte stall has no media to submit. Treat it as a no-part result so the caller can
   // recover the stream instead of turning a dead socket into a permanent task failure.
@@ -1517,24 +1817,23 @@ export async function pumpSegment(o: {
     if (spoolMode === "full") {
       try { rmSync(spoolPath, { force: true }); } catch { /* best effort */ }
     }
-    return { ...rec, session, spoolDurationSec: 0, usedFileFallback: false };
+    return withSession({ ...rec, spoolDurationSec: 0, usedFileFallback: false });
   }
 
-  // TS 不需要补 trailer 就能读出时长;这一步只是**自检**(T-53:读不出即拒投)。
-  const probe = o.probeDuration ?? ffprobeDuration;
   let durationSec = 0;
-  if (spoolMode === "full") {
+  if (rec.ptsDurationSec && rec.ptsDurationSec > 0) {
+    durationSec = rec.ptsDurationSec;
+  } else if (spoolMode === "full") {
+    // No PTS seen in the stream: fall back to the T-53 self-check (read the duration from the file).
+    const probe = o.probeDuration ?? ffprobeDuration;
     try { durationSec = await probe(spoolPath); } catch { durationSec = 0; }
     if (durationSec <= 0) rec.uploadError = rec.uploadError ?? `产物自检失败(TS 读不出 duration,不可投): ${spoolPath}`;
   } else {
-    // Zero-disk: there is no local file to probe. The uploaded bytes are still validated by
-    // UPOS `complete`; a bad container surfaces there instead of being caught locally.
+    // Zero-disk with no PTS: there is no local file to probe. The uploaded bytes are still
+    // validated by UPOS `complete`; a bad container surfaces there instead of locally.
     // Keep sub-second precision: a short part must not round down to 0 seconds and be
     // rejected as "no duration" (real bug: a 67ms slice became an unsubmittable part).
-    // NOTE: `sealedMs` is **wall-clock**, not media duration. A live pull can spend real time
-    // waiting for source segments, so wall-clock may be far below the media duration
-    // (measured 2026-10-18: 60s wall clock for a 603s part). Only ever used as a "> 0" gate
-    // below — never show it to users as the part's duration.
+    // NOTE: `sealedMs` is **wall-clock**, not media duration; only ever used as a "> 0" gate.
     durationSec = Math.max(0.001, Math.round((rec.sealedMs ?? 0) / 100) / 100);
   }
 
@@ -1567,14 +1866,14 @@ export async function pumpSegment(o: {
   let stem: string | undefined;
   let usedFallback = false;
 
-  if (!rec.uploadError && rec.chunksUploaded > 0) {
+  if (!rec.uploadError && rec.chunksUploaded > 0 && session) {
     const parts = Array.from({ length: rec.chunksUploaded }, (_, i) => ({ partNumber: i + 1, eTag: "etag" }));
     const done = await complete({ session, parts, fetchImpl: o.fetchImpl, signal: o.signal });
     if (done.ok) stem = done.stem;
     else rec.uploadError = `complete 失败: ${JSON.stringify(done.raw).slice(0, 200)}`;
   }
 
-  // ── 失败回退:按**整文件**重传(文档承诺过,此前没有实现) ──────────────────
+  // ── 失败回退:按**整文件**重传 ──────────────────
   // 边录边传失败的每种情形(块失败 / 背压降级 / complete 失败 / 自检不过但内容可读)
   // 都不能让已录的字节白白躺在盘上。这里新开一个会话、用**精确文件大小**整体上传,
   // 与生产的 biliup 文件上传等价。UPOS 没有 abort,旧会话只能留着(见 sessionLeaked)。
@@ -1599,8 +1898,90 @@ export async function pumpSegment(o: {
   if (!o.keepSpool && stem) {
     try { rmSync(spoolPath, { force: true }); } catch { /* cleanup is best effort */ }
   }
-  const result = { ...rec, session, spoolDurationSec: durationSec, stemOfCompleted: stem, usedFileFallback: usedFallback };
-  return result;
+  return withSession({ ...rec, spoolDurationSec: durationSec, stemOfCompleted: stem, usedFileFallback: usedFallback });
+}
+
+/**
+ * 单段闭环(边录边传版,TS 容器):一个 preupload → {@link runSegment} → {@link finalizeRecordedPart}。
+ *
+ * 直播直传主循环不再逐段调用它(一个连接产出多个分 P,见 {@link runStream}),它保留给
+ * 一次性调用与测试,行为与拆分前一致:
+ *
+ *   1. preupload(size = 结算上界)  —— 字节还没产生就先申请会话;
+ *   2. ffmpeg 边录,stdout 切块**当场** PUT(录制与上传并行);
+ *   3. 结算点(字节兜底 / 时长阈值谁先到)→ complete 已传出的连续 parts。
+ *
+ * 为什么可以这样:UPOS 的 `complete` 接受「声明 chunks=N、实际只传 M<N 个连续 part」
+ * (实测:声明 20MiB、只传 1 个 10MiB 块 → `OK:1`)。所以 `size` 是**上界**而非精确值,
+ * 分 P 的真实大小就是实际流出的字节数 —— 不需要预知总长。
+ *
+ * spool **仍然写**,且失败时真的会用它回退({@link reuploadSpoolFile}):块失败 /
+ * 背压降级 / complete 失败 / 自检不过但内容可读 —— 四种都按**整文件**重传,
+ * 不补零伪造媒体长度。自检读不出时长的除外(那种内容本身就不可投)。
+ */
+export async function pumpSegment(o: {
+  cookiesPath: string;
+  args: string[];
+  /** 分 P 文件名(同时是 spool 名;UPOS `name` 用同一个;容器为 .ts)。 */
+  fileName: string;
+  /** 结算上界(= preupload 声明的 size)。 */
+  sizeCap: number;
+  spoolDir: string;
+  line: string;
+  /** 时长阈值(毫秒,按视频 PTS);与 sizeCap 谁先到算一 P。 */
+  maxMs?: number;
+  /** Kill ffmpeg after this long without a stdout chunk (default 5 minutes). */
+  stallTimeoutMs?: number;
+  fetchImpl?: typeof fetch;
+  onChunk?: (streamedBytes: number, chunksDone: number) => void;
+  onBackpressure?: (spooledBytes: number, queuedChunks: number) => void;
+  /** Progress/diagnostic log (preupload backoff). Without it a long backoff looks like a hang. */
+  log?: (msg: string) => void;
+  /** 回退整文件重传成功时回调一次(调用方须告知用户:这一段不是流式传上去的)。 */
+  onFallback?: (spoolPath: string, bytes: number) => void;
+  /** 时长自检接缝(测试注入;缺省 {@link ffprobeDuration};只在流里没有 PTS 时用)。 */
+  probeDuration?: (path: string) => Promise<number>;
+  /** dts gap scan seam (tests inject; default {@link ffprobeDtsGap}). `undefined` = could not judge. */
+  scanDtsGap?: (path: string) => Promise<DtsGap | null | undefined>;
+  signal?: AbortSignal;
+  /** Keep the spool after completion (the caller confirms submission and cleans it up). */
+  keepSpool?: boolean;
+  /** Upload queue depth in chunks (default 4). Tests use 1 to force backpressure. */
+  queueCapacity?: number;
+  /**
+   * "full" (default) writes a fallback spool; "none" is true zero-disk. In "none" mode there is
+   * no file to ffprobe or to re-upload, so the self-check and whole-file fallback are skipped —
+   * a failed chunk upload is a hard failure for that part (logged, never silently dropped).
+   */
+  spoolMode?: "full" | "none";
+}): Promise<SegmentRunResult & { session: PreuploadResult }> {
+  const spoolPath = `${o.spoolDir.replace(/\/$/, "")}/${o.fileName}`;
+  const session = await preuploadWithBackoff({
+    cookiesPath: o.cookiesPath, fileName: o.fileName, sizeCap: o.sizeCap,
+    line: o.line, fetchImpl: o.fetchImpl, signal: o.signal, log: o.log,
+  });
+  const spoolMode = o.spoolMode ?? "full";
+  const rec = await runSegment({
+    args: o.args,
+    sizeCap: o.sizeCap,
+    spoolPath,
+    spoolMode,
+    queueCapacity: o.queueCapacity,
+    session,
+    fetchImpl: o.fetchImpl,
+    signal: o.signal,
+    // 时长阈值必须传下去,否则"谁先到"永远只可能是字节先到。
+    seal: { maxBytes: o.sizeCap, maxMs: o.maxMs },
+    stallTimeoutMs: o.stallTimeoutMs,
+    onChunk: o.onChunk,
+    onBackpressure: o.onBackpressure,
+  });
+  const fin = await finalizeRecordedPart({
+    rec, session, cookiesPath: o.cookiesPath, fileName: o.fileName, spoolPath, spoolMode,
+    line: o.line, fetchImpl: o.fetchImpl, signal: o.signal, onChunk: o.onChunk, log: o.log,
+    onFallback: o.onFallback, probeDuration: o.probeDuration, scanDtsGap: o.scanDtsGap, keepSpool: o.keepSpool,
+  });
+  return { ...fin, session };
 }
 
 /**
@@ -2164,10 +2545,297 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
   const recoverWindowMs = Math.max(1_000, o.recoverWindowMs ?? DEFAULT_RECOVERY_WINDOW_MS);
   let recoveryDeadline: number | undefined;
   let recoveryTimedOut = false;
+  const spoolMode = o.spoolMode ?? "full";
+  const spoolDirClean = o.spoolDir.replace(/\/$/, "");
+  const defaultFileName = (seg: number): string => `${Date.now()}_${String(seg).padStart(3, "0")}.live.ts`;
+  const fileNameFor = (seg: number): string => (o.spoolName ? o.spoolName(seg) : defaultFileName(seg));
+  /** Archive index of the next part to open. Allocated when a part starts, never at submit time. */
+  let nextIndex = session.nextPartIndex;
+  /** Run-local part sequence (spool names, "段N" in logs, report.seg). */
+  let partSeq = 0;
+  let partsOpened = 0;
+  interface PartCtx {
+    index: number;
+    seg: number;
+    fileName: string;
+    spoolPath: string;
+    openedAt: number;
+    onChunk: (streamedBytes: number, chunksDone: number) => void;
+  }
+  const ctxs = new Map<PartSink, PartCtx>();
+  /** What the connection loop should do after a part's background finalize. */
+  type Disposition = { kind: "continue" } | { kind: "ended" } | { kind: "stall-empty" };
+  /** First background failure (the same result shape the sequential code returned). */
+  let fatal: RunLivePumpResult | undefined;
+  /** An exception thrown on the chain; rethrown by the main loop, never swallowed. */
+  let fatalThrown: { error: unknown } | undefined;
+  let currentConnAbort: AbortController | undefined;
+  /** Strictly ordered background chain: part k+1 is not finalized before part k is. */
+  let finalizeTail: Promise<void> = Promise.resolve();
+  const failRun = (result: RunLivePumpResult): Disposition => {
+    fatal ??= result;
+    // A failed part must stop the pull: parts after it could not be submitted anyway.
+    currentConnAbort?.abort();
+    return { kind: "ended" };
+  };
+
+  /** complete → dts scan → submit for one sealed part. Mirrors the sequential per-part code. */
+  const finalizeOne = async (part: SealedPart, exit: SegmentExit | undefined): Promise<Disposition> => {
+    const ctx = ctxs.get(part.sink)!;
+    const { index, seg, fileName, spoolPath } = ctx;
+    const sinkRes = await part.sink.finished;
+    const r = await finalizeRecordedPart({
+      rec: segmentResultOf(part, sinkRes, exit ?? NO_EXIT),
+      session: sinkRes.session,
+      cookiesPath: o.cookiesPath, fileName, spoolPath, spoolMode,
+      line: o.line ?? "txa",
+      fetchImpl: o.fetchImpl, signal: o.signal,
+      onChunk: ctx.onChunk, log,
+      onFallback: (p, b) => log(`[直播直传] ↺ 段${seg + 1} 走整文件回退重传: ${(b / MiB).toFixed(1)}MiB (${p})`),
+      probeDuration: o.probeDuration, scanDtsGap: o.scanDtsGap,
+      keepSpool: true,
+    });
+    const base: LivePumpSegmentReport = {
+      seg: seg + 1,
+      chunks: r.chunksUploaded,
+      bytes: r.streamedBytes,
+      spooled: r.spooledBytes,
+      ms: Date.now() - ctx.openedAt,
+      exit: r.exit.code,
+      backpressured: r.backpressured,
+      sessionLeaked: r.sessionLeaked,
+      usedFileFallback: r.usedFileFallback,
+    };
+    const fail = (error: string, extra: Partial<LivePumpSegmentReport> = {}): Disposition => failRun({
+      ok: false, error, bvid: session.bvid, aid: session.aid, title: session.archiveTitle,
+      segments: [...segments, { ...base, ...extra, uploadError: error }],
+      spoolDir: o.spoolDir, statePath: livePumpStatePath(o.spoolDir, o.room),
+    });
+
+    // No bytes means there is nothing to append. Recover the source instead of turning a dead
+    // socket into a permanent task failure.
+    if (r.spooledBytes === 0) {
+      if (r.sealedBy === "stalled") return { kind: "stall-empty" };
+      if (!r.uploadError) {
+        log("[直播直传] 本段没有写入,判定已收播");
+        return { kind: "ended" };
+      }
+      // A non-stalled empty part with an upload error is a real failure. Fall through to the
+      // existing error return; treating it as a source stall would spin preupload forever.
+    }
+
+    const unconfirmedIndex = index;
+    const persistUnconfirmed = (): string | undefined => {
+      if (r.tsGap || spoolMode !== "full" || o.submit === false || r.spooledBytes <= 0) {
+        return undefined;
+      }
+      const note = session.noteUnconfirmedPart({
+        index: unconfirmedIndex,
+        spoolPath,
+        title: o.partTitle?.(unconfirmedIndex + 1, liveTitle) ?? fileName.replace(/\.live(?=\.[^.]+$)/, "").replace(/\.[^.]+$/, ""),
+        bytes: r.spooledBytes,
+        durationSec: r.spoolDurationSec ?? 0,
+        ...(r.stemOfCompleted ? { stem: r.stemOfCompleted } : {}),
+      });
+      if (note.ok) emit({ at: Date.now(), kind: "part_unconfirmed", part: unconfirmedIndex, bytes: r.spooledBytes });
+      return note.ok ? undefined : (note.error ?? "无法记录未确认分 P");
+    };
+    const retryUnconfirmed = async (): Promise<{ ok: boolean; stem?: string; bvid?: string; aid?: number; error?: string }> => {
+      emit({ at: Date.now(), kind: "part_retry", part: unconfirmedIndex });
+      const deadline = Date.now() + recoverWindowMs;
+      let waitMs = Math.min(5_000, recoverWindowMs);
+      let lastError = "";
+      for (;;) {
+        // Drain means "finish this part, do not start another"; a hard signal is the only thing
+        // that should abort the current spool retry.
+        if (o.signal?.aborted) return { ok: false, error: "stopped" };
+        const recovered = await session.recover().catch((e: unknown) => ({
+          ok: false,
+          reason: String((e as Error)?.message ?? e).slice(0, 200),
+        }));
+        if (!recovered.ok) {
+          lastError = recovered.reason ?? "状态恢复失败";
+        } else {
+          const submitted: { ok: boolean; bvid?: string; aid?: number; error?: string } =
+            await session.resubmitUnconfirmedPart(o.signal).catch((e: unknown) => ({
+              ok: false,
+              error: String((e as Error)?.message ?? e).slice(0, 200),
+            }));
+          if (submitted.ok) {
+            const confirmedPart = session.parts.find((p) => p.index === unconfirmedIndex && p.confirmed);
+            if (!confirmedPart) {
+              return { ok: false, error: `自动重试未确认目标分 P(索引 ${unconfirmedIndex})` };
+            }
+            emit({ at: Date.now(), kind: "part_confirmed", part: unconfirmedIndex, ...(submitted.bvid ? { bvid: submitted.bvid } : {}) });
+            return {
+              ok: true,
+              ...(confirmedPart?.stem ? { stem: confirmedPart.stem } : {}),
+              ...(submitted.bvid ? { bvid: submitted.bvid } : {}),
+              ...(submitted.aid ? { aid: submitted.aid } : {}),
+            };
+          }
+          lastError = submitted.error ?? "未确认分 P 重试失败";
+        }
+        if (Date.now() >= deadline) return { ok: false, error: lastError || "自动重试窗口耗尽" };
+        const sleepMs = Math.max(0, Math.min(waitMs, deadline - Date.now()));
+        log(`[直播直传] 段${seg + 1} 自动重试上传,${Math.max(1, Math.ceil(sleepMs / 1000))}s 后继续: ${lastError}`);
+        await sleepUnlessAborted(sleepMs, [o.signal], o.sleep);
+        waitMs = Math.min(60_000, Math.max(1_000, waitMs * 2));
+      }
+    };
+
+    // Zero-disk: backpressure means bytes were produced but not uploaded, and there is no file
+    // to fall back to. Treating it as a warning would silently lose video — it is a hard error.
+    if (spoolMode === "none" && r.backpressured) {
+      const error = ZERO_DISK_PART_LOST;
+      log(`[直播直传] ⚠️ 段${seg + 1} ${error}`);
+      emit({ at: Date.now(), kind: "part_failed", part: index, message: error });
+      return fail(error);
+    }
+    // A part that fails self-check or upload never enters the archive (T-53).
+    if (r.uploadError || !r.spoolDurationSec) {
+      let error = r.uploadError ?? "缺 duration(产物不可投)";
+      const where = spoolMode === "none" ? "无本地副本" : `spool ${(r.spooledBytes / MiB).toFixed(1)}MiB`;
+      log(`[直播直传] ⚠️ 段${seg + 1} 未可投,不进入稿件: ${error}(${where})`);
+      // Keep recoverable bytes in the WAL before returning. Without this, the orphan sweep can
+      // delete the only spool copy after its grace period while the uploader is offline.
+      const persistError = persistUnconfirmed();
+      if (persistError) error = `${error};${persistError}`;
+      const persisted = persistError === undefined;
+      if (r.sealedBy === "stalled" && o.autoRetryUpload !== false
+        && persisted && spoolMode === "full" && !r.tsGap && r.spooledBytes > 0
+        && !o.signal?.aborted && !o.drainSignal?.aborted) {
+        const retried = await retryUnconfirmed();
+        if (retried.ok) {
+          const recovered = session.parts.find((p) => p.index === unconfirmedIndex && p.confirmed);
+          segments.push({
+            ...base,
+            ...(recovered?.stem ? { stem: recovered.stem } : {}),
+            spooled: r.spooledBytes,
+            bytes: r.spooledBytes,
+            spoolDurationSec: r.spoolDurationSec ?? 0,
+          });
+          log(`[直播直传] 段${seg + 1} 自动重试成功,已追到稿件 ${retried.bvid ?? session.bvid ?? retried.aid ?? "当前稿件"}`);
+          log("[状态] 分P已确认");
+          try {
+            const bv = retried.bvid ?? session.bvid;
+            o.onPartConfirmed?.({
+              count: session.parts.filter((p) => p.confirmed).length,
+              ...(bv ? { bvid: bv } : {}),
+            });
+          } catch { /* progress reporting must never fail an upload */ }
+          recoveryDeadline = Date.now() + recoverWindowMs;
+          return { kind: "continue" };
+        }
+        error = `${error};自动重试失败: ${retried.error ?? "窗口耗尽"}`;
+      }
+      // A cancelled run that already delivered parts is still a success: the archive holds
+      // everything recorded so far. Reporting failure would make callers (ledger writeback,
+      // exit code) discard real uploaded parts just because the *last* segment was cut short
+      // by the stop signal.
+      if (r.sealedBy === "abort" && segments.some((x) => x.stem)) {
+        log("[直播直传] 已停止,此前分 P 均已入稿:按成功收尾");
+        segments.push({ ...base, uploadError: error });
+        return { kind: "ended" };
+      }
+      emit({ at: Date.now(), kind: "part_failed", part: unconfirmedIndex, message: error });
+      return fail(error);
+    }
+
+    const stem = r.stemOfCompleted;
+    if (!stem) {
+      let error = "complete 未返回 UPOS stem";
+      const persistError = persistUnconfirmed();
+      if (persistError) error = `${error};${persistError}`;
+      emit({ at: Date.now(), kind: "part_failed", part: unconfirmedIndex, message: error });
+      return fail(error, { spoolDurationSec: r.spoolDurationSec });
+    }
+
+    const report: LivePumpSegmentReport = { ...base, stem, spoolDurationSec: r.spoolDurationSec };
+    if (o.submit !== false) {
+      emit({ at: Date.now(), kind: "part_submit", part: index });
+      const submitted = await session.submitPart({
+        index,
+        spoolPath,
+        stem,
+        title: o.partTitle?.(index + 1, liveTitle) ?? fileName.replace(/\.live(?=\.[^.]+$)/, "").replace(/\.[^.]+$/, ""),
+        bytes: r.spooledBytes,
+        durationSec: r.spoolDurationSec,
+      }, o.signal);
+      if (!submitted.ok) {
+        log(`[直播直传] 段${seg + 1} 稿件提交失败${spoolMode === "none" ? "(无本地副本)" : ",保留 spool"}: ${submitted.error}`);
+        emit({ at: Date.now(), kind: "part_failed", part: index, message: submitted.error });
+        return failRun({
+          ok: false, error: submitted.error, bvid: session.bvid, aid: session.aid,
+          title: session.archiveTitle, segments: [...segments, { ...report, uploadError: submitted.error }],
+          spoolDir: o.spoolDir, statePath: livePumpStatePath(o.spoolDir, o.room),
+        });
+      }
+      log(
+        `[直播直传] 段${seg + 1} 已确认到稿件 ${submitted.bvid ?? submitted.aid}` +
+        `${r.usedFileFallback ? " (整文件回退)" : ""}`,
+      );
+      emit({ at: Date.now(), kind: "part_confirmed", part: index, ...(submitted.bvid ? { bvid: submitted.bvid } : {}) });
+      log("[状态] 分P已确认");
+      try {
+        const bv = submitted.bvid ?? session.bvid;
+        o.onPartConfirmed?.({ count: session.parts.filter((p) => p.confirmed).length, ...(bv ? { bvid: bv } : {}) });
+      } catch { /* progress reporting must never fail an upload */ }
+    }
+    segments.push(report);
+    // A normal part with bytes proves the source is producing again. Do not let an old stall
+    // deadline cut off a healthy broadcast later in the same run.
+    recoveryDeadline = part.final ? recoveryDeadlineAfterPart(r.sealedBy, Date.now(), recoverWindowMs) : undefined;
+    const disk = spoolMode === "none"
+      ? "无本地回退文件(真直播直传)"
+      : `spool ${(r.spooledBytes / MiB).toFixed(1)}MiB`;
+    log(
+      `[直播直传] 段${seg + 1} 结束: ${r.chunksUploaded} 块 / ${(r.streamedBytes / MiB).toFixed(1)}MiB,` +
+      `${disk},ffmpeg exit=${r.exit.code}`,
+    );
+    // Degradation must be explicit: silent backpressure turns streaming upload into "disk only".
+    if (r.backpressured) {
+      log(`[直播直传] ⚠️ 上传跟不上录制,本段已降级为纯落盘(${(r.streamedBytes / MiB).toFixed(1)}/${(r.spooledBytes / MiB).toFixed(1)}MiB 流出)`);
+    }
+    if (r.sessionLeaked) log("[直播直传] ⚠️ UPOS 会话半截泄漏:协议无 abort,须按原文件重传覆盖");
+    if (!part.final) return { kind: "continue" };
+    if (r.sealedBy === "abort") return { kind: "ended" };
+    // A tiny final part at a normal stream end is usually the last few packets, not a useful P.
+    // A stalled part is different: it is the tail we are explicitly trying to preserve.
+    if (r.spooledBytes < MIN_PART_BYTES && r.sealedBy !== "stalled" && !part.stopped) {
+      log("[直播直传] 本段 < 1MiB,判定已收播");
+      return { kind: "ended" };
+    }
+    return { kind: "continue" };
+  };
+
+  /** Queue a sealed part on the ordered background chain. Never rejects. */
+  const enqueueFinalize = (part: SealedPart, exit?: SegmentExit): Promise<Disposition> => {
+    const run = finalizeTail.then(async (): Promise<Disposition> => {
+      const ctx = ctxs.get(part.sink);
+      if (fatal || fatalThrown) {
+        // An earlier part failed. This one cannot be submitted (the archive refuses a part after an
+        // unconfirmed one); say so loudly instead of dropping it silently.
+        log(`[直播直传] ⚠️ 段${(ctx?.seg ?? 0) + 1} 前序分 P 已失败,本分 P 不再处理${spoolMode === "none" ? "(无本地副本,已丢失)" : `(spool 保留: ${ctx?.spoolPath})`}`);
+        return { kind: "ended" };
+      }
+      try {
+        return await finalizeOne(part, exit);
+      } catch (e) {
+        fatalThrown ??= { error: e };
+        currentConnAbort?.abort();
+        return { kind: "ended" };
+      }
+    });
+    finalizeTail = run.then(() => { ctxs.delete(part.sink); });
+    return run;
+  };
   try {
   let drainLogged = false;
-  for (let seg = 0; maxSegments === 0 || seg < maxSegments; seg++) {
+  for (;;) {
     if (await o.shouldStop?.()) break;
+    if (maxSegments > 0 && partsOpened >= maxSegments) break;
+    if (o.signal?.aborted) break;
     if (recoveryDeadline !== undefined && Date.now() >= recoveryDeadline) {
       recoveryTimedOut = true;
       log("[直播直传] 停滞恢复窗口结束,停止本次录制;下次运行会重新等待开播");
@@ -2203,7 +2871,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         room: o.room,
         fetch: o.fetch,
         quality: o.quality,
-        onRetry: (waitMs, attempt, max) => log(`[直播直传] 段${seg + 1} 取流失败,${waitMs / 1000}s 后重试(${attempt}/${max})`),
+        onRetry: (waitMs, attempt, max) => log(`[直播直传] 段${partSeq + 1} 取流失败,${waitMs / 1000}s 后重试(${attempt}/${max})`),
         onGiveUp: (attempts) => log(`[直播直传] 连续 ${attempts} 次取不到流,按收播收尾(已录分 P 不受影响)`),
         sleep,
       });
@@ -2222,264 +2890,131 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     }
     log("[状态] 录制中");
 
-    const fileName = o.spoolName ? o.spoolName(seg) : `${Date.now()}_${String(seg).padStart(3, "0")}.live.ts`;
-    const t0 = Date.now();
-    const streamingPart = session.nextPartIndex;
-    emit({ at: Date.now(), kind: "part_streaming", part: streamingPart });
-    const r = await pumpSegment({
-      cookiesPath: o.cookiesPath,
-      args: buildPipeFfmpegArgs({ url: s.url, headers: s.headers, sizeCap: o.sizeCap }),
-      fileName,
-      sizeCap: o.sizeCap,
-      spoolDir: o.spoolDir,
-      line: o.line ?? "txa",
-      keepSpool: true,
-      fetchImpl: o.fetchImpl,
-      signal: o.signal,
-      stallTimeoutMs: o.stallTimeoutMs,
-      probeDuration: o.probeDuration,
-      scanDtsGap: o.scanDtsGap,
-      spoolMode: o.spoolMode ?? "full",
-      queueCapacity: o.queueCapacity,
-      log,
-      onFallback: (p, b) => log(`[直播直传] ↺ 段${seg + 1} 走整文件回退重传: ${(b / MiB).toFixed(1)}MiB (${p})`),
-      maxMs: o.maxMs,
-      onChunk: (b, n) => {
-        log(`[直播直传] 段${seg + 1} 第 ${n} 块完成,累计 ${(b / MiB).toFixed(1)}MiB`);
-        progress({ part: streamingPart, uploadedBytes: b, chunks: n });
-      },
-    });
-    emit({ at: Date.now(), kind: "part_sealed", part: streamingPart, bytes: r.spooledBytes });
-    const base: LivePumpSegmentReport = {
-      seg: seg + 1,
-      chunks: r.chunksUploaded,
-      bytes: r.streamedBytes,
-      spooled: r.spooledBytes,
-      ms: Date.now() - t0,
-      exit: r.exit.code,
-      backpressured: r.backpressured,
-      sessionLeaked: r.sessionLeaked,
-      usedFileFallback: r.usedFileFallback,
-    };
-
-    if (r.sealedBy === "stalled") {
-      emit({ at: Date.now(), kind: "stalled", part: streamingPart, bytes: r.spooledBytes, message: `${Math.max(1, Math.ceil((r.stalledMs ?? 0) / 1000))}s no data` });
-      const silentSec = Math.max(1, Math.ceil((r.stalledMs ?? 0) / 1000));
-      log("[状态] 录制停滞");
-      log(`[直播直传] 段${seg + 1} 源流已 ${silentSec}s 无写入,自动封口并尝试追到当前稿件`);
-    }
-    // No bytes means there is nothing to append. Recover the source instead of turning a dead
-    // socket into a permanent task failure.
-    if (r.spooledBytes === 0) {
-      if (r.sealedBy === "stalled") {
-        recoveryDeadline ??= Date.now() + recoverWindowMs;
-        continue;
-      }
-      if (!r.uploadError) {
-        log("[直播直传] 本段没有写入,判定已收播");
-        break;
-      }
-      // A non-stalled empty part with an upload error is a real failure. Fall through to the
-      // existing error return; treating it as a source stall would spin preupload forever.
-    }
-
-    const unconfirmedIndex = session.nextPartIndex;
-    const persistUnconfirmed = (): string | undefined => {
-      if (r.tsGap || (o.spoolMode ?? "full") !== "full" || o.submit === false || r.spooledBytes <= 0) {
-        return undefined;
-      }
-      const note = session.noteUnconfirmedPart({
-        index: unconfirmedIndex,
-        spoolPath: `${o.spoolDir.replace(/\/$/, "")}/${fileName}`,
-        title: o.partTitle?.(unconfirmedIndex + 1, liveTitle) ?? fileName.replace(/\.live(?=\.[^.]+$)/, "").replace(/\.[^.]+$/, ""),
-        bytes: r.spooledBytes,
-        durationSec: r.spoolDurationSec ?? 0,
-        ...(r.stemOfCompleted ? { stem: r.stemOfCompleted } : {}),
+    // ── One ffmpeg for this whole connection; parts are cut by TsCutter at video keyframes ────────
+    // (plans/043). Everything a part needs after it is cut (complete → dts scan → submit) runs on
+    // the background finalize chain below, so the pull never waits for it.
+    const connAbort = new AbortController();
+    currentConnAbort = connAbort;
+    const connSignal = o.signal ? AbortSignal.any([o.signal, connAbort.signal]) : connAbort.signal;
+    let prefetch: { promise: Promise<PreuploadResult>; abort: AbortController } | undefined;
+    const startPreupload = (fileName: string, signal: AbortSignal): Promise<PreuploadResult> => {
+      const p = preuploadWithBackoff({
+        cookiesPath: o.cookiesPath, fileName, sizeCap: o.sizeCap, line: o.line ?? "txa",
+        fetchImpl: o.fetchImpl, signal, log,
       });
-      if (note.ok) emit({ at: Date.now(), kind: "part_unconfirmed", part: unconfirmedIndex, bytes: r.spooledBytes });
-      return note.ok ? undefined : (note.error ?? "无法记录未确认分 P");
+      // The consumer (a part sink) handles the rejection; this only keeps an unconsumed prefetch
+      // from surfacing as an unhandled rejection.
+      p.catch(() => {});
+      return p;
     };
-    const retryUnconfirmed = async (): Promise<{ ok: boolean; stem?: string; bvid?: string; aid?: number; error?: string }> => {
-      emit({ at: Date.now(), kind: "part_retry", part: unconfirmedIndex });
-      const deadline = Date.now() + recoverWindowMs;
-      let waitMs = Math.min(5_000, recoverWindowMs);
-      let lastError = "";
-      for (;;) {
-        // Drain means "finish this part, do not start another"; a hard signal is the only thing
-        // that should abort the current spool retry.
-        if (o.signal?.aborted) return { ok: false, error: "stopped" };
-        const recovered = await session.recover().catch((e: unknown) => ({
-          ok: false,
-          reason: String((e as Error)?.message ?? e).slice(0, 200),
-        }));
-        if (!recovered.ok) {
-          lastError = recovered.reason ?? "状态恢复失败";
-        } else {
-          const submitted: { ok: boolean; bvid?: string; aid?: number; error?: string } =
-            await session.resubmitUnconfirmedPart(o.signal).catch((e: unknown) => ({
-              ok: false,
-              error: String((e as Error)?.message ?? e).slice(0, 200),
-            }));
-          if (submitted.ok) {
-            const part = session.parts.find((p) => p.index === unconfirmedIndex && p.confirmed);
-            if (!part) {
-              return { ok: false, error: `自动重试未确认目标分 P(索引 ${unconfirmedIndex})` };
-            }
-            emit({ at: Date.now(), kind: "part_confirmed", part: unconfirmedIndex, ...(submitted.bvid ? { bvid: submitted.bvid } : {}) });
-            return {
-              ok: true,
-              ...(part?.stem ? { stem: part.stem } : {}),
-              ...(submitted.bvid ? { bvid: submitted.bvid } : {}),
-              ...(submitted.aid ? { aid: submitted.aid } : {}),
-            };
-          }
-          lastError = submitted.error ?? "未确认分 P 重试失败";
-        }
-        if (Date.now() >= deadline) return { ok: false, error: lastError || "自动重试窗口耗尽" };
-        const sleepMs = Math.max(0, Math.min(waitMs, deadline - Date.now()));
-        log(`[直播直传] 段${seg + 1} 自动重试上传,${Math.max(1, Math.ceil(sleepMs / 1000))}s 后继续: ${lastError}`);
-        await sleepUnlessAborted(sleepMs, [o.signal], o.sleep);
-        waitMs = Math.min(60_000, Math.max(1_000, waitMs * 2));
-      }
+    /** Allocate the part index and open its sink; the index is fixed here, not at submit time. */
+    const openPart = (session: PreuploadResult | Promise<PreuploadResult>, fileName: string): PartSink => {
+      const seg = partSeq++;
+      const index = nextIndex++;
+      partsOpened++;
+      const spoolPath = `${spoolDirClean}/${fileName}`;
+      emit({ at: Date.now(), kind: "part_streaming", part: index });
+      const onChunk = (b: number, n: number): void => {
+        log(`[直播直传] 段${seg + 1} 第 ${n} 块完成,累计 ${(b / MiB).toFixed(1)}MiB`);
+        progress({ part: index, uploadedBytes: b, chunks: n });
+      };
+      const sink = new PartSink({
+        sizeCap: o.sizeCap, spoolPath, session, spoolMode,
+        ...(o.fetchImpl ? { fetchImpl: o.fetchImpl } : {}),
+        ...(o.queueCapacity !== undefined ? { queueCapacity: o.queueCapacity } : {}),
+        signal: connSignal,
+        onChunk,
+      });
+      ctxs.set(sink, { index, seg, fileName, spoolPath, openedAt: Date.now(), onChunk });
+      return sink;
     };
+    const openNext = (): PartSink => {
+      const fileName = fileNameFor(partSeq);
+      const pre = prefetch;
+      prefetch = undefined;
+      return openPart(pre ? pre.promise : startPreupload(fileName, connSignal), fileName);
+    };
+    /** At ~80% of the size/duration threshold: get the next part's session ready before the cut. */
+    const onPrefetch = (): void => {
+      if (prefetch || fatal || fatalThrown) return;
+      if (o.drainSignal?.aborted || (maxSegments > 0 && partsOpened >= maxSegments)) return;
+      const ac = new AbortController();
+      prefetch = {
+        promise: startPreupload(fileNameFor(partSeq), AbortSignal.any([connSignal, ac.signal])),
+        abort: ac,
+      };
+    };
+    const stopAtCut = async (): Promise<boolean> =>
+      !!o.signal?.aborted || !!o.drainSignal?.aborted || (maxSegments > 0 && partsOpened >= maxSegments)
+      || !!(await o.shouldStop?.());
 
-    // Zero-disk: backpressure means bytes were produced but not uploaded, and there is no file
-    // to fall back to. Treating it as a warning would silently lose video — it is a hard error.
-    if ((o.spoolMode ?? "full") === "none" && r.backpressured) {
-      const error = "上传跟不上录制且未保留本地 spool:该分 P 已丢失";
-      log(`[直播直传] ⚠️ 段${seg + 1} ${error}`);
-      emit({ at: Date.now(), kind: "part_failed", part: streamingPart, message: error });
-      return {
-        ok: false, error, bvid: session.bvid, aid: session.aid, title: session.archiveTitle,
-        segments: [...segments, { ...base, uploadError: error }],
-        spoolDir: o.spoolDir, statePath: livePumpStatePath(o.spoolDir, o.room),
-      };
-    }
-    // A part that fails self-check or upload never enters the archive (T-53).
-    if (r.uploadError || !r.spoolDurationSec) {
-      let error = r.uploadError ?? "缺 duration(产物不可投)";
-      const where = (o.spoolMode ?? "full") === "none" ? "无本地副本" : `spool ${(r.spooledBytes / MiB).toFixed(1)}MiB`;
-      log(`[直播直传] ⚠️ 段${seg + 1} 未可投,不进入稿件: ${error}(${where})`);
-      // Keep recoverable bytes in the WAL before returning. Without this, the orphan sweep can
-      // delete the only spool copy after its grace period while the uploader is offline.
-      const persistError = persistUnconfirmed();
-      if (persistError) error = `${error};${persistError}`;
-      const persisted = persistError === undefined;
-      if (r.sealedBy === "stalled" && o.autoRetryUpload !== false
-        && persisted && (o.spoolMode ?? "full") === "full" && !r.tsGap && r.spooledBytes > 0
-        && !o.signal?.aborted && !o.drainSignal?.aborted) {
-        const retried = await retryUnconfirmed();
-        if (retried.ok) {
-          const recovered = session.parts.find((p) => p.index === unconfirmedIndex && p.confirmed);
-          segments.push({
-            ...base,
-            ...(recovered?.stem ? { stem: recovered.stem } : {}),
-            spooled: r.spooledBytes,
-            bytes: r.spooledBytes,
-            spoolDurationSec: r.spoolDurationSec ?? 0,
-          });
-          log(`[直播直传] 段${seg + 1} 自动重试成功,已追到稿件 ${retried.bvid ?? session.bvid ?? retried.aid ?? "当前稿件"}`);
-          log("[状态] 分P已确认");
-          try {
-            const bv = retried.bvid ?? session.bvid;
-            o.onPartConfirmed?.({
-              count: session.parts.filter((p) => p.confirmed).length,
-              ...(bv ? { bvid: bv } : {}),
-            });
-          } catch { /* progress reporting must never fail an upload */ }
-          recoveryDeadline = Date.now() + recoverWindowMs;
-          continue;
-        }
-        error = `${error};自动重试失败: ${retried.error ?? "窗口耗尽"}`;
-      }
-      // A cancelled run that already delivered parts is still a success: the archive holds
-      // everything recorded so far. Reporting failure would make callers (ledger writeback,
-      // exit code) discard real uploaded parts just because the *last* segment was cut short
-      // by the stop signal.
-      if (r.sealedBy === "abort" && segments.some((x) => x.stem)) {
-        log("[直播直传] 已停止,此前分 P 均已入稿:按成功收尾");
-        segments.push({ ...base, uploadError: error });
-        break;
-      }
-      emit({ at: Date.now(), kind: "part_failed", part: unconfirmedIndex, message: error });
-      return {
-        ok: false, error, bvid: session.bvid, aid: session.aid, title: session.archiveTitle,
-        segments: [...segments, { ...base, uploadError: error }],
-        spoolDir: o.spoolDir, statePath: livePumpStatePath(o.spoolDir, o.room),
-      };
+    // The first part's preupload happens before ffmpeg starts (no bytes exist yet); a failure here
+    // propagates exactly as it did when preupload lived inside the per-part call.
+    const firstName = fileNameFor(partSeq);
+    const firstSession = await preuploadWithBackoff({
+      cookiesPath: o.cookiesPath, fileName: firstName, sizeCap: o.sizeCap, line: o.line ?? "txa",
+      fetchImpl: o.fetchImpl, signal: connSignal, log,
+    });
+    const firstSink = openPart(firstSession, firstName);
+    let stream: StreamRunResult;
+    try {
+      stream = await runStream({
+        args: buildPipeFfmpegArgs({ url: s.url, headers: s.headers }),
+        sizeCap: o.sizeCap,
+        maxMs: o.maxMs,
+        firstSink,
+        openNext,
+        onPrefetch,
+        stopAtCut,
+        onPartSealed: (part) => {
+          emit({ at: Date.now(), kind: "part_sealed", part: ctxs.get(part.sink)!.index, bytes: part.sink.spooledBytes });
+          void enqueueFinalize(part);
+        },
+        signal: connSignal,
+        stallTimeoutMs: o.stallTimeoutMs,
+      });
+    } finally {
+      // A prefetched session nobody used (the stream ended first) is only a preupload with no
+      // bytes; abort a pending backoff so it cannot outlive the connection.
+      prefetch?.abort.abort();
+      prefetch = undefined;
     }
 
-    const stem = r.stemOfCompleted;
-    if (!stem) {
-      let error = "complete 未返回 UPOS stem";
-      const persistError = persistUnconfirmed();
-      if (persistError) error = `${error};${persistError}`;
-      emit({ at: Date.now(), kind: "part_failed", part: unconfirmedIndex, message: error });
-      return {
-        ok: false, error, bvid: session.bvid, aid: session.aid, title: session.archiveTitle,
-        segments: [...segments, { ...base, spoolDurationSec: r.spoolDurationSec, uploadError: error }],
-        spoolDir: o.spoolDir, statePath: livePumpStatePath(o.spoolDir, o.room),
-      };
+    let finalDisposition: Disposition | undefined;
+    if (stream.endedBy === "stalled") {
+      const ctx = stream.finalPart ? ctxs.get(stream.finalPart.sink) : undefined;
+      const silentSec = Math.max(1, Math.ceil((stream.stalledMs ?? 0) / 1000));
+      emit({
+        at: Date.now(), kind: "stalled",
+        ...(ctx ? { part: ctx.index, bytes: stream.finalPart!.sink.spooledBytes } : {}),
+        message: `${silentSec}s no data`,
+      });
+      log("[状态] 录制停滞");
+      log(`[直播直传] 段${(ctx?.seg ?? partSeq - 1) + 1} 源流已 ${silentSec}s 无写入,自动封口并尝试追到当前稿件`);
     }
+    if (stream.finalPart) {
+      const fp = stream.finalPart;
+      emit({ at: Date.now(), kind: "part_sealed", part: ctxs.get(fp.sink)!.index, bytes: fp.sink.spooledBytes });
+      finalDisposition = await enqueueFinalize(fp, stream.exit);
+    } else if (stream.discardedTail) {
+      // The dropped tail never became a part: give its numbers back so titles/indexes have no gap.
+      partSeq--;
+      nextIndex--;
+      partsOpened--;
+      if (stream.discardedSink) ctxs.delete(stream.discardedSink);
+    }
+    // Every earlier part reaches a terminal state before the next step is decided.
+    await finalizeTail;
+    if (fatalThrown) throw fatalThrown.error;
+    if (fatal) return fatal;
 
-    let report: LivePumpSegmentReport = {
-      ...base, stem, spoolDurationSec: r.spoolDurationSec,
-    };
-    if (o.submit !== false) {
-      // Resume from the last known part: a restarted run must not reuse an index that is
-      // already confirmed, or the new part overwrites the record and its spool leaks.
-      const nextIndex = session.nextPartIndex;
-      emit({ at: Date.now(), kind: "part_submit", part: nextIndex });
-      const submitted = await session.submitPart({
-        index: nextIndex,
-        spoolPath: `${o.spoolDir.replace(/\/$/, "")}/${fileName}`,
-        stem,
-        title: o.partTitle?.(nextIndex + 1, liveTitle) ?? fileName.replace(/\.live(?=\.[^.]+$)/, "").replace(/\.[^.]+$/, ""),
-        bytes: r.spooledBytes,
-        durationSec: r.spoolDurationSec,
-      }, o.signal);
-      if (!submitted.ok) {
-        log(`[直播直传] 段${seg + 1} 稿件提交失败${(o.spoolMode ?? "full") === "none" ? "(无本地副本)" : ",保留 spool"}: ${submitted.error}`);
-        emit({ at: Date.now(), kind: "part_failed", part: nextIndex, message: submitted.error });
-        return {
-          ok: false, error: submitted.error, bvid: session.bvid, aid: session.aid,
-          title: session.archiveTitle, segments: [...segments, { ...report, uploadError: submitted.error }],
-          spoolDir: o.spoolDir, statePath: livePumpStatePath(o.spoolDir, o.room),
-        };
-      }
-      log(
-        `[直播直传] 段${seg + 1} 已确认到稿件 ${submitted.bvid ?? submitted.aid}` +
-        `${r.usedFileFallback ? " (整文件回退)" : ""}`,
-      );
-      emit({ at: Date.now(), kind: "part_confirmed", part: nextIndex, ...(submitted.bvid ? { bvid: submitted.bvid } : {}) });
-      log("[状态] 分P已确认");
-      try {
-        const bv = submitted.bvid ?? session.bvid;
-        o.onPartConfirmed?.({ count: session.parts.filter((p) => p.confirmed).length, ...(bv ? { bvid: bv } : {}) });
-      } catch { /* progress reporting must never fail an upload */ }
+    if (stream.endedBy === "stalled" && (stream.discardedTail || finalDisposition?.kind === "stall-empty")) {
+      // Nothing recorded since the last cut/connection: keep the same deadline so repeated silent
+      // stalls cannot extend the recovery window forever.
+      recoveryDeadline ??= Date.now() + recoverWindowMs;
+      continue;
     }
-    segments.push(report);
-    // A normal part with bytes proves the source is producing again. Do not let an old stall
-    // deadline cut off a healthy broadcast later in the same run.
-    recoveryDeadline = recoveryDeadlineAfterPart(r.sealedBy, Date.now(), recoverWindowMs);
-    const disk = (o.spoolMode ?? "full") === "none"
-      ? "无本地回退文件(真直播直传)"
-      : `spool ${(r.spooledBytes / MiB).toFixed(1)}MiB`;
-    log(
-      `[直播直传] 段${seg + 1} 结束: ${r.chunksUploaded} 块 / ${(r.streamedBytes / MiB).toFixed(1)}MiB,` +
-      `${disk},ffmpeg exit=${r.exit.code}`,
-    );
-    // Degradation must be explicit: silent backpressure turns streaming upload into "disk only".
-    if (r.backpressured) {
-      log(`[直播直传] ⚠️ 上传跟不上录制,本段已降级为纯落盘(${(r.streamedBytes / MiB).toFixed(1)}/${(r.spooledBytes / MiB).toFixed(1)}MiB 流出)`);
-    }
-    if (r.sessionLeaked) log("[直播直传] ⚠️ UPOS 会话半截泄漏:协议无 abort,须按原文件重传覆盖");
-    // A tiny part at a normal stream end is usually the last few packets, not a useful P.
-    // A stalled part is different: it is the tail we are explicitly trying to preserve.
-    if (r.spooledBytes < MIN_PART_BYTES && r.sealedBy !== "stalled") {
-      log("[直播直传] 本段 < 1MiB,判定已收播");
-      break;
-    }
+    if (finalDisposition?.kind === "ended") break;
   }
 
   if (recoveryTimedOut && segments.length === 0) {

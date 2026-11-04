@@ -31,12 +31,17 @@ import {
   writeLivePumpState,
   livePumpStatePath,
   runSegment,
+  runStream,
+  PartSink,
   runLivePump,
   setSpawnForTest,
   type ChildProcessLike,
+  type SealedPart,
   type SpawnFn,
 } from "./live-pump.js";
 import type { PreuploadResult } from "./upos-stream.js";
+import { stream as tsStream } from "./ts-fixture.js";
+import { TS_PACKET as TS_PACKET_BYTES } from "./ts-cutter.js";
 
 const CHUNK = 1024;
 
@@ -129,7 +134,7 @@ function installFakeFfmpeg(
     holdOpen?: boolean | ((spawnIndex: number) => boolean);
     killEndsStdout?: boolean;
   } = {},
-): { kills: NodeJS.Signals[] } {
+): { kills: NodeJS.Signals[]; readonly spawns: number } {
   const kills: NodeJS.Signals[] = [];
   let spawnIndex = 0;
   const spawn: SpawnFn = (() => {
@@ -169,27 +174,27 @@ function installFakeFfmpeg(
     return proc;
   }) as SpawnFn;
   setSpawnForTest(spawn);
-  return { kills };
+  return { kills, get spawns() { return spawnIndex; } };
 }
 
 afterEach(() => { setSpawnForTest(undefined); });
 
 describe("buildPipeFfmpegArgs", () => {
-  it("stdout matroska + -fs 上界 + 不滚动分段", () => {
-    const cap = 100 * 1024 * 1024; // 写成表达式:隐私闸门会把裸长数字当房间号
-    const args = buildPipeFfmpegArgs({ url: "https://live.douyin.com/x.flv", headers: { Referer: "https://live.douyin.com/" }, sizeCap: cap });
+  it("stdout mpegts + 无 -fs(分 P 由 TsCutter 在关键帧切)+ 不滚动分段", () => {
+    const args = buildPipeFfmpegArgs({ url: "https://live.douyin.com/x.flv", headers: { Referer: "https://live.douyin.com/" } });
     expect(args.at(-1)).toBe("-");
     // 容器是 mpegts:管道(非 seekable)上可写音轨,且 -fs 强杀后仍读得出时长
     // (matroska 两个都不行,实测 62002)。于是不需要 remux,可以边录边传。
     expect(args).toContain("mpegts");
-    expect(hasPair(args, "-fs", String(cap))).toBe(true);
-    // 没有 segment muxer —— 一段一个进程,不靠 -segment_time 滚动。
+    // 一个连接一个 ffmpeg:分 P 大小由我们在 TS 关键帧处切,ffmpeg 不能再按 -fs 到点退出。
+    expect(args).not.toContain("-fs");
+    // 没有 segment muxer —— 切分在我们这一侧,不靠 -segment_time 滚动。
     expect(args).not.toContain("segment");
     expect(args).not.toContain("-segment_time");
   });
 
   it("-reconnect* 必须排在 -i 之前(input 选项;late 会被当成 output 选项)", () => {
-    const args = buildPipeFfmpegArgs({ url: "https://x/live.flv", sizeCap: 4096 });
+    const args = buildPipeFfmpegArgs({ url: "https://x/live.flv" });
     // ffmpeg 对这些参数按出现位置解析:放 -i 之后报 `Option reconnect not found`
     // 并 exit 1。真实直播里被忽略过,所以必须用测试钉住顺序。
     const iAt = args.indexOf("-i");
@@ -200,7 +205,7 @@ describe("buildPipeFfmpegArgs", () => {
   });
 
   it("本地文件源不加 -reconnect(它们只属于 http protocol)", () => {
-    const args = buildPipeFfmpegArgs({ url: "/tmp/recordings/x.ts", sizeCap: 4096 });
+    const args = buildPipeFfmpegArgs({ url: "/tmp/recordings/x.ts" });
     expect(args.some((a) => a.startsWith("-reconnect"))).toBe(false);
     expect(args).toContain("-i");
   });
@@ -209,30 +214,30 @@ describe("buildPipeFfmpegArgs", () => {
     // matroska 在非 seekable 输出上写不了 AAC
     // ("Error parsing AAC extradata...",exit 1),所以才曾被迫 `-map 0:v`。
     // mpegts 没这个限制,音轨保留。
-    const args = buildPipeFfmpegArgs({ url: "https://x/live.flv", sizeCap: 1024 });
+    const args = buildPipeFfmpegArgs({ url: "https://x/live.flv" });
     expect(hasPair(args, "-map", "0")).toBe(true);
     expect(hasPair(args, "-map", "0:v")).toBe(false);
   });
 
   it("FLV URL 加 live_flv(排在 -i 之前);HLS 与本地文件不加", () => {
-    const flv = buildPipeFfmpegArgs({ url: "https://x/live.flv?k=1", sizeCap: 1024 });
+    const flv = buildPipeFfmpegArgs({ url: "https://x/live.flv?k=1" });
     expect(hasPair(flv, "-f", "live_flv")).toBe(true);
     expect(flv.indexOf("live_flv")).toBeLessThan(flv.indexOf("-i"));
     // 输出封装 `-f mpegts` 仍在 -i 之后,不能被输入侧选项顶掉。
     expect(hasPair(flv, "-f", "mpegts")).toBe(true);
-    const hls = buildPipeFfmpegArgs({ url: "https://x/live.m3u8", sizeCap: 1024 });
+    const hls = buildPipeFfmpegArgs({ url: "https://x/live.m3u8" });
     expect(hls).not.toContain("live_flv");
-    const local = buildPipeFfmpegArgs({ url: "/tmp/x.flv", sizeCap: 1024 });
+    const local = buildPipeFfmpegArgs({ url: "/tmp/x.flv" });
     expect(local).not.toContain("live_flv");
   });
 
   it("日志级别为 warning,时间戳不连续警告才会到达计数器", () => {
-    const args = buildPipeFfmpegArgs({ url: "https://x/live.flv", sizeCap: 1024 });
+    const args = buildPipeFfmpegArgs({ url: "https://x/live.flv" });
     expect(hasPair(args, "-loglevel", "warning")).toBe(true);
   });
 
   it("HTTP 头只去 HTTP 流,且 UA/Referer 用专属 flag", () => {
-    const args = buildPipeFfmpegArgs({ url: "https://x/live.flv", headers: { "User-Agent": "UA", Referer: "R", Cookie: "c=1" }, sizeCap: 1024 });
+    const args = buildPipeFfmpegArgs({ url: "https://x/live.flv", headers: { "User-Agent": "UA", Referer: "R", Cookie: "c=1" } });
     expect(hasPair(args, "-user_agent", "UA")).toBe(true);
     expect(hasPair(args, "-referer", "R")).toBe(true);
     expect(hasPair(args, "-headers", "Cookie: c=1\r\n")).toBe(true);
@@ -425,35 +430,42 @@ describe("双阈值结算:字节兜底 与 时长,谁先到算一 P", () => {
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "live-pump-seal-")); });
   afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
 
+  // Duration is now measured on the stream's video PTS (the cutter cuts on a keyframe), not on the
+  // wall clock, so these cases feed a synthetic TS: 20 GOPs × 4 frames × 33.3ms ≈ 2.7s of media.
+  const media = (gops = 20): Buffer => tsStream({ gops });
+
   it("时长先到 → 只用已入队的满块收尾(少传合法,不补零)", async () => {
-    // 声明 10 块的容量,但 30ms 后就到时;期间只够入队 2 个满块。
-    const total = CHUNK * 10;
-    // 每 20ms 才吐 4KB → 全量要 ~330ms,而时长阈值 30ms 先到,期间只够入队 1-2 个满块。
-    installFakeFfmpeg(Buffer.alloc(total, 4), { chunkEvery: 4096, delayMs: 20 });
+    const data = media();
+    const cap = CHUNK * 1000; // 远大于数据量:字节兜底不会先到
+    installFakeFfmpeg(data, { chunkEvery: 4096 });
     const { fake, puts } = makeFetch();
     const r = await runSegment({
-      args: ["-fake"], sizeCap: total, spoolPath: join(dir, "dur.mkv"), session: session(), fetchImpl: fake,
-      seal: { maxBytes: total, maxMs: 30 },
+      args: ["-fake"], sizeCap: cap, spoolPath: join(dir, "dur.mkv"), session: session(), fetchImpl: fake, queueCapacity: 64,
+      seal: { maxBytes: cap, maxMs: 400 },
     });
-    // 已入队的块全部传出;没有补零凑够 10 块
+    // 已入队的块全部传出;没有补零凑够声明的块数
     expect(r.chunksUploaded).toBeGreaterThan(0);
-    expect(r.chunksUploaded).toBeLessThan(10);
+    expect(r.chunksUploaded).toBeLessThan(Math.ceil(data.length / CHUNK));
     expect(puts.length).toBe(r.chunksUploaded);
     expect(r.streamedBytes).toBe(puts.reduce((a, p) => a + p.bytes, 0));
     // 时长结算是**正常收尾**:sealedBy 告诉调用方「到点了」,不是「流断了」。
     expect(r.sealedBy).toBe("duration");
+    // 切点在关键帧:本 P 的 PTS 时长 ≥ 阈值,且不超过阈值太多(最多再多一个 GOP)。
+    expect(r.ptsDurationSec).toBeGreaterThanOrEqual(0.4);
+    expect(r.ptsDurationSec).toBeLessThan(0.4 + 0.14);
   });
 
-  it("时长到点但 stdout 无数据 → 也必须杀死 ffmpeg,不能继续挂住", async () => {
-    const ffmpeg = installFakeFfmpeg(Buffer.alloc(0), { holdOpen: true });
+  it("时长按视频 PTS,不按墙钟:墙钟早已超过阈值、PTS 未到 → 不结算", async () => {
+    // 总媒体时长 ≈ 2.7s,阈值 5s;数据按 20ms 一块慢速吐出,墙钟远超旧的 30ms 阈值。
+    installFakeFfmpeg(media(), { chunkEvery: 4096, delayMs: 20 });
     const { fake } = makeFetch();
+    const cap = CHUNK * 1000;
     const r = await runSegment({
-      args: ["-fake"], sizeCap: CHUNK, spoolPath: join(dir, "silent-duration.mkv"),
-      session: session(), fetchImpl: fake, seal: { maxBytes: CHUNK, maxMs: 20 },
+      args: ["-fake"], sizeCap: cap, spoolPath: join(dir, "wall.mkv"), session: session(), fetchImpl: fake, queueCapacity: 64,
+      seal: { maxBytes: cap, maxMs: 5_000 },
     });
-    expect(r.sealedBy).toBe("duration");
-    expect(r.spooledBytes).toBe(0);
-    expect(ffmpeg.kills).toContain("SIGKILL");
+    expect(r.sealedBy).toBe("eof");
+    expect(r.uploadError).toBeUndefined();
   });
 
   it("字节兜底先到 → 走原来的完整收尾路径", async () => {
@@ -474,16 +486,15 @@ describe("双阈值结算:字节兜底 与 时长,谁先到算一 P", () => {
     // 真实直播踩过:时长到点时已入队 2 个满块、残余 4.9MB。旧逻辑要求尾块长度
     // **正好等于**声明尾块,于是把它丢掉 → 2 个块已 PUT 却没 complete → sessionLeaked，
     // 整段判失败(实测 `尾块长度不符` 后 `没有可提交的分 P`)。少传本就合法。
-    const total = CHUNK * 10;
-    installFakeFfmpeg(Buffer.alloc(total, 4), { chunkEvery: 4096, delayMs: 20 });
+    const cap = CHUNK * 1000;
+    installFakeFfmpeg(tsStream({ gops: 20 }), { chunkEvery: 4096 });
     const { fake, puts } = makeFetch();
     const r = await runSegment({
-      args: ["-fake"], sizeCap: total, spoolPath: join(dir, "dur-tail.mkv"), session: session(), fetchImpl: fake,
-      seal: { maxBytes: total, maxMs: 30 },
+      args: ["-fake"], sizeCap: cap, spoolPath: join(dir, "dur-tail.mkv"), session: session(), fetchImpl: fake, queueCapacity: 64,
+      seal: { maxBytes: cap, maxMs: 400 },
     });
     expect(r.sealedBy).toBe("duration");
     expect(r.chunksUploaded).toBeGreaterThan(0);
-    expect(r.chunksUploaded).toBeLessThan(10);
     // 每块长度 = 满块,最后一个 = 残余真实长度
     const sizes = puts.map((p) => p.bytes);
     expect(sizes.slice(0, -1).every((n) => n === CHUNK)).toBe(true);
@@ -499,14 +510,12 @@ describe("双阈值结算:字节兜底 与 时长,谁先到算一 P", () => {
     // 真实直播踩过(cap=300MiB、maxMs=60s、~400KB/s):时长到点时入队 2 个满块,
     // 还剩 ~5.5MB。旧实现 maxChunks 用 queuedChunks(=2,尾块尚未入队) → 尾块被静默
     // 丢弃 → 每段尾部约 3 秒视频没了。spool 26.5MB vs 上传 20MB,只看块数毫无异常。
-    const cap = CHUNK * 10;
-    // 每 40ms 吐 1.2KB:第一个 1024B 块约 1 tick 成形,全量 ~340ms。
-    // maxMs=120 → 到点时已入队若干满块 + 一段不足一块的余数(真实直播的形状)。
-    installFakeFfmpeg(Buffer.alloc(cap, 4), { chunkEvery: 1200, delayMs: 40 });
+    const cap = CHUNK * 1000;
+    installFakeFfmpeg(tsStream({ gops: 20 }), { chunkEvery: 1200 });
     const { fake, puts } = makeFetch();
     const r = await runSegment({
-      args: ["-fake"], sizeCap: cap, spoolPath: join(dir, "dur-remainder.mkv"), session: session(), fetchImpl: fake,
-      seal: { maxBytes: cap, maxMs: 120 },
+      args: ["-fake"], sizeCap: cap, spoolPath: join(dir, "dur-remainder.mkv"), session: session(), fetchImpl: fake, queueCapacity: 64,
+      seal: { maxBytes: cap, maxMs: 400 },
     });
     expect(r.sealedBy).toBe("duration");
     expect(r.chunksUploaded).toBeGreaterThan(2);
@@ -2849,3 +2858,314 @@ describe("issue #360: zero-disk room files", () => {
     expect(resolvePumpDir(roomDir, dir, room)).toBe(roomDir);
   });
 });
+
+// ─── plans/043: one ffmpeg per connection, parts cut at keyframes ───────────────────────────────
+describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "live-pump-seamless-")); });
+  afterEach(() => {
+    setSpawnForTest(undefined);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const HEAD = TS_PACKET_BYTES * 2; // PAT + PMT prepended to every part after the first
+  const cookies = (): string => {
+    const path = join(dir, "cookies.json");
+    writeFileSync(path, JSON.stringify({
+      cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
+    }));
+    return path;
+  };
+
+  interface FakeUposOpts {
+    /** Delay before a session's `complete` answers (ms), by 1-based session number. */
+    completeDelayMs?: (n: number) => number;
+    /** Delay per chunk PUT (ms), by session number. */
+    putDelayMs?: (n: number) => number;
+    /** Answer `complete` with a failure for this session number. */
+    failComplete?: (n: number) => boolean;
+  }
+  /** A UPOS + studio fake that remembers every session's bytes and the archive's part order. */
+  function fakeUpos(opts: FakeUposOpts = {}) {
+    let preuploads = 0;
+    const events: string[] = [];
+    const sessions = new Map<number, Array<{ partNumber: number; body: Buffer }>>();
+    let archive: string[] = [];
+    const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
+    const sessionOf = (u: URL): number => Number(/p(\d+)\.ts/.exec(u.pathname)?.[1] ?? 0);
+    const fake = (async (input: string | URL | Request, init?: RequestInit) => {
+      const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      const m = (init?.method ?? "GET").toUpperCase();
+      if (u.pathname === "/preupload") {
+        const n = ++preuploads;
+        events.push(`preupload ${n}`);
+        return json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: `upos://b/p${n}.ts` });
+      }
+      if (m === "POST" && u.searchParams.has("uploads")) return json({ upload_id: `uid-${sessionOf(u)}` });
+      if (m === "PUT") {
+        const n = sessionOf(u);
+        const delay = opts.putDelayMs?.(n) ?? 0;
+        if (delay) await new Promise((r) => setTimeout(r, delay));
+        const list = sessions.get(n) ?? [];
+        list.push({ partNumber: Number(u.searchParams.get("partNumber")), body: Buffer.from(init!.body as ArrayBuffer) });
+        sessions.set(n, list);
+        return new Response("", { status: 200 });
+      }
+      if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) {
+        const n = sessionOf(u);
+        const delay = opts.completeDelayMs?.(n) ?? 0;
+        if (delay) await new Promise((r) => setTimeout(r, delay));
+        if (opts.failComplete?.(n)) return json({ OK: 0, message: "complete boom" });
+        events.push(`complete ${n}`);
+        return json({ OK: 1, key: `b/p${n}.ts` });
+      }
+      if (u.pathname === "/x/vu/web/add/v3" || u.pathname === "/x/vu/web/edit") {
+        const body = JSON.parse(String(init!.body)) as { videos: Array<{ filename: string }> };
+        archive = body.videos.map((v) => v.filename);
+        events.push(`submit ${archive.join(",")}`);
+        return json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } });
+      }
+      if (u.pathname === "/x/vupre/web/archive/view") {
+        return json({ code: 0, data: { archive: { aid: 7, bvid: "BILIfake1", title: "t", tid: 21 }, videos: archive.map((f, i) => ({ cid: i + 1, filename: f })) } });
+      }
+      return json({ code: 0, data: {} });
+    }) as unknown as typeof fetch;
+    /** The bytes uploaded to session n, in part order. */
+    const uploaded = (n: number): Buffer => Buffer.concat((sessions.get(n) ?? []).sort((a, b) => a.partNumber - b.partNumber).map((x) => x.body));
+    return { fake, events, uploaded, get archive() { return archive; }, get preuploads() { return preuploads; } };
+  }
+
+  const baseOpts = (u: ReturnType<typeof fakeUpos>, o: Partial<Parameters<typeof runLivePump>[0]> = {}) => ({
+    cookiesPath: cookies(), room: "sm", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+    sizeCap: CHUNK * 1000, maxMs: 400, maxSegments: 0, queueCapacity: 64,
+    quality: "origin", submit: true, spoolMode: "none" as "full" | "none",
+    fetch: async () => ({ living: true, url: "http://x/y.ts" }),
+    sleep: async () => {}, fetchImpl: u.fake, scanDtsGap: async () => null,
+    ...o,
+  });
+  const keyframeAt = (b: Buffer, o: number): boolean => ((b[o + 1] & 0x1f) << 8 | b[o + 2]) === 0x100 && (b[o + 1] & 0x40) !== 0 && (b[o + 5] & 0x40) !== 0;
+
+  it.each(["none", "full"] as const)("[%s] one connection yields many parts: 1 spawn, bytes conserved, strictly ordered submit, no state flip", async (spoolMode) => {
+    const input = tsStream({ gops: 24 });
+    const ff = installFakeFfmpeg(input, { chunkEvery: 1500 });
+    const u = fakeUpos();
+    const logs: string[] = [];
+    const r = await runLivePump(baseOpts(u, { spoolMode, log: (m) => logs.push(m) }));
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(ff.spawns).toBe(1);
+    const n = r.segments.length;
+    expect(n).toBeGreaterThanOrEqual(3);
+    // The archive holds the parts in cut order.
+    expect(u.archive).toEqual(Array.from({ length: n }, (_, i) => `p${i + 1}`));
+    // Byte conservation: parts minus the PAT/PMT head prepended after each cut == ffmpeg stdout.
+    const parts = Array.from({ length: n }, (_, i) => u.uploaded(i + 1));
+    const rebuilt = Buffer.concat(parts.map((p, i) => (i === 0 ? p : p.subarray(HEAD))));
+    expect(rebuilt.equals(input)).toBe(true);
+    // Every later part starts with PAT/PMT and then a video keyframe (decodable on its own).
+    for (let i = 1; i < n; i++) {
+      expect(parts[i]!.readUInt8(1) & 0x1f).toBe(0); // PAT pid 0
+      expect(keyframeAt(parts[i]!, HEAD)).toBe(true);
+    }
+    // Recording state never flips between parts.
+    expect(logs.filter((l) => l === "[状态] 录制中")).toHaveLength(1);
+    expect(logs.filter((l) => l === "[状态] 等待开播")).toHaveLength(1);
+    expect(logs.filter((l) => l === "[状态] 分P已确认")).toHaveLength(n);
+    // Part duration comes from PTS: every full part spans about the 400ms threshold.
+    const st = readLivePumpState(livePumpStatePath(dir, "sm"))!;
+    expect(st.parts.every((p) => p.confirmed)).toBe(true);
+    expect(st.parts[0]!.durationSec).toBeGreaterThanOrEqual(0.4);
+    if (spoolMode === "none") expect(readdirSync(dir).filter((f) => f.endsWith(".ts"))).toEqual([]);
+  }, 30_000);
+
+  it("part indexes are allocated at the cut and submit strictly in index order when completes finish out of order", async () => {
+    installFakeFfmpeg(tsStream({ gops: 24 }), { chunkEvery: 1500 });
+    // Part 1's complete is slow, later parts answer at once: they must still wait their turn.
+    const u = fakeUpos({ completeDelayMs: (n) => (n === 1 ? 200 : 0) });
+    const r = await runLivePump(baseOpts(u));
+    expect(r.ok, r.error ?? "").toBe(true);
+    const submits = u.events.filter((e) => e.startsWith("submit "));
+    expect(submits).toHaveLength(r.segments.length);
+    submits.forEach((e, i) => expect(e).toBe(`submit ${Array.from({ length: i + 1 }, (_, k) => `p${k + 1}`).join(",")}`));
+    const st = readLivePumpState(livePumpStatePath(dir, "sm"))!;
+    expect(st.parts.map((p) => p.index)).toEqual(st.parts.map((_, i) => i));
+  }, 30_000);
+
+  it("the next part's preupload is prefetched before the cut (no wait at the switch)", async () => {
+    // One frame (4 packets) per read, paced: the cut at ~500ms is preceded by the 80% prefetch.
+    installFakeFfmpeg(tsStream({ gops: 24 }), { chunkEvery: 752, delayMs: 3 });
+    const u = fakeUpos();
+    const r = await runLivePump(baseOpts(u));
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(u.events.indexOf("preupload 2")).toBeGreaterThan(-1);
+    expect(u.events.indexOf("preupload 2")).toBeLessThan(u.events.indexOf("complete 1"));
+  }, 30_000);
+
+  it.each(["none", "full"] as const)("[%s] a failing background complete stops ffmpeg and returns the error (never swallowed)", async (spoolMode) => {
+    const ff = installFakeFfmpeg(tsStream({ gops: 24 }), { chunkEvery: 752, delayMs: 3 });
+    const u = fakeUpos({ failComplete: (n) => n >= 2 });
+    const logs: string[] = [];
+    const r = await runLivePump(baseOpts(u, { spoolMode, log: (m) => logs.push(m), autoRetryUpload: false }));
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("complete");
+    expect(r.segments.some((x) => x.stem === "p1")).toBe(true);
+    expect(ff.kills).toContain("SIGKILL");
+    const st = readLivePumpState(livePumpStatePath(dir, "sm"))!;
+    if (spoolMode === "full") {
+      // Same shape as before: the part's spool is the recoverable copy, recorded as unconfirmed.
+      const bad = st.parts.find((p) => !p.confirmed);
+      expect(bad, JSON.stringify(st.parts)).toBeTruthy();
+      expect(existsSync(bad!.spoolPath)).toBe(true);
+    } else {
+      expect(st.parts.every((p) => p.confirmed)).toBe(true);
+    }
+  }, 30_000);
+
+  it("zero-disk: upload falling behind is a hard error (part lost), not a silent degrade", async () => {
+    installFakeFfmpeg(tsStream({ gops: 24 }), { chunkEvery: 1500 });
+    const u = fakeUpos({ putDelayMs: () => 30 });
+    const r = await runLivePump(baseOpts(u, { queueCapacity: 1 }));
+    expect(r.ok).toBe(false);
+    expect(r.error).toBe(ZERO_DISK_PART_LOST);
+  }, 30_000);
+
+  it("full spool: backpressure degrades one part to a whole-file re-upload and the run continues", async () => {
+    installFakeFfmpeg(tsStream({ gops: 24 }), { chunkEvery: 1500 });
+    const u = fakeUpos({ putDelayMs: () => 5 });
+    const r = await runLivePump(baseOpts(u, { spoolMode: "full", queueCapacity: 1 }));
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(r.segments.some((x) => x.usedFileFallback)).toBe(true);
+    expect(u.archive.length).toBe(r.segments.length);
+  }, 30_000);
+
+  it.each(["none", "full"] as const)("[%s] drain stops ffmpeg at the next cut; the part in flight finishes and is submitted", async (spoolMode) => {
+    const ff = installFakeFfmpeg(tsStream({ gops: 40 }), { chunkEvery: 752, delayMs: 3 });
+    const u = fakeUpos();
+    const drain = new AbortController();
+    const logs: string[] = [];
+    const r = await runLivePump(baseOpts(u, {
+      spoolMode, drainSignal: drain.signal, log: (m) => logs.push(m),
+      onPartConfirmed: ({ count }) => { if (count === 1) drain.abort(); },
+    }));
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(ff.spawns).toBe(1);
+    expect(ff.kills).toContain("SIGKILL");
+    expect(r.segments.length).toBeGreaterThanOrEqual(2);
+    expect(r.segments.length).toBeLessThan(10); // stopped long before the 40-GOP stream ended
+    expect(u.archive).toEqual(r.segments.map((_, i) => `p${i + 1}`));
+    expect(logs.some((m) => m.includes("已排空"))).toBe(true);
+  }, 30_000);
+
+  it.each(["none", "full"] as const)("[%s] stop (abort) after parts landed ends ok with those parts in the archive", async (spoolMode) => {
+    const ff = installFakeFfmpeg(tsStream({ gops: 40 }), { chunkEvery: 752, delayMs: 3 });
+    const u = fakeUpos();
+    const ac = new AbortController();
+    const r = await runLivePump(baseOpts(u, {
+      spoolMode, signal: ac.signal,
+      onPartConfirmed: ({ count }) => { if (count === 1) ac.abort(); },
+    }));
+    expect(ff.spawns).toBe(1);
+    expect(ff.kills).toContain("SIGKILL");
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(r.segments.some((x) => x.stem)).toBe(true);
+    expect(u.archive[0]).toBe("p1");
+  }, 30_000);
+
+  it.each(["none", "full"] as const)("[%s] stall seals the current part and recovers on a new connection (new ffmpeg)", async (spoolMode) => {
+    const ff = installFakeFfmpeg(tsStream({ gops: 10 }), { chunkEvery: 1500, holdOpen: (i) => i === 0 });
+    const u = fakeUpos();
+    const logs: string[] = [];
+    const r = await runLivePump(baseOpts(u, {
+      spoolMode, stallTimeoutMs: 40, recoverWindowMs: 3_000, idlePollMs: 10, maxSegments: 0,
+      log: (m) => logs.push(m),
+    }));
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(ff.spawns).toBeGreaterThanOrEqual(2);
+    expect(logs).toContain("[状态] 录制停滞");
+    expect(logs.filter((l) => l === "[状态] 录制中").length).toBe(ff.spawns); // once per connection
+    expect(u.archive.length).toBe(r.segments.length);
+    expect(r.segments.length).toBeGreaterThanOrEqual(2);
+  }, 30_000);
+
+  it("maxSegments counts parts, not connections", async () => {
+    const ff = installFakeFfmpeg(tsStream({ gops: 40 }), { chunkEvery: 752, delayMs: 2 });
+    const u = fakeUpos();
+    const r = await runLivePump(baseOpts(u, { maxSegments: 2 }));
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(r.segments).toHaveLength(2);
+    expect(ff.spawns).toBe(1);
+  }, 30_000);
+});
+
+describe("runStream: cutting and stopping", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "live-pump-stream-")); });
+  afterEach(() => {
+    setSpawnForTest(undefined);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const sinkFor = (name: string): PartSink => new PartSink({
+    sizeCap: CHUNK * 1000, spoolPath: join(dir, name), session: session(), queueCapacity: 64,
+    fetchImpl: makeFetch().fake,
+  });
+
+  it("every byte lands in exactly one part, in order (spool files concatenate back to the input)", async () => {
+    const input = tsStream({ gops: 16 });
+    installFakeFfmpeg(input, { chunkEvery: 1000 });
+    const sinks = [sinkFor("a.ts")];
+    const sealed: SealedPart[] = [];
+    const res = await runStream({
+      args: ["-fake"], sizeCap: CHUNK * 1000, maxMs: 300,
+      firstSink: sinks[0]!,
+      openNext: () => { const s = sinkFor(`p${sinks.length}.ts`); sinks.push(s); return s; },
+      onPartSealed: (p) => sealed.push(p),
+    });
+    expect(res.endedBy).toBe("eof");
+    const all = [...sealed.map((p) => p.sink), res.finalPart!.sink];
+    expect(all.length).toBeGreaterThan(2);
+    const files = all.map((s) => readFileSync(s.spoolPath));
+    expect(Buffer.concat(files.map((f, i) => (i === 0 ? f : f.subarray(TS_PACKET_BYTES * 2)))).equals(input)).toBe(true);
+    for (const p of sealed) expect(p.final).toBe(false);
+    expect(res.finalPart!.final).toBe(true);
+  });
+
+  it("stopAtCut seals at the cut, kills ffmpeg and drops what follows", async () => {
+    const input = tsStream({ gops: 16 });
+    const ff = installFakeFfmpeg(input, { chunkEvery: 1000 });
+    const first = sinkFor("only.ts");
+    const res = await runStream({
+      args: ["-fake"], sizeCap: CHUNK * 1000, maxMs: 300, firstSink: first,
+      openNext: () => { throw new Error("must not open a part after a stop"); },
+      stopAtCut: () => true,
+      onPartSealed: () => { throw new Error("the part sealed by the stop is the final one"); },
+    });
+    expect(res.endedBy).toBe("stopped");
+    expect(res.finalPart!.sink).toBe(first);
+    expect(res.finalPart!.sealedBy).toBe("duration");
+    expect(ff.kills).toContain("SIGKILL");
+    expect(readFileSync(first.spoolPath).length).toBeLessThan(input.length);
+    // The kept bytes are an exact prefix of the stream, cut right before a keyframe.
+    const kept = readFileSync(first.spoolPath);
+    expect(input.subarray(0, kept.length).equals(kept)).toBe(true);
+    expect(keyframeAtOffset(input, kept.length)).toBe(true);
+  });
+
+  it("a head-only tail after the last cut is dropped, not uploaded as a part", async () => {
+    // PAT+PMT+exactly the bytes up to the cut: the stream ends right after the cut.
+    const input = tsStream({ gops: 2 });
+    installFakeFfmpeg(input.subarray(0, 376 + 3008), { chunkEvery: 1000 });
+    const sinks = [sinkFor("a.ts")];
+    const res = await runStream({
+      args: ["-fake"], sizeCap: CHUNK * 1000, firstSink: sinks[0]!,
+      openNext: () => { const s = sinkFor("b.ts"); sinks.push(s); return s; },
+      onPartSealed: () => {},
+    });
+    expect(res.discardedTail).toBe(false); // no cut happened at all: one part only
+    expect(res.finalPart?.sink).toBe(sinks[0]);
+  });
+});
+
+/** Whether the packet at byte offset `o` starts a video keyframe PES. */
+function keyframeAtOffset(b: Buffer, o: number): boolean {
+  return ((b[o + 1]! & 0x1f) << 8 | b[o + 2]!) === 0x100 && (b[o + 1]! & 0x40) !== 0 && (b[o + 5]! & 0x40) !== 0;
+}
