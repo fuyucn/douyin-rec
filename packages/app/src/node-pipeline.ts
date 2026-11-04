@@ -23,7 +23,7 @@ import {
 } from "@drec/core";
 import { ffprobeDuration, mergeSession, planSegmentGroups, remuxSegment, unreadableParts } from "@drec/post-process";
 import { appendGroup, countVideoParts, isAllFilesUploadedLine, runBiliup, uploadPlain } from "./upload/biliup.js";
-import { procQueueDbPath, rootBiliupCookies, rootDbPath, rootStageDir, readOutputLayout } from "./paths.js";
+import { drecRoot, procQueueDbPath, rootBiliupCookies, rootDbPath, rootStageDir, readOutputLayout } from "./paths.js";
 
 /**
  * 节点侧上传的**限流闸门**(030 T19,T-18 房间不上传风暴)。
@@ -799,6 +799,8 @@ export async function runNodeSidePipeline(
       const season = await addArchiveToSeasonIfConfigured({
         cookiesPath: cookies,
         sectionId: spec.uploadMeta.seasonSectionId,
+        seasonId: spec.uploadMeta.seasonId,
+        dataRoot: drecRoot(),
         bvid,
         reconcileFirst,
         note: log,
@@ -820,7 +822,7 @@ export async function runNodeSidePipeline(
       nextIdx = confirmed;
       confirmedParts = confirmed;
       log(`幂等重入:稿件 ${bv} 已有 ${confirmed} 个分 P → 跳过建稿,从分 P ${nextIdx + 1}/${totalParts} 续 append`);
-      if (spec.uploadMeta.seasonSectionId && seasonState === "pending") {
+      if ((spec.uploadMeta.seasonSectionId || spec.uploadMeta.seasonId) && seasonState === "pending") {
         // Persist the intent with the BV before the best-effort network call, so a kill leaves
         // a re-enterable "pending" state instead of silently losing the association.
         startSeason(bv, confirmed, true);
@@ -833,7 +835,7 @@ export async function runNodeSidePipeline(
         ),
       );
       log(`建稿成功 BV=${bv}`);
-      if (spec.uploadMeta.seasonSectionId) {
+      if (spec.uploadMeta.seasonSectionId || spec.uploadMeta.seasonId) {
         // Persist the BV BEFORE the season call: a kill during that call must not lose it.
         if (persistSeasonState("pending", { bv, confirmedParts: 1 })) {
           startSeason(bv, 1, false);

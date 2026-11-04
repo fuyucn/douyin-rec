@@ -594,6 +594,8 @@ program
         tag: manual.streamUploadTag ?? streamMeta.tag,
         ...(streamMeta.desc ? { desc: streamMeta.desc } : {}),
         ...(streamMeta.seasonSectionId ? { seasonSectionId: streamMeta.seasonSectionId } : {}),
+        ...(streamMeta.seasonId ? { seasonId: streamMeta.seasonId } : {}),
+        dataRoot: drecRoot(),
         private: manual.streamUploadPrivate === undefined ? streamMeta.private : manual.streamUploadPrivate !== "0",
         sizeCap,
         maxMs: streamPartMaxMs(o.streamUploadSec, o.segment),
@@ -1421,8 +1423,8 @@ const hubStarter: HubStarter = {
       /** 上传后延后回读分 P 数的总窗口(ms);缺省 10 分钟。主控路径删最后一份源之前必须回读一致,否则保留源并转人工(issues #92 / #327)。 */
       sideCheckDelayMs?: number;
       /** 投稿默认(per-task 文件留空时回退);旧字段 uploadMeta 也认(迁移兼容)。 */
-      uploadDefaults?: { tag?: string; tid?: number; desc?: string; titleTemplate?: string; submissionTitleTemplate?: string; partTitleTemplate?: string; seasonSectionId?: number };
-      uploadMeta?: { tag?: string; tid?: number; desc?: string; titleTemplate?: string; submissionTitleTemplate?: string; partTitleTemplate?: string; seasonSectionId?: number };
+      uploadDefaults?: { tag?: string; tid?: number; desc?: string; titleTemplate?: string; submissionTitleTemplate?: string; partTitleTemplate?: string; seasonSectionId?: number; seasonId?: number };
+      uploadMeta?: { tag?: string; tid?: number; desc?: string; titleTemplate?: string; submissionTitleTemplate?: string; partTitleTemplate?: string; seasonSectionId?: number; seasonId?: number };
       /** Max settle wait before reconciler proceeds regardless (seconds). */
       maxWaitSec?: number;
       /** Settle poll interval (seconds). */
@@ -1675,6 +1677,7 @@ const hubStarter: HubStarter = {
     const defaultTag = uploadDefaults.tag ?? "直播,录像";
     const defaultTid = uploadDefaults.tid ?? 21;
     const defaultSeasonSectionId = normalizeSeasonSectionId(uploadDefaults.seasonSectionId);
+    const defaultSeasonId = normalizeSeasonSectionId(uploadDefaults.seasonId);
 
     const { spawn } = await import("node:child_process");
     // T15:并行度/内存门槛**每轮热读**(UI 改完立即生效,无需重启)。
@@ -1793,6 +1796,7 @@ const hubStarter: HubStarter = {
         diskMinGB,
         stageDir: hubCfg.stageDir ?? rootStageDir(),
         cookies: hubCfg.cookies ?? "",
+        seasonDataRoot: drecRoot(),
         uploadMode: "stage" as const, // 全局兜底 = 不自动传;每任务文件按需 mode:"upload"
         uploadPrivate: true,
         uploadMeta: {
@@ -1801,6 +1805,7 @@ const hubStarter: HubStarter = {
           submissionTitleTemplate: uploadDefaults.submissionTitleTemplate,
           partTitleTemplate: uploadDefaults.partTitleTemplate,
           ...(defaultSeasonSectionId ? { seasonSectionId: defaultSeasonSectionId } : {}),
+          ...(defaultSeasonId ? { seasonId: defaultSeasonId } : {}),
         },
         timeZone: effectiveTimezone(opts.store),
       },
@@ -1815,6 +1820,7 @@ const hubStarter: HubStarter = {
       if (!rule || !rule.enabled) return null; // 无任务文件或已禁用 → hub 不处理该房间
       const p = rule.pipeline ?? {};
       const seasonSectionId = resolveSeasonSectionId(p.upload?.seasonSectionId, uploadDefaults.seasonSectionId);
+      const seasonId = resolveSeasonSectionId(p.upload?.seasonId, uploadDefaults.seasonId);
       return {
         cleanMaxGapSec: hubCfg.cleanMaxGapSec ?? 30,
         // 磁盘水位闸门(issue #8):同上,与 reconciler 看门狗同一个配置键与默认值(不新增第二套口径)。
@@ -1832,6 +1838,7 @@ const hubStarter: HubStarter = {
           submissionTitleTemplate: (p.upload?.submissionTitleTemplate ?? "").trim() || uploadDefaults.submissionTitleTemplate,
           partTitleTemplate: (p.upload?.partTitleTemplate ?? "").trim() || uploadDefaults.partTitleTemplate,
           ...(seasonSectionId ? { seasonSectionId } : {}),
+          ...(seasonId ? { seasonId } : {}),
         },
         timeZone: effectiveTimezone(opts.store),
         steps: p.steps,

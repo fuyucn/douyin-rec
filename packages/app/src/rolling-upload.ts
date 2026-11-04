@@ -67,7 +67,7 @@ import {
 } from "@drec/core";
 import { appendGroup, countVideoParts, uploadPlain, type BiliupHooks } from "./upload/biliup.js";
 import { readTcpAckedAsync, type AckSample } from "@drec/processors";
-import { rootBiliupCookies } from "./paths.js";
+import { drecRoot, rootBiliupCookies } from "./paths.js";
 import { openNodeUploadGate, openNodeUploadSlot, resolveUploadAccountKey } from "./node-pipeline.js";
 
 /** One node-wide upload slot per process; null when the node store cannot be opened (no coordination). */
@@ -269,6 +269,8 @@ export interface RollingUploaderOpts {
     submissionTitleTemplate?: string;
     partTitleTemplate?: string;
     seasonSectionId?: number;
+    /** Bilibili season (合集) id (issue #460); resolved to a section with the recording account. */
+    seasonId?: number;
   };
   timeZone?: string;
   /** 缺省 true(仅自己可见);false = 公开。 */
@@ -445,13 +447,15 @@ export class RollingUploader {
    * recoverable on the next run.
    */
   private async associateSeason(bv: string, reconcileFirst: boolean): Promise<void> {
-    if (!this.o.uploadMeta.seasonSectionId) return;
+    if (!this.o.uploadMeta.seasonSectionId && !this.o.uploadMeta.seasonId) return;
     if (this.state.seasonState === "done" || this.state.seasonState === "failed") return;
     if (!this.state.sessionBase || !this.segDir) return;
     const cookies = this.o.cookies ?? process.env.BILIUP_COOKIE ?? rootBiliupCookies();
     const outcome = await addArchiveToSeasonIfConfigured({
       cookiesPath: cookies,
       sectionId: this.o.uploadMeta.seasonSectionId,
+      seasonId: this.o.uploadMeta.seasonId,
+      dataRoot: drecRoot(),
       bvid: bv,
       reconcileFirst,
       note: (m) => this.log(m),
@@ -473,7 +477,7 @@ export class RollingUploader {
   }
 
   private queueSeason(bv: string, reconcileFirst: boolean): void {
-    if (!this.o.uploadMeta.seasonSectionId) return;
+    if (!this.o.uploadMeta.seasonSectionId && !this.o.uploadMeta.seasonId) return;
     if (this.state.seasonState === "done" || this.state.seasonState === "failed") return;
     this.seasonTail = this.seasonTail
       .then(() => this.associateSeason(bv, reconcileFirst))
@@ -748,14 +752,14 @@ export class RollingUploader {
         // Same broadcast (gap <= SAME_BROADCAST_GAP_MS): continue the predecessor's submission.
         this.state = {
       ...this.state, bv: link.bv, inheritedParts: link.parts, inheritedFrom: link.from,
-      ...(this.o.uploadMeta.seasonSectionId && link.seasonState === "pending"
+      ...((this.o.uploadMeta.seasonSectionId || this.o.uploadMeta.seasonId) && link.seasonState === "pending"
         ? { seasonState: "pending" as const }
         : {}),
           updatedAt: this.now(),
         };
         if (!this.persist()) throw new Error("sidecar 写失败(继承前序稿件),中止上传并保留源");
         this.log(`[rolling] 同一场断流重连:续用前序会话 ${link.from} 的稿件(已有 ${link.parts} 个分P),本会话段改为 append`);
-        if (this.o.uploadMeta.seasonSectionId && link.seasonState === "pending") {
+        if ((this.o.uploadMeta.seasonSectionId || this.o.uploadMeta.seasonId) && link.seasonState === "pending") {
           this.queueSeason(link.bv, true);
         }
       }
@@ -788,7 +792,7 @@ export class RollingUploader {
       // Persist the BV BEFORE the best-effort season call: a kill during that call must not lose the BV.
       this.state = {
         ...this.state, bv, uploading: undefined, confirmed: [...confirmed],
-        ...(this.o.uploadMeta.seasonSectionId ? { seasonState: "pending" as const } : {}),
+        ...((this.o.uploadMeta.seasonSectionId || this.o.uploadMeta.seasonId) ? { seasonState: "pending" as const } : {}),
         updatedAt: this.now(),
       };
       if (!this.persist()) throw new Error(`sidecar 写失败(建稿结果 BV=${bv}),状态不可信,保留源`);
@@ -1124,7 +1128,7 @@ function resolveRollingUploadMetaInner(
   const ruleActive = rule?.enabled !== false && (mode === "upload" || mode === "rolling");
   let uploadDefaults: {
     tag?: string; tid?: number; desc?: string; titleTemplate?: string;
-    submissionTitleTemplate?: string; partTitleTemplate?: string; seasonSectionId?: number;
+    submissionTitleTemplate?: string; partTitleTemplate?: string; seasonSectionId?: number; seasonId?: number;
   } = {};
   try {
     // `serve` may be running with --hub-config, settings, or inline JSON. The child record
@@ -1145,6 +1149,7 @@ function resolveRollingUploadMetaInner(
   }
   const up = ruleActive ? rule?.pipeline?.upload : undefined;
   const seasonSectionId = resolveSeasonSectionId(up?.seasonSectionId, uploadDefaults.seasonSectionId);
+  const seasonId = resolveSeasonSectionId(up?.seasonId, uploadDefaults.seasonId);
   return {
     meta: {
       tag: up?.tag || uploadDefaults.tag || "直播,录像",
@@ -1154,6 +1159,7 @@ function resolveRollingUploadMetaInner(
       submissionTitleTemplate: (up?.submissionTitleTemplate ?? "").trim() || uploadDefaults.submissionTitleTemplate,
       partTitleTemplate: (up?.partTitleTemplate ?? "").trim() || uploadDefaults.partTitleTemplate,
       ...(seasonSectionId ? { seasonSectionId } : {}),
+      ...(seasonId ? { seasonId } : {}),
     },
     // 可见性:规则 upload.private 缺省 true(= 仅自己可见)。**保守默认 true**(公开是不可逆的曝光)。
     private: up?.private !== false,
@@ -1186,7 +1192,7 @@ export function resolveRollingUploadMeta(
 export function resolveStreamUploadMeta(
   platform: string,
   roomSlug: string,
-): { tid: number; tag: string; desc?: string; partTitleTemplate?: string; seasonSectionId?: number; partSizeMiB?: number; private: boolean } {
+): { tid: number; tag: string; desc?: string; partTitleTemplate?: string; seasonSectionId?: number; seasonId?: number; partSizeMiB?: number; private: boolean } {
   const { meta, private: isPrivate, partSizeMiB } = resolveRollingUploadMetaInner(platform, roomSlug);
   return {
     tid: meta.tid,
@@ -1194,6 +1200,7 @@ export function resolveStreamUploadMeta(
     ...(meta.desc ? { desc: meta.desc } : {}),
     ...(meta.partTitleTemplate ? { partTitleTemplate: meta.partTitleTemplate } : {}),
     ...(meta.seasonSectionId ? { seasonSectionId: meta.seasonSectionId } : {}),
+    ...(meta.seasonId ? { seasonId: meta.seasonId } : {}),
     ...(partSizeMiB ? { partSizeMiB } : {}),
     private: isPrivate,
   };

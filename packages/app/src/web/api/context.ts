@@ -250,6 +250,11 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
         && !(typeof season === "number" && Number.isSafeInteger(season) && season > 0)) {
       return `upload.seasonSectionId 必须是正整数或 null,收到 ${JSON.stringify(season)}`;
     }
+    const seasonId = input.pipeline?.upload?.seasonId as unknown;
+    if (seasonId !== undefined && seasonId !== null
+        && !(typeof seasonId === "number" && Number.isSafeInteger(seasonId) && seasonId > 0)) {
+      return `upload.seasonId 必须是正整数或 null,收到 ${JSON.stringify(seasonId)}`;
+    }
     const size = input.pipeline?.upload?.partSizeMiB as unknown;
     if (size !== undefined && size !== null && !isValidPartSizeMiB(size)) {
       return `upload.partSizeMiB 必须是 ${PART_SIZE_MIB_MIN}-${PART_SIZE_MIB_MAX} 的整数或 null,收到 ${JSON.stringify(size)}`;

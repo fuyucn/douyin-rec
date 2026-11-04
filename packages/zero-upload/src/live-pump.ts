@@ -547,6 +547,10 @@ export interface LivePumpSessionOpts {
   scanDtsGap?: (path: string) => Promise<DtsGap | null | undefined>;
   /** Optional Bilibili season section id; added after the first successful create. */
   seasonSectionId?: number;
+  /** Optional Bilibili season (合集) id (issue #460); resolved to a section with the node account. */
+  seasonId?: number;
+  /** Node data root the season-id -> section-id cache is stored under (issue #460). */
+  dataRoot?: string;
   /** Display-only run timeline sink; errors are swallowed. */
   reporter?: LivePumpReporter;
   /** Error-level alert channel (same notifier as the other zero-disk alerts). Fired at most once per start. */
@@ -1001,7 +1005,7 @@ export class LivePumpSession {
       aid: result.aid ?? this.state.aid,
       // P1 create: the season call has NOT run yet. Persist "pending" now so a kill before it
       // completes is reconciled on restart instead of silently skipping the association.
-      ...(pending.kind === "create" && this.o.seasonSectionId ? { seasonState: "pending" as const } : {}),
+      ...(pending.kind === "create" && (this.o.seasonSectionId || this.o.seasonId) ? { seasonState: "pending" as const } : {}),
       parts: existing
         ? this.state.parts.map((p) => p.index === input.index ? {
           ...p,
@@ -1020,7 +1024,7 @@ export class LivePumpSession {
         }],
       pending: undefined,
     };
-    if (pending.kind === "create" && this.o.seasonSectionId) {
+    if (pending.kind === "create" && (this.o.seasonSectionId || this.o.seasonId)) {
       try { this.o.reporter?.event({ at: Date.now(), kind: "season_pending", part: input.index }); } catch { /* observability */ }
     }
     try {
@@ -1030,7 +1034,7 @@ export class LivePumpSession {
     }
     noteRecorderProgress(); // a confirmed part is progress for the finalizing stall judge (plans/044)
     this.cleanupConfirmed();
-    if (pending.kind === "create" && this.o.seasonSectionId) {
+    if (pending.kind === "create" && (this.o.seasonSectionId || this.o.seasonId)) {
       this.queueSeason(doFetch, false);
     }
     return { ok: true, bvid: this.state.bvid, aid: this.state.aid };
@@ -1114,11 +1118,13 @@ export class LivePumpSession {
    * the state so an interrupted or failed call is visible and can be reconciled on restart.
    */
   private async associateSeason(doFetch: typeof fetch, reconcileFirst: boolean): Promise<void> {
-    if (!this.o.seasonSectionId) return;
+    if (!this.o.seasonSectionId && !this.o.seasonId) return;
     if (this.state.seasonState === "done" || this.state.seasonState === "failed") return;
     const outcome = await addArchiveToSeasonIfConfigured({
       cookiesPath: this.o.cookiesPath,
       sectionId: this.o.seasonSectionId,
+      seasonId: this.o.seasonId,
+      dataRoot: this.o.dataRoot,
       ...(this.state.aid ? { aid: this.state.aid } : {}),
       ...(this.state.bvid ? { bvid: this.state.bvid } : {}),
       reconcileFirst,
@@ -1166,7 +1172,7 @@ export class LivePumpSession {
 
   /** Restart hook: retry only an explicit pending checkpoint. */
   async reconcileSeason(fetchImpl?: typeof fetch): Promise<void> {
-    if (!this.o.seasonSectionId || this.state.seasonState !== "pending") return;
+    if ((!this.o.seasonSectionId && !this.o.seasonId) || this.state.seasonState !== "pending") return;
     await this.associateSeason(fetchImpl ?? this.o.fetchImpl ?? fetch, true);
   }
 
@@ -2462,6 +2468,10 @@ export interface RunLivePumpOptions {
   tag: string;
   /** Optional Bilibili season section id; added after the first successful create. */
   seasonSectionId?: number;
+  /** Optional Bilibili season (合集) id (issue #460); resolved to a section with the node account. */
+  seasonId?: number;
+  /** Node data root the season-id -> section-id cache is stored under (issue #460). */
+  dataRoot?: string;
   /** Archive description; omitted/empty = no description. */
   desc?: string;
   private?: boolean;
@@ -2758,6 +2768,8 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       tag: o.tag,
       ...(o.desc ? { desc: o.desc } : {}),
       ...(o.seasonSectionId ? { seasonSectionId: o.seasonSectionId } : {}),
+      ...(o.seasonId ? { seasonId: o.seasonId } : {}),
+      ...(o.dataRoot ? { dataRoot: o.dataRoot } : {}),
       private: o.private !== false,
       log,
       ...(o.onAlert ? { onAlert: o.onAlert } : {}),

@@ -29,6 +29,8 @@ export interface ZeroDiskUploadMeta {
   partTitleTemplate?: string;
   /** Optional Bilibili season section id; the node adds the archive after its first submit. */
   seasonSectionId?: number;
+  /** Optional Bilibili season (合集) id (issue #460); the node resolves it with its own account. */
+  seasonId?: number;
   /** Optional per-part byte cap in MiB; absent = built-in default. */
   partSizeMiB?: number;
 }
@@ -90,6 +92,10 @@ export function parseZeroDiskDelivery(raw: unknown): ZeroDiskDeliveryParse {
   const seasonSectionId = typeof rawSeason === "number" && Number.isSafeInteger(rawSeason) && rawSeason > 0
     ? rawSeason
     : undefined;
+  const rawSeasonId = m.seasonId;
+  const seasonId = typeof rawSeasonId === "number" && Number.isSafeInteger(rawSeasonId) && rawSeasonId > 0
+    ? rawSeasonId
+    : undefined;
   // Optional like the season id: an out-of-range value falls back to the default instead of refusing.
   const rawSize = m.partSizeMiB;
   const partSizeMiB = isValidPartSizeMiB(rawSize) ? rawSize : undefined;
@@ -109,6 +115,7 @@ export function parseZeroDiskDelivery(raw: unknown): ZeroDiskDeliveryParse {
         ...(submissionTitleTemplate ? { submissionTitleTemplate } : {}),
         ...(partTitleTemplate ? { partTitleTemplate } : {}),
         ...(seasonSectionId ? { seasonSectionId } : {}),
+        ...(seasonId ? { seasonId } : {}),
         ...(partSizeMiB ? { partSizeMiB } : {}),
       },
       accountKey: raw.accountKey,

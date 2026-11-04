@@ -238,7 +238,7 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
         });
         // checkpoint:P1 建稿成功即刻落库 bv —— 必须在这里(不能等 burn/split 完),
         // 否则 P1 成功后若后续节点失败,bv 丢失 → 重试重传 P1 → 重复稿。
-        if (cfg.uploadMeta.seasonSectionId) {
+        if (cfg.uploadMeta.seasonSectionId || cfg.uploadMeta.seasonId) {
           let saved = false;
           let lastError: unknown;
           for (let attempt = 0; attempt < 2; attempt++) {
@@ -1062,12 +1062,14 @@ export async function associateSeasonForJob(
   // Legacy rows without any seasonState were never requested, so enabling the feature must never
   // retroactively add old archives.
   const pendingNow = row?.seasonState === "pending";
-  if (!cfg.uploadMeta.seasonSectionId || !bv || row?.seasonState === "done" || row?.seasonState === "failed") return;
+  if ((!cfg.uploadMeta.seasonSectionId && !cfg.uploadMeta.seasonId) || !bv || row?.seasonState === "done" || row?.seasonState === "failed") return;
   if (!pendingNow) return;
   const reconcileFirst = opts.reconcileFirst ?? true;
   const season = await addArchiveToSeasonIfConfigured({
     cookiesPath: cfg.cookies,
     sectionId: cfg.uploadMeta.seasonSectionId,
+    seasonId: cfg.uploadMeta.seasonId,
+    dataRoot: cfg.seasonDataRoot,
     bvid: bv,
     reconcileFirst,
     note: log,

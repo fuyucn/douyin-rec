@@ -18,7 +18,7 @@ import { kuaishouPlatform } from "@drec/kuaishou-live";
 import { ffmpegEngine, mesioEngine } from "@drec/record-engine";
 import { existsSync } from "node:fs";
 import { makeBiliupProcessor, remuxProcessor, uploadPrepProcessor } from "@drec/processors";
-import { openNodeUploadGate, openNodeUploadSlot, resolveUploadAccountKey, rootBiliupCookies } from "@drec/app";
+import { drecRoot, openNodeUploadGate, openNodeUploadSlot, resolveUploadAccountKey, rootBiliupCookies } from "@drec/app";
 
 // ── 平台 ────────────────────────────────────────────────────────────────────
 // 接第二平台:写 <平台>-core 实现 Platform + 在此 registerPlatform 一行。
@@ -45,6 +45,7 @@ registerProcessor(makeBiliupProcessor({
   gate: () => (nodeUploadGate ??= openNodeUploadGate()),
   ...(nodeUploadSlot ? { slot: nodeUploadSlot } : {}),
   accountKey: resolveUploadAccountKey,
+  dataRoot: drecRoot(),
   localCookies: () => {
     const local = process.env.BILIUP_COOKIE ?? rootBiliupCookies();
     return existsSync(local) ? local : null;

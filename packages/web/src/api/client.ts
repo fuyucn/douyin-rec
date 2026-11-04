@@ -146,6 +146,12 @@ export const api = {
   /** 删除整个房间:录制任务 + hub 规则一起删(守卫:受管/在录/有进行中 job 会被拒)。 */
   deleteRoom: (key: string): Promise<{ ok: boolean; key: string; deletedHistory: number }> =>
     request("DELETE", `/api/rooms/${encodeURIComponent(key)}`),
+  /**
+   * 合集 ID 的非阻塞提示(issue #460):用主控账号解析合集名/小节名。
+   * 解析不到返回节点侧兜底文案;后端永不落库,失败也只是一个提示。
+   */
+  seasonHint: (seasonId: number): Promise<{ seasonId: number; title: string }> =>
+    request("GET", `/api/season/hint?seasonId=${encodeURIComponent(String(seasonId))}`),
 
   /** 拖拽排序持久化:keys = 完整送序。 */
   reorderHubRules: (keys: string[]): Promise<HubRuleDTO[]> => request("POST", "/api/hub/rules/reorder", { keys }),

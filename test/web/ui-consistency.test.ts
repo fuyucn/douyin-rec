@@ -63,7 +63,7 @@ describe("room links (issue #197)", () => {
 });
 
 describe("rooms editor upload fields", () => {
-  it("exposes the Bilibili season section id from the unified room editor (#370)", () => {
+  it("exposes the Bilibili season (合集) id from the unified room editor (#370 / #460)", () => {
     const editor = readFileSync(join(SRC, "modals", "RoomEditor.tsx"), "utf-8");
     const hub = readFileSync(join(SRC, "modals", "HubRuleDialog.tsx"), "utf-8");
     const upload = readFileSync(join(SRC, "components", "room-form", "UploadSection.tsx"), "utf-8");
@@ -71,7 +71,10 @@ describe("rooms editor upload fields", () => {
     expect(editor).toContain("<SeasonSectionField");
     expect(upload).toContain("<SeasonSectionField");
     expect(hub).toContain("seasonSectionIdPayload");
-    expect(field).toContain("value={value}");
+    expect(hub).toContain("seasonIdPayload");
+    // 合集 ID is the primary input; the legacy section input is only rendered for legacy rules.
+    expect(field).toContain("value={seasonId}");
+    expect(field).toContain("value={seasonSectionId}");
   });
 });
 

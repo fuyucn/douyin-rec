@@ -573,7 +573,7 @@ export async function runSegmentPipeline(o: {
         : deps.uploadPlain({ ...plainOpts, video: p1Path, title: uploadTitle }), streamKey),
       { tries: 3, backoffMs: 60_000, sleep: deps.sleep, shouldRetry: (e) => isUploadRateLimited(e) },
     );
-    if (cfg.uploadMeta.seasonSectionId) {
+    if (cfg.uploadMeta.seasonSectionId || cfg.uploadMeta.seasonId) {
       let saved = false;
       let lastError: unknown;
       for (let attempt = 0; attempt < 2; attempt++) {
@@ -590,7 +590,7 @@ export async function runSegmentPipeline(o: {
     ledger.markPartDone(streamKey, "plain", 0); // P1 = 第 0 段
     jlog(`建稿完成: ${bv}`);
     // BV is durable now (setBv above); associate after the upload gate is released.
-    if (cfg.uploadMeta.seasonSectionId) {
+    if (cfg.uploadMeta.seasonSectionId || cfg.uploadMeta.seasonId) {
       if (ledger.get(streamKey)?.seasonState === "pending") {
         startSeason(false);
       } else {
@@ -600,7 +600,7 @@ export async function runSegmentPipeline(o: {
   } else {
     bv = ledger.get(streamKey)?.bv ?? "";
     jlog(`建稿 P1 已存在,跳过(bv=${bv})`);
-    if (cfg.uploadMeta.seasonSectionId && bv && ledger.get(streamKey)?.seasonState === "pending") {
+    if ((cfg.uploadMeta.seasonSectionId || cfg.uploadMeta.seasonId) && bv && ledger.get(streamKey)?.seasonState === "pending") {
       startSeason(true);
     }
   }
@@ -801,7 +801,7 @@ async function resumeSegmentAppends(
   // Resume path owns its own association: the original create may have been killed before the season
   // call ran. Start it before appends; the append loop does not wait for this bounded HTTP call.
   let seasonTail: Promise<void> = Promise.resolve();
-  if (cfg.uploadMeta.seasonSectionId && ledger.get(streamKey)?.seasonState === "pending") {
+  if ((cfg.uploadMeta.seasonSectionId || cfg.uploadMeta.seasonId) && ledger.get(streamKey)?.seasonState === "pending") {
     seasonTail = associateSegmentSeason(ledger, cfg, streamKey, jlog, true)
       .catch((e) => jlog(`season association exception (left pending): ${String((e as Error)?.message ?? e).slice(0, 200)}`));
   }
@@ -929,10 +929,12 @@ async function associateSegmentSeason(
   reconcileFirst: boolean,
 ): Promise<void> {
   const bv = ledger.get(streamKey)?.bv;
-  if (!cfg.uploadMeta.seasonSectionId || !bv) return;
+  if ((!cfg.uploadMeta.seasonSectionId && !cfg.uploadMeta.seasonId) || !bv) return;
   const outcome = await addArchiveToSeasonIfConfigured({
     cookiesPath: cfg.cookies,
     sectionId: cfg.uploadMeta.seasonSectionId,
+    seasonId: cfg.uploadMeta.seasonId,
+    dataRoot: cfg.seasonDataRoot,
     bvid: bv,
     reconcileFirst,
     note: log,

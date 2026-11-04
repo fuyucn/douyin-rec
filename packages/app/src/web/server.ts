@@ -118,6 +118,7 @@ export interface RouteMatch {
     | "cleanupJobLogs"
     | "hubStream"
     | "getStats"
+    | "seasonHint"
     | "index";
   /** Path param when the route has /:id. */
   id?: number;
@@ -207,6 +208,7 @@ const ROUTES: readonly RouteEntry[] = [
   { name: "updateWorker", methods: ["PATCH"], pattern: /^\/api\/hub\/workers\/([A-Za-z0-9_-]+)$/, param: "slug", needsBody: true },
   { name: "reorderWorkers", methods: ["POST"], pattern: /^\/api\/hub\/workers\/reorder$/, needsBody: true },
   { name: "deleteWorker", methods: ["DELETE"], pattern: /^\/api\/hub\/workers\/([A-Za-z0-9_-]+)$/, param: "slug" },
+  { name: "seasonHint", methods: ["GET"], pattern: /^\/api\/season\/hint$/ },
   { name: "listHubRules", methods: ["GET"], pattern: /^\/api\/hub\/rules$/ },
   { name: "reorderHubRules", methods: ["POST"], pattern: /^\/api\/hub\/rules\/reorder$/, needsBody: true },
   { name: "createHubRule", methods: ["POST"], pattern: /^\/api\/hub\/rules$/, needsBody: true },
@@ -694,6 +696,10 @@ async function dispatch(
       const q = new URL(req.url ?? "/", "http://localhost").searchParams;
       const force = q.get("force") === "1" || q.get("force") === "true";
       return api.applyHubTasks({ force });
+    }
+    case "seasonHint": {
+      const q = new URL(req.url ?? "/", "http://localhost").searchParams;
+      return api.seasonHint(Number(q.get("seasonId") ?? "0"));
     }
     case "listHubRules":
       return api.listHubRules();

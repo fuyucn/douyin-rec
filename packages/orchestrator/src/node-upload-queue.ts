@@ -55,6 +55,8 @@ export interface BiliupMeta {
   titleCtx?: TitleContext;
   /** Optional Bilibili season section id; added by the node after its P1 create succeeds. */
   seasonSectionId?: number;
+  /** Optional Bilibili season (合集) id (issue #460); resolved by the node with its own account. */
+  seasonId?: number;
 }
 
 export type UploadDispatch =

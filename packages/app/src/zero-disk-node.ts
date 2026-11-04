@@ -389,6 +389,7 @@ export function buildZeroDiskDelivery(o: {
         ...(meta.submissionTitleTemplate ? { submissionTitleTemplate: meta.submissionTitleTemplate } : {}),
         ...(meta.partTitleTemplate ? { partTitleTemplate: meta.partTitleTemplate } : {}),
         ...(meta.seasonSectionId ? { seasonSectionId: meta.seasonSectionId } : {}),
+        ...(meta.seasonId ? { seasonId: meta.seasonId } : {}),
         ...(partSizeMiB ? { partSizeMiB } : {}),
       },
       accountKey,
@@ -403,6 +404,8 @@ export interface ZeroDiskStreamMeta {
   tag: string;
   desc?: string;
   seasonSectionId?: number;
+  /** Bilibili season (合集) id (issue #460); resolved on the node with its own account. */
+  seasonId?: number;
   partSizeMiB?: number;
   private: boolean;
 }
@@ -415,6 +418,7 @@ export function zeroDiskStreamMeta(delivery: import("@drec/core").ZeroDiskDelive
     private: delivery.meta.private,
     ...(delivery.meta.desc ? { desc: delivery.meta.desc } : {}),
     ...(delivery.meta.seasonSectionId ? { seasonSectionId: delivery.meta.seasonSectionId } : {}),
+    ...(delivery.meta.seasonId ? { seasonId: delivery.meta.seasonId } : {}),
     ...(delivery.meta.partSizeMiB ? { partSizeMiB: delivery.meta.partSizeMiB } : {}),
   };
 }

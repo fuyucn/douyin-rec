@@ -19,6 +19,10 @@ export interface UploadValue {
   submissionTitleTemplate: string;
   partTitleTemplate: string;
   seasonSectionId: string;
+  /** Whether the stored rule already carries a legacy seasonSectionId (drives the legacy input). */
+  seasonSectionIdStored: boolean;
+  /** 合集 ID (issue #460): the primary season field. */
+  seasonId: string;
 }
 
 interface Props {
@@ -144,7 +148,9 @@ export function UploadSection({ value: v, onChange, constraints: c, procEnabled,
                              onChange={(x) => onChange({ partTitleTemplate: x })}
                              presets={["{name}_P{part}", "{name}_{date}_P{part}", "{name}_{date}"]}
                              preview={v.partTitleTemplate.trim() ? previewPartTitles(v.partTitleTemplate, anchorName) : undefined} />
-              <SeasonSectionField value={v.seasonSectionId} onChange={(seasonSectionId) => onChange({ seasonSectionId })} />
+              <SeasonSectionField seasonId={v.seasonId} seasonSectionId={v.seasonSectionId}
+                                  seasonSectionIdStored={v.seasonSectionIdStored}
+                                  onChange={(patch) => onChange(patch)} />
               <label className="block sm:col-span-2">
                 <span className="field-label">{t("hub.ruleDialog.descLabel")}</span>
                 <textarea className="textarea font-mono text-sm" rows={4} placeholder={t("hub.ruleDialog.descPlaceholder")}

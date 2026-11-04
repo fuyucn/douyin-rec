@@ -190,6 +190,8 @@ export interface PipelineCfg {
   diskMinGB?: number;
   stageDir: string;
   cookies: string;
+  /** Data root for the season-id -> section-id cache (issue #460); injected by the CLI (orchestrator can't import app). */
+  seasonDataRoot?: string;
   /** stage = 只合成不传;upload = 传 B站。 */
   uploadMode: "stage" | "upload";
   /**
@@ -206,6 +208,8 @@ export interface PipelineCfg {
     submissionTitleTemplate?: string;
     partTitleTemplate?: string;
     seasonSectionId?: number;
+    /** Bilibili season (合集) id (issue #460); resolved to a section with the master's account. */
+    seasonId?: number;
   };
   /** 渲染 {date}/{time} 回退用(sessionBase 解析不到时);缺省 Asia/Shanghai。 */
   timeZone?: string;

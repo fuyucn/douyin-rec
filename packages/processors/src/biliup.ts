@@ -25,6 +25,8 @@ export interface BiliupParams {
   titleCtx?: TitleContext;
   /** Optional Bilibili season section id; added after the P1 create succeeds. */
   seasonSectionId?: number;
+  /** Optional Bilibili season (合集) id (issue #460); resolved to a section with the node account. */
+  seasonId?: number;
 }
 
 /** BV persisted on the queue row by an earlier attempt of this same job (P1 created by us, inputs[0] is P1). */
@@ -52,6 +54,7 @@ function params(job: ProcessJob): BiliupParams {
     partTitleTemplate: typeof p.partTitleTemplate === "string" && p.partTitleTemplate.trim() ? p.partTitleTemplate : undefined,
     titleCtx: typeof p.titleCtx === "object" && p.titleCtx !== null ? p.titleCtx : undefined,
     seasonSectionId: normalizeSeasonSectionId(p.seasonSectionId),
+    seasonId: normalizeSeasonSectionId(p.seasonId),
   };
 }
 
@@ -88,6 +91,8 @@ export interface BiliupDeps {
   accountKey?: (cookiesPath: string) => string;
   /** The node's own biliup cookies path when present; the master-sent path is only a fallback. */
   localCookies?: () => string | null;
+  /** Node data root, used for the season-id -> section-id cache (issue #460). */
+  dataRoot?: string;
 }
 
 const ALIAS_DIR = ".upload";
@@ -269,7 +274,7 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
     if (proof === "unknown") throw new Error("cannot confirm whether a draft exists; needs manual verification");
     partAt(0);
     st.bv = await slotted(() => uploadPlain({ plain: { ...meta, video: files[0]! }, run: sup.run }));
-    if (p.seasonSectionId) {
+    if (p.seasonSectionId || p.seasonId) {
       let lastError: unknown;
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
@@ -294,11 +299,13 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
   const seasonState = persistedSeasonState(job);
   let seasonTail: Promise<void> = Promise.resolve();
   const checkpointReady = seasonCheckpointReady || seasonState === "pending";
-  if (p.seasonSectionId && checkpointReady) {
+  if ((p.seasonSectionId || p.seasonId) && checkpointReady) {
     seasonTail = (async () => {
       const outcome = await addArchiveToSeasonIfConfigured({
         cookiesPath: cookies,
         sectionId: p.seasonSectionId,
+        seasonId: p.seasonId,
+        dataRoot: deps.dataRoot,
         bvid: bv,
         reconcileFirst: seasonState === "pending",
         note: (m) => ctx.log(m),

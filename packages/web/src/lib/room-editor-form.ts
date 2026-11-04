@@ -45,6 +45,10 @@ export interface RoomForm {
   seasonSectionId: string;
   /** Whether the stored rule already carries the key (including an explicit null). */
   seasonSectionIdStored: boolean;
+  /** 合集 ID (issue #460): the primary field, entered from the creator center. Empty = off. */
+  seasonId: string;
+  /** Whether the stored rule already carries seasonId (including an explicit null). */
+  seasonIdStored: boolean;
   /** Live upload per-part size in MiB; empty = built-in default. */
   partSizeMiB: string;
   partSizeMiBStored: boolean;
@@ -88,6 +92,24 @@ export function seasonSectionIdPatch(raw: string, stored: boolean): number | nul
 /** Invalid hidden leftovers are omitted so they neither persist nor clear an already stored association. */
 export function seasonSectionIdPayload(raw: string, stored: boolean): number | null | undefined {
   return isValidSeasonSectionIdInput(raw) ? seasonSectionIdPatch(raw, stored) : undefined;
+}
+
+/** Empty clears/disables; otherwise the API accepts only a positive integer season (合集) id. */
+export function isValidSeasonIdInput(raw: string): boolean {
+  const value = raw.trim();
+  return value === "" || (/^\d+$/.test(value) && Number(value) > 0 && Number.isSafeInteger(Number(value)));
+}
+
+/** Empty inherits when the key was never stored, clears when it exists, and parses a valid number otherwise. */
+export function seasonIdPatch(raw: string, stored: boolean): number | null | undefined {
+  const value = raw.trim();
+  if (!value) return stored ? null : undefined;
+  return Number(value);
+}
+
+/** Invalid hidden leftovers are omitted so they neither persist nor clear an already stored season id. */
+export function seasonIdPayload(raw: string, stored: boolean): number | null | undefined {
+  return isValidSeasonIdInput(raw) ? seasonIdPatch(raw, stored) : undefined;
 }
 
 /** Mirrors the API range (core PART_SIZE_MIB_*); the web package does not depend on core. */
@@ -140,6 +162,8 @@ export function formFromRoom(r: RoomDTO): RoomForm {
     partTitleTemplate: p.upload?.partTitleTemplate || DEFAULT_TITLE_TEMPLATES.partTitleTemplate,
     seasonSectionId: p.upload?.seasonSectionId ? String(p.upload.seasonSectionId) : "",
     seasonSectionIdStored: !!p.upload && Object.prototype.hasOwnProperty.call(p.upload, "seasonSectionId"),
+    seasonId: p.upload?.seasonId ? String(p.upload.seasonId) : "",
+    seasonIdStored: !!p.upload && Object.prototype.hasOwnProperty.call(p.upload, "seasonId"),
     partSizeMiB: p.upload?.partSizeMiB ? String(p.upload.partSizeMiB) : "",
     partSizeMiBStored: !!p.upload && Object.prototype.hasOwnProperty.call(p.upload, "partSizeMiB"),
     clStageSourceAfterMerge: p.cleanup?.stageSourceAfterMerge === true,
@@ -183,7 +207,7 @@ export function ruleFactsOf(f: RoomForm, ctx: RoomContext): FormFacts {
   return factsOf(f, { ...ctx, hasRule: true });
 }
 
-export type PayloadResult = { ok: true; payload: RoomPayload } | { ok: false; error: "schedule" | "seasonSectionId" | "partSizeMiB" };
+export type PayloadResult = { ok: true; payload: RoomPayload } | { ok: false; error: "schedule" | "seasonSectionId" | "seasonId" | "partSizeMiB" };
 
 /**
  * Form → payload. `recording.enabled` is deliberately NOT sent: the list/detail switch owns it,
@@ -194,6 +218,7 @@ export function payloadFromForm(f: RoomForm, ctx: RoomContext): PayloadResult {
   const sched = splitSchedule(f.schedule);
   if (!sched) return { ok: false, error: "schedule" };
   if (f.uploadOn && !isValidSeasonSectionIdInput(f.seasonSectionId)) return { ok: false, error: "seasonSectionId" };
+  if (f.uploadOn && !isValidSeasonIdInput(f.seasonId)) return { ok: false, error: "seasonId" };
   if (f.uploadOn && !isValidPartSizeInput(f.partSizeMiB)) return { ok: false, error: "partSizeMiB" };
   const stored = storedFromForm(ruleFactsOf(f, ctx));
   const trimOrUndef = (s: string): string | undefined => s.trim() || undefined;
@@ -247,6 +272,7 @@ export function payloadFromForm(f: RoomForm, ctx: RoomContext): PayloadResult {
             submissionTitleTemplate: trimOrUndef(f.submissionTitleTemplate),
             partTitleTemplate: trimOrUndef(f.partTitleTemplate),
             seasonSectionId: seasonSectionIdPayload(f.seasonSectionId, f.seasonSectionIdStored),
+            seasonId: seasonIdPayload(f.seasonId, f.seasonIdStored),
             partSizeMiB: partSizePayload(f.partSizeMiB, f.partSizeMiBStored),
           },
         },

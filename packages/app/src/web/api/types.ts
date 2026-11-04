@@ -347,6 +347,11 @@ export interface Api {
   updateRoom(key: string, input: RoomPayload): ApiResult;
   /** DELETE /api/rooms/:key — 删除整个房间(录制任务 + hub 规则),含与两个旧端点一致的守卫。 */
   deleteRoom(key: string): ApiResult;
+  /**
+   * GET /api/season/hint?seasonId=N — 保存后**非阻塞**提示(issue #460):用主控账号解析合集名/小节名。
+   * 只作提示,永不落库、永不阻塞保存;解析不到时返回节点侧兜底文案。
+   */
+  seasonHint(seasonId: number): Promise<ApiResult>;
   /** POST /api/hub/apply[?force=1] — 立刻触发一次全节点任务同步;force=跳过节点骤减安全阀(T-2)。 */
   applyHubTasks(opts?: { force?: boolean }): ApiResult;
   /** GET /api/hub/rules — 所有多节点 hub 后处理规则(按 {platform}.{roomSlug})。 */

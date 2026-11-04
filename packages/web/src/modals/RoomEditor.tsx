@@ -25,7 +25,8 @@ import { RuleSwitch, ToggleRow } from "../components/room-form/parts";
 import { errMessage, usePlatformCookieStatuses, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { pickPlatform, qualityLabel } from "../lib/labels";
-import { factsOf, formFromRoom, isValidPartSizeInput, isValidSeasonSectionIdInput, PART_SIZE_MIB_MAX, PART_SIZE_MIB_MIN, ruleFactsOf, payloadFromForm, type RoomContext, type RoomForm } from "../lib/room-editor-form";
+import { factsOf, formFromRoom, isValidPartSizeInput, isValidSeasonIdInput, isValidSeasonSectionIdInput, PART_SIZE_MIB_MAX, PART_SIZE_MIB_MIN, ruleFactsOf, payloadFromForm, type RoomContext, type RoomForm } from "../lib/room-editor-form";
+import { hintSeasonAfterSave } from "../lib/season-hint";
 import { burnVersionsApply, deriveConstraints, flowSummary, settledMethod, shownOutputFormat, type Lock, type UploadMethod } from "../lib/room-form-rules";
 import { accountToggleCopy, cookieReadyFor } from "../lib/room-form-rules";
 
@@ -136,6 +137,7 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
     const bad: StepId | null = form.segmentSec.trim() !== "" && Number(form.segmentSec) < 0 ? "record"
       : form.uploadOn && form.tid.trim() !== "" && Number(form.tid) < 1 ? "upload"
       : form.uploadOn && !isValidSeasonSectionIdInput(form.seasonSectionId) ? "upload"
+      : form.uploadOn && !isValidSeasonIdInput(form.seasonId) ? "upload"
       : form.uploadOn && !isValidPartSizeInput(form.partSizeMiB) ? "upload" : null;
     if (bad) { setStep(bad); toast(t("room.editor.fieldInvalid"), "error"); return; }
     const r = payloadFromForm(form, ctx);
@@ -147,6 +149,7 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
     try {
       await api.updateRoom(room.key, r.payload);
       toast(t("rooms.saved"), "success");
+      hintSeasonAfterSave(form.seasonId, (m) => toast(m, "success"), t("hub.ruleDialog.seasonIdHintPrefix"));
       onSaved();
     } catch (e) {
       // Backend says which half failed and whether it rolled back — show it verbatim.
@@ -389,7 +392,9 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                             <span className="field-label">{t("room.editor.tag")}</span>
                             <input className="input" placeholder={t("hub.ruleDialog.tagPlaceholder")} value={form.tag} onChange={(e) => update({ tag: e.target.value })} />
                           </label>
-                          <SeasonSectionField value={form.seasonSectionId} onChange={(seasonSectionId) => update({ seasonSectionId })} />
+                          <SeasonSectionField seasonId={form.seasonId} seasonSectionId={form.seasonSectionId}
+                                              seasonSectionIdStored={form.seasonSectionIdStored}
+                                              onChange={(patch) => update(patch)} />
                           {form.streamUpload && (
                             <label className="block sm:col-span-2">
                               <span className="field-label">{t("room.editor.partSize")}</span>

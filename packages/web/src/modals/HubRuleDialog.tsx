@@ -19,7 +19,8 @@ import { UploadSection, type UploadValue } from "../components/room-form/UploadS
 import { errMessage, usePlatformCookieStatuses, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { pickPlatform, scheduleInput, splitSchedule } from "../lib/labels";
-import { isValidSeasonSectionIdInput, seasonSectionIdPayload } from "../lib/room-editor-form";
+import { isValidSeasonIdInput, isValidSeasonSectionIdInput, seasonIdPayload, seasonSectionIdPayload } from "../lib/room-editor-form";
+import { hintSeasonAfterSave } from "../lib/season-hint";
 import {
   cookieReadyFor, deriveConstraints, flowSummary, keepArchiveFromStored, methodFromStored, outputFormatFromStored, settledMethod, shownOutputFormat, storedFromForm, type FormFacts,
 } from "../lib/room-form-rules";
@@ -49,6 +50,10 @@ type FormState = RecordingValue & ProcessingValue & UploadValue & CleanupValue &
   streamUpload: boolean;
   /** Whether the stored upload already carries the season key (including an explicit null). */
   seasonSectionIdStored: boolean;
+  /** 合集 ID (issue #460): the primary season field. */
+  seasonId: string;
+  /** Whether the stored upload already carries seasonId (including an explicit null). */
+  seasonIdStored: boolean;
 };
 
 type RecordingHalf = Omit<RecordingValue, "name"> & { outputFormat: OutputFormat };
@@ -89,6 +94,8 @@ const BLANK: FormState = {
   partTitleTemplate: "",
   seasonSectionId: "",
   seasonSectionIdStored: false,
+  seasonId: "",
+  seasonIdStored: false,
   clStageSourceAfterMerge: false,
   clSourceAfterDone: false,
   clKeepArchive: true,
@@ -125,6 +132,8 @@ function fromRule(r: HubRuleDTO): FormState {
     partTitleTemplate: c.upload?.partTitleTemplate ?? "",
     seasonSectionId: c.upload?.seasonSectionId ? String(c.upload.seasonSectionId) : "",
     seasonSectionIdStored: !!c.upload && Object.prototype.hasOwnProperty.call(c.upload, "seasonSectionId"),
+    seasonId: c.upload?.seasonId ? String(c.upload.seasonId) : "",
+    seasonIdStored: !!c.upload && Object.prototype.hasOwnProperty.call(c.upload, "seasonId"),
     sourceTaskId: r.recording?.sourceTaskId ?? null,
   };
 }
@@ -277,6 +286,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
           submissionTitleTemplate: form.submissionTitleTemplate.trim() || undefined,
           partTitleTemplate: form.partTitleTemplate.trim() || undefined,
           seasonSectionId: seasonSectionIdPayload(form.seasonSectionId, form.seasonSectionIdStored),
+          seasonId: seasonIdPayload(form.seasonId, form.seasonIdStored),
         },
       },
     };
@@ -287,6 +297,9 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
     if (!isEdit && form.sourceTaskId === null) { toast(t("hub.ruleDialog.sourceTaskRequired"), "error"); return; }
     if (workersInvalid) { toast(t("hub.ruleDialog.workersRequired"), "error"); return; }
     if (form.uploadOn && !isValidSeasonSectionIdInput(form.seasonSectionId)) {
+      toast(t("room.editor.fieldInvalid"), "error"); return;
+    }
+    if (form.uploadOn && !isValidSeasonIdInput(form.seasonId)) {
       toast(t("room.editor.fieldInvalid"), "error"); return;
     }
     const sched = splitSchedule(form.schedule);
@@ -331,6 +344,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
         }
         onClose();
         toast(t("hub.ruleDialog.updated"), "success");
+        hintSeasonAfterSave(form.seasonId, (m) => toast(m, "success"), t("hub.ruleDialog.seasonIdHintPrefix"));
         onSaved();
         return;
       }
@@ -347,6 +361,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
       }
       onClose();
       toast(t("hub.ruleDialog.created"), "success");
+      hintSeasonAfterSave(form.seasonId, (m) => toast(m, "success"), t("hub.ruleDialog.seasonIdHintPrefix"));
       onSaved();
     } catch (e) {
       toast(errMessage(e), "error");

@@ -112,6 +112,8 @@ export interface HubPipelineConfig {
     partTitleTemplate?: string;
     /** Optional Bilibili season section id; added after a successful P1 create. Empty = off. */
     seasonSectionId?: number | null;
+    /** Optional Bilibili season (合集) id (issue #460); resolved to a section id with the uploading account. Empty = off. */
+    seasonId?: number | null;
     /** Optional per-part byte cap (MiB) for live upload; empty/null = built-in default. */
     partSizeMiB?: number | null;
   };
@@ -799,6 +801,8 @@ export interface NodePipelineSpec {
     submissionTitleTemplate?: string;
     partTitleTemplate?: string;
     seasonSectionId?: number;
+    /** Node-side upload: Bilibili season (合集) id (issue #460) resolved to a section on the node. */
+    seasonId?: number;
   };
   uploadPrivate: boolean;
   timeZone?: string;
