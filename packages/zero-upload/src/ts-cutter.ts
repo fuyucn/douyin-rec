@@ -55,13 +55,19 @@ export interface TsCutterOptions {
 
 /** Media time covered by one part, from the primary stream's PTS (video, or first stream). */
 export interface PartTiming {
+  /** First video PTS of the part, in seconds (raw 90 kHz ticks stay internal). */
   firstPts: number;
+  /** Last video PTS of the part, in seconds (raw 90 kHz ticks stay internal). */
   lastPts: number;
   /**
    * Media time covered, wrap-safe: the sum of forward PTS steps, with jumps ignored (see
    * {@link TsCutterOptions.ptsJumpMs}). 0 when fewer than two timestamps were seen.
    */
   durationSec: number;
+  /** Total seconds of forward PTS jumps inside the part (media missing at resume points). */
+  ptsJumpSec?: number;
+  /** Number of forward PTS jumps inside the part. */
+  ptsJumpCount?: number;
 }
 
 const pidOf = (p: Buffer, o: number): number => ((p[o + 1] & 0x1f) << 8) | p[o + 2];
@@ -129,6 +135,8 @@ export class TsCutter {
   private maxGopBytes = 0;
   private streamBytes = 0;
   private timing: { first: number; last: number; prev: number; high: number; span: number } | null = null;
+  private jumpSec = 0;
+  private jumpCount = 0;
 
   constructor(o: TsCutterOptions) {
     if (!(o.maxPartBytes > TS_PACKET * 4)) throw new Error("TsCutter: maxPartBytes too small");
@@ -163,7 +171,12 @@ export class TsCutter {
   currentTiming(): PartTiming | null {
     const t = this.timing;
     if (!t) return null;
-    return { firstPts: t.first, lastPts: t.last, durationSec: t.span / PTS_HZ };
+    return {
+      // Seconds everywhere: the only conversion point from the internal 90 kHz ticks, so
+      // callers (per-part reports) cannot mix ticks into second-based logs.
+      firstPts: t.first / PTS_HZ, lastPts: t.last / PTS_HZ, durationSec: t.span / PTS_HZ,
+      ...(this.jumpSec > 0 ? { ptsJumpSec: this.jumpSec, ptsJumpCount: this.jumpCount } : {}),
+    };
   }
 
   /** Feed stdout bytes; returns data and cut events in stream order. */
@@ -276,6 +289,8 @@ export class TsCutter {
     this.partBytes = 0;
     this.mediaBytes = 0;
     this.timing = null;
+    this.jumpSec = 0;
+    this.jumpCount = 0;
     const head = this.pat && this.pmt ? Buffer.concat([this.pat, this.pmt]) : null;
     if (head) {
       out.push({ kind: "data", bytes: head });
@@ -321,6 +336,12 @@ export class TsCutter {
     // must neither inflate the duration nor trigger an early duration cut.
     const step = abs - t.high;
     if (Math.abs(step) > this.ptsJumpTicks) {
+      // A forward jump is broadcast the CDN never sent us (media missing at the resume point);
+      // a backward one is a timestamp reset. Per-part totals feed the end-of-part report.
+      if (abs > t.high) {
+        this.jumpSec += (abs - t.high) / PTS_HZ;
+        this.jumpCount += 1;
+      }
       this.onPtsJump?.({ fromSec: t.high / PTS_HZ, toSec: abs / PTS_HZ });
       t.high = abs;
     } else if (step > 0) {
