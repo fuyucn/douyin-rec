@@ -4353,9 +4353,165 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
       expect(r.ok, r.error ?? "").toBe(true);
       expect(alerts).toHaveLength(1);
       expect(alerts[0]).toContain(`已达 ${ARCHIVE_PARTS_WARN_AT} 个`);
+      expect(alerts[0]).toContain("据信");
     } finally {
       setSpawnForTest(undefined);
       rmSync(dir, { recursive: true, force: true });
     }
   }, 20_000);
+
+  it("does not alert again for a part confirmed after the warning line", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "live-pump-cap2-"));
+    try {
+      writeFileSync(join(dir, "cookies.json"), JSON.stringify({
+        cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
+      }));
+      const fake = ((input: string | URL | Request) => {
+        const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
+        if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
+        if (u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
+        if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
+        if (u.pathname === "/x/vu/web/add/v3") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BVLcap02" } }));
+        if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BVLcap02", title: "t", tid: 21 }, videos: [] } }));
+        if (u.pathname === "/x/web/archives") return Promise.resolve(json({ code: 0, data: { arc_audits: [] } }));
+        return Promise.resolve(json({ code: 0, data: {} }));
+      }) as unknown as typeof fetch;
+      const alerts: string[] = [];
+      let acquisitions = 0;
+      // One part crosses the line (80 confirmed), the next one confirms at 81: still exactly
+      // one warning for the whole run.
+      const parts = Array.from({ length: ARCHIVE_PARTS_WARN_AT - 1 }, (_, i) => ({
+        index: i, spoolPath: join(dir, `gone_${i}.ts`), filename: `gone_${i}.ts`,
+        stem: `n260000cb2${String(i).padStart(4, "0")}`, title: `P${i + 1}`,
+        bytes: CHUNK, durationSec: 1, confirmed: true,
+      }));
+      writeFileSync(livePumpStatePath(dir, "cap2"), JSON.stringify({
+        schemaVersion: 1, room: "cap2", createdAt: Date.now(), title: "cap2", tid: 21, tag: "x",
+        private: true, bvid: "BVLcap02", aid: 7, parts, updatedAt: Date.now(),
+      }));
+      installFakeFfmpeg(tsStream({ gops: 400 }));
+      const r = await runLivePump({
+        cookiesPath: join(dir, "cookies.json"), room: "cap2", spoolDir: dir, title: "cap2",
+        tid: 21, tag: "x", private: true, sizeCap: 8 * 1024 * 1024, queueCapacity: 4096,
+        quality: "origin", submit: true, spoolMode: "none", fetchImpl: fake,
+        fetch: async () => ({ living: ++acquisitions <= 2, url: "http://x/y.ts" }),
+        sleep: async () => {},
+        onAlert: (m) => alerts.push(m),
+        log: () => {},
+      });
+      expect(r.ok, r.error ?? "").toBe(true);
+      expect(readLivePumpState(livePumpStatePath(dir, "cap2"))!.parts.length).toBe(ARCHIVE_PARTS_WARN_AT + 1);
+      expect(alerts.filter((m) => m.includes(`已达 ${ARCHIVE_PARTS_WARN_AT} 个`))).toHaveLength(1);
+      expect(alerts).toHaveLength(1);
+    } finally {
+      setSpawnForTest(undefined);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("carries the suppressed count in the next alert once the cooldown expires", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "live-pump-coolx-"));
+    try {
+      writeFileSync(join(dir, "cookies.json"), JSON.stringify({
+        cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
+      }));
+      const fake = ((input: string | URL | Request) => {
+        const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
+        if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
+        if (u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
+        if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
+        if (u.pathname === "/x/vu/web/add/v3") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BVLcool2" } }));
+        if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BVLcool2", title: "t", tid: 21 }, videos: [] } }));
+        if (u.pathname === "/x/web/archives") return Promise.resolve(json({ code: 0, data: { arc_audits: [] } }));
+        return Promise.resolve(json({ code: 0, data: {} }));
+      }) as unknown as typeof fetch;
+      const alerts: string[] = [];
+      // Parts seal every ~100s of fake time: alert #1 at ~100s, the 30min cooldown then
+      // expires at ~1900s, and part 19 pages again carrying the 17 suppressed alerts.
+      installFakeFfmpeg(tsStream({ gops: 400 }), { holdOpen: true });
+      vi.useFakeTimers();
+      try {
+        const p = runLivePump({
+          cookiesPath: join(dir, "cookies.json"), room: "coolx", spoolDir: dir, title: "coolx",
+          tid: 21, tag: "x", private: true, sizeCap: 8 * 1024 * 1024,
+          queueCapacity: 4096, stallTimeoutMs: 100_000,
+          quality: "origin", submit: true, spoolMode: "none", fetchImpl: fake,
+          fetch: async () => ({ living: true, url: "http://x/y.ts" }),
+          shouldStop: async () => alerts.length >= 2,
+          onAlert: (m) => alerts.push(m),
+          log: () => {},
+        });
+        await vi.advanceTimersByTimeAsync(2_000_000);
+        const r = await p;
+        expect(r.ok, r.error ?? "").toBe(true);
+        expect(alerts).toHaveLength(2);
+        expect(alerts[1]).toContain("已抑制 17 条");
+      } finally {
+        vi.useRealTimers();
+        setSpawnForTest(undefined);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+
+  it("logs the suppressed count on the fatal early-exit path, exactly once", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "live-pump-fatalf-"));
+    try {
+      writeFileSync(join(dir, "cookies.json"), JSON.stringify({
+        cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
+      }));
+      let failEdit = false;
+      const fake = ((input: string | URL | Request) => {
+        const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
+        if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
+        if (u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
+        if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
+        if (u.pathname === "/x/vu/web/add/v3") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BVLfatal1" } }));
+        if (u.pathname === "/x/vu/web/edit") return Promise.resolve(json(failEdit ? { code: 1, message: "edit boom" } : { code: 0, data: { aid: 7, bvid: "BVLfatal1" } }));
+        if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BVLfatal1", title: "t", tid: 21 }, videos: [] } }));
+        if (u.pathname === "/x/web/archives") return Promise.resolve(json({ code: 0, data: { arc_audits: [] } }));
+        return Promise.resolve(json({ OK: 1, key: "bucket/fb.ts" }));
+      }) as unknown as typeof fetch;
+      const alerts: string[] = [];
+      const logs: string[] = [];
+      let confirmed = 0;
+      // Two starved parts (alert + suppressed), then part 3 fails its archive append: the run
+      // exits through the in-loop fatal return, and the finally must still report the count.
+      installFakeFfmpeg(tsStream({ gops: 400 }), { holdOpen: true });
+      vi.useFakeTimers();
+      try {
+        const p = runLivePump({
+          cookiesPath: join(dir, "cookies.json"), room: "fatalf", spoolDir: dir, title: "fatalf",
+          tid: 21, tag: "x", private: true, sizeCap: 8 * 1024 * 1024,
+          queueCapacity: 4096, stallTimeoutMs: 100_000,
+          quality: "origin", submit: true, spoolMode: "none", fetchImpl: fake,
+          fetch: async () => ({ living: true, url: "http://x/y.ts" }),
+          sleep: async () => {},
+          onPartConfirmed: (info: { count: number }) => {
+            confirmed = info.count;
+            if (confirmed >= 2) failEdit = true;
+          },
+          onAlert: (m) => alerts.push(m),
+          log: (m) => logs.push(m),
+        });
+        await vi.advanceTimersByTimeAsync(450_000);
+        const r = await p;
+        expect(r.ok, r.error ?? "").toBe(false);
+        expect(alerts).toHaveLength(1);
+        const lines = logs.filter((m) => m.includes("抑制"));
+        expect(lines).toHaveLength(1);
+        expect(lines[0]).toContain("共抑制 1 条");
+      } finally {
+        vi.useRealTimers();
+        setSpawnForTest(undefined);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
