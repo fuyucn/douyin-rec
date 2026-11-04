@@ -17,7 +17,7 @@ function state(over: Partial<RecorderStateFile> = {}): RecorderStateFile {
   return {
     schemaVersion: 1, taskId: 7, platform: "douyin", roomSlug: "555", mode: "file",
     owner: { pid: 4242, startTicks: TICKS, bootId: BOOT },
-    phase: "recording", session: null, heartbeatAt: NOW, exit: null, updatedAt: NOW,
+    phase: "recording", session: null, heartbeatAt: NOW, finalizingSince: null, exit: null, updatedAt: NOW,
     ...over,
   };
 }
@@ -75,6 +75,13 @@ describe("recorderActivity", () => {
     expect(recorderActivity(f(1000), NOW, probe())).toBe("active");
     expect(recorderActivity(f(ROLLING_ACTIVE_MAX_QUIET_MS), NOW, probe())).toBe("active");
     expect(recorderActivity(f(ROLLING_ACTIVE_MAX_QUIET_MS + 1), NOW, probe())).toBe("dead");
+  });
+
+  it("finalizing: a fresh heartbeat does not save a tail that has been finalizing past the cap", () => {
+    const f = (since: number | null) => state({ phase: "finalizing", heartbeatAt: NOW - 1000, finalizingSince: since });
+    expect(recorderActivity(f(NOW - ROLLING_ACTIVE_MAX_QUIET_MS), NOW, probe())).toBe("active");
+    expect(recorderActivity(f(NOW - ROLLING_ACTIVE_MAX_QUIET_MS - 1), NOW, probe())).toBe("dead");
+    expect(recorderActivity(f(null), NOW, probe())).toBe("active"); // older bundle: heartbeat check only
   });
 
   it("recording / polling do not need a fresh heartbeat (owner verification is enough)", () => {
@@ -172,6 +179,24 @@ describe("RecorderStateWriter", () => {
     w.setPhase("polling", null); // session rotation: the previous session must not stay attached
     expect(read(r)).toMatchObject({ phase: "polling", session: null });
     expect(readdirSync(recorderStateDir(r)).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("finalizingSince is set on entering finalizing, kept across heartbeats, cleared on leaving", () => {
+    vi.useFakeTimers();
+    const r = root();
+    const { w, tick } = mk(r);
+    w.start();
+    w.setPhase("recording");
+    expect(read(r).finalizingSince).toBeNull();
+    w.setPhase("finalizing");
+    const since = read(r).finalizingSince;
+    expect(since).not.toBeNull();
+    tick(FINALIZING_HEARTBEAT_MS);
+    vi.advanceTimersByTime(FINALIZING_HEARTBEAT_MS);
+    expect(read(r).finalizingSince).toBe(since);
+    expect(read(r).heartbeatAt).toBeGreaterThan(since!);
+    w.setPhase("polling");
+    expect(read(r).finalizingSince).toBeNull();
   });
 
   it("does not rewrite on a repeated identical phase", () => {

@@ -59,6 +59,8 @@ export interface RecorderStateFile {
   session: string | null;
   /** Set on every write; refreshed every FINALIZING_HEARTBEAT_MS only while phase=finalizing. */
   heartbeatAt: number;
+  /** Epoch ms of entering `finalizing`; null in any other phase (and in files written by older bundles). */
+  finalizingSince: number | null;
   exit: RecorderExit | null;
   updatedAt: number;
 }
@@ -124,7 +126,8 @@ export const linuxProcProbe: ProcProbe = {
  *  - phase `exited` → `ended` (the child said goodbye itself).
  *  - otherwise the owner must be the very process that wrote the file: same pid start time and same boot
  *    id (guards pid reuse and reboots). Unverifiable (null ticks/boot id, e.g. non-Linux) → `dead`.
- *  - `finalizing` additionally needs a heartbeat newer than ROLLING_ACTIVE_MAX_QUIET_MS.
+ *  - `finalizing` additionally needs a heartbeat newer than ROLLING_ACTIVE_MAX_QUIET_MS AND must have started
+ *    finalizing no longer ago than that (the heartbeat is a plain timer, so a hung tail keeps it fresh forever).
  */
 export function recorderActivity(state: RecorderStateFile, now: number, proc: ProcProbe): RecorderActivity {
   if (state.phase === "exited") return "ended";
@@ -133,7 +136,10 @@ export function recorderActivity(state: RecorderStateFile, now: number, proc: Pr
   const liveTicks = proc.startTicks(pid);
   if (liveTicks === null || liveTicks !== startTicks) return "dead";
   if (proc.bootId() !== bootId) return "dead";
-  if (state.phase === "finalizing" && now - state.heartbeatAt > ROLLING_ACTIVE_MAX_QUIET_MS) return "dead";
+  if (state.phase === "finalizing") {
+    if (now - state.heartbeatAt > ROLLING_ACTIVE_MAX_QUIET_MS) return "dead";
+    if (state.finalizingSince !== null && now - state.finalizingSince > ROLLING_ACTIVE_MAX_QUIET_MS) return "dead";
+  }
   return "active";
 }
 
@@ -170,6 +176,7 @@ export function parseRecorderState(raw: unknown): RecorderStateFile | null {
     phase: r.phase as RecorderPhase,
     session: r.session as string | null,
     heartbeatAt: r.heartbeatAt,
+    finalizingSince: isNum(r.finalizingSince) ? r.finalizingSince : null,
     exit,
     updatedAt: r.updatedAt,
   };
@@ -259,6 +266,7 @@ export class RecorderStateWriter {
   private exit: RecorderExit | null = null;
   private signal: string | null = null;
   private draining = false;
+  private finalizingSince: number | null = null;
   private warned = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly now: () => number;
@@ -283,6 +291,11 @@ export class RecorderStateWriter {
     if (this.exit) return; // exited is terminal
     const same = phase === this.phase && (session === undefined || session === this.session);
     if (session !== undefined) this.session = session;
+    if (phase === "finalizing") {
+      if (this.phase !== "finalizing") this.finalizingSince = this.now();
+    } else {
+      this.finalizingSince = null;
+    }
     this.phase = phase;
     this.syncTimer();
     if (!same) this.flush();
@@ -309,6 +322,7 @@ export class RecorderStateWriter {
     const at = this.now();
     this.exit = { code, signal: this.signal, at, draining: this.draining };
     this.phase = "exited";
+    this.finalizingSince = null;
     this.flush();
   }
 
@@ -340,6 +354,7 @@ export class RecorderStateWriter {
       phase: this.phase,
       session: this.session,
       heartbeatAt: t,
+      finalizingSince: this.finalizingSince,
       exit: this.exit,
       updatedAt: t,
     };
