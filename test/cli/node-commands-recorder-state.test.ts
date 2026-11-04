@@ -5,10 +5,11 @@
  * its last part (phase=finalizing) must keep is-done=false; the old /proc scan saw no downloader and said done.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isRoomDone, recordingRoomsOf, type RoomProbeDeps } from "../../packages/cli/src/node-commands.js";
+import { isRoomDone, localRoomProbes, recordingRoomsOf, type RoomProbeDeps } from "../../packages/cli/src/node-commands.js";
+import { LocalTransport } from "../../packages/orchestrator/src/transport-local.js";
 import { recorderStateDir, recorderStatePath, type ProcProbe, type RecorderStateFile } from "@drec/core";
 
 const NOW = 1_700_000_000_000;
@@ -78,10 +79,23 @@ describe("isRoomDone", () => {
     expect(isRoomDone(root, "777", deps())).toBe(true);
   });
 
-  it("a file for the room decides alone: the /proc scan is NOT consulted (dead file + scan hit → done)", () => {
+  it("a dead file never silences the /proc scan (dead file + scan hit → NOT done)", () => {
     const root = makeRoot();
     put(root, { taskId: 1, phase: "recording", owner: { pid: 1, startTicks: TICKS, bootId: BOOT } });
-    expect(isRoomDone(root, "555", deps(() => [{ platform: "douyin", roomSlug: "555" }]))).toBe(true);
+    expect(isRoomDone(root, "555", deps(() => [{ platform: "douyin", roomSlug: "555" }]))).toBe(false);
+  });
+
+  it("an exited file never silences the /proc scan (exited file + scan hit → NOT done)", () => {
+    const root = makeRoot();
+    put(root, { taskId: 1, phase: "exited", exit: exited });
+    expect(isRoomDone(root, "555", deps(() => [{ platform: "douyin", roomSlug: "555" }]))).toBe(false);
+  });
+
+  it("exited files older than 7 days are ignored (not deleted): the room counts as having no file", () => {
+    const root = makeRoot();
+    put(root, { taskId: 1, phase: "exited", exit: exited, updatedAt: NOW - 8 * 24 * 3600_000 });
+    expect(isRoomDone(root, "555", deps())).toBe(true);
+    expect(existsSync(recorderStatePath(root, 1))).toBe(true);
   });
 
   it("no state file for the room → falls back to the process scan", () => {
@@ -147,5 +161,45 @@ describe("recordingRoomsOf", () => {
     put(root, { taskId: 1, platform: "douyin", roomSlug: "5", phase: "recording" });
     const out = recordingRoomsOf(root, deps(() => [{ platform: "bilibili", roomSlug: "5" }]));
     expect(out).toEqual([{ platform: "douyin", roomSlug: "5" }, { platform: "bilibili", roomSlug: "5" }]);
+  });
+
+  it("a scan hit is listed when the room's only file is dead or exited (they must not suppress it)", () => {
+    const scan = () => [{ platform: "douyin", roomSlug: "555" }];
+    const dead = makeRoot();
+    put(dead, { taskId: 1, phase: "recording", owner: { pid: 1, startTicks: TICKS, bootId: BOOT } });
+    expect(recordingRoomsOf(dead, deps(scan))).toEqual(scan());
+    const gone = makeRoot();
+    put(gone, { taskId: 1, phase: "exited", exit: exited });
+    expect(recordingRoomsOf(gone, deps(scan))).toEqual(scan());
+  });
+
+  it("finalizing is intentionally not listed (not pulling a stream); is-done still holds the room", () => {
+    const root = makeRoot();
+    put(root, { taskId: 1, phase: "finalizing" });
+    expect(recordingRoomsOf(root, deps())).toEqual([]);
+    expect(isRoomDone(root, "555", deps())).toBe(false);
+  });
+});
+
+describe("master local worker uses the same judgement (issue #456)", () => {
+  const mkLocal = (root: string, d: RoomProbeDeps) => new LocalTransport({
+    id: "local", recordingsDir: join(root, "recordings"), taskRooms: {},
+    ffprobe: async () => ({ durationSec: 0, startMs: 0, endMs: 0 }),
+    ...localRoomProbes(() => root, d),
+  });
+
+  it("isDone stays false while a finalizing state file is active, true once it is exited", async () => {
+    const root = makeRoot();
+    put(root, { taskId: 1, phase: "finalizing" });
+    const t = mkLocal(root, deps());
+    expect(await t.isDone("555")).toBe(false);
+    put(root, { taskId: 1, phase: "exited", exit: exited });
+    expect(await t.isDone("555")).toBe(true);
+  });
+
+  it("activeRecordingRooms comes from the same judge", async () => {
+    const root = makeRoot();
+    put(root, { taskId: 1, phase: "recording" });
+    expect(await mkLocal(root, deps()).activeRecordingRooms()).toEqual([{ platform: "douyin", roomSlug: "555" }]);
   });
 });

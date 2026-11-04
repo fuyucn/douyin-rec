@@ -126,9 +126,11 @@ describe("live-pump reporter events", () => {
       onPhase: (p) => seq.push(p),
     });
     expect(r.ok, r.error ?? "").toBe(true);
-    expect(seq.slice(0, 3)).toEqual(["polling", "polling", "recording"]);
-    expect(seq.indexOf("finalizing")).toBeGreaterThan(seq.indexOf("recording"));
-    expect(seq.indexOf("finalizing")).toBeLessThan(seq.indexOf("confirmed"));
+    // The session open (recover) is wrapped in finalizing and then restores the previous phase.
+    expect(seq.filter((x) => x !== "confirmed").slice(0, 5)).toEqual(["polling", "finalizing", "polling", "polling", "recording"]);
+    const fin = seq.indexOf("finalizing", seq.indexOf("recording"));
+    expect(fin).toBeGreaterThan(seq.indexOf("recording"));
+    expect(fin).toBeLessThan(seq.indexOf("confirmed"));
   }, 20_000);
 
   it("a throwing onPhase never changes the upload result", async () => {

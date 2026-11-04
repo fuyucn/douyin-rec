@@ -18,7 +18,7 @@ import { zeroDiskUploadCookie } from "./zero-disk-upload-cookie.js";
 import { Command } from "commander";
 // 节点侧上传(experimental,plans/027)的节点侧命令(隔离在独立文件,便于快速开关/回退)。
 import { applyNodeDataRoot, registerNodePipelineCommands } from "./node-pipeline-commands.js";
-import { NODE_COMMANDS, notifyOutboxArgs, runNodeCommandCli } from "./node-commands.js";
+import { NODE_COMMANDS, localRoomProbes, notifyOutboxArgs, runNodeCommandCli } from "./node-commands.js";
 import { registerRecoverOrderCommands } from "./hub-recover-order-commands.js";
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
@@ -1465,22 +1465,15 @@ const hubStarter: HubStarter = {
       }
       return map;
     };
-    // 某 roomSlug 是否还在本机录制(local transport settle 用):匹配该 slug 的任务有在录的就算「未收播」,
-    // 防周期对账在录制中途就合并残片(settle 等录完才处理)。
-    const isRoomRecording = (slug: string): boolean =>
-      opts.store.listTasks().some(
-        (t) => platformForRoom(t.room).extractRoomSlug(t.room) === slug && opts.manager.isRecording(t.id),
-      );
+    // Local worker: same judgement as ssh / fleet nodes (state files + /proc fallback), NOT the serve-side
+    // `[状态]` flag, which flips to "not recording" on `录制停滞` while the tail part is still uploading.
+    const { isRoomRecording, activeRecordingRooms } = localRoomProbes(drecRoot);
     registerBuiltinTransports({
       ffprobe,
       fleet: fleetLink,
       taskRooms: buildTaskRooms,
       isRoomRecording,
-      activeRecordingRooms: () => opts.store.listTasks().flatMap((t) => {
-        if (!opts.manager.isRecording(t.id)) return [];
-        const platform = platformForRoom(t.room);
-        return [{ platform: platform.id, roomSlug: platform.extractRoomSlug(t.room) }];
-      }),
+      activeRecordingRooms,
       // local worker = master 自身:hub 任务同步直接落在本机 store(与远端 `_tasks` / `_apply-tasks` 同路径)。
       listTasks: () => listNodeTasks(opts.store),
       // 处理任务表通道(T9a):local worker 与远端 `_enqueue` / `_proc-status` 同一执行体(无派发方,仅可被调用)。

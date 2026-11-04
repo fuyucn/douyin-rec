@@ -175,6 +175,9 @@ export function parseRecorderState(raw: unknown): RecorderStateFile | null {
   };
 }
 
+/** Exited state files older than this are ignored by readers (never deleted). */
+export const EXITED_STATE_IGNORE_AFTER_MS = 7 * 24 * 3600_000;
+
 /** Read every `rec-*.json` under `<root>/run`. Unparsable files are skipped with one log line each. */
 export function readRecorderStates(root: string, log: (msg: string) => void = () => {}): RecorderStateFile[] {
   const dir = recorderStateDir(root);
@@ -202,6 +205,8 @@ export function readRecorderStates(root: string, log: (msg: string) => void = ()
 export interface RoomActivity {
   platform: string;
   roomSlug: string;
+  /** Some verified-active owner (any phase, including polling) exists for this room. */
+  active: boolean;
   /** An active owner is pulling a stream right now. */
   recording: boolean;
   /** An active owner is still sealing / uploading its tail. */
@@ -217,8 +222,9 @@ export function roomActivities(states: readonly RecorderStateFile[], now: number
   const rooms = new Map<string, RoomActivity>();
   for (const s of states) {
     const key = `${s.platform}:${s.roomSlug}`;
-    const room = rooms.get(key) ?? { platform: s.platform, roomSlug: s.roomSlug, recording: false, finalizing: false };
+    const room = rooms.get(key) ?? { platform: s.platform, roomSlug: s.roomSlug, active: false, recording: false, finalizing: false };
     if (recorderActivity(s, now, proc) === "active") {
+      room.active = true;
       if (s.phase === "recording") room.recording = true;
       else if (s.phase === "finalizing") room.finalizing = true;
     }

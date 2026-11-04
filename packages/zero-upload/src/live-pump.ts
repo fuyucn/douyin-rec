@@ -2598,7 +2598,9 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
   // TaskManager derives the task's recording phase from these exact markers
   // (`[状态] 录制中` / `[状态] 等待开播`). Without them a zero-disk task shows as "running"
   // but never "recording", so the UI cannot tell waiting-for-stream from actually recording.
+  let curPhase: "polling" | "recording" | "finalizing" = "polling";
   const phase = (p: "polling" | "recording" | "finalizing"): void => {
+    curPhase = p;
     try { o.onPhase?.(p); } catch { /* observability only */ }
   };
   emit({ at: Date.now(), kind: "waiting" });
@@ -2667,6 +2669,11 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     });
 
     if (o.submit !== false) {
+      // Whenever this child owns unconfirmed upload work the phase is `finalizing` (plans/044): WAL recovery and
+      // the whole-file re-upload of a previous run's parts must never look like "idle, waiting for a broadcast".
+      const resumePhase = curPhase;
+      phase("finalizing");
+      try {
       const recovered = await session.recover();
       if (!recovered.ok) {
         log(
@@ -2707,6 +2714,9 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
             statePath: livePumpStatePath(o.spoolDir, o.room),
           } };
         }
+      }
+      } finally {
+        phase(resumePhase);
       }
     }
     return { session };
@@ -3265,7 +3275,9 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     // ending here (exit 0) is safe — the next run waits in-process and re-decides the session.
     // Waiting again *here* would keep a session opened hours earlier for the next broadcast.
     let s: StreamAcquirer | null;
-    phase("polling"); // every part of the previous connection has settled; we are waiting for a stream again
+    // Every part of the previous connection has settled; we are waiting for a stream again. Parts that stayed
+    // unconfirmed (kept spool, held gap) are still upload work this child owns → finalizing, not idle polling.
+    phase(session.hasUnconfirmed ? "finalizing" : "polling");
     if (recoveryDeadline !== undefined) {
       s = await waitForBroadcast(recoveryDeadline);
       if (!s) {
