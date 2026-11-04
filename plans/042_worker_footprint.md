@@ -59,6 +59,13 @@
 - master → 节点：`req {id, cmd, args}`，`cmd` ∈ 现有隐藏命令名（`inventory`/`tasks`/`apply-tasks`/`enqueue`/`proc-status`/`proc-cancel`/`task-logs`/`zero-disk-report`/…）；节点 `res {id, stdout, exitCode}` —— **stdout 与 CLI 字节一致**，`SshTransport` 解析代码不动。超时与现有 ssh 预算一致（8s / 45s / 长任务独立预算）。
 - 存活：ws ping 5s；master 30s 无任何帧 → 该节点状态 `unavailable`（**不是**「未在录 / 文件已删」，#146 口径）；节点断线 1–30s 指数退避重连；同 nodeId 新连接顶替旧连接。
 
+## 实现期设计修订（2026-11-03）
+
+- **通知不做推送**：`notify` 仍由 master 每 10s 拉取，只是改走长连接 `req`（不再拉起进程）。省掉 at-least-once/去重/ack 的一整套新语义，CPU 收益相同。`event` 帧暂不实现。
+- **心跳只带原样 stdout**：`recording-status` / `disk` / `node-status` 三条命令的输出原样缓存在 master，`SshTransport` 的解析代码零改动；`is-done` 由缓存的在录房间直接推出。
+- **接入方式**：`hub.config.json` 加 `fleet.controllerUrl`（master 被 worker 访问的 tailscale 地址）才启用（opt-in，需重启 master 生效）；master 每分钟检查未连上的 ssh 节点，最多每 30 分钟经 ssh `_fleet-join`（配置走 stdin）下发一次 token；节点 serve 每分钟重读 `config/fleet.json`，无需重启。
+- **回落**：未连接 / 超时 / 未知命令 / 数据根不符 → 原 ssh 路径；命令自身失败（非 0）照常抛错，不重试 ssh。经长连接路由的命令都幂等，回复丢失后走 ssh 重试是安全的。
+
 ## Global Constraints
 
 - 代码与注释英文；plan / TODO / commit 描述按仓库约定中文。
