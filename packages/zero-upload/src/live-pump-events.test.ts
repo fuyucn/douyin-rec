@@ -110,6 +110,40 @@ describe("live-pump reporter events", () => {
     expect(r.ok, r.error ?? "").toBe(true);
   }, 20_000);
 
+  it("onPhase: polling → recording → finalizing, and finalizing is reported before the last part is confirmed", async () => {
+    const seq: string[] = [];
+    const reporter: LivePumpReporter = {
+      event: (e) => { if (e.kind === "part_confirmed") seq.push("confirmed"); },
+      progress: () => {},
+    };
+    fakeFfmpeg(CHUNK * 2);
+    const r = await runLivePump({
+      cookiesPath: join(dir, "cookies.json"), room: "phase", spoolDir: dir, title: "phase",
+      tid: 21, tag: "x", private: true, sizeCap: CHUNK * 2, maxMs: 10_000, maxSegments: 1,
+      quality: "origin", submit: true, spoolMode: "none", fetchImpl: fakeUpos(), reporter,
+      fetch: async () => ({ living: true, url: "http://x/y.ts" }),
+      sleep: async () => {},
+      onPhase: (p) => seq.push(p),
+    });
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(seq.slice(0, 3)).toEqual(["polling", "polling", "recording"]);
+    expect(seq.indexOf("finalizing")).toBeGreaterThan(seq.indexOf("recording"));
+    expect(seq.indexOf("finalizing")).toBeLessThan(seq.indexOf("confirmed"));
+  }, 20_000);
+
+  it("a throwing onPhase never changes the upload result", async () => {
+    fakeFfmpeg(CHUNK * 2);
+    const r = await runLivePump({
+      cookiesPath: join(dir, "cookies.json"), room: "phaseboom", spoolDir: dir, title: "phaseboom",
+      tid: 21, tag: "x", private: true, sizeCap: CHUNK * 2, maxMs: 10_000, maxSegments: 1,
+      quality: "origin", submit: true, spoolMode: "none", fetchImpl: fakeUpos(),
+      fetch: async () => ({ living: true, url: "http://x/y.ts" }),
+      sleep: async () => {},
+      onPhase: () => { throw new Error("phase boom"); },
+    });
+    expect(r.ok, r.error ?? "").toBe(true);
+  }, 20_000);
+
   it("sessionInfo reports resumed for a loaded archive", () => {
     const state = {
       schemaVersion: 1 as const, room: "resume", createdAt: 100, title: "t", tid: 21, tag: "x",

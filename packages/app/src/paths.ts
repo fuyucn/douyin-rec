@@ -4,6 +4,7 @@
  *   <root>/db/douyin-rec.db          数据库(含抖音账号 cookie)
  *   <root>/db/room-stats.db          直播统计(节点会话起止/时长;plans/041)
  *   <root>/recordings/               录像输出
+ *   <root>/run/rec-<taskId>.json     录制子进程状态文件(子进程唯一写者;路径由 core recorderStatePath(drecRoot(), id) 给出;plans/044)
  *   <root>/stage/                    hub 合成暂存(合并/烧录中间产物)
  *   <root>/logs/hub/<平台>_<房间号>/  hub 场次日志(永久保留;不放 stage,清理 stage 不会带走日志)
  *   <root>/config/biliup/cookies.json  biliup B站上传 cookie

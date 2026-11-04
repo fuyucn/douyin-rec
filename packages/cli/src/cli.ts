@@ -32,7 +32,8 @@ import { groupSessionsInDir, mergeSession, mergeSessions } from "@drec/post-proc
 import { renderXmlToAss } from "@drec/post-process";
 import { burn } from "@drec/post-process";
 import { FONTS_DIR } from "@drec/post-process";
-import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir, readOutputLayout, LiveUploadReporter } from "@drec/app";
+import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, drecRoot, rootOutputDir, readOutputLayout, LiveUploadReporter } from "@drec/app";
+import { initRecorderState, noteRecorderDraining, noteRecorderSignal, setRecorderPhase } from "@drec/core";
 import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, isWorkerTargeted, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type ZeroDiskNodeStatusDTO, type RollingDeliveryDTO, type HubPoolSnapshotDTO, type HubBlockedBroadcastDTO, type NodeTaskLogsDTO, type NodeTasksDTO, type WorkerStatus } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, resolveUploadAccountKey, type NotifWebhookToggles } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, buildZeroDiskDelivery, zeroDiskStreamMeta, planZeroDiskSpec, APP_VERSION, syncDbPathFor } from "@drec/app";
@@ -304,6 +305,18 @@ program
       console.error("[rec] --stream-upload 与 --rolling-upload 互斥,请只开一个");
       process.exit(2);
     }
+    // Process state file (plans/044): only a child launched by serve (has --task-id) writes one. The writer is
+    // started before any mode-specific work, so the file exists while the child is still waiting for a broadcast.
+    // The exit hook covers every exit path except SIGKILL; write failures are logged once and never fatal.
+    if (o.taskId !== undefined && /^\d+$/.test(o.taskId)) {
+      initRecorderState({
+        root: drecRoot(),
+        taskId: Number(o.taskId),
+        platform: platform.id,
+        roomSlug: platform.extractRoomSlug(roomToUrl(o.room)),
+        mode: streamUploadEnabled ? "live" : rollingEnabled ? "rolling" : "file",
+      }).installExitHook(process);
+    }
     if (streamUploadEnabled) {
       // 直连新包(不再经 processors re-export):生产路径的依赖要明确,否则"换实现"
       // 看起来像改 processors,容易连带碰到后处理插件层。
@@ -502,6 +515,7 @@ program
       const abort = new AbortController();
       const onSig = (sig: string): void => {
         console.log(`[直播直传] 收到 ${sig},停止录制并中止当前分 P`);
+        noteRecorderSignal(sig);
         abort.abort();
       };
       process.on("SIGINT", () => onSig("SIGINT"));
@@ -516,6 +530,7 @@ program
       const drain = new AbortController();
       process.on("SIGUSR2", () => {
         if (drain.signal.aborted) return; // the daemon re-sends every tick; idempotent
+        noteRecorderDraining();
         drain.abort();
       });
       const run = runLivePump({
@@ -585,6 +600,7 @@ program
         drainSignal: drain.signal,
         // Wait in-process for the next broadcast instead of exiting (issue #308).
         waitForBroadcast: true,
+        onPhase: (p) => setRecorderPhase(p),
         danmu,
         log: (m) => console.log(m),
         onAlert: (message) => { void notifier.notify({ kind: "error", stage: "直播直传", message }).catch(() => {}); },
@@ -717,6 +733,7 @@ program
     const shutdown = (sig: string) => {
       if (stopping) return;
       stopping = true;
+      noteRecorderSignal(sig);
       console.log(`\n[rec] 收到 ${sig}，正在停止…`);
       void session.stop().then(() => closeRemuxQueue()).then(() => {
         console.log("[rec] 已停止");
@@ -735,6 +752,7 @@ program
     process.on("SIGUSR2", () => {
       if (stopping || draining) return;
       draining = true;
+      noteRecorderDraining();
       console.log("[rec] 收到 SIGUSR2，窗口结束排空：等待当前直播自然收播…");
       void session.drain().then(() => closeRemuxQueue()).then(() => {
         console.log("[rec] 排空完成，已停止");
