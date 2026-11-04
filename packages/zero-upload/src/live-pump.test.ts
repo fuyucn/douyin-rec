@@ -17,6 +17,7 @@ import {
   ZERO_DISK_PART_LOST,
   recoveryDeadlineAfterPart,
   alignFileSize,
+  CHUNK_UNIT,
   pumpSegment,
   reuploadSpoolFile,
   buildPipeFfmpegArgs,
@@ -1553,6 +1554,73 @@ describe("audit 回归:降级/泄漏不得静默", () => {
   });
 });
 
+describe("降级可见性(#461):当场上报 + 原因保留", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "live-pump-degrade-")); });
+  afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
+
+  it("块 PUT 失败:onDegrade 当场触发,带块号与 HTTP 状态,uploadError 一致", async () => {
+    const total = CHUNK * 4;
+    installFakeFfmpeg(Buffer.alloc(total, 3));
+    const { fake } = makeFetch({ failPutAt: 2 });
+    const degraded: string[] = [];
+    const r = await runSegment({
+      args: ["-fake"], sizeCap: total, spoolPath: join(dir, "c.mkv"), session: session(),
+      fetchImpl: fake, onDegrade: (reason) => degraded.push(reason),
+    });
+    expect(degraded).toEqual([expect.stringMatching(/分块 1 上传失败.*HTTP 500/)]);
+    expect(r.degradedReason).toBe(degraded[0]);
+    expect(r.uploadError).toMatch(/HTTP 500/);
+  }, 20000);
+
+  it("背压:onDegrade 当场触发(不等段结束),原因与 backpressured 一致", async () => {
+    const total = CHUNK * 6;
+    installFakeFfmpeg(Buffer.alloc(total, 5));
+    const { fake } = makeFetch();
+    const degraded: string[] = [];
+    const r = await runSegment({
+      args: ["-fake"], sizeCap: total, spoolPath: join(dir, "bp.mkv"), session: session(),
+      fetchImpl: fake, queueCapacity: 1, onDegrade: (reason) => degraded.push(reason),
+    });
+    expect(degraded).toEqual([expect.stringMatching(/上传跟不上录制,队列已满/)]);
+    expect(r.degradedReason).toBe(degraded[0]);
+    expect(r.backpressured).toBe(true);
+  });
+
+  it("会话迟到且等待缓冲满:当场降级记录,整文件回退语义不变", async () => {
+    const { fake } = makeFetch();
+    const degraded: string[] = [];
+    let resolveSession!: (s: PreuploadResult) => void;
+    const late = new Promise<PreuploadResult>((resolve) => { resolveSession = resolve; });
+    const sink = new PartSink({
+      sizeCap: CHUNK_UNIT * 2, spoolPath: join(dir, "late.mkv"), session: late, fetchImpl: fake,
+      queueCapacity: 1, onDegrade: (reason) => degraded.push(reason),
+    });
+    sink.write(Buffer.alloc(CHUNK_UNIT + 1, 1)); // 等待缓冲(1×10MiB)装不下 → 当场降级
+    expect(degraded).toEqual([expect.stringMatching(/上传会话未及时就绪.*缓冲已满/)]);
+    resolveSession(session());
+    sink.seal();
+    const res = await sink.finished;
+    expect(res.uploadError).toContain("上传会话未及时就绪");
+    expect(res.degradedReason).toBe(degraded[0]);
+    expect(res.backpressured).toBe(false); // 整文件回退路径,不是队列背压
+  });
+
+  it("停止 abort 不算降级:onDegrade 不触发(停止路径自有上报),uploadError 照记", async () => {
+    const controller = new AbortController();
+    controller.abort(); // 预先中止:等价于停止信号打断在传的分 P
+    installFakeFfmpeg(Buffer.alloc(CHUNK * 4, 1));
+    const { fake } = makeFetch();
+    const degraded: string[] = [];
+    const r = await runSegment({
+      args: ["-fake"], sizeCap: CHUNK * 4, spoolPath: join(dir, "abort.mkv"), session: session(),
+      fetchImpl: fake, signal: controller.signal, onDegrade: (reason) => degraded.push(reason),
+    });
+    expect(degraded).toEqual([]);
+    expect(r.uploadError).toBeTruthy();
+  });
+});
+
 describe("封口信号来自进程退出而非后继段(设计约束回归)", () => {
   it("声明值被刚好填满时尾块立即入队,不需要第二段", async () => {
     // rolling 的 sealedSegmentIndices 要求 `index < maxIndex`(必须出现后继段才封口)。
@@ -2976,6 +3044,8 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     failComplete?: (n: number) => boolean;
     /** Answer the Nth preupload request (1-based, counting every request) with a 601 rate limit. */
     rateLimit601?: (call: number) => boolean;
+    /** PUT chunks of this session number always fail (4xx: fails fast, triggers the whole-file fallback). */
+    failPut?: (n: number) => boolean;
     /** UPOS chunk size (default CHUNK). */
     chunk?: number;
     /** `complete` for this session ignores the abort signal (a request that cannot be cancelled). */
@@ -3019,6 +3089,7 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
       if (m === "POST" && u.searchParams.has("uploads")) return json({ upload_id: `uid-${sessionOf(u)}` });
       if (m === "PUT") {
         const n = sessionOf(u);
+        if (opts.failPut?.(n)) return new Response("boom", { status: 400 });
         const delay = opts.putDelayMs?.(n) ?? 0;
         if (delay) await delayOrAbort(delay, init?.signal);
         const list = sessions.get(n) ?? [];
@@ -3504,6 +3575,28 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     // The late session must be visible the moment it is late.
     expect(all).toContain("上传会话未及时就绪");
     if (spoolMode === "none") expect(all).toMatch(/零落盘仅能缓冲/);
+  }, 30_000);
+
+  it("#461: the degrade reason is logged the moment it happens and survives a successful fallback", async () => {
+    installFakeFfmpeg(tsStream({ gops: 40 }), { chunkEvery: 752, delayMs: 3 });
+    // Part 1's chunk PUTs fail (4xx fails fast, no retry sleep); the fallback session succeeds.
+    const u = fakeUpos({ failPut: (n) => n === 1 });
+    const logs: string[] = [];
+    const alerts: string[] = [];
+    const r = await runLivePump(baseOpts(u, { spoolMode: "full", log: (m) => logs.push(m), onAlert: (m) => alerts.push(m) }));
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(r.segments[0]?.usedFileFallback).toBe(true);
+    expect(r.segments[0]?.uploadError).toBeUndefined();
+    expect(r.segments[0]?.degradedReason).toMatch(/分块 0 上传失败.*HTTP 400/);
+    // 当场(不等段结束)就有降级日志与告警,一段只报一次。
+    const degradeLogs = logs.filter((l) => l.includes("流式上传降级"));
+    expect(degradeLogs).toHaveLength(1);
+    expect(degradeLogs[0]).toMatch(/段1 流式上传降级: 分块 0 上传失败.*HTTP 400/);
+    expect(alerts).toEqual([expect.stringMatching(/段1 流式上传降级/)]);
+    // 段结束行保留原始原因(回退成功清掉 uploadError 也不丢)。
+    const summary = logs.find((l) => l.includes("段1 结束"));
+    expect(summary).toMatch(/降级: 分块 0 上传失败.*HTTP 400/);
+    expect(summary).toMatch(/整文件回退成功/);
   }, 30_000);
 
   it("[full] part N fails with N+1 already cut: both stay recoverable and the next run submits them in index order", async () => {

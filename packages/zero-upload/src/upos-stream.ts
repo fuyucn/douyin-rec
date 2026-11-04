@@ -196,6 +196,12 @@ export interface UploadOptions {
    * 到点后返回已入队的块数,上传侧即干净收尾而不报「流太短」。**缺块仍算错误**。
    */
   maxChunks?: number | (() => number);
+  /**
+   * A chunk PUT that failed even after retries. Carries the chunk index and the last response's
+   * HTTP status (absent for network errors). Observability only: retries and the return
+   * contract are unchanged.
+   */
+  onChunkFailure?: (info: { chunk: number; httpStatus?: number }) => void;
 }
 
 /**
@@ -669,8 +675,14 @@ export async function uploadChunks(o: UploadOptions): Promise<UposPart[]> {
       start: String(start),
       end: String(start + body.length),
     });
-    const ok = await putChunk(doFetch, `${session.url}?${params.toString()}`, session.bucket.auth, body, retries, o.signal);
-    if (!ok) throw new Error(`分块 ${i} 上传失败(已重试 ${retries} 次)`);
+    let lastStatus: number | undefined;
+    const ok = await putChunk(doFetch, `${session.url}?${params.toString()}`, session.bucket.auth, body, retries, o.signal, (s) => { lastStatus = s; });
+    if (!ok) {
+      o.onChunkFailure?.({ chunk: i, ...(lastStatus !== undefined ? { httpStatus: lastStatus } : {}) });
+      // The status belongs in the error message: this string lands in the caller's uploadError,
+      // and without it triage only ever sees "upload failed".
+      throw new Error(`分块 ${i} 上传失败(已重试 ${retries} 次)${lastStatus !== undefined ? `,HTTP ${lastStatus}` : ""}`);
+    }
     parts.push({ partNumber: i + 1, eTag: "etag" });
     uploadedBytes += body.length;
     noteRecorderProgress(); // finalizing stall judge (plans/044): a completed chunk is real upload progress
@@ -747,6 +759,7 @@ async function putChunk(
   body: Uint8Array,
   retries: number,
   signal?: AbortSignal,
+  onStatus?: (status: number) => void,
 ): Promise<boolean> {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -765,6 +778,7 @@ async function putChunk(
         signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(CHUNK_TIMEOUT_MS)]) : AbortSignal.timeout(CHUNK_TIMEOUT_MS),
       });
       if (res.ok) return true;
+      onStatus?.(res.status);
       if (res.status >= 500 && attempt < retries) { await sleep(1000 * (attempt + 1)); continue; }
       return false;
     } catch (e) {
