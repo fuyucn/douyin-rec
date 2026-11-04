@@ -10,7 +10,7 @@
  * `<root>/config/fleet-nodes.json` (read fresh on every hello, the file is the source of truth).
  */
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { dirname } from "node:path";
@@ -25,34 +25,41 @@ import {
   FLEET_ROUTE_FRESH_MS,
   FLEET_WS_PATH,
   parseFleetFrame,
+  writeFileAtomicSync,
   type FleetCommandOutput,
   type FleetHeartbeatCommand,
+  type FleetPing,
+  type FleetRefusal,
+  type FleetRequest,
+  type FleetWelcome,
 } from "@drec/core";
+
+/** A node's reply to a request. */
+export interface FleetReply {
+  stdout: string;
+  exitCode: number;
+  /** The agent did not run the command; the caller should use ssh. */
+  refused?: FleetRefusal;
+  /** The command threw on the node. */
+  error?: string;
+}
 
 /** What `SshTransport` needs from the hub (an interface so tests can fake it). */
 export interface FleetLink {
-  /** Node is connected, authenticated and was heard from recently (FLEET_ROUTE_FRESH_MS). */
-  connected(nodeId: string): boolean;
-  /** Node's agent advertised this command. */
+  /** Node is connected, heard from recently (FLEET_ROUTE_FRESH_MS) and advertised this command. */
   supports(nodeId: string, cmd: string): boolean;
   /** Latest heartbeat output for a status command, or null if missing / older than maxAgeMs. */
   cached(nodeId: string, cmd: FleetHeartbeatCommand, maxAgeMs: number): FleetCommandOutput | null;
+  /** Room slugs recording on the node per the latest `recording-status` heartbeat, or null if unknown / stale. */
+  recordingRooms(nodeId: string, maxAgeMs: number): ReadonlySet<string> | null;
   /** Run a node command over the connection. Rejects on disconnect / timeout (caller falls back to ssh). */
-  request(nodeId: string, cmd: string, args: string[], timeoutMs: number): Promise<{ stdout: string; exitCode: number; error?: string }>;
-}
-
-export interface FleetNodeState {
-  nodeId: string;
-  appVersion: string;
-  connectedAt: number;
-  lastFrameAt: number;
-  lastHeartbeatAt: number | null;
+  request(nodeId: string, cmd: string, args: string[], timeoutMs: number): Promise<FleetReply>;
 }
 
 // ─── token store ──────────────────────────────────────────────────────────────
 
 interface TokenFile {
-  nodes: Record<string, { sha256: string; issuedAt: number }>;
+  nodes: Record<string, { sha256: string }>;
 }
 
 const sha256 = (s: string): string => createHash("sha256").update(s).digest("hex");
@@ -69,28 +76,18 @@ function readTokenFile(path: string): TokenFile {
 /** A fresh random node token (plaintext; persist only its hash with {@link saveFleetToken}). */
 export const newFleetToken = (): string => randomBytes(32).toString("hex");
 
-/** Issue (or rotate) a node's token; returns the plaintext once — only its hash is stored. */
-export function issueFleetToken(path: string, nodeId: string, now = Date.now()): string {
-  const token = newFleetToken();
-  saveFleetToken(path, nodeId, token, now);
-  return token;
-}
-
-/** Store `token`'s hash as the node's only valid token (replaces any previous one). */
-export function saveFleetToken(path: string, nodeId: string, token: string, now = Date.now()): void {
+/** Store `token`'s hash as the node's only valid token (replaces any previous one). Atomic, 0600. */
+export function saveFleetToken(path: string, nodeId: string, token: string): void {
   const file = readTokenFile(path);
-  file.nodes[nodeId] = { sha256: sha256(token), issuedAt: now };
+  file.nodes[nodeId] = { sha256: sha256(token) };
   mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}`;
-  writeFileSync(tmp, JSON.stringify(file, null, 2) + "\n", { mode: 0o600 });
-  chmodSync(tmp, 0o600);
-  renameSync(tmp, path);
+  writeFileAtomicSync(path, JSON.stringify(file, null, 2) + "\n", { mode: 0o600 });
 }
 
 /** Constant-time check of a presented token against the stored hash. */
 export function verifyFleetToken(path: string, nodeId: string, token: string): boolean {
   const entry = readTokenFile(path).nodes[nodeId];
-  if (!entry || typeof token !== "string" || !token) return false;
+  if (!entry || typeof token !== "string" || !token || typeof entry.sha256 !== "string") return false;
   const a = Buffer.from(sha256(token), "hex");
   const b = Buffer.from(entry.sha256, "hex");
   return a.length === b.length && timingSafeEqual(a, b);
@@ -99,11 +96,14 @@ export function verifyFleetToken(path: string, nodeId: string, token: string): b
 // ─── hub ──────────────────────────────────────────────────────────────────────
 
 interface Conn {
+  nodeId: string;
   ws: WebSocket;
-  state: FleetNodeState;
+  lastFrameAt: number;
   commands: Set<string>;
   outputs: Partial<Record<FleetHeartbeatCommand, FleetCommandOutput>>;
-  pending: Map<number, { resolve: (r: { stdout: string; exitCode: number; error?: string }) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>;
+  /** Parsed once per `recording-status` heartbeat: the slugs, and an order-free identity for change detection. */
+  rooms: { slugs: ReadonlySet<string>; key: string; at: number } | null;
+  pending: Map<number, { resolve: (r: FleetReply) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>;
 }
 
 export interface FleetHubOptions {
@@ -113,7 +113,7 @@ export interface FleetHubOptions {
   pingMs?: number;
   idleTimeoutMs?: number;
   routeFreshMs?: number;
-  /** Called when a node's recording rooms change between heartbeats (lets the master reconcile at once). */
+  /** Called when a node's recording rooms change between heartbeats (lets the master refresh at once). */
   onRecordingChange?: (nodeId: string) => void;
 }
 
@@ -144,6 +144,7 @@ export class FleetHub implements FleetLink {
     return true;
   }
 
+  /** Node is connected and was heard from recently enough to route a request to it. */
   connected(nodeId: string): boolean {
     return this.live(nodeId) !== null;
   }
@@ -152,19 +153,18 @@ export class FleetHub implements FleetLink {
     return this.live(nodeId)?.commands.has(cmd) ?? false;
   }
 
-  /** The node's connection if it was heard from recently enough to route a request to it. */
-  private live(nodeId: string): Conn | null {
-    const c = this.conns.get(nodeId);
-    return c && this.now() - c.state.lastFrameAt <= this.routeFreshMs ? c : null;
-  }
-
   cached(nodeId: string, cmd: FleetHeartbeatCommand, maxAgeMs: number): FleetCommandOutput | null {
     const out = this.conns.get(nodeId)?.outputs[cmd];
     return out && this.now() - out.at <= maxAgeMs ? out : null;
   }
 
-  request(nodeId: string, cmd: string, args: string[], timeoutMs: number): Promise<{ stdout: string; exitCode: number; error?: string }> {
-    const c = this.conns.get(nodeId);
+  recordingRooms(nodeId: string, maxAgeMs: number): ReadonlySet<string> | null {
+    const rooms = this.conns.get(nodeId)?.rooms;
+    return rooms && this.now() - rooms.at <= maxAgeMs ? rooms.slugs : null;
+  }
+
+  request(nodeId: string, cmd: string, args: string[], timeoutMs: number): Promise<FleetReply> {
+    const c = this.live(nodeId);
     if (!c) return Promise.reject(new Error(`fleet: ${nodeId} not connected`));
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
@@ -173,19 +173,19 @@ export class FleetHub implements FleetLink {
         reject(new Error(`fleet: ${cmd} on ${nodeId} timed out after ${timeoutMs}ms`));
       }, timeoutMs);
       c.pending.set(id, { resolve, reject, timer });
-      c.ws.send(JSON.stringify({ t: "req", id, cmd, args }));
+      c.ws.send(JSON.stringify({ t: "req", id, cmd, args } satisfies FleetRequest));
     });
-  }
-
-  nodes(): FleetNodeState[] {
-    return [...this.conns.values()].map((c) => ({ ...c.state }));
   }
 
   close(): void {
     clearInterval(this.pingTimer);
-    for (const c of this.conns.values()) c.ws.close(1001);
-    this.conns.clear();
+    for (const c of [...this.conns.values()]) this.drop(c, 1001, "hub closed");
     this.wss.close();
+  }
+
+  private live(nodeId: string): Conn | null {
+    const c = this.conns.get(nodeId);
+    return c && this.now() - c.lastFrameAt <= this.routeFreshMs ? c : null;
   }
 
   private accept(ws: WebSocket): void {
@@ -211,20 +211,21 @@ export class FleetHub implements FleetLink {
         const nodeId = frame.nodeId;
         const prev = this.conns.get(nodeId);
         if (prev) this.drop(prev, FLEET_CLOSE.superseded, "superseded by a new connection");
-        const t = this.now();
         conn = {
+          nodeId,
           ws,
-          state: { nodeId, appVersion: String(frame.appVersion ?? ""), connectedAt: t, lastFrameAt: t, lastHeartbeatAt: null },
+          lastFrameAt: this.now(),
           commands: new Set(Array.isArray(frame.commands) ? frame.commands.filter((x): x is string => typeof x === "string") : []),
           outputs: {},
+          rooms: null,
           pending: new Map(),
         };
         this.conns.set(nodeId, conn);
-        ws.send(JSON.stringify({ t: "welcome", protocol: FLEET_PROTOCOL }));
-        this.log(`[fleet] node ${nodeId} connected (${conn.state.appVersion})`);
+        ws.send(JSON.stringify({ t: "welcome", protocol: FLEET_PROTOCOL } satisfies FleetWelcome));
+        this.log(`[fleet] node ${nodeId} connected (${String(frame.appVersion ?? "")})`);
         return;
       }
-      conn.state.lastFrameAt = this.now();
+      conn.lastFrameAt = this.now();
       if (frame.t === "heartbeat" && frame.outputs && typeof frame.outputs === "object") {
         this.applyHeartbeat(conn, frame.outputs as Record<string, unknown>);
       } else if (frame.t === "res" && typeof frame.id === "number") {
@@ -235,6 +236,7 @@ export class FleetHub implements FleetLink {
         p.resolve({
           stdout: typeof frame.stdout === "string" ? frame.stdout : "",
           exitCode: typeof frame.exitCode === "number" ? frame.exitCode : 1,
+          ...(frame.refused === "unknown-command" || frame.refused === "data-root-mismatch" ? { refused: frame.refused } : {}),
           ...(typeof frame.error === "string" ? { error: frame.error } : {}),
         });
       }
@@ -242,69 +244,67 @@ export class FleetHub implements FleetLink {
 
     ws.on("close", () => {
       clearTimeout(helloTimer);
-      if (conn && this.conns.get(conn.state.nodeId) === conn) this.drop(conn, null, "disconnected");
+      if (conn && this.conns.get(conn.nodeId) === conn) this.drop(conn, null, "disconnected");
     });
     ws.on("error", () => { /* close follows */ });
   }
 
   private applyHeartbeat(conn: Conn, outputs: Record<string, unknown>): void {
-    const prevRooms = conn.outputs["recording-status"]?.stdout;
+    const at = this.now(); // freshness by the master's clock: node clocks may drift, receipt time cannot
     for (const cmd of FLEET_HEARTBEAT_COMMANDS) {
-      const o = outputs[cmd] as Partial<FleetCommandOutput> | undefined;
-      if (!o || typeof o.stdout !== "string" || typeof o.exitCode !== "number" || typeof o.at !== "number") continue;
-      // Freshness is judged by the master's clock: node clocks may drift, receipt time cannot.
-      conn.outputs[cmd] = { stdout: o.stdout, exitCode: o.exitCode, at: this.now() };
+      const o = outputs[cmd] as { stdout?: unknown; exitCode?: unknown } | undefined;
+      if (!o || typeof o.stdout !== "string" || typeof o.exitCode !== "number") continue;
+      conn.outputs[cmd] = { stdout: o.stdout, exitCode: o.exitCode, at };
+      if (cmd === "recording-status") this.applyRooms(conn, o.stdout, o.exitCode, at);
     }
-    conn.state.lastHeartbeatAt = this.now();
-    const nextRooms = conn.outputs["recording-status"]?.stdout;
-    if (prevRooms !== undefined && nextRooms !== undefined && roomsKey(prevRooms) !== roomsKey(nextRooms)) {
-      this.o.onRecordingChange?.(conn.state.nodeId);
+  }
+
+  private applyRooms(conn: Conn, stdout: string, exitCode: number, at: number): void {
+    const parsed = exitCode === 0 ? parseRecordingRooms(stdout) : null;
+    if (!parsed) {
+      conn.rooms = null; // unknown: callers fall back to asking
+      return;
     }
+    const key = parsed.map((r) => `${r.platform}:${r.roomSlug}`).sort().join(",");
+    const changed = conn.rooms !== null && conn.rooms.key !== key;
+    conn.rooms = { slugs: new Set(parsed.map((r) => r.roomSlug)), key, at };
+    if (changed) this.o.onRecordingChange?.(conn.nodeId);
   }
 
   /** Ping live connections; drop the ones that went silent (half-open links never close on their own). */
   private sweep(): void {
     const t = this.now();
     for (const c of [...this.conns.values()]) {
-      if (t - c.state.lastFrameAt > this.idleTimeoutMs) {
+      if (t - c.lastFrameAt > this.idleTimeoutMs) {
         this.drop(c, 1001, "idle");
         continue;
       }
-      c.ws.send(JSON.stringify({ t: "ping" }));
+      c.ws.send(JSON.stringify({ t: "ping" } satisfies FleetPing));
     }
   }
 
   private drop(c: Conn, code: number | null, why: string): void {
-    if (this.conns.get(c.state.nodeId) === c) this.conns.delete(c.state.nodeId);
+    if (this.conns.get(c.nodeId) === c) this.conns.delete(c.nodeId);
     for (const p of c.pending.values()) {
       clearTimeout(p.timer);
-      p.reject(new Error(`fleet: ${c.state.nodeId} ${why}`));
+      p.reject(new Error(`fleet: ${c.nodeId} ${why}`));
     }
     c.pending.clear();
     if (code !== null) c.ws.close(code);
-    this.log(`[fleet] node ${c.state.nodeId} ${why}`);
+    this.log(`[fleet] node ${c.nodeId} ${why}`);
   }
 }
 
-/** Order-insensitive identity of the recording rooms in a `recording-status` stdout (rolling progress ignored). */
-function roomsKey(stdout: string): string {
+/** The recording rooms in a `recording-status` stdout (rolling progress ignored), or null if it does not parse. */
+export function parseRecordingRooms(stdout: string): Array<{ platform: string; roomSlug: string }> | null {
   try {
-    const v = JSON.parse(stdout) as { rooms?: Array<{ platform?: string; roomSlug?: string }> };
-    return (v.rooms ?? []).map((r) => `${r.platform}:${r.roomSlug}`).sort().join(",");
+    const v = JSON.parse(stdout) as { rooms?: unknown };
+    if (!Array.isArray(v.rooms)) return null;
+    return v.rooms.map((r) => {
+      const x = (r ?? {}) as { platform?: unknown; roomSlug?: unknown };
+      return { platform: String(x.platform), roomSlug: String(x.roomSlug) };
+    });
   } catch {
-    return stdout;
+    return null;
   }
-}
-
-// ─── process-wide link (set by the master at hub start) ───────────────────────
-
-let activeLink: FleetLink | null = null;
-
-/** The master registers its hub once; every `SshTransport` built afterwards consults it. */
-export function setFleetLink(link: FleetLink | null): void {
-  activeLink = link;
-}
-
-export function getFleetLink(): FleetLink | null {
-  return activeLink;
 }

@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocket } from "ws";
-import { FleetHub, issueFleetToken, verifyFleetToken } from "./fleet-hub.js";
+import { FleetHub, newFleetToken, saveFleetToken, verifyFleetToken } from "./fleet-hub.js";
 
 type Frame = { t: string; [k: string]: unknown };
 
@@ -78,7 +78,7 @@ describe("FleetHub", () => {
     const { hub, url } = await startHub({ now: () => t });
     const n = await node(url);
     await n.next("welcome");
-    n.ws.send(JSON.stringify({ t: "heartbeat", at: 5, outputs: { disk: { stdout: '{"freeGB":1}\n', exitCode: 0, at: 5 } } }));
+    n.ws.send(JSON.stringify({ t: "heartbeat", outputs: { disk: { stdout: '{"freeGB":1}\n', exitCode: 0 } } }));
     await until(() => hub.cached("n1", "disk", 100) !== null);
     expect(hub.cached("n1", "disk", 100)).toEqual({ stdout: '{"freeGB":1}\n', exitCode: 0, at: 1000 });
     t = 1200;
@@ -148,8 +148,8 @@ describe("FleetHub", () => {
     const n = await node(url);
     await n.next("welcome");
     const hb = (rooms: string[]) => n.ws.send(JSON.stringify({
-      t: "heartbeat", at: 0,
-      outputs: { "recording-status": { stdout: JSON.stringify({ rooms: rooms.map((r) => ({ platform: "douyin", roomSlug: r })), rolling: [{ p: Math.random() }] }) + "\n", exitCode: 0, at: 0 } },
+      t: "heartbeat",
+      outputs: { "recording-status": { stdout: JSON.stringify({ rooms: rooms.map((r) => ({ platform: "douyin", roomSlug: r })), rolling: [{ p: Math.random() }] }) + "\n", exitCode: 0 } },
     }));
     hb(["a"]);
     hb(["a"]); // rolling progress changed, rooms did not
@@ -157,6 +157,45 @@ describe("FleetHub", () => {
     await until(() => changes.length === 1);
     await new Promise((r) => setTimeout(r, 100));
     expect(changes).toEqual(["n1"]);
+  });
+
+  it("recordingRooms: parsed once from the heartbeat; unparsable or failed output → null", async () => {
+    let t = 1000;
+    const { hub, url } = await startHub({ now: () => t });
+    const n = await node(url);
+    await n.next("welcome");
+    const send = (stdout: string, exitCode = 0) => n.ws.send(JSON.stringify({ t: "heartbeat", outputs: { "recording-status": { stdout, exitCode } } }));
+    send('{"rooms":[{"platform":"douyin","roomSlug":"a"}],"rolling":[]}\n');
+    await until(() => hub.recordingRooms("n1", 100) !== null);
+    expect([...hub.recordingRooms("n1", 100)!]).toEqual(["a"]);
+    t = 1200;
+    expect(hub.recordingRooms("n1", 100)).toBeNull();
+    send("not json");
+    await until(() => hub.cached("n1", "recording-status", 100)?.stdout === "not json");
+    expect(hub.recordingRooms("n1", 100)).toBeNull();
+    send('{"rooms":[]}\n', 1);
+    await until(() => hub.cached("n1", "recording-status", 100)?.exitCode === 1);
+    expect(hub.recordingRooms("n1", 100)).toBeNull();
+  });
+
+  it("close() rejects pending requests", async () => {
+    const { hub, url } = await startHub();
+    const n = await node(url);
+    await n.next("welcome");
+    const p = hub.request("n1", "tasks", ["/r"], 5000);
+    await n.next("req");
+    hub.close();
+    await expect(p).rejects.toThrow(/closed/);
+  });
+
+  it("a refusal from the agent is passed through", async () => {
+    const { hub, url } = await startHub();
+    const n = await node(url);
+    await n.next("welcome");
+    const p = hub.request("n1", "tasks", ["/r"], 2000);
+    const req = await n.next("req");
+    n.ws.send(JSON.stringify({ t: "res", id: req.id, stdout: "", exitCode: 1, refused: "unknown-command" }));
+    expect(await p).toEqual({ stdout: "", exitCode: 1, refused: "unknown-command" });
   });
 
   it("non-fleet upgrade paths are not handled", async () => {
@@ -170,14 +209,16 @@ describe("fleet token store", () => {
     const dir = mkdtempSync(join(tmpdir(), "drec-fleet-tok-"));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
     const p = join(dir, "config", "fleet-nodes.json");
-    const t1 = issueFleetToken(p, "n1");
+    const t1 = newFleetToken();
+    saveFleetToken(p, "n1", t1);
     expect(t1).toMatch(/^[0-9a-f]{64}$/);
     expect(statSync(p).mode & 0o777).toBe(0o600);
     expect(readFileSync(p, "utf8")).not.toContain(t1);
     expect(verifyFleetToken(p, "n1", t1)).toBe(true);
     expect(verifyFleetToken(p, "n1", t1.slice(1))).toBe(false);
     expect(verifyFleetToken(p, "n2", t1)).toBe(false);
-    const t2 = issueFleetToken(p, "n1");
+    const t2 = newFleetToken();
+    saveFleetToken(p, "n1", t2);
     expect(verifyFleetToken(p, "n1", t1)).toBe(false);
     expect(verifyFleetToken(p, "n1", t2)).toBe(true);
   });

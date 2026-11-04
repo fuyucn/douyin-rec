@@ -43,14 +43,30 @@ export const FLEET_CLOSE = Object.freeze({
 export const FLEET_UNAUTHORIZED_BACKOFF_MS = 10 * 60_000;
 export const FLEET_SUPERSEDED_BACKOFF_MS = 30_000;
 
-/** Commands whose stdout rides on every heartbeat (cheap, polled constantly by the master). */
+/** Commands whose stdout rides on heartbeats (cheap, polled constantly by the master). */
 export const FLEET_HEARTBEAT_COMMANDS = ["recording-status", "disk", "node-status"] as const;
 export type FleetHeartbeatCommand = (typeof FLEET_HEARTBEAT_COMMANDS)[number];
 
-/** One command's cached output: exactly what the hidden CLI command would print, plus when it was taken. */
-export interface FleetCommandOutput {
+/**
+ * Per command: how often the agent refreshes it (`everyMs`) and how old a cached value the master still
+ * answers polls with (`maxAgeMs`). One table so the two sides cannot drift: maxAgeMs must stay above
+ * everyMs plus one heartbeat of slack, or the master would ask over the connection between refreshes.
+ * Only recording state changes quickly; node-status opens two sqlite databases, disk changes slowly.
+ */
+export const FLEET_HEARTBEAT_PLAN: Readonly<Record<FleetHeartbeatCommand, { everyMs: number; maxAgeMs: number }>> = Object.freeze({
+  "recording-status": { everyMs: 10_000, maxAgeMs: 15_000 },
+  "node-status": { everyMs: 30_000, maxAgeMs: 45_000 },
+  disk: { everyMs: 60_000, maxAgeMs: 120_000 },
+});
+
+/** One command's result as the hidden CLI command would print it. */
+export interface FleetCommandResult {
   stdout: string;
   exitCode: number;
+}
+
+/** A cached heartbeat value on the master, stamped with the master's receipt time. */
+export interface FleetCommandOutput extends FleetCommandResult {
   at: number;
 }
 
@@ -66,8 +82,8 @@ export interface FleetHello {
 
 export interface FleetHeartbeat {
   t: "heartbeat";
-  at: number;
-  outputs: Partial<Record<FleetHeartbeatCommand, FleetCommandOutput>>;
+  /** Only the commands refreshed this time; the master keeps the others. */
+  outputs: Partial<Record<FleetHeartbeatCommand, FleetCommandResult>>;
 }
 
 export interface FleetRequest {
@@ -78,12 +94,18 @@ export interface FleetRequest {
   args: string[];
 }
 
-export interface FleetResponse {
+/**
+ * Why an agent declined to run a request. The master then uses ssh: an old bundle (unknown command) or a
+ * misconfigured worker (data root mismatch) is exactly what the ssh path already handles.
+ */
+export type FleetRefusal = "unknown-command" | "data-root-mismatch";
+
+export interface FleetResponse extends FleetCommandResult {
   t: "res";
   id: number;
-  stdout: string;
-  exitCode: number;
-  /** Set when the agent could not run the command at all (unknown command, dataRoot mismatch, crash). */
+  /** The agent did not run the command (see FleetRefusal); stdout/exitCode carry no meaning. */
+  refused?: FleetRefusal;
+  /** The command threw instead of returning (exitCode 1); the message, for the master's error. */
   error?: string;
 }
 
@@ -98,9 +120,6 @@ export interface FleetPing {
 
 export type FleetNodeFrame = FleetHello | FleetHeartbeat | FleetResponse;
 export type FleetMasterFrame = FleetWelcome | FleetRequest | FleetPing;
-
-/** Exit code an agent reports for a command it does not have (mirrors a shell's "command not found"). */
-export const FLEET_UNKNOWN_COMMAND_EXIT = 127;
 
 /** Parse one text frame; returns null for anything that is not a well-formed object with a string `t`. */
 export function parseFleetFrame(text: string): { t: string; [k: string]: unknown } | null {

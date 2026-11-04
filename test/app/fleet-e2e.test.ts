@@ -19,7 +19,7 @@ const until = async (cond: () => boolean): Promise<void> => {
 
 describe("fleet end to end", () => {
   it("status from heartbeat, tasks over the connection, ssh after the agent stops", async () => {
-    const hub = new FleetHub({ verifyToken: (n, t) => n === "vps1" && t === "tok" });
+    const hub = new FleetHub({ verifyToken: (n, t) => n === "vps1" && t === "tok".repeat(11) });
     const server: Server = createServer((_q, r) => r.end());
     server.on("upgrade", (req, socket, head) => { if (!hub.handleUpgrade(req, socket, head)) socket.destroy(); });
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r())); // issue-guard: allow (loopback / test fixture)
@@ -33,14 +33,14 @@ describe("fleet end to end", () => {
       tasks: async () => ({ stdout: '{"tasks":[]}\n', exitCode: 0 }),
     };
     const agent = startFleetAgent({
-      config: { controllerUrl: `http://127.0.0.1:${port}`, nodeId: "vps1", token: "tok" }, // issue-guard: allow (loopback / test fixture)
+      config: { controllerUrl: `http://127.0.0.1:${port}`, nodeId: "vps1", token: "tok".repeat(11) }, // issue-guard: allow (loopback / test fixture)
       dataRoot: "/data", appVersion: "x", commands, heartbeatMs: 50,
     });
     cleanups.push(() => agent.stop());
     await until(() => hub.cached("vps1", "disk", 10_000) !== null);
 
     const ssh = vi.fn(async () => { throw new Error("ssh should not be used"); });
-    const t = new SshTransport({ id: "vps1", host: "h", dataRoot: "/data", run: ssh, fleet: hub });
+    const t = new SshTransport({ id: "vps1", host: "h", dataRoot: "/data", run: ssh, fleet: () => hub });
     expect(await t.diskFreeGB()).toBe(12.5);
     expect(await t.isDone("r1")).toBe(false);
     expect(await t.isDone("r2")).toBe(true);
@@ -51,7 +51,7 @@ describe("fleet end to end", () => {
     agent.stop();
     await until(() => !hub.connected("vps1"));
     const ssh2 = vi.fn(async () => '{"tasks":[]}\n');
-    const t2 = new SshTransport({ id: "vps1", host: "h", dataRoot: "/data", run: ssh2, fleet: hub });
+    const t2 = new SshTransport({ id: "vps1", host: "h", dataRoot: "/data", run: ssh2, fleet: () => hub });
     await t2.listTasks();
     expect(ssh2).toHaveBeenCalledOnce();
   });

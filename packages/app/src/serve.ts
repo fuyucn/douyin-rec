@@ -27,7 +27,7 @@ import { ProcQueueStore, ProcRunner, SimpleSlotLimiter } from "@drec/proc-queue"
 import { TaskManager } from "./task-manager.js";
 import { masterSendsTransition, roomIsLive, workerProbeUsable, type LiveTick } from "./live-notify.js";
 import { NotifyOutbox } from "./notify-outbox.js";
-import { readFleetConfig, startFleetAgent, type FleetAgent, type FleetNodeCommand } from "./fleet-agent.js";
+import { watchFleetAgent, type FleetAgent, type FleetNodeCommand } from "./fleet-agent.js";
 import { APP_VERSION } from "./version.js";
 import { TaskLogStore } from "@drec/observability";
 import { NodeRecordSpawner } from "./process/spawner.js";
@@ -218,25 +218,18 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
         console.warn(`[rolling] 启动刷新边录边传生效值失败(回落旧开关迁移):${String((e as Error)?.message ?? e)}`);
       }
     }
-    // Fleet agent (plans/042): workers only. fleet.json is re-read every minute so a master-issued join
-    // (or token rotation) takes effect without restarting serve. Absent/invalid → off, the master uses ssh.
-    const fleetConfigPath = join(rootConfigDir(), "fleet.json");
-    let fleetAgent: FleetAgent | null = null;
-    let fleetConfigKey = "";
-    const reloadFleetAgent = (): void => {
-      if (hubEnabled || !deps.fleetCommands) return;
-      const cfg = readFleetConfig(fleetConfigPath);
-      const key = cfg ? JSON.stringify(cfg) : "";
-      if (key === fleetConfigKey) return;
-      fleetConfigKey = key;
-      fleetAgent?.stop();
-      fleetAgent = cfg
-        ? startFleetAgent({ config: cfg, dataRoot: drecRoot(), appVersion: APP_VERSION, commands: deps.fleetCommands, log: (m) => serveLog.info(m) })
+    // Fleet agent (plans/042): workers only. fleet.json is followed, so a master-issued join (or token
+    // rotation) takes effect without restarting serve. Absent/invalid → off, the master uses ssh.
+    const fleetAgent: FleetAgent | null =
+      !hubEnabled && deps.fleetCommands
+        ? watchFleetAgent({
+            configPath: join(rootConfigDir(), "fleet.json"),
+            dataRoot: drecRoot(),
+            appVersion: APP_VERSION,
+            commands: deps.fleetCommands,
+            log: (m) => serveLog.info(m),
+          })
         : null;
-    };
-    reloadFleetAgent();
-    const fleetReload = setInterval(reloadFleetAgent, 60_000);
-    fleetReload.unref?.();
     // hub 台账路径与 cli hubStarter 同一推导(<db>-sync.db)——「hub 任务」端点读它展示进度/ETA/日志。
     const syncDbPath = resolveDbPath(o.db).replace(/\.db$/, "-sync.db");
     // T4:台账变更监视 → SSE(/api/hub/stream)。
@@ -365,8 +358,8 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
         if (prev === undefined) { lastRec.set(t.id, next); continue; }
         if (rec === prev.live) { lastRec.set(t.id, next); continue; }
         lastRec.set(t.id, next);
-        // Tell the master right away instead of at the next heartbeat tick.
-        fleetAgent?.triggerHeartbeat();
+        // Tell the master right away instead of at the next heartbeat tick (only recording state changed).
+        fleetAgent?.triggerHeartbeat(["recording-status"]);
         const anchor = taskDisplayName(t, manager.getAnchorName(t.id));
         const selfNotifies = !masterSendsTransition(prev, next);
         events.emit(
@@ -579,7 +572,6 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
         serveLog.error("[proc] runner 停止出错:", err);
       });
       clearInterval(recWatch);
-      clearInterval(fleetReload);
       fleetAgent?.stop();
       if (notifyRelay) clearInterval(notifyRelay);
       notifyOutbox?.close();

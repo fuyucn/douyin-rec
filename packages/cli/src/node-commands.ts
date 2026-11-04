@@ -29,6 +29,39 @@ export type NodeCommand = (dataRoot: string, args: string[]) => Promise<NodeComm
 const json = (value: unknown, exitCode = 0): NodeCommandResult => ({ stdout: JSON.stringify(value) + "\n", exitCode });
 const errorJson = (e: unknown): NodeCommandResult => json({ error: String((e as Error)?.message ?? e) }, 1);
 
+/** A command whose failures are reported as `{"error":…}` with exit 1 (the contract of several commands). */
+const guarded = (run: NodeCommand): NodeCommand => async (dataRoot, args) => {
+  try {
+    return await run(dataRoot, args);
+  } catch (e) {
+    return errorJson(e);
+  }
+};
+
+/**
+ * Open the node's task db for one command and always close it: inside the resident serve (fleet agent)
+ * a leaked handle would pile up for the life of the process.
+ */
+async function withTaskStore<T>(dataRoot: string, fn: (store: import("@drec/app").TaskStore) => T | Promise<T>): Promise<T> {
+  const { TaskStore } = await import("@drec/app");
+  const store = new TaskStore(join(dataRoot, "db", "douyin-rec.db"));
+  try {
+    return await fn(store);
+  } finally {
+    store.close();
+  }
+}
+
+/** `platform:roomSlug` of a task, or null when its platform cannot be resolved. */
+function taskRoomKey(room: string): string | null {
+  try {
+    const p = platformForRoom(room);
+    return `${p.id}:${p.extractRoomSlug(room)}`;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Scan `/proc` for `record` child processes that currently have a media download grandchild (ffmpeg/mesio)
  * and return their room identities.
@@ -88,8 +121,8 @@ export function notifyOutboxArgs(o: { after?: string; limit?: string; ack?: stri
   return args;
 }
 
-/** Process-lifetime ffprobe duration cache for `inventory` (see there). */
-let probeDuration: ((file: string) => Promise<number>) | undefined;
+/** Process-lifetime ffprobe cache for `inventory` (see there). */
+let probeSegment: ((file: string) => Promise<{ durationMs: number; endMs: number }>) | undefined;
 
 /** Local serve API used by commands that need state only the serve process holds. */
 const serveApiBase = (): string => process.env.DREC_SERVE_API ?? "http://localhost:7860"; // loopback; Node 24 fetch tries both IPv6 and IPv4 loopback
@@ -115,20 +148,12 @@ export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freez
 
   // Scan <dataRoot>/recordings and return the inventory the master clusters into broadcasts.
   inventory: async (dataRoot) => {
-    const { TaskStore } = await import("@drec/app");
     const { ffprobeVideo } = await import("@drec/post-process");
-    const { scanInventory, segmentSecByAnchorOf } = await import("@drec/orchestrator");
+    const { scanInventory, segmentSecByAnchorOf, createProbeCache } = await import("@drec/orchestrator");
 
     // anchorName/name → roomSlug from this node's own task db
-    // Close every store we open: inside the resident serve (fleet agent) a leaked handle would pile up.
-    const store = new TaskStore(join(dataRoot, "db", "douyin-rec.db"));
+    const tasks = await withTaskStore(dataRoot, (s) => s.listTasks());
     const taskRooms: Record<string, string> = {};
-    let tasks;
-    try {
-      tasks = store.listTasks();
-    } finally {
-      store.close();
-    }
     for (const task of tasks) {
       try {
         const slug = platformForRoom(task.room).extractRoomSlug(task.room);
@@ -138,15 +163,17 @@ export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freez
     }
     const segmentSecByAnchor = segmentSecByAnchorOf(tasks);
 
-    // durationMs via ffprobe + mtime → startMs/endMs. Durations are cached per file version for the
+    // durationMs via ffprobe + mtime → startMs/endMs. Results are cached per file version for the
     // lifetime of this process (the resident serve under the fleet agent); a CLI call starts empty.
     // Probe failures are not cached (they fall back to 0 per call, as before) so a transient error on a
     // finished segment cannot pin its duration to 0 for the life of the serve.
-    probeDuration ??= (await import("@drec/orchestrator")).createProbeCache(async (file: string) => (await ffprobeVideo(file)).durationMs);
-    const durationOf = probeDuration;
+    probeSegment ??= createProbeCache(async (file, st) => ({
+      durationMs: (await ffprobeVideo(file)).durationMs,
+      endMs: (st ?? statSync(file)).mtimeMs,
+    }));
+    const probe = probeSegment;
     const ffprobe = async (file: string): Promise<{ durationSec: number; startMs: number; endMs: number }> => {
-      const durationMs = await durationOf(file).catch(() => 0);
-      const endMs = statSync(file).mtimeMs;
+      const { durationMs, endMs } = await probe(file).catch(() => ({ durationMs: 0, endMs: statSync(file).mtimeMs }));
       return { durationSec: durationMs / 1000, endMs, startMs: endMs - durationMs };
     };
 
@@ -155,32 +182,21 @@ export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freez
   },
 
   // Free space of the data-root volume (GB) for the master's disk watchdog.
-  disk: async (dataRoot) => {
+  disk: guarded(async (dataRoot) => {
     const { statfs } = await import("node:fs/promises");
-    try {
-      const st = await statfs(dataRoot);
-      return json({ freeGB: Number(freeGBOf(st).toFixed(2)) });
-    } catch (e) {
-      return errorJson(e);
-    }
-  },
+    return json({ freeGB: Number(freeGBOf(await statfs(dataRoot)).toFixed(2)) });
+  }),
 
   // Privacy-safe projection of every task on this node (no cookies), for master task sync.
   tasks: async (dataRoot) => {
-    const { TaskStore, listNodeTasks } = await import("@drec/app");
-    const store = new TaskStore(join(dataRoot, "db", "douyin-rec.db"));
-    try {
-      return json({ tasks: listNodeTasks(store) });
-    } finally {
-      store.close();
-    }
+    const { listNodeTasks } = await import("@drec/app");
+    return json({ tasks: await withTaskStore(dataRoot, listNodeTasks) });
   },
 
   // Apply the master's desired tasks.
   "apply-tasks": async (dataRoot, [b64]) => {
-    const { TaskStore, applyTasksPayload } = await import("@drec/app");
-    const store = new TaskStore(join(dataRoot, "db", "douyin-rec.db"));
-    try {
+    const { applyTasksPayload } = await import("@drec/app");
+    return withTaskStore(dataRoot, async (store) => {
       // T16: expectedVersion travels in the payload; an old master without it → version 0.
       const result = applyTasksPayload(store, b64, undefined, {
         // Audit snapshot dir is derived from dataRoot explicitly (no DOUYIN_REC_ROOT here; see managed-state.ts).
@@ -190,26 +206,22 @@ export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freez
       // stopped the source task / removed the rule, and draining would keep the hub settle waiting for the
       // broadcast to end. Only the local serve holds the TaskManager, so ask it via
       // POST /api/tasks/:id/stop (internal=1 is accepted from loopback only).
-      if (result.pending.length > 0) {
-        for (const key of result.pending) {
-          const task = store.listTasks().find((x) => {
-            try {
-              const p = platformForRoom(x.room);
-              return `${p.id}:${p.extractRoomSlug(x.room)}` === key;
-            } catch {
-              return false;
-            }
+      const byKey = new Map(store.listTasks().map((t) => [taskRoomKey(t.room), t] as const));
+      for (const key of result.pending) {
+        const task = byKey.get(key);
+        if (!task) continue;
+        try {
+          const res = await fetch(`${serveApiBase()}/api/tasks/${task.id}/stop?internal=1`, {
+            method: "POST",
+            // Bounded: inside the resident serve a hung loopback call must not pin the request.
+            signal: AbortSignal.timeout(10_000),
           });
-          if (!task) continue;
-          try {
-            const res = await fetch(`${serveApiBase()}/api/tasks/${task.id}/stop?internal=1`, { method: "POST" });
-            if (!res.ok) {
-              console.error(`[task-sync] 硬停任务 id=${task.id}(${key}) 失败: HTTP ${res.status}`);
-            }
-          } catch (e) {
-            // serve down/restarting → the next sync puts it back in pending; daemon drain is the last resort.
-            console.error(`[task-sync] 硬停任务 id=${task.id}(${key}) 失败: ${(e as Error).message}`);
+          if (!res.ok) {
+            console.error(`[task-sync] 硬停任务 id=${task.id}(${key}) 失败: HTTP ${res.status}`);
           }
+        } catch (e) {
+          // serve down/restarting → the next sync puts it back in pending; daemon drain is the last resort.
+          console.error(`[task-sync] 硬停任务 id=${task.id}(${key}) 失败: ${(e as Error).message}`);
         }
       }
       // Managed tasks without an anchorName yet: ask the local serve to refetch it in the background
@@ -229,9 +241,7 @@ export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freez
         }),
       );
       return json(result);
-    } finally {
-      store.close();
-    }
+    });
   },
 
   // Tail of one task's recording log (F3). Logs live in the serve's in-memory ring buffer, so ask it.
@@ -258,7 +268,7 @@ export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freez
 
   // Apply receipt (T16): which desired version this node applied and which bundle it runs.
   "node-status": async (dataRoot) => {
-    const { TaskStore, readManagedState, APP_VERSION } = await import("@drec/app");
+    const { readManagedState, APP_VERSION } = await import("@drec/app");
     let appliedVersion: number | null = null;
     let appliedAt: number | null = null;
     let appVersionAtApply: string | null = null;
@@ -275,14 +285,9 @@ export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freez
     let taskCount = 0;
     let managedCount = 0;
     try {
-      const store = new TaskStore(join(dataRoot, "db", "douyin-rec.db"));
-      try {
-        const tasks = store.listTasks();
-        taskCount = tasks.length;
-        managedCount = tasks.filter((t) => t.managedBy === "hub").length;
-      } finally {
-        store.close();
-      }
+      const tasks = await withTaskStore(dataRoot, (s) => s.listTasks());
+      taskCount = tasks.length;
+      managedCount = tasks.filter((t) => t.managedBy === "hub").length;
     } catch {
       /* db unreadable → counts stay 0; version info is still useful */
     }
@@ -327,37 +332,25 @@ export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freez
   },
 
   // Enqueue a processing job (remux only).
-  enqueue: async (dataRoot, [b64]) => {
-    try {
-      await applyNodeDataRoot(dataRoot);
-      const { decodeEnqueue } = await import("@drec/core");
-      const { handleEnqueue } = await import("@drec/app");
-      const capabilities = listProcessors().map((p) => p.kind);
-      return json(handleEnqueue(dataRoot, decodeEnqueue(b64), { capabilities }));
-    } catch (e) {
-      return errorJson(e);
-    }
-  },
+  enqueue: guarded(async (dataRoot, [b64]) => {
+    await applyNodeDataRoot(dataRoot);
+    const { decodeEnqueue } = await import("@drec/core");
+    const { handleEnqueue } = await import("@drec/app");
+    const capabilities = listProcessors().map((p) => p.kind);
+    return json(handleEnqueue(dataRoot, decodeEnqueue(b64), { capabilities }));
+  }),
 
   // Processing receipts (plans/036 §2.4): request = base64(JSON jobId array). Unknown jobIds are absent.
-  "proc-status": async (dataRoot, [b64]) => {
-    try {
-      const { decodeJobIds, handleProcStatus } = await import("@drec/app");
-      return json({ receipts: handleProcStatus(dataRoot, decodeJobIds(b64)) });
-    } catch (e) {
-      return errorJson(e);
-    }
-  },
+  "proc-status": guarded(async (dataRoot, [b64]) => {
+    const { decodeJobIds, handleProcStatus } = await import("@drec/app");
+    return json({ receipts: handleProcStatus(dataRoot, decodeJobIds(b64)) });
+  }),
 
   // Cancel processing jobs (plans/038): pending rows are cancelled directly; running rows are closed out by the runner.
-  "proc-cancel": async (dataRoot, [b64]) => {
-    try {
-      const { decodeJobIds, handleProcCancel } = await import("@drec/app");
-      return json({ receipts: handleProcCancel(dataRoot, decodeJobIds(b64)) });
-    } catch (e) {
-      return errorJson(e);
-    }
-  },
+  "proc-cancel": guarded(async (dataRoot, [b64]) => {
+    const { decodeJobIds, handleProcCancel } = await import("@drec/app");
+    return json({ receipts: handleProcCancel(dataRoot, decodeJobIds(b64)) });
+  }),
 
   // Node-side upload capabilities (biliup/cookies/disk/fonts) + registered processor kinds.
   "node-capabilities": async (dataRoot) => {

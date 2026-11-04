@@ -279,6 +279,14 @@ describe("SshTransport", () => {
     expect(cmdStr).toContain("custom-node");
     expect(cmdStr).toContain("_inventory");
   });
+  it("hidden-command args are single-quoted on the ssh line (shell never interprets them)", async () => {
+    const calls: string[] = [];
+    const t = new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec", rsync: async () => {},
+      run: async (argv) => { calls.push(argv.join(" ")); return "true\n"; } });
+    await t.isDone("a'b; rm -rf /");
+    expect(calls[0]).toBe("node /data/drec/dist/douyin-rec.mjs _is-done /data/drec 'a'\\''b; rm -rf /'");
+  });
+
   it("isDone：远端 _is-done 返回 true → 已收播", async () => {
     const t = new SshTransport({ id: "vps", host: "h", dataRoot: "~/drec",
       run: async () => "true", rsync: async () => {} });
@@ -476,7 +484,7 @@ describe("SshTransport.taskLogs(F3:master 代查节点日志)", () => {
     const calls: string[] = [];
     const t = mkT(async (argv) => { calls.push(argv.join(" ")); return JSON.stringify({ lines: ["x", "y"] }); });
     await expect(t.taskLogs(7, 200)).resolves.toEqual({ lines: ["x", "y"] });
-    expect(calls[0]).toContain("_task-logs /data/drec 7 200");
+    expect(calls[0]).toContain("_task-logs /data/drec '7' '200'");
 
     const t2 = mkT(async () => JSON.stringify({ lines: [], error: "serve 未起" }));
     await expect(t2.taskLogs(7, 50)).resolves.toEqual({ lines: [], error: "serve 未起" });

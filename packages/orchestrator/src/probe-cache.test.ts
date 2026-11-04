@@ -55,6 +55,21 @@ describe("createProbeCache", () => {
     expect(probe).toHaveBeenCalledTimes(3);
   });
 
+  it("concurrent calls for the same version share one probe; the probe gets the stat", async () => {
+    let resolve!: (v: number) => void;
+    const probe = vi.fn((_f: string, st: { mtimeMs: number } | null) => {
+      expect(st?.mtimeMs).toBeGreaterThan(0);
+      return new Promise<number>((r) => { resolve = r; });
+    });
+    const cached = createProbeCache(probe);
+    const f = file();
+    const a = cached(f);
+    const b = cached(f);
+    resolve(9);
+    expect(await Promise.all([a, b])).toEqual([9, 9]);
+    expect(probe).toHaveBeenCalledOnce();
+  });
+
   it("missing file → falls through to the probe", async () => {
     const cached = createProbeCache(async () => "probed");
     expect(await cached(join(tmpdir(), "drec-nope", "x.ts"))).toBe("probed");

@@ -1192,7 +1192,9 @@ program
 // web API 在 hub 规则/worker 变更后立即触发一次任务同步(不等 60s 周期 tick)。
 let hubSyncTasks: ((opts?: { force?: boolean }) => Promise<void>) | undefined;
 /** Master side of the fleet long connection (plans/042); null when `fleet.controllerUrl` is not configured. */
-let hubFleet: import("@drec/orchestrator").FleetHub | null = null;
+let hubFleet: import("@drec/orchestrator").FleetController | null = null;
+/** For every SshTransport this process builds: fleet first, ssh otherwise (read per call). */
+const fleetLink = (): import("@drec/orchestrator").FleetLink | null => hubFleet?.link ?? null;
 
 const hubSyncGate = new SyncGate();
 const requestHubSync = (opts?: { force?: boolean }): void => {
@@ -1285,7 +1287,7 @@ const requestNodeTaskLogs = async (workerId: string, taskId: number, lines: numb
   const w = workerStore.listWorkers(rootHubConfig()).find((x) => x.id === workerId);
   if (!w) return { workerId, taskId, lines: [], error: `未配置的 worker id: ${workerId}` };
   if (w.kind === "local") return { workerId, taskId, lines: [], error: "本机节点:日志就在 master 的任务详情页" };
-  const t = new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot! });
+  const t = new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot!, fleet: fleetLink });
   try {
     const r = await t.taskLogs(taskId, lines);
     return { workerId, taskId, lines: r.lines, ...(r.error ? { error: r.error } : {}) };
@@ -1304,7 +1306,7 @@ const requestNodeTasks = async (workerId: string): Promise<NodeTasksDTO> => {
   const w = workerStore.listWorkers(rootHubConfig()).find((x) => x.id === workerId);
   if (!w) return { workerId, tasks: [], error: `未配置的 worker id: ${workerId}` };
   if (w.kind === "local") return { workerId, tasks: [], error: "本机节点:日志就在 master 的任务详情页" };
-  const t = new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot! });
+  const t = new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot!, fleet: fleetLink });
   try {
     const r = await t.listTasks();
     return { workerId, tasks: r.tasks };
@@ -1336,7 +1338,7 @@ const requestNotifyOutbox = async (
     }
   }
   const { SshTransport } = await import("@drec/orchestrator");
-  const t = new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot! });
+  const t = new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot!, fleet: fleetLink });
   const rows = await t.notifyOutbox(after, limit, ackIds);
   return (rows ?? []) as Array<{ id: number; at: number; taskId: number | null; room: string | null; wantWebhook: boolean; event: import("@drec/core").NotifyEvent }>;
 };
@@ -1349,7 +1351,7 @@ const requestHubRunNow = async (
 };
 
 const hubStarter: HubStarter = {
-  fleetUpgrade: (req, socket, head) => hubFleet?.handleUpgrade(req, socket, head) ?? false,
+  fleetUpgrade: (req, socket, head) => hubFleet?.upgrade(req, socket, head) ?? false,
   requestSyncTasks: requestHubSync,
   recordingWorkers: readRecordingWorkers,
   zeroDiskStatus: readZeroDiskStatus,
@@ -1457,6 +1459,7 @@ const hubStarter: HubStarter = {
       );
     registerBuiltinTransports({
       ffprobe,
+      fleet: fleetLink,
       taskRooms: buildTaskRooms,
       isRoomRecording,
       activeRecordingRooms: () => opts.store.listTasks().flatMap((t) => {
@@ -1491,16 +1494,17 @@ const hubStarter: HubStarter = {
     };
     // Fleet long connection (plans/042): workers dial in; SshTransport consults it before spawning over ssh.
     const fleetControllerUrl = hubCfg.fleet?.controllerUrl?.trim();
-    const fleetTokenPath = join(rootConfigDir(), "fleet-nodes.json");
     if (fleetControllerUrl) {
-      const { FleetHub, setFleetLink, verifyFleetToken } = await import("@drec/orchestrator");
-      hubFleet = new FleetHub({
-        verifyToken: (nodeId, token) => verifyFleetToken(fleetTokenPath, nodeId, token),
+      const { startFleetController } = await import("@drec/orchestrator");
+      hubFleet = startFleetController({
+        controllerUrl: fleetControllerUrl,
+        tokenPath: join(rootConfigDir(), "fleet-nodes.json"),
+        loadWorkers,
         log: opts.log,
+        warn: opts.warn,
         // A worker's recording rooms changed: refresh the console snapshot now (it reads the fresh heartbeat).
         onRecordingChange: () => void refreshRecordingStatus(),
       });
-      setFleetLink(hubFleet);
     }
     let refreshingRecordingStatus = false;
     /** 状态探测与 pipeline 共用同一批 transport 实例(避免每 5s 重建 SshTransport)。 */
@@ -2277,34 +2281,9 @@ const hubStarter: HubStarter = {
     };
     scheduleRecordingStatusProbe(RECORDING_IDLE_POLL_MS);
     opts.log(`[hub] 已启用，${loadWorkers().length} 个 worker`);
-    // Hand fleet credentials to ssh workers that are not connected (old bundle / never joined / token lost).
-    // Retried at most every 30 minutes per node; a join takes effect once the node's serve reloads fleet.json.
-    const fleetJoinAttempt = new Map<string, number>();
-    const fleetJoinTimer = fleetControllerUrl
-      ? setInterval(() => {
-          void (async () => {
-            const { joinFleetNode } = await import("@drec/orchestrator");
-            for (const w of loadWorkers()) {
-              if ((w.kind !== "ssh" && w.kind !== "tailscale-ssh") || !w.host || !w.dataRoot) continue;
-              if (hubFleet?.connected(w.id)) continue;
-              const last = fleetJoinAttempt.get(w.id) ?? 0;
-              if (Date.now() - last < 30 * 60_000) continue;
-              fleetJoinAttempt.set(w.id, Date.now());
-              const r = await joinFleetNode({ host: w.host, dataRoot: w.dataRoot, nodeId: w.id, controllerUrl: fleetControllerUrl, tokenPath: fleetTokenPath });
-              if (r.result === "joined") opts.log(`[fleet] credentials sent to ${w.id}`);
-              else if (r.result === "failed") opts.warn(`[fleet] join ${w.id} failed (ssh fallback stays): ${r.detail ?? ""}`);
-            }
-          })().catch((e) => opts.warn(`[fleet] join loop: ${(e as Error)?.message ?? e}`));
-        }, 60_000)
-      : null;
-    fleetJoinTimer?.unref?.();
     return () => {
-      if (fleetJoinTimer) clearInterval(fleetJoinTimer);
-      if (hubFleet) {
-        hubFleet.close();
-        hubFleet = null;
-        void import("@drec/orchestrator").then(({ setFleetLink }) => setFleetLink(null));
-      }
+      hubFleet?.stop();
+      hubFleet = null;
       stop();
       recordingProbeStopped = true;
       if (recordingStatusTimer) clearTimeout(recordingStatusTimer);
@@ -2343,7 +2322,7 @@ const hubStarter: HubStarter = {
           id, recordingsDir: `${cfg.dataRoot}/recordings`, taskRooms: {}, ffprobe,
           nodeIdentity: () => { const i = ensureNodeIdentity(cfg.dataRoot); return { nodeId: i.nodeId, hostname: i.hostname }; },
         })
-      : new SshTransport({ id, host: cfg.host!, dataRoot: cfg.dataRoot! });
+      : new SshTransport({ id, host: cfg.host!, dataRoot: cfg.dataRoot!, fleet: fleetLink });
     try {
       // ping 内置超时(local 瞬时;ssh 6s)。这里不再额外包 20s——探针本就轻量。
       await t.ping!();
@@ -2385,7 +2364,7 @@ const hubStarter: HubStarter = {
               return { appVersion: APP_VERSION, appliedVersion, appliedAt, appVersionAtApply, taskCount: 0, managedCount: 0 };
             },
           })
-        : new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot! });
+        : new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot!, fleet: fleetLink });
       await t.ping!();
       // 版本回执 / 磁盘剩余都是可选观测:拿不到(旧 bundle/不可达)就当没有 —— **绝不能因此让 status 失败**。
       // 两者并行,避免慢节点上串行叠加 ssh 超时。
@@ -2556,9 +2535,8 @@ program
     process.stdout.write(JSON.stringify(ensureNodeIdentity()) + "\n");
   });
 
-// 输出本节点全部任务的隐私安全投影(无 cookies)。master 的任务同步对账用。
 // (internal) Join the fleet long connection (plans/042): the master writes this node's agent config
-// (controller URL + node id + token) over ssh once. Takes effect when `task serve` (re)starts.
+// (controller URL + node id + token) over ssh. A running `task serve` picks it up within a minute.
 // The JSON payload is read from stdin so the token never shows up in argv / `ps`; it is never echoed back.
 program
   .command("_fleet-join <dataRoot>", { hidden: true })
@@ -2571,7 +2549,10 @@ program
       const cfg = writeFleetConfig(join(dataRoot, "config", "fleet.json"), JSON.parse(Buffer.concat(chunks).toString("utf8")));
       process.stdout.write(JSON.stringify({ ok: true, nodeId: cfg.nodeId, controllerUrl: cfg.controllerUrl }) + "\n");
     } catch (e) {
-      process.stdout.write(JSON.stringify({ ok: false, error: String((e as Error)?.message ?? e) }) + "\n");
+      const error = String((e as Error)?.message ?? e);
+      process.stdout.write(JSON.stringify({ ok: false, error }) + "\n");
+      // Also on stderr: the master's ssh runner reports stderr when the exit code is non-zero.
+      process.stderr.write(`_fleet-join: ${error}\n`);
       process.exitCode = 1;
     }
   });

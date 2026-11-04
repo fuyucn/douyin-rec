@@ -4,27 +4,29 @@
  * Runs inside the resident `task serve` of a worker (never on the master). It dials out to the master over
  * WebSocket and keeps one connection, so the master no longer spawns `node … _<cmd>` over ssh for every
  * question (measured ~28 node processes/minute on an E2.1.Micro worker, ~0.4 vCPU sustained):
- *   - every FLEET_HEARTBEAT_MS it runs the cheap status commands in-process and pushes their stdout;
+ *   - every FLEET_HEARTBEAT_MS it runs the status commands that are due (FLEET_HEARTBEAT_PLAN) in-process
+ *     and pushes their stdout;
  *   - it answers `req` frames with the same command registry the hidden CLI commands use.
  *
  * Failure policy: the agent never takes the serve down. Any connection problem only means the master falls
  * back to ssh, which is exactly today's behaviour.
  */
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import {
   FLEET_CLOSE,
   FLEET_HEARTBEAT_COMMAND_TIMEOUT_MS,
   FLEET_HEARTBEAT_COMMANDS,
   FLEET_HEARTBEAT_MS,
+  FLEET_HEARTBEAT_PLAN,
   FLEET_IDLE_TIMEOUT_MS,
   FLEET_PROTOCOL,
   FLEET_SUPERSEDED_BACKOFF_MS,
   FLEET_UNAUTHORIZED_BACKOFF_MS,
-  FLEET_UNKNOWN_COMMAND_EXIT,
   FLEET_WS_PATH,
   parseFleetFrame,
-  type FleetCommandOutput,
+  writeFileAtomicSync,
+  type FleetCommandResult,
   type FleetHeartbeat,
   type FleetHeartbeatCommand,
   type FleetHello,
@@ -32,7 +34,7 @@ import {
 } from "@drec/core";
 
 /** Same shape as the CLI node command registry (cli/node-commands.ts), injected to respect layering. */
-export type FleetNodeCommand = (dataRoot: string, args: string[]) => Promise<{ stdout: string; exitCode: number }>;
+export type FleetNodeCommand = (dataRoot: string, args: string[]) => Promise<FleetCommandResult>;
 
 /** `<root>/config/fleet.json`, written by the master through `_fleet-join` (mode 0600). */
 export interface FleetAgentConfig {
@@ -42,13 +44,23 @@ export interface FleetAgentConfig {
   token: string;
 }
 
+/** Shortest token accepted (the master issues 64 hex chars). */
+const MIN_TOKEN_LENGTH = 32;
+
+/** The one validator for the agent config, shared by read and write so the two cannot disagree. */
+function parseFleetConfig(input: unknown): FleetAgentConfig | string {
+  const v = (input ?? {}) as Partial<FleetAgentConfig>;
+  if (typeof v.controllerUrl !== "string" || !/^https?:\/\//.test(v.controllerUrl)) return "controllerUrl must be an http(s) URL";
+  if (typeof v.nodeId !== "string" || !v.nodeId) return "nodeId missing";
+  if (typeof v.token !== "string" || v.token.length < MIN_TOKEN_LENGTH) return "token missing or too short";
+  return { controllerUrl: v.controllerUrl, nodeId: v.nodeId, token: v.token };
+}
+
 /** Read and validate the agent config; null when absent or malformed (= agent stays off). */
 export function readFleetConfig(path: string): FleetAgentConfig | null {
   try {
-    const v = JSON.parse(readFileSync(path, "utf8")) as Partial<FleetAgentConfig>;
-    if (typeof v.controllerUrl !== "string" || typeof v.nodeId !== "string" || typeof v.token !== "string") return null;
-    if (!/^https?:\/\//.test(v.controllerUrl) || !v.nodeId || !v.token) return null;
-    return { controllerUrl: v.controllerUrl, nodeId: v.nodeId, token: v.token };
+    const cfg = parseFleetConfig(JSON.parse(readFileSync(path, "utf8")));
+    return typeof cfg === "string" ? null : cfg;
   } catch {
     return null;
   }
@@ -56,19 +68,13 @@ export function readFleetConfig(path: string): FleetAgentConfig | null {
 
 /**
  * Validate and persist the agent config (written by `_fleet-join` on behalf of the master).
- * Atomic (tmp + rename) and 0600: the token authenticates this node to the master.
+ * Atomic and 0600 from the first byte: the token authenticates this node to the master.
  */
 export function writeFleetConfig(path: string, input: unknown): FleetAgentConfig {
-  const v = (input ?? {}) as Partial<FleetAgentConfig>;
-  if (typeof v.controllerUrl !== "string" || !/^https?:\/\//.test(v.controllerUrl)) throw new Error("controllerUrl must be an http(s) URL");
-  if (typeof v.nodeId !== "string" || !v.nodeId) throw new Error("nodeId missing");
-  if (typeof v.token !== "string" || v.token.length < 32) throw new Error("token missing or too short");
-  const cfg: FleetAgentConfig = { controllerUrl: v.controllerUrl, nodeId: v.nodeId, token: v.token };
+  const cfg = parseFleetConfig(input);
+  if (typeof cfg === "string") throw new Error(cfg);
   mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}`;
-  writeFileSync(tmp, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
-  chmodSync(tmp, 0o600);
-  renameSync(tmp, path);
+  writeFileAtomicSync(path, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
   return cfg;
 }
 
@@ -93,10 +99,19 @@ export interface FleetAgentOptions {
   log?: (m: string) => void;
   /** Injectable for tests; defaults to the Node 24 global WebSocket. */
   WebSocketImpl?: typeof WebSocket;
+  /** Heartbeat tick; each tick runs only the commands that are due. */
   heartbeatMs?: number;
+  /** Per-command refresh interval (defaults to FLEET_HEARTBEAT_PLAN). */
+  everyMs?: Partial<Record<FleetHeartbeatCommand, number>>;
   idleTimeoutMs?: number;
   heartbeatCommandTimeoutMs?: number;
   now?: () => number;
+}
+
+export interface FleetAgent {
+  /** Push fresh values now (e.g. a recording started or ended); all heartbeat commands when omitted. */
+  triggerHeartbeat(commands?: readonly FleetHeartbeatCommand[]): void;
+  stop(): void;
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
@@ -108,14 +123,6 @@ function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 }
 
-export interface FleetAgent {
-  /** Push a heartbeat now (e.g. a recording started or ended) instead of waiting for the next tick. */
-  triggerHeartbeat(): void;
-  /** Whether the connection is open and welcomed. */
-  connected(): boolean;
-  stop(): void;
-}
-
 export function startFleetAgent(o: FleetAgentOptions): FleetAgent {
   const WS = o.WebSocketImpl ?? globalThis.WebSocket;
   const log = o.log ?? (() => {});
@@ -123,6 +130,7 @@ export function startFleetAgent(o: FleetAgentOptions): FleetAgent {
   const heartbeatMs = o.heartbeatMs ?? FLEET_HEARTBEAT_MS;
   const idleTimeoutMs = o.idleTimeoutMs ?? FLEET_IDLE_TIMEOUT_MS;
   const heartbeatCommandTimeoutMs = o.heartbeatCommandTimeoutMs ?? FLEET_HEARTBEAT_COMMAND_TIMEOUT_MS;
+  const everyMs = (cmd: FleetHeartbeatCommand): number => o.everyMs?.[cmd] ?? FLEET_HEARTBEAT_PLAN[cmd].everyMs;
   const url = fleetSocketUrl(o.config.controllerUrl);
   const ownRoot = resolve(o.dataRoot);
 
@@ -132,6 +140,8 @@ export function startFleetAgent(o: FleetAgentOptions): FleetAgent {
   let failures = 0;
   let lastFrameAt = 0;
   let heartbeatRunning = false;
+  /** When each heartbeat command was last sent on the current connection (reset on welcome). */
+  const lastSent = new Map<FleetHeartbeatCommand, number>();
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let idleTimer: ReturnType<typeof setInterval> | null = null;
@@ -146,38 +156,46 @@ export function startFleetAgent(o: FleetAgentOptions): FleetAgent {
     heartbeatTimer = idleTimer = null;
   };
 
-  const heartbeat = async (): Promise<void> => {
+  /** Commands due on this tick; half a tick of slack keeps tick jitter from skipping a command by one tick. */
+  const dueCommands = (): FleetHeartbeatCommand[] => {
+    const t = now();
+    const slack = heartbeatMs / 2;
+    return FLEET_HEARTBEAT_COMMANDS.filter((cmd) => t - (lastSent.get(cmd) ?? -Infinity) >= everyMs(cmd) - slack);
+  };
+
+  const heartbeat = async (cmds: readonly FleetHeartbeatCommand[]): Promise<void> => {
     if (!welcomed || heartbeatRunning) return;
     heartbeatRunning = true;
     try {
-      const outputs: Partial<Record<FleetHeartbeatCommand, FleetCommandOutput>> = {};
-      for (const cmd of FLEET_HEARTBEAT_COMMANDS) {
+      const outputs: FleetHeartbeat["outputs"] = {};
+      for (const cmd of cmds) {
         const run = o.commands[cmd];
         if (!run) continue;
         try {
           // Bounded: a command that never settles must not wedge every later heartbeat.
           const r = await withTimeout(run(o.dataRoot, []), heartbeatCommandTimeoutMs, cmd);
-          outputs[cmd] = { stdout: r.stdout, exitCode: r.exitCode, at: now() };
+          outputs[cmd] = { stdout: r.stdout, exitCode: r.exitCode };
+          lastSent.set(cmd, now());
         } catch (e) {
-          // Leave it out: the master then falls back to asking (req / ssh) instead of trusting a stale value.
+          // Leave it out: the master's copy ages out and it asks (req / ssh) instead of trusting a stale value.
           log(`[fleet] heartbeat ${cmd} failed: ${(e as Error)?.message ?? e}`);
         }
       }
-      const frame: FleetHeartbeat = { t: "heartbeat", at: now(), outputs };
-      send(frame);
+      // Sent even when empty: it is the liveness signal the master routes by.
+      send({ t: "heartbeat", outputs } satisfies FleetHeartbeat);
     } finally {
       heartbeatRunning = false;
     }
   };
 
   const answer = async (id: number, cmd: string, args: string[]): Promise<void> => {
-    const res = (r: Omit<FleetResponse, "t" | "id">): void => send({ t: "res", id, ...r });
+    const res = (r: Omit<FleetResponse, "t" | "id">): void => send({ t: "res", id, ...r } satisfies FleetResponse);
     const run = o.commands[cmd];
-    if (!run) return res({ stdout: "", exitCode: FLEET_UNKNOWN_COMMAND_EXIT, error: `unknown command: ${cmd}` });
+    if (!run) return res({ stdout: "", exitCode: 1, refused: "unknown-command" });
     const [root, ...rest] = args;
     // The master addresses a data root; only ever act on our own (a mismatch means a misconfigured worker).
     if (typeof root !== "string" || resolve(root) !== ownRoot) {
-      return res({ stdout: "", exitCode: 2, error: `dataRoot mismatch: ${String(root)}` });
+      return res({ stdout: "", exitCode: 1, refused: "data-root-mismatch" });
     }
     try {
       const r = await run(o.dataRoot, rest);
@@ -244,9 +262,10 @@ export function startFleetAgent(o: FleetAgentOptions): FleetAgent {
         if (welcomed) return; // duplicate welcome: the heartbeat timer is already running
         welcomed = true;
         failures = 0;
+        lastSent.clear(); // a new connection starts with an empty master cache
         log(`[fleet] connected to ${o.config.controllerUrl}`);
-        void heartbeat();
-        heartbeatTimer = setInterval(() => void heartbeat(), heartbeatMs);
+        void heartbeat(FLEET_HEARTBEAT_COMMANDS);
+        heartbeatTimer = setInterval(() => void heartbeat(dueCommands()), heartbeatMs);
         heartbeatTimer.unref?.();
       } else if (frame.t === "req" && typeof frame.id === "number" && typeof frame.cmd === "string" && Array.isArray(frame.args)) {
         const args = frame.args.filter((a): a is string => typeof a === "string");
@@ -281,8 +300,7 @@ export function startFleetAgent(o: FleetAgentOptions): FleetAgent {
   connect();
 
   return {
-    triggerHeartbeat: () => void heartbeat(),
-    connected: () => welcomed,
+    triggerHeartbeat: (cmds = FLEET_HEARTBEAT_COMMANDS) => void heartbeat(cmds),
     stop: () => {
       stopped = true;
       clearTimers();
@@ -290,6 +308,37 @@ export function startFleetAgent(o: FleetAgentOptions): FleetAgent {
       reconnectTimer = null;
       ws?.close(1000);
       ws = null;
+    },
+  };
+}
+
+/**
+ * Run the agent from `configPath` and follow the file: `_fleet-join` (run over ssh by the master, a separate
+ * process) writes it, so it is re-read every `reloadMs`; a changed config restarts the agent, a removed or
+ * invalid one stops it. The returned handle forwards heartbeat triggers to whichever agent is current.
+ */
+export function watchFleetAgent(
+  o: Omit<FleetAgentOptions, "config"> & { configPath: string; reloadMs?: number },
+): FleetAgent {
+  let agent: FleetAgent | null = null;
+  let key = "";
+  const reload = (): void => {
+    const cfg = readFleetConfig(o.configPath);
+    const next = cfg ? JSON.stringify(cfg) : "";
+    if (next === key) return;
+    key = next;
+    agent?.stop();
+    agent = cfg ? startFleetAgent({ ...o, config: cfg }) : null;
+  };
+  reload();
+  const timer = setInterval(reload, o.reloadMs ?? 60_000);
+  timer.unref?.();
+  return {
+    triggerHeartbeat: (cmds) => agent?.triggerHeartbeat(cmds),
+    stop: () => {
+      clearInterval(timer);
+      agent?.stop();
+      agent = null;
     },
   };
 }

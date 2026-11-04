@@ -1,6 +1,6 @@
 // issue #223: writeFileAtomicSync — atomic replace via unique temp + rename, never deletes.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, statSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeFileAtomicSync } from "@drec/core";
@@ -13,6 +13,14 @@ const tmpLeft = (): string[] => readdirSync(dir).filter((n) => n.endsWith(".tmp"
 const tmpRe = (base: string): RegExp => new RegExp(`^${base.replace(/\./g, "\\.")}\\.${process.pid}\\.[0-9a-f]{8}\\.tmp$`);
 
 describe("writeFileAtomicSync", () => {
+  it("mode applies to the new file, also when replacing a wider-permission target", () => {
+    const f = join(dir, "cred.json");
+    writeFileSync(f, "old", { mode: 0o644 });
+    writeFileAtomicSync(f, "secret", { mode: 0o600 });
+    expect(readFileSync(f, "utf-8")).toBe("secret");
+    expect(statSync(f).mode & 0o777).toBe(0o600);
+  });
+
   it("replaces the inode instead of writing in place: a hard link keeps the old content", () => {
     const f = join(dir, "a.session.json");
     writeFileSync(f, "old");
