@@ -394,18 +394,38 @@ describe("live gate: after the gate", () => {
     expect(mgr.isGated(id)).toBe(false);
   });
 
-  it("hub zero-disk preflight runs when the gate opens; a refusal sets error and alerts once", async () => {
+  it("hub zero-disk preflight runs in start() BEFORE the gate: a refusal fails at once (error, one alert, no probe)", async () => {
     const id = add({ streamUpload: true, managedBy: "hub" });
     const downs: string[] = [];
-    const mgr = mk(async () => true, {
+    const probe = vi.fn(async () => true);
+    const mgr = mk(probe, {
       zeroDiskPreflight: () => ({ ok: false, refusal: { code: "delivery_missing", message: "no delivery" } }) as never,
       onTaskDown: (_i, r) => downs.push(r),
     });
-    expect(mgr.start(id)).toBe(true); // gated: nothing checked yet
-    await advance(0);
+    expect(mgr.start(id)).toBe(false);
+    await advance(60_000);
+    expect(probe).not.toHaveBeenCalled();
+    expect(mgr.isRunning(id)).toBe(false);
     expect(spawner.spawned).toHaveLength(0);
     expect(store.getTask(id)!.status).toBe("error");
     expect(downs).toHaveLength(1);
+  });
+
+  it("the preflight also runs again at spawn time: accepted at start, refused when the gate opens", async () => {
+    const id = add({ streamUpload: true, managedBy: "hub" });
+    let ok = true;
+    const mgr = mk(async () => true, {
+      zeroDiskPreflight: () => (ok
+        ? { ok: true, delivery: {}, cookiesPath: "/x", credentialSource: "node-default" }
+        : { ok: false, refusal: { code: "account_mismatch", message: "differs" } }) as never,
+      random: () => 0.9,
+    });
+    expect(mgr.start(id)).toBe(true);
+    expect(mgr.isGated(id)).toBe(true);
+    ok = false;
+    await advance(5_000);
+    expect(spawner.spawned).toHaveLength(0);
+    expect(store.getTask(id)!.status).toBe("error");
     expect(mgr.isRunning(id)).toBe(false);
   });
 
@@ -552,5 +572,87 @@ describe("douyin API mode used by the gate probe", () => {
     store.setSetting("douyinApiMode", "balance");
     await advance(30_000);
     expect(seen).toEqual(["webHTML", "balance"]);
+  });
+});
+
+describe("live gate: crash-restart timer vs gate (single owner of the next spawn)", () => {
+  /** Manager with a deferred restart scheduler the test fires by hand. */
+  function deferred(probe: (t: Task) => Promise<boolean>): { mgr: TaskManager; fire: () => void } {
+    const pending: Array<() => void> = [];
+    const mgr = mk(probe, { autoRestart: true, restartDelayMs: 5_000, schedule: (cb) => { pending.push(cb); } });
+    return { mgr, fire: () => { for (const cb of pending.splice(0)) cb(); } };
+  }
+
+  it("a start() during the restart delay creates a gate; the stale timer must not spawn a second owner", async () => {
+    const id = add();
+    let live = true;
+    const { mgr, fire } = deferred(async () => live);
+    mgr.start(id);
+    await advance(0);
+    expect(spawner.spawned).toHaveLength(1);
+    live = false;
+    spawner.spawned[0]!.exit({ code: 1, signal: null, expected: false }); // crash: restart timer pending
+    expect(mgr.start(id)).toBe(true); // daemon tick / manual start during the delay -> gate
+    expect(mgr.isGated(id)).toBe(true);
+    fire();
+    expect(spawner.spawned).toHaveLength(1); // timer stood down
+    live = true;
+    await advance(30_000);
+    expect(spawner.spawned).toHaveLength(2); // the gate is the only spawner
+    expect(mgr.isGated(id)).toBe(false);
+  });
+
+  it("stop after that sequence leaves neither a gate nor a later spawn", async () => {
+    const id = add();
+    let live = true;
+    const { mgr, fire } = deferred(async () => live);
+    mgr.start(id);
+    await advance(0);
+    live = false;
+    spawner.spawned[0]!.exit({ code: 1, signal: null, expected: false });
+    mgr.start(id);
+    fire();
+    await mgr.stop(id);
+    live = true;
+    await advance(10 * 60_000);
+    expect(mgr.isGated(id)).toBe(false);
+    expect(mgr.isRunning(id)).toBe(false);
+    expect(spawner.spawned).toHaveLength(1);
+    expect(store.getTask(id)!.status).toBe("stopped");
+  });
+
+  it("stopGraceful also cancels the gate", async () => {
+    const id = add();
+    const { mgr } = deferred(async () => false);
+    mgr.start(id);
+    await advance(0);
+    await mgr.stopGraceful(id);
+    expect(mgr.isGated(id)).toBe(false);
+  });
+
+  it("trySpawn refuses to run while a gate exists (only openGate may spawn)", async () => {
+    const id = add();
+    const mgr = mk(async () => false);
+    mgr.start(id);
+    expect((mgr as unknown as { trySpawn(i: number): boolean }).trySpawn(id)).toBe(false);
+    expect(spawner.spawned).toHaveLength(0);
+  });
+
+  it("probe-failure backoff never polls faster than the platform interval", async () => {
+    const id = add();
+    const p = platformForRoom("12345");
+    const prev = p.pollIntervalMs;
+    p.pollIntervalMs = 300_000;
+    try {
+      const probe = vi.fn(async (): Promise<boolean> => { throw new Error("x"); });
+      mk(probe).start(id);
+      await advance(0);
+      await advance(299_000);
+      expect(probe).toHaveBeenCalledTimes(1); // plain backoff would have retried at 30s
+      await advance(1_001);
+      expect(probe).toHaveBeenCalledTimes(2);
+    } finally {
+      p.pollIntervalMs = prev;
+    }
   });
 });

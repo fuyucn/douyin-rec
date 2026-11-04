@@ -318,6 +318,12 @@ export class TaskManager {
       }
     }
     this.restarts.set(taskId, 0);
+    try {
+      this.assertZeroDiskPreflight(task);
+    } catch (e) {
+      this.failStart(taskId, e);
+      return false;
+    }
     // Single gate insertion point: an explicit/daemon start of a not-live task holds no process.
     // Crash restarts (handleExit) deliberately spawn directly and never come through here.
     if (this.shouldGate(task)) {
@@ -416,7 +422,11 @@ export class TaskManager {
       if (gate.failures === 1 || gate.failures % 10 === 0) {
         this.logTask(taskId, `[task_manager] 判活失败(连续 ${gate.failures} 次,将退避重试): ${(failure as Error)?.message ?? failure}`);
       }
-      const backoff = Math.min(GATE_BACKOFF_MAX_MS, GATE_POLL_MS * 2 ** (gate.failures - 1));
+      // Never faster than the platform's own interval (kuaishou: 5 min).
+      const backoff = Math.max(
+        this.gateIntervalMs(task),
+        Math.min(GATE_BACKOFF_MAX_MS, GATE_POLL_MS * 2 ** (gate.failures - 1)),
+      );
       this.scheduleGatePoll(taskId, gate, backoff);
       return;
     }
@@ -484,10 +494,10 @@ export class TaskManager {
     this.restarts.delete(taskId);
     this.gaveUpAt.delete(taskId);
     this.draining.delete(taskId);
-    if (!proc) {
-      this.stopGated(taskId);
-      return;
-    }
+    // Always cancel the gate, whether or not a child exists: a gate must never outlive a stop.
+    const wasGated = this.stopGated(taskId);
+    if (!proc) return;
+    if (wasGated) this.logTask(taskId, `[task_manager] 停止时同时存在判活闸门,已一并取消`);
     this.logTask(taskId, `[task_manager] ■ 停止任务 id=${taskId}`);
     await proc.stop();
     // onExit (expected) handler sets status + clears the map entry.
@@ -531,11 +541,11 @@ export class TaskManager {
    */
   async stopGraceful(taskId: number): Promise<void> {
     const proc = this.procs.get(taskId);
-    if (!proc) {
-      // Gated: nothing is recording, so a drain is an immediate stop.
-      this.stopGated(taskId);
-      return;
-    }
+    // Gated: nothing is recording, so a drain is an immediate stop. Cancel the gate even when a
+    // child also exists (it must never outlive the stop).
+    const wasGated = this.stopGated(taskId);
+    if (!proc) return;
+    if (wasGated) this.restarts.delete(taskId);
     // 硬停在途(例如 rolling 任务在给末段上传留宽限):硬停优先,不能再转成排空——否则 status 会被改成 draining、
     // 日志写成「自然收播」,且 daemon tick 会重新卡到进程退出。
     if (this.stopping.has(taskId)) return;
@@ -576,21 +586,44 @@ export class TaskManager {
    * 置 error、写任务日志、走 onTaskDown 告警,不留「看似在跑」的状态,也不让异常逃出重启定时器。
    */
   private trySpawn(taskId: number): boolean {
+    // Invariant: a gated task is spawned only by openGate (which removes the gate first). Anything
+    // else spawning here would leave a gate and a child coexisting for one task.
+    if (this.gates.has(taskId)) {
+      this.logTask(taskId, `[task_manager] 任务 id=${taskId} 仍在判活闸门中,拒绝直接启动进程`);
+      return false;
+    }
     try {
       this.spawnFor(taskId);
       this.startFailAlerted.delete(taskId);
       return true;
     } catch (e) {
-      const reason = `启动失败:${(e as Error)?.message ?? e}`;
-      this.restarts.delete(taskId);
-      this.store.setStatus(taskId, "error");
-      this.notifyRecordingState(taskId);
-      this.logTask(taskId, `[task_manager] ✗ 任务 id=${taskId} ${reason}`);
-      if (!this.startFailAlerted.has(taskId)) {
-        this.startFailAlerted.add(taskId);
-        this.onTaskDown?.(taskId, reason);
-      }
+      this.failStart(taskId, e);
       return false;
+    }
+  }
+
+  /** Spawn-failure handling shared by trySpawn and the start()-time preflight. */
+  private failStart(taskId: number, e: unknown): void {
+    const reason = `启动失败:${(e as Error)?.message ?? e}`;
+    this.restarts.delete(taskId);
+    this.store.setStatus(taskId, "error");
+    this.notifyRecordingState(taskId);
+    this.logTask(taskId, `[task_manager] ✗ 任务 id=${taskId} ${reason}`);
+    if (!this.startFailAlerted.has(taskId)) {
+      this.startFailAlerted.add(taskId);
+      this.onTaskDown?.(taskId, reason);
+    }
+  }
+
+  /**
+   * A hub-managed node must never start a zero-disk upload from defaults: the master-delivered
+   * metadata and the account check are mandatory. Throws on refusal. Runs in start() (so a
+   * misconfigured task fails at once instead of sitting gated until the broadcast) and again in spawnFor.
+   */
+  private assertZeroDiskPreflight(task: Task): void {
+    if (task.streamUpload && task.managedBy === "hub") {
+      const pre = this.zeroDiskPreflight(task);
+      if (!pre.ok) throw new Error(`直播直传拒绝启动 [${pre.refusal.code}]: ${pre.refusal.message}`);
     }
   }
 
@@ -605,10 +638,7 @@ export class TaskManager {
     // A hub-managed node must never start a zero-disk upload from defaults: the master-delivered
     // metadata and the account check are mandatory. Throwing routes through trySpawn, which marks the
     // task `error`, logs the reason and alerts once (no restart loop, nothing is uploaded).
-    if (task.streamUpload && task.managedBy === "hub") {
-      const pre = this.zeroDiskPreflight(task);
-      if (!pre.ok) throw new Error(`直播直传拒绝启动 [${pre.refusal.code}]: ${pre.refusal.message}`);
-    }
+    this.assertZeroDiskPreflight(task);
     // Platform-aware cookie resolution, shared with buildSessionForTask.
     const effective = {
       ...task,
@@ -745,6 +775,9 @@ export class TaskManager {
       // Guard: a stop() between scheduling and firing clears the budget.
       if (!this.restarts.has(taskId)) return;
       if (this.procs.has(taskId)) return;
+      // A start() during the restart delay may have put the task behind the gate: the gate owns
+      // the next spawn, so this stale timer must not create a second owner.
+      if (this.gates.has(taskId)) return;
       if (!this.trySpawn(taskId)) return;
       this.store.setStatus(taskId, "running");
     }, this.restartDelayMs);
