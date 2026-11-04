@@ -15,7 +15,10 @@
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { freeGBOf, listProcessors, platformForRoom, redactLogLines, type ProcActiveDTO } from "@drec/core";
+import {
+  freeGBOf, linuxProcProbe, listProcessors, platformForRoom, readRecorderStates, redactLogLines, roomActivities,
+  type ProcActiveDTO, type ProcProbe,
+} from "@drec/core";
 import { applyNodeDataRoot } from "./node-pipeline-commands.js";
 
 export interface NodeCommandResult {
@@ -99,6 +102,50 @@ export function scanRecordingRooms(): { platform: string; roomSlug: string }[] {
   return [...rooms.values()];
 }
 
+/** Everything the room judgement touches outside the state files; injected by tests. */
+export interface RoomProbeDeps {
+  /** /proc process scan: fallback for rooms without a state file (older bundles, standalone runs). */
+  scan: () => { platform: string; roomSlug: string }[];
+  proc: ProcProbe;
+  now: () => number;
+  log: (msg: string) => void;
+}
+
+const defaultRoomProbe = (): RoomProbeDeps => ({
+  scan: scanRecordingRooms,
+  proc: linuxProcProbe,
+  now: Date.now,
+  // stderr: stdout of these commands is a parsed contract.
+  log: (m) => console.error(m),
+});
+
+/**
+ * `is-done` judgement (plans/044): a room with a recorder state file is decided by `recorderActivity` alone
+ * (an active child that is recording OR still finalizing = not done); only a room with NO state file falls
+ * back to the /proc process scan.
+ */
+export function isRoomDone(dataRoot: string, roomSlug: string, deps: RoomProbeDeps = defaultRoomProbe()): boolean {
+  const states = readRecorderStates(dataRoot, deps.log).filter((st) => st.roomSlug === roomSlug);
+  if (states.length === 0) return !deps.scan().some((room) => room.roomSlug === roomSlug);
+  for (const room of roomActivities(states, deps.now(), deps.proc).values()) {
+    if (room.recording || room.finalizing) return false;
+  }
+  return true;
+}
+
+/**
+ * `recording-status` rooms: rooms whose active child is pulling a stream (phase=recording), plus
+ * /proc-scan rooms that have no state file at all.
+ */
+export function recordingRoomsOf(dataRoot: string, deps: RoomProbeDeps = defaultRoomProbe()): { platform: string; roomSlug: string }[] {
+  const rooms = roomActivities(readRecorderStates(dataRoot, deps.log), deps.now(), deps.proc);
+  const out = [...rooms.values()].filter((r) => r.recording).map((r) => ({ platform: r.platform, roomSlug: r.roomSlug }));
+  for (const r of deps.scan()) {
+    if (!rooms.has(`${r.platform}:${r.roomSlug}`)) out.push(r);
+  }
+  return out;
+}
+
 /** Read `--name value` options out of `args`; unknown flags are ignored. */
 function readOptions(args: string[]): Record<string, string> {
   const out: Record<string, string> = {};
@@ -128,16 +175,16 @@ let probeSegment: ((file: string) => Promise<{ durationMs: number; endMs: number
 const serveApiBase = (): string => process.env.DREC_SERVE_API ?? "http://localhost:7860"; // loopback; Node 24 fetch tries both IPv6 and IPv4 loopback
 
 export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freeze({
-  // "true" once no downloader is writing for this room (master settle polls this).
+  // "true" once nothing is recording or finalizing for this room (master settle polls this).
   // Only this room counts: a global ffmpeg count made other rooms' recordings stall this room's settle.
-  "is-done": async (_dataRoot, [roomSlug]) => ({
-    stdout: (scanRecordingRooms().some((room) => room.roomSlug === roomSlug) ? "false" : "true") + "\n",
+  "is-done": async (dataRoot, [roomSlug]) => ({
+    stdout: (isRoomDone(dataRoot, roomSlug) ? "true" : "false") + "\n",
     exitCode: 0,
   }),
 
   // Recording rooms + live-upload progress (F1). Progress is best-effort: failures leave it empty.
   "recording-status": async (dataRoot) => {
-    const rooms = scanRecordingRooms();
+    const rooms = recordingRoomsOf(dataRoot);
     let rolling: unknown[] = [];
     try {
       const { scanRollingSessions } = await import("@drec/orchestrator");
