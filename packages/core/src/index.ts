@@ -55,3 +55,6 @@ export * from "./child-identity.js";
 export * from "./output-paths.js";
 // Master ↔ worker control-plane protocol fleet/1 (plans/042): shared by the node agent and the master hub.
 export * from "./fleet-protocol.js";
+
+// Recorder process state file + the single activity judge (plans/044): record child writes, node commands read.
+export * from "./recorder-state.js";
