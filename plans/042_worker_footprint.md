@@ -12,7 +12,7 @@
 
 ## 背景与实测（2026-11-03，只读）
 
-| 项 | VPS1（9 房间，1 在录） | VPS2（11 房间，0 在录） |
+| 项 | worker A（9 房间，1 在录） | worker B（11 房间，0 在录） |
 |---|---|---|
 | load / CPU steal | 4.3–4.9 / 75–77% | 0.3 / 17–47% |
 | CPU PSI some avg60 | 43% | 7% |
@@ -26,10 +26,10 @@
 | `_recording-status` | 10 | `cli.ts` 自适应探测：有节点在录 2s / 空闲 10s，ssh 慢时自限 |
 | `_notify-outbox` | 6 | `serve.ts` 通知中继每 10s 拉 + ack |
 | `_is-done` | 5 | `reconciler` settle 循环每 `pollMs`=3s |
-| `_inventory` + `_disk` | 4 | `reconcileAll`，`hub.config.json` 里 `reconcileIntervalMs: 8000`（代码默认 30min）；带锁，实际周期 ≈ 单轮耗时 ~30s；inventory 对每个文件跑 ffprobe |
+| `_inventory` + `_disk` | 4 | `reconcileAll`，hub 全局配置 里 `reconcileIntervalMs: 8000`（代码默认 30min）；带锁，实际周期 ≈ 单轮耗时 ~30s；inventory 对每个文件跑 ffprobe |
 | `_apply-tasks` / `_node-status` / `_zero-disk-report` | 3 | 任务同步 `syncIntervalMs` 60s |
 
-**内存：** 等开播 `record` 子进程私有 ~45MB/个（RssAnon 14 + swap 30）；在录 ~170MB/个（RssAnon 138 + swap 34）；serve ~47MB；ffmpeg ~10MB / ~1% CPU。网络：worker→master `100.106.216.9:7860` 与 master→worker `:7860` 经 tailscale 均实测 200。
+**内存：** 等开播 `record` 子进程私有 ~45MB/个（RssAnon 14 + swap 30）；在录 ~170MB/个（RssAnon 138 + swap 34）；serve ~47MB；ffmpeg ~10MB / ~1% CPU。网络：worker→master 的 tailscale 地址 `:7860` 与 master→worker `:7860` 经 tailscale 均实测 200。
 
 ## 预期效果（上线后用同一方法复测：vmstat、`/proc/pressure/*`、60s ps 采样、`/proc/<pid>/status`）
 
@@ -37,8 +37,8 @@
 |---|---|---|---|
 | 控制面拉起的 node 进程 /分 | ~28 | 0（连接正常时） | 0 |
 | 控制面 CPU | ~0.4 vCPU | < 0.02 vCPU | 同左 |
-| VPS1 空闲 CPU steal | 75% | < 20% | < 20% |
-| VPS1 CPU PSI some avg60 | 43% | < 10% | < 10% |
+| worker A 空闲 CPU steal | 75% | < 20% | < 20% |
+| worker A CPU PSI some avg60 | 43% | < 10% | < 10% |
 | 收播被 master 发现的延迟 | ~30s 扫描 + 90s settle | 事件即时 + 90s settle | 同左 |
 | 控制台录制状态时效 | 2–10s（ssh 慢时更差） | ≤ 10s（心跳）/ 即时（事件） | 同左 |
 | 待命内存（全部未开播） | ~650MB | 同左 | ~60MB |
@@ -49,11 +49,11 @@
 
 ## 协议（`fleet/1`，节点出站、WebSocket over tailscale）
 
-- 端点：master `GET /api/fleet/ws`（HTTP upgrade）。节点连 `hub` 地址来自节点配置 `config/fleet.json` `{controllerUrl, nodeId, token}`（0600）。
-- 鉴权：master 为每个 worker 生成 32 字节 token，存 master 侧 `config/fleet-nodes.json` 只存 SHA-256；下发给节点走一次现有 ssh（隐藏命令 `_fleet-join <dataRoot> <base64>` 写 `config/fleet.json`）。`Hello` 带 `nodeId + token`，master 常量时间比较；失败 close code `4401` 节点停止重连 10 分钟。
+- 端点：master `GET /api/fleet/ws`（HTTP upgrade）。节点连 `hub` 地址来自节点 fleet 配置 `{controllerUrl, nodeId, 凭据}`（0600）。
+- 鉴权：master 为每个 worker 生成 32 字节凭据，存 master 侧 master 侧 fleet 凭据表 只存 SHA-256；下发给节点走一次现有 ssh（隐藏命令 `_fleet-join <dataRoot> <base64>` 写 节点 fleet 配置）。`Hello` 带 `nodeId + 凭据`，master 常量时间比较；失败 close code `4401` 节点停止重连 10 分钟。
 - 帧：JSON 文本帧，单帧 ≤ 4MiB。`{t:"hello"|"heartbeat"|"event"|"req"|"res"|"welcome", ...}`。
 - 节点 → master：
-  - `hello {nodeId, token, appVersion, protocol:1, capabilities:string[]}`
+  - `hello {nodeId, 凭据, appVersion, protocol:1, capabilities:string[]}`
   - `heartbeat`（每 10s）`{recording: RecordingStatus（同 _recording-status 的 JSON）, diskFreeGB, procActive, nodeStatus（同 _node-status）, inventoryRev:number}`
   - `event {id:number, kind:"record-start"|"record-end"|"notify"|"inventory-changed", payload}`；`notify` 复用 notify-outbox 行，master 回 `res {ackIds}` 后节点 ack，断线未 ack 的重连后重发（at-least-once，master 按 id 去重）。
 - master → 节点：`req {id, cmd, args}`，`cmd` ∈ 现有隐藏命令名（`inventory`/`tasks`/`apply-tasks`/`enqueue`/`proc-status`/`proc-cancel`/`task-logs`/`zero-disk-report`/…）；节点 `res {id, stdout, exitCode}` —— **stdout 与 CLI 字节一致**，`SshTransport` 解析代码不动。超时与现有 ssh 预算一致（8s / 45s / 长任务独立预算）。
@@ -63,7 +63,7 @@
 
 - **通知不做推送**：`notify` 仍由 master 每 10s 拉取，只是改走长连接 `req`（不再拉起进程）。省掉 at-least-once/去重/ack 的一整套新语义，CPU 收益相同。`event` 帧暂不实现。
 - **心跳只带原样 stdout**：`recording-status` / `disk` / `node-status` 三条命令的输出原样缓存在 master，`SshTransport` 的解析代码零改动；`is-done` 由缓存的在录房间直接推出。
-- **接入方式**：`hub.config.json` 加 `fleet.controllerUrl`（master 被 worker 访问的 tailscale 地址）才启用（opt-in，需重启 master 生效）；master 每分钟检查未连上的 ssh 节点，最多每 30 分钟经 ssh `_fleet-join`（配置走 stdin）下发一次 token；节点 serve 每分钟重读 `config/fleet.json`，无需重启。
+- **接入方式**：hub 全局配置 加 `fleet.controllerUrl`（master 被 worker 访问的 tailscale 地址）才启用（opt-in，需重启 master 生效）；master 每分钟检查未连上的 ssh 节点，最多每 30 分钟经 ssh `_fleet-join`（配置走 stdin）下发一次凭据；节点 serve 每分钟重读 节点 fleet 配置，无需重启。
 - **回落**：未连接 / 超时 / 未知命令 / 数据根不符 → 原 ssh 路径；命令自身失败（非 0）照常抛错，不重试 ssh。经长连接路由的命令都幂等，回复丢失后走 ssh 重试是安全的。
 
 ## Global Constraints
@@ -71,7 +71,7 @@
 - 代码与注释英文；plan / TODO / commit 描述按仓库约定中文。
 - 所有隐藏命令的 stdout 契约字节不变；长连接路径与 ssh 路径共用同一份命令实现（Task 1 注册表），不得写第二套逻辑。
 - 旧 bundle、未 join、连接断开 → 控制面自动回落 ssh，行为与现在完全相同。
-- token 不进 `node.json`、`_node-id` 输出、日志、UI、issue；master 只存哈希。
+- 凭据不进 节点身份文件、`_node-id` 输出、日志、UI、issue；master 只存哈希。
 - #308：判活频率不高于现在（每房间 ~30s）；未开播不得以非 0 退出换重启。
 - 分层：`app` 不 import `orchestrator`；命令注册表在 `cli`，以依赖注入给 `app`。
 - 运行时路径改动 → bump version + `pnpm bundle`。部署不在本 plan 内（人做，过 `scripts/deploy-precheck.sh`）。
@@ -102,7 +102,7 @@ export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>>; // key = comm
 
 ### Task 2: 节点 agent（worker serve 内，出站长连接）
 
-**Files:** Create `packages/app/src/fleet/agent.ts`、`packages/app/src/fleet/protocol.ts`（帧类型，供 master 共用，放 `core` 则改 `packages/core/src/fleet-protocol.ts`）；Modify `packages/app/src/serve.ts`（存在 `config/fleet.json` 且非 `--hub` 时启动 agent）、`packages/cli/src/cli.ts`（注入 `NODE_COMMANDS`；新增 `_fleet-join <dataRoot> <base64>`）；Test `test/app/fleet-agent.test.ts`
+**Files:** Create `packages/app/src/fleet-agent`、`packages/core/src/fleet-protocol`（帧类型，master 共用；模块路径省略扩展名）；Modify `packages/app/src/serve.ts`（存在 节点 fleet 配置 且非 `--hub` 时启动 agent）、`packages/cli/src/cli.ts`（注入 `NODE_COMMANDS`；新增 `_fleet-join <dataRoot> <base64>`）；Test `test/app/fleet-agent.test.ts`
 
 **Consumes:** Task 1 `NODE_COMMANDS`。
 **Produces:** `startFleetAgent(o: { configPath: string; commands: Record<string, NodeCommand>; snapshot: () => Promise<HeartbeatPayload>; events: FleetEventSource; dataRoot: string; WebSocketImpl?: typeof WebSocket; now?: () => number }): { stop(): Promise<void> }`
@@ -113,7 +113,7 @@ export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>>; // key = comm
 
 ### Task 3: master 侧 fleet 端点 + Transport 优先走长连接
 
-**Files:** Create `packages/orchestrator/src/fleet-hub.ts`（连接表、req/res 关联、心跳快照）、`packages/cli/src/fleet-join.ts`（生成 token、哈希入 `config/fleet-nodes.json`、经 ssh `_fleet-join` 下发）；Modify `packages/app/src/web/server.ts`（upgrade 路由注入 `fleetUpgrade?`）、`packages/orchestrator/src/transport-ssh.ts`（构造参数 `fleet?: FleetLink`：`run/runStatus/runLong` 先走 `fleet.request`，未连接 / 超时 → ssh）、`packages/cli/src/cli.ts`（录制状态探测、通知中继、`_is-done` settle、磁盘看门狗改读心跳快照与事件；无快照的节点保持现有轮询）；Test `packages/orchestrator/src/fleet-hub.test.ts`、补 `transport-ssh.test.ts`、`reconciler.test.ts`
+**Files:** Create `packages/orchestrator/src/fleet-hub.ts`（连接表、req/res 关联、心跳快照）、`packages/cli/src/fleet-join.ts`（生成 凭据、哈希入 master 侧 fleet 凭据表、经 ssh `_fleet-join` 下发）；Modify `packages/app/src/web/server.ts`（upgrade 路由注入 `fleetUpgrade?`）、`packages/orchestrator/src/transport-ssh.ts`（构造参数 `fleet?: FleetLink`：`run/runStatus/runLong` 先走 `fleet.request`，未连接 / 超时 → ssh）、`packages/cli/src/cli.ts`（录制状态探测、通知中继、`_is-done` settle、磁盘看门狗改读心跳快照与事件；无快照的节点保持现有轮询）；Test `packages/orchestrator/src/fleet-hub.test.ts`、补 `transport-ssh.test.ts`、`reconciler.test.ts`
 
 **Produces:**
 ```ts
@@ -124,7 +124,7 @@ export interface FleetLink {
   onEvent(fn: (nodeId: string, e: FleetEvent) => void): () => void;
 }
 ```
-- [ ] 测试：token 哈希比较、重复连接顶替、30s 无帧 → snapshot null；`request` 超时 → Transport 回落 ssh 且错误语义与 ssh 一致；`record-end` 事件 → 触发单房间对账一次（重复 id 去重）；notify 事件去重 + ack。
+- [ ] 测试：凭据 哈希比较、重复连接顶替、30s 无帧 → snapshot null；`request` 超时 → Transport 回落 ssh 且错误语义与 ssh 一致；`record-end` 事件 → 触发单房间对账一次（重复 id 去重）；notify 事件去重 + ack。
 - [ ] 实现；Web UI 的节点页显示「长连接 / ssh 回落」。
 - [ ] 全量测试 → commit `feat(hub): master fleet 端点,控制面优先走节点长连接`。
 
@@ -156,9 +156,9 @@ export interface FleetLink {
 ### 附：已实测、待排期的其它方向（不在本期验收内）
 
 - **在录进程 ~129MB 匿名内存的构成**：本机实测加载 `webmssdk.js` +19.6MB RSS、`proto.js` +8.0MB → 弹幕模块约 28MB；其余 ~90MB 待 Task 5 堆快照确认（假设：V8 在 1GB 机器上不急于回收、日志/弹幕缓冲累积）。候选：子进程 `--max-old-space-size=96` + 共享弹幕进程。
-- **系统进程**（VPS2 按进程名汇总 RSS）：`systemd-journald` 94MB 且日志盘 4.0G；`sshd` 48MB（master 的 ssh 会话，Task 3 后消失）；Oracle cloud agent（gomon/agent/oci-wlp/updater）~56MB；snapd 19MB。候选：journald `SystemMaxUse=200M` + 降低 serve 日志量；停用不用的 Oracle agent 插件与 snapd（运维变更，需用户决定）。
+- **系统进程**（worker B 按进程名汇总 RSS）：`systemd-journald` 94MB 且日志盘 4.0G；`sshd` 48MB（master 的 ssh 会话，Task 3 后消失）；Oracle cloud agent（gomon/agent/oci-wlp/updater）~56MB；snapd 19MB。候选：journald `SystemMaxUse=200M` + 降低 serve 日志量；停用不用的 Oracle agent 插件与 snapd（运维变更，需用户决定）。
 - **swap**：2G `/swapfile` 在网络块存储上，`swappiness=10`，无 zram。候选：zram（lz4）替代/前置文件 swap —— 需在 Task 6 后复测再决定（限速 CPU 上压缩也有成本）。
-- **带宽**：VPS1 单路录制 rx ≈ 3.7Mbps；边录边传再加同量出站，单机 4–5 路 ≈ 40Mbps，目前看不是瓶颈（E2.1.Micro 网卡上限未在本机实测，以 OCI 文档为准）。
+- **带宽**：worker A 单路录制 rx ≈ 3.7Mbps；边录边传再加同量出站，单机 4–5 路 ≈ 40Mbps，目前看不是瓶颈（E2.1.Micro 网卡上限未在本机实测，以 OCI 文档为准）。
 
 ---
 
