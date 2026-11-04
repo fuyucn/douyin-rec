@@ -9,6 +9,7 @@
  */
 import { readFileSync } from "node:fs";
 import { biliupCookieHeader, biliupCsrf } from "./upload-gate.js";
+import { clearSeasonIdCachePath, resolveSectionIdFromSeasonId } from "./bili-season-resolve.js";
 
 const MEMBER = "https://member.bilibili.com";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
@@ -304,9 +305,82 @@ export async function addArchiveToSeasonWithNote(
  * wrapper. Callers can invoke it unconditionally without repeating the config guard.
  */
 export async function addArchiveToSeasonIfConfigured(
-  o: Omit<SeasonTarget, "sectionId"> & { sectionId?: number | null; note?: (msg: string) => void },
+  o: Omit<SeasonTarget, "sectionId"> & {
+    sectionId?: number | null;
+    /** New-style season id (合集 ID from the creator center); wins over sectionId when set. */
+    seasonId?: number | null;
+    /** Node data root for the season-id -> section-id cache. */
+    dataRoot?: string;
+    note?: (msg: string) => void;
+  },
 ): Promise<SeasonAddOutcome> {
+  const seasonId = normalizeSeasonSectionId(o.seasonId);
+  if (seasonId) return addArchiveToSeasonById({
+    seasonId,
+    cookiesPath: o.cookiesPath,
+    ...(o.dataRoot ? { dataRoot: o.dataRoot } : {}),
+    ...(o.aid ? { aid: o.aid } : {}),
+    ...(o.bvid ? { bvid: o.bvid } : {}),
+    ...(o.title ? { title: o.title } : {}),
+    ...(o.reconcileFirst ? { reconcileFirst: o.reconcileFirst } : {}),
+    ...(o.fetchImpl ? { fetchImpl: o.fetchImpl } : {}),
+    ...(o.timeoutMs ? { timeoutMs: o.timeoutMs } : {}),
+    ...(o.totalTimeoutMs ? { totalTimeoutMs: o.totalTimeoutMs } : {}),
+    ...(o.sleep ? { sleep: o.sleep } : {}),
+    ...(o.note ? { note: o.note } : {}),
+  });
   const sectionId = normalizeSeasonSectionId(o.sectionId);
-  if (!sectionId) return { status: "skipped", reason: "合集小节 ID 未配置" };
+  if (!sectionId) return { status: "skipped", reason: "合集 ID 未配置" };
   return addArchiveToSeasonWithNote({ ...o, sectionId });
+}
+
+/**
+ * Season-id entry point (issue #460): resolves seasonId -> sectionId (cache first), then adds.
+ * A definite rejection drops the cache, re-resolves once, and retries once before giving up.
+ */
+export async function addArchiveToSeasonById(o: {
+  seasonId: number;
+  cookiesPath: string;
+  dataRoot?: string;
+  aid?: number;
+  bvid?: string;
+  title?: string;
+  reconcileFirst?: boolean;
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+  totalTimeoutMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  note?: (msg: string) => void;
+}): Promise<SeasonAddOutcome> {
+  const { seasonId, cookiesPath, dataRoot } = o;
+  const attempt = async (): Promise<SeasonAddOutcome> => {
+    const resolved = await resolveSectionIdFromSeasonId({
+      seasonId, cookiesPath, dataRoot, fetchImpl: o.fetchImpl, timeoutMs: o.timeoutMs,
+    });
+    if (!("sectionId" in resolved)) {
+      const outcome: SeasonAddOutcome = { status: "failed", sectionId: 0, error: resolved.error, retryable: resolved.retryable };
+      try { o.note?.(describeSeasonOutcome(outcome)); } catch { /* logging never fails an upload */ }
+      return outcome;
+    }
+    return addArchiveToSeasonWithNote({
+      sectionId: resolved.sectionId,
+      cookiesPath,
+      aid: o.aid,
+      bvid: o.bvid,
+      title: o.title,
+      reconcileFirst: o.reconcileFirst,
+      fetchImpl: o.fetchImpl,
+      timeoutMs: o.timeoutMs,
+      totalTimeoutMs: o.totalTimeoutMs,
+      sleep: o.sleep,
+      note: o.note,
+    });
+  };
+  const first = await attempt();
+  if (first.status === "failed" && !first.retryable) {
+    // The cached section was wrong (definite rejection): drop it and re-resolve+retry once.
+    clearSeasonIdCachePath(cookiesPath, seasonId, dataRoot);
+    return attempt();
+  }
+  return first;
 }

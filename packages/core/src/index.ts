@@ -58,3 +58,6 @@ export * from "./fleet-protocol.js";
 
 // Recorder process state file + the single activity judge (plans/044): record child writes, node commands read.
 export * from "./recorder-state.js";
+
+// Season-id resolver (issue #460): resolves 合集 ID -> section id with a node-local cache.
+export * from "./bili-season-resolve.js";
