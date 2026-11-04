@@ -64,7 +64,8 @@ import {
   type UploadSlot,
   type RollingSegment,
 } from "@drec/core";
-import { appendGroup, countVideoParts, uploadPlain } from "./upload/biliup.js";
+import { appendGroup, countVideoParts, uploadPlain, type BiliupHooks } from "./upload/biliup.js";
+import { readTcpAcked, type AckSample } from "@drec/processors";
 import { rootBiliupCookies } from "./paths.js";
 import { openNodeUploadGate, openNodeUploadSlot, resolveUploadAccountKey } from "./node-pipeline.js";
 
@@ -291,6 +292,12 @@ export interface RollingUploaderOpts {
   /** 上传接缝(测试注入)。 */
   uploadPlainRaw?: typeof uploadPlain;
   appendGroupRaw?: typeof appendGroup;
+  /** Per-socket TCP acked reader for the biliup child (test seam); default `ss`. */
+  readAcked?: (pid: number) => AckSample;
+  /** Progress report sink (test seam); default reports to the recorder state file. */
+  noteProgress?: () => void;
+  /** How often the live biliup child is sampled for progress; default 30s. */
+  progressIntervalMs?: number;
   /** 删源接缝(测试注入);缺省 fs.rm。返回是否删除成功。 */
   removeFile?: (p: string) => boolean;
   /** 时间源(测试注入)。 */
@@ -771,7 +778,7 @@ export class RollingUploader {
       const up = this.o.uploadPlainRaw ?? uploadPlain;
       const bv = await this.withSlot(() => this.gate.run(this.accountKey, () => {
         this.writeIntent(seg.index, "create");
-        return up({ plain: { ...meta, video: seg.path, title } });
+        return this.withBiliupProgress((hooks) => up({ plain: { ...meta, video: seg.path, title }, hooks }));
       }));
       // 把「当段已确认」并入同一次写:建稿成功即确认段 0,防止 bv 与 confirmed 分两次写之间崩溃。
       confirmed.add(seg.index);
@@ -793,13 +800,14 @@ export class RollingUploader {
     const ap = this.o.appendGroupRaw ?? appendGroup;
     await this.withSlot(() => this.gate.run(this.accountKey, () => {
       this.writeIntent(seg.index, "append");
-      return ap({
+      return this.withBiliupProgress((hooks) => ap({
         ...meta,
         bv,
         files: [seg.path],
         // 幂等核对:失败后重查分 P 数,变多 = 其实已成功;查不到 → 抛 ambiguous 标记转人工。
         countParts: () => this.countPartsInner(bv, cookies),
-      });
+        hooks,
+      }));
     }));
     // 与建稿同口径:确认并入同一次写,防止 append 成功后、补 confirmed 前崩溃导致重复 append。
     confirmed.add(seg.index);
@@ -807,6 +815,45 @@ export class RollingUploader {
     if (!this.persist()) throw new Error(`sidecar 写失败(append 结果段 ${seg.index}),状态不可信,保留源`);
     noteRecorderProgress(); // a confirmed segment is progress for the finalizing stall judge (plans/044)
     this.log(`[rolling] 段 ${seg.index} append 到 ${bv}`);
+  }
+
+  /**
+   * Report upload progress for the recorder's finalizing stall judge (plans/044) while a biliup child runs.
+   * biliup's output is NOT a signal (no progress bar on a pipe, plans/038); TCP bytes acked on its sockets is.
+   * Each tick samples the child: acked grew → progress. No reading (no `ss`, non-Linux) → a live child counts
+   * as progress (the judge's 24h backstop still bounds it). The timer lives exactly as long as one child
+   * (cleared on close, and again in `finally` for any path that skips `onClose`).
+   */
+  private async withBiliupProgress<T>(run: (hooks: BiliupHooks) => Promise<T>): Promise<T> {
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const stop = (): void => {
+      if (timer) { clearInterval(timer); timer = null; }
+    };
+    const note = this.o.noteProgress ?? noteRecorderProgress;
+    const read = this.o.readAcked ?? readTcpAcked;
+    const hooks: BiliupHooks = {
+      onSpawn: (pid) => {
+        stop();
+        if (pid === undefined) return;
+        let last = -1;
+        timer = setInterval(() => {
+          let sample: AckSample = null;
+          try { sample = read(pid); } catch { sample = null; }
+          if (sample === null) { note(); return; }
+          let sum = 0;
+          for (const v of sample.values()) sum += v;
+          if (sum > last) note();
+          last = sum;
+        }, this.o.progressIntervalMs ?? 30_000);
+        timer.unref?.();
+      },
+      onClose: stop,
+    };
+    try {
+      return await run(hooks);
+    } finally {
+      stop();
+    }
   }
 
   /**

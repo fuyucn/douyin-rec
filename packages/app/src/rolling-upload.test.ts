@@ -6,7 +6,11 @@ import {
   RollingUploader, looksLikeRecordProcess, makeRollingUploadHookFactory, resolveRollingUploadMeta, resolveStreamUploadMeta,
   resolveStreamUploadTitle, resolveStreamPartTitle,
 } from "./rolling-upload.js";
-import { UploadGate, rollingUploadSingleNode, type SeasonAddOutcome } from "@drec/core";
+import {
+  UploadGate, RecorderStateWriter, parseRecorderState, recorderActivity, recorderStatePath, rollingUploadSingleNode,
+  type ProcProbe, type RecorderActivity, type SeasonAddOutcome,
+} from "@drec/core";
+import type { AckSample } from "@drec/processors";
 
 const seasonHook = vi.hoisted(() => ({
   calls: [] as Array<{ bvid: string; persistedBv?: string; persistedState?: string; reconcileFirst?: boolean }>,
@@ -1516,5 +1520,80 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
     expect(plain).not.toHaveBeenCalled();
     expect(u.ambiguousIndices).toEqual([0]);
     expect(readA(f)).toMatchObject({ confirmed: [0], ownerPid: DEAD_PID }); // predecessor untouched
+  });
+});
+
+describe("RollingUploader finalizing progress from the biliup child (plans/044)", () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  const ALIVE: ProcProbe = { startTicks: () => 7, bootId: () => "b" };
+  const STEP = 30_000;
+
+  /** One rolling upload whose biliup "child" stays pending until the end; returns the judge's view after `minutes`. */
+  async function scenario(opts: {
+    readAcked: (pid: number) => AckSample;
+    minutes: number;
+    spawns?: number; // sequential children inside the one upload call (line retries)
+  }): Promise<{ verdict: RecorderActivity; timersAfter: number }> {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW_MS);
+    const dir = mkdtempSync(path.join(tmpdir(), "rolling-progress-"));
+    try {
+      const w = new RecorderStateWriter({
+        file: recorderStatePath(dir, 7), taskId: 7, platform: "douyin", roomSlug: "123", mode: "rolling",
+        owner: { pid: 4242, startTicks: 7, bootId: "b" },
+      });
+      w.start();
+      w.setPhase("finalizing");
+      const { paths } = mkSession(segNames(1));
+      let release: () => void = () => {};
+      const gateOpen = new Promise<void>((r) => { release = r; });
+      const spawns = opts.spawns ?? 1;
+      const u = new RollingUploader({
+        room, uploadMeta, gate: new FakeGate(), appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0,
+        readAcked: opts.readAcked, noteProgress: () => w.noteProgress(), progressIntervalMs: STEP,
+        uploadPlainRaw: async (o) => {
+          for (let i = 0; i < spawns - 1; i++) { o.hooks?.onSpawn?.(4242 + i); o.hooks?.onClose?.(); } // retried lines: children that died
+          o.hooks?.onSpawn?.(9999); // the last child hangs
+          await gateOpen;
+          o.hooks?.onClose?.();
+          return FAKE_BV;
+        },
+      });
+      u.noteSegment(paths[0]);
+      const done = u.flush({ recordingActive: false });
+      for (let t = 0; t < opts.minutes * 60_000; t += STEP) await vi.advanceTimersByTimeAsync(STEP);
+      const st = parseRecorderState(JSON.parse(readFileSync(recorderStatePath(dir, 7), "utf-8")))!;
+      const verdict = recorderActivity(st, Date.now(), ALIVE);
+      release();
+      await done;
+      w.markExited(0); // stops the writer's own heartbeat timer, so only the uploader's could remain
+      const timersAfter = vi.getTimerCount();
+      return { verdict, timersAfter };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("no output for 50 min but acked bytes keep growing: the judge stays active", async () => {
+    let acked = 0;
+    const r = await scenario({ readAcked: () => new Map([["a>b", (acked += 1_000_000)]]), minutes: 50 });
+    expect(r.verdict).toBe("active");
+  });
+
+  it("acked reader unavailable (null) with the child alive counts as progress: stays active", async () => {
+    const r = await scenario({ readAcked: () => null, minutes: 50 });
+    expect(r.verdict).toBe("active");
+  });
+
+  it("acked flat for 46 min with the child alive: dead", async () => {
+    const r = await scenario({ readAcked: () => new Map([["a>b", 5_000_000]]), minutes: 46 });
+    expect(r.verdict).toBe("dead");
+  });
+
+  it("the sampling interval is cleared after close and across retries (no leaked timers)", async () => {
+    const r = await scenario({ readAcked: () => null, minutes: 2, spawns: 3 });
+    expect(r.verdict).toBe("active");
+    expect(r.timersAfter).toBe(0);
   });
 });

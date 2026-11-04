@@ -4,7 +4,6 @@ import { existsSync, readFileSync } from "node:fs";
 import {
   APPEND_AMBIGUOUS_MARKER,
   biliupCookieHeader,
-  noteRecorderProgress,
   registerChild,
   throwIfAborted,
   type UploadLine,
@@ -139,6 +138,8 @@ export interface BiliupHooks {
   onSpawn?: (pid: number | undefined) => void;
   /** stdout / stderr 每出现一整行调用一次(`\r` 与 `\n` 都算行尾;进度条用 `\r` 刷新)。 */
   onLine?: (line: string) => void;
+  /** 子进程结束(正常退出 / 非零 / spawn 出错)后调用,每次 spawn 恰好一次;与 onSpawn 成对。 */
+  onClose?: () => void;
 }
 
 /** 底层：spawn biliup argv，收集 stdout+stderr，非零退出抛错，返回合并输出。 */
@@ -163,11 +164,11 @@ export function runBiliup(argv: string[], hooks: BiliupHooks = {}): Promise<stri
     };
     const lineOut = makeLiner(), lineErr = makeLiner();
     if (hooks.onSpawn) safe(() => hooks.onSpawn!(p.pid));
-    // Any biliup output (its progress bar included) is upload progress for the finalizing stall judge (plans/044).
-    p.stdout.on("data", (c: Buffer) => { noteRecorderProgress(); out = appendTail(out, c); lineOut(c); });
-    p.stderr.on("data", (c: Buffer) => { noteRecorderProgress(); err = appendTail(err, c); lineErr(c); });
-    p.on("error", reject);
+    p.stdout.on("data", (c: Buffer) => { out = appendTail(out, c); lineOut(c); });
+    p.stderr.on("data", (c: Buffer) => { err = appendTail(err, c); lineErr(c); });
+    p.on("error", (e) => { if (hooks.onClose) safe(() => hooks.onClose!()); reject(e); });
     p.on("close", (code) => {
+      if (hooks.onClose) safe(() => hooks.onClose!());
       try { throwIfAborted(); } catch (e) { reject(e); return; }
       if (code !== 0) { reject(new Error(`biliup 失败 (rc=${code}): ${(err || out).slice(-2000).trim()}`)); return; }
       resolve(out + err);
@@ -214,8 +215,10 @@ export function buildAppendArgs(o: { cookies: string; bv: string; files: string[
  */
 export async function uploadPlain(o: {
   plain: UploadOpts;
-  run?: (argv: string[]) => Promise<string>;
+  run?: (argv: string[], hooks?: BiliupHooks) => Promise<string>;
   lines?: readonly UploadLine[];
+  /** Optional spawn/close observation, passed to every biliup child this call starts (line retries included). */
+  hooks?: BiliupHooks;
 }): Promise<string> {
   const run = o.run ?? runBiliup;
   const tried: UploadLine[] = [];
@@ -223,7 +226,7 @@ export async function uploadPlain(o: {
   for (const line of uploadLineCandidates(o.plain.line, o.lines)) {
     tried.push(line);
     try {
-      const out = await run(buildUploadArgs({ ...o.plain, line }));
+      const out = await run(buildUploadArgs({ ...o.plain, line }), o.hooks);
       const bv = parseBV(out);
       if (!bv) throw new Error(`upload plain 完成但解析不到 BV：${out.slice(-300)}`);
       return bv;
@@ -287,7 +290,9 @@ export async function appendGroup(o: {
   public?: boolean;
   line?: UploadLine;
   lines?: readonly UploadLine[];
-  run?: (argv: string[]) => Promise<string>;
+  run?: (argv: string[], hooks?: BiliupHooks) => Promise<string>;
+  /** Optional spawn/close observation, passed to every biliup child this call starts (line retries included). */
+  hooks?: BiliupHooks;
   /** 查询当前分 P 数;返回 null = 无法确认。 */
   countParts?: () => Promise<number | null>;
   /** 重读间隔的等待实现(测试注入以免真等)。 */
@@ -302,7 +307,7 @@ export async function appendGroup(o: {
   for (const line of uploadLineCandidates(o.line, o.lines)) {
     tried.push(line);
     try {
-      await run(buildAppendArgs({ cookies: o.cookies, bv: o.bv, files: o.files, public: o.public, line }));
+      await run(buildAppendArgs({ cookies: o.cookies, bv: o.bv, files: o.files, public: o.public, line }), o.hooks);
       return;
     } catch (e) {
       last = e;
