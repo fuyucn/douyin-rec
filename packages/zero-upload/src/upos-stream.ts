@@ -196,6 +196,12 @@ export interface UploadOptions {
    * 到点后返回已入队的块数,上传侧即干净收尾而不报「流太短」。**缺块仍算错误**。
    */
   maxChunks?: number | (() => number);
+  /**
+   * A chunk PUT that failed even after retries. Carries the chunk index plus what the LAST
+   * failing attempt produced: the HTTP status or the error text (name+message, e.g. a chunk
+   * PUT timeout). Observability only: retries and the return contract are unchanged.
+   */
+  onChunkFailure?: (info: { chunk: number; httpStatus?: number; error?: string }) => void;
 }
 
 /**
@@ -669,8 +675,15 @@ export async function uploadChunks(o: UploadOptions): Promise<UposPart[]> {
       start: String(start),
       end: String(start + body.length),
     });
-    const ok = await putChunk(doFetch, `${session.url}?${params.toString()}`, session.bucket.auth, body, retries, o.signal);
-    if (!ok) throw new Error(`分块 ${i} 上传失败(已重试 ${retries} 次)`);
+    let lastFail: { httpStatus?: number; error?: string } | undefined;
+    const ok = await putChunk(doFetch, `${session.url}?${params.toString()}`, session.bucket.auth, body, retries, o.signal, (f) => { lastFail = f; });
+    if (!ok) {
+      o.onChunkFailure?.({ chunk: i, ...(lastFail?.httpStatus !== undefined ? { httpStatus: lastFail.httpStatus } : {}), ...(lastFail?.error !== undefined ? { error: lastFail.error } : {}) });
+      // The last attempt's status/error belongs in the message: this string lands in the caller's
+      // uploadError, and without it triage only ever sees "upload failed".
+      const why = lastFail?.httpStatus !== undefined ? `,HTTP ${lastFail.httpStatus}` : lastFail?.error !== undefined ? `,${lastFail.error}` : "";
+      throw new Error(`分块 ${i} 上传失败(已重试 ${retries} 次)${why}`);
+    }
     parts.push({ partNumber: i + 1, eTag: "etag" });
     uploadedBytes += body.length;
     noteRecorderProgress(); // finalizing stall judge (plans/044): a completed chunk is real upload progress
@@ -747,8 +760,14 @@ async function putChunk(
   body: Uint8Array,
   retries: number,
   signal?: AbortSignal,
+  onFail?: (info: { httpStatus?: number; error?: string }) => void,
 ): Promise<boolean> {
+  let httpStatus: number | undefined;
+  let error: string | undefined;
   for (let attempt = 0; attempt <= retries; attempt++) {
+    // Per-attempt reset: a 500 followed by a timeout must report the timeout, not HTTP 500.
+    httpStatus = undefined;
+    error = undefined;
     try {
       const res = await doFetch(url, {
         method: "PUT",
@@ -765,14 +784,17 @@ async function putChunk(
         signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(CHUNK_TIMEOUT_MS)]) : AbortSignal.timeout(CHUNK_TIMEOUT_MS),
       });
       if (res.ok) return true;
+      httpStatus = res.status;
       if (res.status >= 500 && attempt < retries) { await sleep(1000 * (attempt + 1)); continue; }
-      return false;
+      break;
     } catch (e) {
       if ((e as Error)?.name === "AbortError") throw e;
-      if (attempt >= retries) return false;
+      error = `${(e as Error)?.name ?? "Error"}: ${String((e as Error)?.message ?? e).slice(0, 200)}`;
+      if (attempt >= retries) break;
       await sleep(1000 * (attempt + 1));
     }
   }
+  onFail?.({ ...(httpStatus !== undefined ? { httpStatus } : {}), ...(error !== undefined ? { error } : {}) });
   return false;
 }
 
