@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import {
   APPEND_AMBIGUOUS_MARKER,
   biliupCookieHeader,
+  noteRecorderProgress,
   registerChild,
   throwIfAborted,
   type UploadLine,
@@ -162,8 +163,9 @@ export function runBiliup(argv: string[], hooks: BiliupHooks = {}): Promise<stri
     };
     const lineOut = makeLiner(), lineErr = makeLiner();
     if (hooks.onSpawn) safe(() => hooks.onSpawn!(p.pid));
-    p.stdout.on("data", (c: Buffer) => { out = appendTail(out, c); lineOut(c); });
-    p.stderr.on("data", (c: Buffer) => { err = appendTail(err, c); lineErr(c); });
+    // Any biliup output (its progress bar included) is upload progress for the finalizing stall judge (plans/044).
+    p.stdout.on("data", (c: Buffer) => { noteRecorderProgress(); out = appendTail(out, c); lineOut(c); });
+    p.stderr.on("data", (c: Buffer) => { noteRecorderProgress(); err = appendTail(err, c); lineErr(c); });
     p.on("error", reject);
     p.on("close", (code) => {
       try { throwIfAborted(); } catch (e) { reject(e); return; }

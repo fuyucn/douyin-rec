@@ -54,6 +54,7 @@ import {
   segmentSessionBase,
   stripVideoExt,
   UploadGate,
+  noteRecorderProgress,
   isSlotBusy,
   SLOT_BUSY_MARKER,
   addArchiveToSeasonIfConfigured,
@@ -781,6 +782,7 @@ export class RollingUploader {
         updatedAt: this.now(),
       };
       if (!this.persist()) throw new Error(`sidecar 写失败(建稿结果 BV=${bv}),状态不可信,保留源`);
+      noteRecorderProgress(); // a confirmed segment is progress for the finalizing stall judge (plans/044)
       this.log(`[rolling] 段 ${seg.index} 建稿 BV=${bv}`);
       this.queueSeason(bv, false);
       return;
@@ -803,6 +805,7 @@ export class RollingUploader {
     confirmed.add(seg.index);
     this.state = { ...this.state, uploading: undefined, confirmed: [...confirmed], updatedAt: this.now() };
     if (!this.persist()) throw new Error(`sidecar 写失败(append 结果段 ${seg.index}),状态不可信,保留源`);
+    noteRecorderProgress(); // a confirmed segment is progress for the finalizing stall judge (plans/044)
     this.log(`[rolling] 段 ${seg.index} append 到 ${bv}`);
   }
 

@@ -120,9 +120,15 @@ export interface RoomProbeDeps {
   proc: ProcProbe;
   now: () => number;
   log: (msg: string) => void;
+  /** False suppresses the data-root mismatch warning (one-shot ssh invocations; its dedup cannot span calls). */
+  warnMismatch?: boolean;
 }
 
+/** Set by the one-shot hidden-CLI entry: every ssh `_is-done` is a fresh process, so a per-process dedup is useless. */
+let oneShotInvocation = false;
+
 const defaultRoomProbe = (): RoomProbeDeps => ({
+  warnMismatch: !oneShotInvocation,
   scan: scanRecordingRooms,
   proc: linuxProcProbe,
   now: Date.now,
@@ -153,6 +159,7 @@ export function resetScanMismatchWarningsForTest(): void {
  * unchanged (the scan still counts); we only say so once per (room, task) per process lifetime.
  */
 function warnScanWithoutState(scanned: readonly ScannedRoom[], states: readonly RecorderStateFile[], deps: RoomProbeDeps): void {
+  if (deps.warnMismatch === false) return;
   for (const r of scanned) {
     if (r.taskId === undefined) continue;
     const key = `${r.platform}:${r.roomSlug}:${r.taskId}`;
@@ -505,6 +512,7 @@ export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freez
 
 /** Run a registry command for the hidden CLI entry point: same stdout bytes and exit code as before. */
 export async function runNodeCommandCli(name: string, dataRoot: string, args: string[]): Promise<void> {
+  oneShotInvocation = true;
   const r = await NODE_COMMANDS[name](dataRoot, args);
   process.stdout.write(r.stdout);
   if (r.exitCode !== 0) process.exitCode = r.exitCode;

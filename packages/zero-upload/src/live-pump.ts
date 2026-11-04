@@ -58,6 +58,7 @@ import {
   seasonCheckpointState,
   isSameBroadcastGap,
   isUploadRateLimited,
+  noteRecorderProgress,
   type DanmuMessage,
   type LivePumpReporter,
 } from "@drec/core";
@@ -991,6 +992,7 @@ export class LivePumpSession {
     } catch (e) {
       return { ok: false, error: `cannot persist confirmation: ${String((e as Error)?.message ?? e).slice(0, 200)}` };
     }
+    noteRecorderProgress(); // a confirmed part is progress for the finalizing stall judge (plans/044)
     this.cleanupConfirmed();
     if (pending.kind === "create" && this.o.seasonSectionId) {
       this.queueSeason(doFetch, false);

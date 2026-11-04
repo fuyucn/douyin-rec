@@ -32,7 +32,7 @@ function put(root: string, over: Partial<RecorderStateFile> & { taskId: number }
   const s: RecorderStateFile = {
     schemaVersion: 1, platform: "douyin", roomSlug: "555", mode: "live",
     owner: { pid: ALIVE_PID, startTicks: TICKS, bootId: BOOT },
-    phase: "recording", session: null, heartbeatAt: NOW, finalizingSince: null, exit: null, updatedAt: NOW,
+    phase: "recording", session: null, heartbeatAt: NOW, finalizingSince: null, progressAt: null, exit: null, updatedAt: NOW,
     ...over,
   };
   mkdirSync(recorderStateDir(root), { recursive: true });
@@ -216,9 +216,9 @@ describe("finalizingRoomsOf (recording-status `finalizing` list, #456)", () => {
     expect(finalizingRoomsOf(root, deps())).toEqual([{ platform: "douyin", roomSlug: "fin" }]);
   });
 
-  it("a finalizing tail past the 3h cap is no longer listed even though its heartbeat is fresh", () => {
+  it("a finalizing tail with no progress for 46 min is no longer listed even though its heartbeat is fresh", () => {
     const root = makeRoot();
-    put(root, { taskId: 1, phase: "finalizing", finalizingSince: NOW - 3 * 3600_000 - 1 });
+    put(root, { taskId: 1, phase: "finalizing", finalizingSince: NOW - 2 * 3600_000, progressAt: NOW - 46 * 60_000 });
     expect(finalizingRoomsOf(root, deps())).toEqual([]);
     expect(isRoomDone(root, "555", deps())).toBe(true);
   });
@@ -252,6 +252,13 @@ describe("localRoomProbes on hosts without /proc (macOS serve --hub)", () => {
 });
 
 describe("data-root mismatch warning", () => {
+  it("is suppressed for one-shot invocations (warnMismatch=false)", () => {
+    const root = makeRoot();
+    const d = { ...deps(() => [{ platform: "douyin", roomSlug: "555", taskId: 42 }]), warnMismatch: false };
+    isRoomDone(root, "555", d);
+    expect(d.logs).toEqual([]);
+  });
+
   const scan = (taskId?: number) => () => [{ platform: "douyin", roomSlug: "555", ...(taskId !== undefined ? { taskId } : {}) }];
 
   it("warns once per (room, task) when the scan sees a --task-id process with no state file; the verdict is unchanged", () => {
