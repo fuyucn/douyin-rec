@@ -149,12 +149,25 @@ export interface FleetLink {
 
 ### Task 6: serve 判活闸门（按需拉起 record 子进程）
 
-> 动手前在本文件补设计细节并让用户确认（任务状态展示、#308、drain、零落盘模式）。
+> 设计已由用户确认（2026-11-04：a 边录边传进闸门、c 手动启动也进闸门、直播直传也进闸门、b 收播退回闸门推迟）。现状依据：task-manager / daemon / record-engine / live-pump 的生命周期梳理。
 
-- 任务应运行时先进 `gated`：每 30s `platform.getLiving(slug)`；true → spawn，之后子进程生命周期不变；失败只记日志。
-- 本期只做「首次拉起」，「收播后退出回闸门」另立任务（与 30 分钟同场口径、边录边传收尾冲突）。
-- API：`running:true, recording:false, gated:true`；前端「等待开播」；旧前端忽略。零落盘 / live-pump 任务不进闸门。开关 `settings.liveGate`（默认 true）。
-- 验收：0 在录时 `record` 子进程数 = 0；开播 ≤ 60s 开始写分段；停止 / 窗口结束 / 删除立即取消闸门。
+**目标**：未开播的任务不占 `record` 子进程（实测空闲子进程约 10MB 匿名 + 27MB swap / 个，一台 worker 挂 8 个）。
+
+**插入点（唯一）**：`TaskManager.start()` → 原 `trySpawn` 前。闸门是 TaskManager 内部状态 `gates: Map<taskId, Gate>`，不新建模块、不改 daemon 的决策逻辑。
+
+1. **何时进闸门**（判定函数唯一一个 `shouldGate(task)`）：`settings.liveGate !== "false"`（默认开）即进闸门，**含边录边传（rolling）与直播直传（零落盘）**，手动启动与 daemon 启动同口径。唯一例外：直播直传任务的状态里有**未确认分 P**（上次运行留下、需补交）→ 不进闸门、立即 spawn，由子进程照旧先恢复（判定用与子进程同一套状态路径解析与读取函数，不另写一份；读不到 / 解析失败 → 当作有未确认分 P，立即 spawn，宁可多占进程也不拖延补交）。同场判定（#293）本就在开播那一刻于子进程内做，闸门不影响。边录边传：spawn 时 `beforeSpawn` 本就读最新值。
+2. **闸门轮询**：首次在 0–5s 随机抖动后查（避免 daemon 一次 tick 拉起 N 个任务同时打 N 个请求），之后按 `platform.pollIntervalMs ?? 30s`（快手 5 分钟，与录制器同口径）。`getLiving` true → 撤闸门、走原 `trySpawn`，此后子进程生命周期完全不变（子进程自己仍会再取一次流，多一个请求，与现状同量级）。
+3. **#308**：闸门永不退出、永不计入 restart 预算。`getLiving` 抛错（风控 / 网络）→ 连续失败指数退避（30s → 封顶 5 分钟），首次与每第 10 次记一条任务日志，不告警、不改状态。
+4. **抖音 API 模式**：serve 进程目前不设 `DOUYIN_REC_API_MODE`（只注入子进程）→ 闸门会用默认 balance。实现时让闸门调用前按 `settings.douyinApiMode` 设好同一取值（与子进程同口径），否则闸门与录制用不同取流接口。
+5. **状态**：闸门中 `isRunning = true`（daemon 的 `runningIds`、Web 启停、维护逻辑都把它当已启动，不会每 tick 重复 start）、`isRecording = false`、`status = "running"`。`TaskDTO` 加可选 `gated?: boolean`；前端现有「running && !recording → 等待开播」徽标不变，仅加提示「未开播，未占用录制进程」；旧前端忽略该字段。
+6. **停止类操作立即生效**：`stop` / `requestStop` / `stopWithin` / `stopGraceful`（窗口结束排空）/ 删除 / hub 抑制源任务，遇闸门中任务一律清定时器、标记取消（进行中的 `getLiving` 返回后检查取消标记，不再 spawn），状态 `stopped`。闸门中没有在录内容，排空等于立即停。
+7. **hub / 节点**：`recording-status` 按 `/proc` 扫下载器子进程，闸门中与「子进程等待开播」读数相同（都是不在录），对账与 settle 不受影响。hub 零落盘预检在 `spawnFor` 内，开闸时才跑；失败走原 spawn 失败路径。
+8. **开关在运行中关闭**：`liveGate` 改为 false → 所有闸门中任务立即开闸 spawn（关开关 = 即时回到旧行为，作为线上兜底）。
+9. **本期不做（用户确认推迟）**：收播后子进程退出回闸门（与 30 分钟同场口径、边录边传收尾冲突，另立任务）。所以收益是「每个窗口首次开播前」不占进程；一场播完后子进程照旧留在进程内等待，直到窗口结束。崩溃重启同样直接 spawn，不经闸门。
+
+**测试**（假平台 `getLiving`）：未开播不 spawn 且 `isRunning` 为 true；开播 → spawn 一次；`getLiving` 抛错持续轮询且不进 error / 不计 restart；`stop` / `stopGraceful` / 删除在轮询中途取消且其后不再 spawn；直播直传有未确认分 P（含状态读不到）与 `liveGate=false` 直接 spawn；直播直传无未确认分 P 与边录边传都进闸门；运行中关开关立即 spawn；daemon 连续 tick 不重复 start。
+
+**验收**：0 在录时 `record` 子进程数 = 0；开播 ≤ 60s 开始写分段（快手 ≤ 5 分钟，与现状同）；停止 / 窗口结束 / 删除立即取消闸门；Task 5 复测内存。
 
 ### 附：已实测、待排期的其它方向（不在本期验收内）
 
