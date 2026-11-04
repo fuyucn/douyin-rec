@@ -1,6 +1,6 @@
 // packages/orchestrator/src/transport-ssh.ts
-import { getFleetLink, type FleetLink } from "./fleet-hub.js";
-import { withFleet } from "./fleet-run.js";
+import type { FleetLink } from "./fleet-hub.js";
+import { cachedRecordingRooms, runOverFleet } from "./fleet-run.js";
 import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { encodeEnqueue, isJobAbort, normalizeNodeResultFile, normalizeZeroDiskReport, type ZeroDiskReport, registerChild, throwIfAborted, type EnqueueRequest, type EnqueueResponse, type ProcessReceipt, type RemoteTaskSpec } from "@drec/core";
@@ -31,11 +31,10 @@ export interface SshOpts {
    */
   nodePipelineTimeoutMs?: number;
   /**
-   * Fleet long connection (plans/042). Omitted → the process-wide link the master registered at hub start
-   * (`setFleetLink`); `null` → ssh only. Without a link (or for a node that is not connected) behaviour is
-   * exactly the ssh path.
+   * Fleet long connection (plans/042), read on every call (the master may start it after transports are
+   * built). Omitted or returning null → ssh only; a node that is not connected also takes the ssh path.
    */
-  fleet?: FleetLink | null;
+  fleet?: () => FleetLink | null;
 }
 
 // SSH 心跳 + 免交互:ServerAlive 5s×3≈15s 检测死连接自动断(tailscale 偶发 stall 不再永久挂);
@@ -78,9 +77,22 @@ export function buildRsyncArgs(host: string, remote: string, localDir: string): 
   ];
 }
 
-function defaultRun(host: string, timeoutMs = 45_000) {
+/** One argument of a remote shell line, always single-quoted: the remote shell must never interpret it. */
+function shellWord(a: string): string {
+  return `'${a.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * `ssh host -- <argv>` with keepalives and a hard timeout. `input`, when given, is written to the remote
+ * command's stdin (used to hand over secrets without putting them in argv).
+ */
+export function defaultRun(host: string, timeoutMs = 45_000, input?: string) {
   return (argv: string[]): Promise<string> => new Promise((resolve, reject) => {
     const p = spawn("ssh", ["-o", "ConnectTimeout=10", ...SSH_KEEPALIVE, host, "--", ...argv]);
+    if (input !== undefined) {
+      p.stdin.on("error", () => { /* remote exited before reading (EPIPE): the exit code reports it */ });
+      p.stdin.end(input);
+    }
     registerChild(p); // 不建进程组:ssh 自己是叶子
     let out = "", err = "", settled = false;
     const finish = (fn: () => void): void => { if (settled) return; settled = true; clearTimeout(timer); fn(); };
@@ -104,7 +116,7 @@ function defaultRun(host: string, timeoutMs = 45_000) {
  * 只认这一明确信号才允许降级;网络/权限/超时等错误必须抛给调用方,避免把可达性故障
  * 误报成「节点不支持状态查询」。
  */
-function isUnknownCommandError(e: unknown): boolean {
+export function isUnknownCommandError(e: unknown): boolean {
   const msg = e instanceof Error ? e.message : String(e);
   return /unknown command|未知命令|commander(\.js)?:?\s*unknown/i.test(msg);
 }
@@ -116,13 +128,13 @@ export class SshTransport implements Transport {
   private rsync: (remote: string, localDir: string) => Promise<void>;
   /** 长任务专用 run(节点侧上传),超时预算独立于默认 45s。 */
   private runLong: (argv: string[]) => Promise<string>;
+  /** Remote `node <bundle>` prefix of every hidden command. */
+  private readonly nodePrefix: string;
   constructor(private o: SshOpts) {
     this.id = o.id;
-    const nodePrefix = o.remoteNode ?? `node ${o.dataRoot}/dist/douyin-rec.mjs`;
-    const link = (): FleetLink | null => (o.fleet === undefined ? getFleetLink() : o.fleet);
-    // Long-running node pipelines (runLong) stay on ssh: they need their own process and timeout budget.
-    this.run = withFleet(o.run ?? defaultRun(o.host), { nodeId: o.id, nodePrefix, link, timeoutMs: 45_000 });
-    this.runStatus = withFleet(o.run ?? defaultRun(o.host, 8_000), { nodeId: o.id, nodePrefix, link, timeoutMs: 8_000 });
+    this.nodePrefix = o.remoteNode ?? `node ${o.dataRoot}/dist/douyin-rec.mjs`;
+    this.run = o.run ?? defaultRun(o.host);
+    this.runStatus = o.run ?? defaultRun(o.host, 8_000);
     // 注入的 fake run(测试)沿用同一个,只有真实 ssh 才用更长的预算。
     this.runLong = o.run ?? defaultRun(o.host, o.nodePipelineTimeoutMs ?? 30 * 60_000);
     this.rsync = o.rsync ?? ((remote, localDir) => new Promise((res, rej) => {
@@ -165,15 +177,31 @@ export class SshTransport implements Transport {
       p.on("error", (e) => finish(() => rej(e)));
     }));
   }
+  /** `<nodePrefix> _<cmd> <dataRoot> <args…>` as one remote shell line (the ssh path). */
+  private nodeLine(cmd: string, args: readonly string[] = []): string {
+    return [`${this.nodePrefix} _${cmd}`, this.o.dataRoot, ...args.map(shellWord)].join(" ");
+  }
+
+  /**
+   * Run hidden command `_<cmd>` on the node: over the fleet connection when it can answer (fleet-run.ts),
+   * otherwise ssh with the default (45s) or status (8s) budget. Long node pipelines stay on `runLong`.
+   */
+  private node(cmd: string, args: readonly string[] = [], budget: "default" | "status" = "default"): Promise<string> {
+    const ssh = budget === "status" ? this.runStatus : this.run;
+    return runOverFleet(
+      this.o.fleet?.() ?? null,
+      { nodeId: this.o.id, dataRoot: this.o.dataRoot, cmd, args, timeoutMs: budget === "status" ? 8_000 : 45_000 },
+      () => ssh([this.nodeLine(cmd, args)]),
+    );
+  }
+
   async listInventory(): Promise<NodeInventory> {
     // 调用 slave 部署的 CLI bundle：`node <dataRoot>/dist/douyin-rec.mjs _inventory <dataRoot>`
     // slave 端 _inventory 子命令扫描自身 recordings 并输出 JSON { recordings: NodeRecording[] }。
-    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
-    const cmd = `${nodePrefix} _inventory ${this.o.dataRoot}`;
     // 命令作**单个字符串**传:ssh 本就经远端 shell(`$SHELL -c`)执行命令,无需再包 bash -lc。
     // 旧写法 ["bash","-lc",cmd] 经 ssh 空格 join 成 `bash -lc node /path …` → bash -c 只取 "node"
     // 当命令、其余成位置参数 → 实际只跑 `node`(无脚本)→ 空输出 → JSON.parse 抛错 → 该节点恒缺席。
-    const out = await this.run([cmd]);
+    const out = await this.node("inventory");
     const parsed = JSON.parse(out) as { recordings: NodeRecording[]; unclaimedSegments?: unknown; unclaimedTruncated?: unknown };
     // Old workers omit the orphan fields and malformed ones are dropped: both mean "unknown".
     const extra = parseUnclaimedPayload(parsed);
@@ -182,17 +210,15 @@ export class SshTransport implements Transport {
 
   /** 读远端任务清单(隐藏 `_tasks` 子命令;输出不含 cookies)。 */
   async listTasks(): Promise<NodeTasks> {
-    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
-    const out = await this.run([`${nodePrefix} _tasks ${this.o.dataRoot}`]);
+    const out = await this.node("tasks");
     const parsed = JSON.parse(out) as { tasks: NodeTasks["tasks"] };
     return { workerId: this.id, tasks: parsed.tasks };
   }
 
   /** 读远端稳定身份(隐藏 `_node-id` 子命令;旧 bundle 无该命令 → 返回 null,调用方回落旧行为)。 */
   async nodeId(): Promise<{ nodeId: string; hostname?: string } | null> {
-    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
     try {
-      const out = await this.run([`${nodePrefix} _node-id ${this.o.dataRoot}`]);
+      const out = await this.node("node-id");
       const parsed = JSON.parse(out) as { nodeId?: string; hostname?: string };
       return parsed?.nodeId ? { nodeId: parsed.nodeId, hostname: parsed.hostname } : null;
     } catch {
@@ -205,9 +231,8 @@ export class SshTransport implements Transport {
    * 命令不存在才降级到 activeRecordingRooms(其内部有 `_tasks`+`_is-done` 回退),其它错误照常抛。
    */
   async recordingStatus(): Promise<NodeRecordingStatus> {
-    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
     try {
-      const out = await this.runStatus([`${nodePrefix} _recording-status ${this.o.dataRoot}`]);
+      const out = await this.node("recording-status", [], "status");
       const parsed = JSON.parse(out) as { rooms?: ActiveRecordingRoom[]; rolling?: unknown };
       if (Array.isArray(parsed.rooms)) {
         const rolling = (Array.isArray(parsed.rolling) ? parsed.rolling : []).filter((r): r is NodeRollingSession => {
@@ -227,9 +252,8 @@ export class SshTransport implements Transport {
 
   /** 查询 worker 当前正在录制的房间,仅做轻量 /proc 扫描,不读录像目录。 */
   async activeRecordingRooms(): Promise<ActiveRecordingRoom[]> {
-    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
     try {
-      const out = await this.runStatus([`${nodePrefix} _recording-status ${this.o.dataRoot}`]);
+      const out = await this.node("recording-status", [], "status");
       const parsed = JSON.parse(out) as { rooms?: ActiveRecordingRoom[] };
       return Array.isArray(parsed.rooms) ? parsed.rooms : [];
     } catch (e) {
@@ -238,7 +262,7 @@ export class SshTransport implements Transport {
       if (!isUnknownCommandError(e)) throw e;
     }
     // 兼容尚未更新的 worker bundle:退回现有 _tasks + _is-done 查询(每轮 1 + N 次 ssh)。
-    const taskOut = await this.runStatus([`${nodePrefix} _tasks ${this.o.dataRoot}`]);
+    const taskOut = await this.node("tasks", [], "status");
     const parsed = JSON.parse(taskOut) as { tasks: NodeTasks["tasks"] };
     const candidates = [...new Map(
       parsed.tasks.filter((task) => task.enabled).map((task) => [
@@ -248,7 +272,7 @@ export class SshTransport implements Transport {
     ).values()];
     const done = await Promise.all(candidates.map(async (room) => ({
       room,
-      done: await this.runStatus([`${nodePrefix} _is-done ${this.o.dataRoot} '${room.roomSlug.replace(/'/g, "'\\''")}'`])
+      done: await this.node("is-done", [room.roomSlug], "status")
         .then((out) => out.trim().toLowerCase() !== "false")
         .catch(() => true),
     })));
@@ -261,16 +285,14 @@ export class SshTransport implements Transport {
    * 只在 master 侧生效等于没做(远端节点才是拒绝删除的那个)。
    */
   async applyTasks(input: { desired: RemoteTaskSpec[]; force?: boolean; expectedVersion?: number }): Promise<ApplyTasksResult> {
-    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
     const b64 = Buffer.from(JSON.stringify(input), "utf-8").toString("base64");
-    const out = await this.run([`${nodePrefix} _apply-tasks ${this.o.dataRoot} ${b64}`]);
+    const out = await this.node("apply-tasks", [b64]);
     return JSON.parse(out) as ApplyTasksResult;
   }
 
   /** 远端数据根剩余空间 GB(隐藏 `_disk`;master 侧磁盘看门狗用,不依赖 worker webhook 配置)。 */
   async diskFreeGB(): Promise<number> {
-    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
-    const out = await this.run([`${nodePrefix} _disk ${this.o.dataRoot}`]);
+    const out = await this.node("disk");
     const parsed = JSON.parse(out) as { freeGB?: number; error?: string };
     if (parsed.error || typeof parsed.freeGB !== "number") throw new Error(`_disk 失败: ${parsed.error ?? "无 freeGB"}`);
     return parsed.freeGB;
@@ -284,9 +306,8 @@ export class SshTransport implements Transport {
    * 拿不到不该打断任何流程 —— 所以这里吞掉「未知命令」并返回 null。
    */
   async nodeStatus(): Promise<NodeStatus | null> {
-    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
     try {
-      const out = await this.run([`${nodePrefix} _node-status ${this.o.dataRoot}`]);
+      const out = await this.node("node-status");
       return JSON.parse(out) as NodeStatus;
     } catch (e) {
       // 旧 bundle(unknown command)/ 节点不可达 / 输出非法 JSON → 一律 null,不抛。
@@ -299,11 +320,10 @@ export class SshTransport implements Transport {
    * `ackIds` 非空时同一次调用顺便确认,避免多一次 ssh。
    */
   async notifyOutbox(after: number, limit: number, ackIds: number[] = []): Promise<Array<{ id: number; at: number; taskId: number | null; room: string | null; wantWebhook: boolean; event: unknown }> | null> {
-    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
-    const ack = ackIds.length > 0 ? ` --ack ${ackIds.join(",")}` : "";
+    const ack = ackIds.length > 0 ? ["--ack", ackIds.join(",")] : [];
     let out: string;
     try {
-      out = await this.runStatus([`${nodePrefix} _notify-outbox ${this.o.dataRoot} --after ${after} --limit ${limit}${ack}`]);
+      out = await this.node("notify-outbox", ["--after", String(after), "--limit", String(limit), ...ack], "status");
     } catch (e) {
       if (isUnknownCommandError(e)) return null;
       throw e;
@@ -317,8 +337,7 @@ export class SshTransport implements Transport {
    * 返回 `error` 由调用方原样展示,不当成失败抛错(可观测性不能反过来打断任何东西)。
    */
   async taskLogs(taskId: number, lines: number): Promise<{ lines: string[]; error?: string }> {
-    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
-    const out = await this.runStatus([`${nodePrefix} _task-logs ${this.o.dataRoot} ${taskId} ${lines}`]);
+    const out = await this.node("task-logs", [String(taskId), String(lines)], "status");
     const parsed = JSON.parse(out) as { lines?: unknown; error?: unknown };
     return {
       lines: Array.isArray(parsed.lines) ? parsed.lines.filter((x): x is string => typeof x === "string") : [],
@@ -332,10 +351,9 @@ export class SshTransport implements Transport {
    * offline instead of treating it as "no receipts".
    */
   async zeroDiskReport(): Promise<ZeroDiskReport | null> {
-    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
     let out: string;
     try {
-      out = await this.runStatus([`${nodePrefix} _zero-disk-report ${this.o.dataRoot}`]);
+      out = await this.node("zero-disk-report", [], "status");
     } catch (e) {
       if (isUnknownCommandError(e)) return null;
       throw e;
@@ -349,8 +367,7 @@ export class SshTransport implements Transport {
 
   /** 节点侧上传能力探测(experimental,见 plans/027)。旧 bundle 无 `_node-capabilities` → 抛错,调用方按不支持处理。 */
   async nodeCapabilities(): Promise<NodeCapabilities> {
-    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
-    const out = await this.run([`${nodePrefix} _node-capabilities ${this.o.dataRoot}`]);
+    const out = await this.node("node-capabilities");
     const parsed = JSON.parse(out) as Partial<NodeCapabilities>;
     return {
       biliup: parsed.biliup === true,
@@ -369,10 +386,9 @@ export class SshTransport implements Transport {
    * 可达性 / 超时等其余错误原样抛(不能把网络故障误报成「节点不支持」)。
    */
   async enqueue(req: EnqueueRequest): Promise<EnqueueResponse> {
-    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
     let out: string;
     try {
-      out = await this.run([`${nodePrefix} _enqueue ${this.o.dataRoot} ${encodeEnqueue(req)}`]);
+      out = await this.node("enqueue", [encodeEnqueue(req)]);
     } catch (e) {
       if (isUnknownCommandError(e)) throw new ProcUnsupported("节点 bundle 不支持 _enqueue(旧版本)");
       throw e;
@@ -385,11 +401,10 @@ export class SshTransport implements Transport {
 
   /** 回执查询(`_proc-status`)。unknown command → {@link ProcUnsupported}(节点回滚旧 bundle 的信号,N7)。 */
   async procStatus(jobIds: string[]): Promise<ProcessReceipt[]> {
-    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
     const b64 = Buffer.from(JSON.stringify(jobIds), "utf8").toString("base64");
     let out: string;
     try {
-      out = await this.runStatus([`${nodePrefix} _proc-status ${this.o.dataRoot} ${b64}`]);
+      out = await this.node("proc-status", [b64], "status");
     } catch (e) {
       if (isUnknownCommandError(e)) throw new ProcUnsupported("节点 bundle 不支持 _proc-status(旧版本)");
       throw e;
@@ -402,11 +417,10 @@ export class SshTransport implements Transport {
 
   /** Cancel queued jobs (`_proc-cancel`). Unknown command → ProcUnsupported. */
   async procCancel(jobIds: string[]): Promise<ProcessReceipt[]> {
-    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
     const b64 = Buffer.from(JSON.stringify(jobIds), "utf8").toString("base64");
     let out: string;
     try {
-      out = await this.runStatus([`${nodePrefix} _proc-cancel ${this.o.dataRoot} ${b64}`]);
+      out = await this.node("proc-cancel", [b64], "status");
     } catch (e) {
       if (isUnknownCommandError(e)) throw new ProcUnsupported("node bundle does not support _proc-cancel (old version)");
       throw e;
@@ -419,11 +433,10 @@ export class SshTransport implements Transport {
 
   /** Plan or apply order recovery on the node (`_recover-order`); unknown command -> ProcUnsupported. */
   async recoverOrder(req: RecoverOrderRequest): Promise<RecoverOrderResult> {
-    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
     const b64 = Buffer.from(JSON.stringify(req), "utf8").toString("base64");
     let out: string;
     try {
-      out = await this.runStatus([`${nodePrefix} _recover-order ${this.o.dataRoot} ${b64}`]);
+      out = await this.node("recover-order", [b64], "status");
     } catch (e) {
       if (isUnknownCommandError(e)) throw new ProcUnsupported("node bundle does not support _recover-order (old version)");
       throw e;
@@ -440,11 +453,10 @@ export class SshTransport implements Transport {
    * 录像**不回传 master** —— 这正是省掉 rsync 的关键。
    */
   async nodePipeline(spec: NodePipelineSpec, opts?: { timeoutMs?: number }): Promise<NodePipelineResult> {
-    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
     const b64 = Buffer.from(JSON.stringify(spec), "utf-8").toString("base64");
     // 用 runLong:上传整场录像远超默认 45s 预算(见 SshOpts.nodePipelineTimeoutMs)。
     // 调用方按场次字节数估算的超时(issue #25 ①)优先;注入的 run(测试)不受影响。
-    const argv = [`${nodePrefix} _node-pipeline ${this.o.dataRoot} ${b64}`];
+    const argv = [this.nodeLine("node-pipeline", [b64])];
     const out = opts?.timeoutMs && !this.o.run ? await defaultRun(this.o.host, opts.timeoutMs)(argv) : await this.runLong(argv);
     const parsed = JSON.parse(out) as Partial<NodePipelineResult>;
     return {
@@ -461,10 +473,8 @@ export class SshTransport implements Transport {
    * 用短预算 runStatus(8s):只是读一个小文件,不该拖住 master 的失败处理。
    */
   async nodeResult(streamKey: string): Promise<NodePipelineResultFile | null> {
-    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
-    const q = streamKey.replace(/'/g, "'\\''");
     try {
-      const out = await this.runStatus([`${nodePrefix} _node-result ${this.o.dataRoot} '${q}'`]);
+      const out = await this.node("node-result", [streamKey], "status");
       // 归一口径与 app 侧 `readNodeResult` **共用 core 的 `normalizeNodeResultFile`**(唯一真理):
       // phase 白名单新增一处即可,两处不再各写一份而漂移(issue #2)。
       return normalizeNodeResultFile(JSON.parse(out));
@@ -482,10 +492,8 @@ export class SshTransport implements Transport {
    * 用 runStatus(8s):节点侧 abort 内部 SIGTERM→2s 宽限→SIGKILL,远小于预算。
    */
   async abortNodePipeline(streamKey: string): Promise<{ aborted: boolean; detail?: string }> {
-    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
-    const q = streamKey.replace(/'/g, "'\\''");
     try {
-      const out = await this.runStatus([`${nodePrefix} _node-abort ${this.o.dataRoot} '${q}'`]);
+      const out = await this.node("node-abort", [streamKey], "status");
       const parsed = JSON.parse(out) as { aborted?: unknown; detail?: unknown };
       return {
         aborted: parsed?.aborted === true,
@@ -501,9 +509,10 @@ export class SshTransport implements Transport {
     // 每房间判定:远端 `_is-done <dataRoot> <roomSlug>` 只查该房间 record 进程是否还有
     // ffmpeg/mesio 孙进程。旧实现 `grep -ic ffmpeg` 是全机计数 —— 别的房间还在录会把
     // 本房间也判成未收播,settle 一直空等、hub 迟迟不建 job(实测踩过)。
-    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
-    const q = roomSlug.replace(/'/g, "'\\''");
-    const out = await this.run([`${nodePrefix} _is-done ${this.o.dataRoot} '${q}'`]);
+    // A fresh heartbeat already says which rooms are recording: no round trip at all.
+    const rooms = cachedRecordingRooms(this.o.fleet?.() ?? null, this.o.id);
+    if (rooms) return !rooms.has(roomSlug);
+    const out = await this.node("is-done", [roomSlug]);
     const trimmed = out.trim().toLowerCase();
     // 未知/乱码输出 → 视为未收播(安全默认：编排器等待而非提前同步)
     if (trimmed !== "true" && trimmed !== "false") return false;

@@ -241,7 +241,8 @@ describe("_proc-status", () => {
 
 /** 进程内「假节点」:把 ssh argv 路由到同一执行体(等价于节点上跑 `_enqueue` / `_proc-status`)。 */
 const fakeNodeRun = (dataRoot: string, o = opts()) => async (argv: string[]): Promise<string> => {
-  const [, , cmd, , b64] = argv[0].split(" ");
+  const [, , cmd, , quoted] = argv[0].split(" ");
+  const b64 = (quoted ?? "").replace(/^'|'$/g, ""); // SshTransport single-quotes every argument
   if (cmd === "_enqueue") return JSON.stringify(handleEnqueue(dataRoot, decodeEnqueue(b64), o)) + "\n";
   if (cmd === "_proc-status") return JSON.stringify({ receipts: handleProcStatus(dataRoot, decodeJobIds(b64)) }) + "\n";
   if (cmd === "_node-capabilities") return JSON.stringify({ biliup: true, cookies: true, diskFreeGB: 9, cjkFonts: false, processors: ["remux"] }) + "\n";

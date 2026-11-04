@@ -11,11 +11,12 @@ import {
   fleetSocketUrl,
   readFleetConfig,
   startFleetAgent,
+  watchFleetAgent,
   writeFleetConfig,
   type FleetAgent,
   type FleetNodeCommand,
 } from "../../packages/app/src/fleet-agent.js";
-import { FLEET_CLOSE, FLEET_UNKNOWN_COMMAND_EXIT } from "../../packages/core/src/fleet-protocol.js";
+import { FLEET_CLOSE } from "../../packages/core/src/fleet-protocol.js";
 
 type Frame = { t: string; [k: string]: unknown };
 
@@ -115,7 +116,7 @@ describe("fleet agent", () => {
     expect(res).toEqual({ t: "res", id: 7, stdout: '["a","--b","c"]\n', exitCode: 0 });
   });
 
-  it("unknown command → exit 127; foreign dataRoot → exit 2; throw → exit 1 with error", async () => {
+  it("unknown command / foreign dataRoot → refused; throw → exit 1 with error", async () => {
     const m = await startMaster();
     agent(m.url);
     await m.next("hello");
@@ -126,8 +127,8 @@ describe("fleet agent", () => {
     s.send(JSON.stringify({ t: "req", id: 3, cmd: "boom", args: ["/data/root"] }));
     await new Promise((r) => setTimeout(r, 300));
     const byId = new Map(m.frames.filter((f) => f.t === "res").map((f) => [f.id, f]));
-    expect(byId.get(1)).toMatchObject({ exitCode: FLEET_UNKNOWN_COMMAND_EXIT });
-    expect(byId.get(2)).toMatchObject({ exitCode: 2 });
+    expect(byId.get(1)).toMatchObject({ refused: "unknown-command" });
+    expect(byId.get(2)).toMatchObject({ refused: "data-root-mismatch" });
     expect(byId.get(3)).toMatchObject({ exitCode: 1, error: "kaput" });
   });
 
@@ -167,6 +168,22 @@ describe("fleet agent", () => {
     await m.next("heartbeat", at);
   });
 
+  it("each heartbeat carries only the commands that are due; a trigger can push just one", async () => {
+    const m = await startMaster();
+    const a = agent(m.url, { heartbeatMs: 100, everyMs: { "recording-status": 100, "node-status": 100_000, disk: 100_000 } });
+    await m.next("hello");
+    m.sockets[0].send(JSON.stringify({ t: "welcome", protocol: 1 }));
+    const first = await m.next("heartbeat");
+    expect(Object.keys(first.outputs as object).sort()).toEqual(["disk", "node-status", "recording-status"]);
+    const second = await m.next("heartbeat", m.frames.indexOf(first) + 1);
+    expect(Object.keys(second.outputs as object)).toEqual(["recording-status"]);
+    const at = m.frames.length;
+    a.triggerHeartbeat(["disk"]);
+    const pushed = await m.next("heartbeat", at);
+    expect(Object.keys(pushed.outputs as object).length).toBeGreaterThan(0);
+    expect(m.frames.slice(at).some((f) => f.t === "heartbeat" && Object.keys(f.outputs as object).join() === "disk")).toBe(true);
+  });
+
   it("a duplicate welcome does not start a second heartbeat timer", async () => {
     const m = await startMaster();
     agent(m.url, { heartbeatMs: 200 });
@@ -195,7 +212,24 @@ describe("fleet agent", () => {
     a.stop();
     await new Promise((r) => setTimeout(r, 1500));
     expect(m.sockets.length).toBe(1);
-    expect(a.connected()).toBe(false);
+  });
+});
+
+describe("watchFleetAgent", () => {
+  it("follows the config file: absent → off, written → dials, removed → stops", async () => {
+    const m = await startMaster();
+    const dir = mkdtempSync(join(tmpdir(), "drec-fleet-watch-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const configPath = join(dir, "fleet.json");
+    const w = watchFleetAgent({ configPath, reloadMs: 50, dataRoot: "/data/root", appVersion: "t", commands });
+    cleanups.push(() => w.stop());
+    await new Promise((r) => setTimeout(r, 200));
+    expect(m.sockets.length).toBe(0);
+    writeFleetConfig(configPath, { controllerUrl: m.url, nodeId: "n1", token: "k".repeat(64) });
+    await m.next("hello");
+    rmSync(configPath);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(m.sockets.every((s) => s.readyState !== s.OPEN)).toBe(true);
   });
 });
 
@@ -214,9 +248,13 @@ describe("fleet agent helpers", () => {
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
     const p = join(dir, "fleet.json");
     expect(readFleetConfig(p)).toBeNull();
+    const token = "t".repeat(64);
+    writeFileSync(p, JSON.stringify({ controllerUrl: "http://m:7860", nodeId: "n", token }));
+    expect(readFleetConfig(p)).toEqual({ controllerUrl: "http://m:7860", nodeId: "n", token });
+    writeFileSync(p, JSON.stringify({ controllerUrl: "ftp://m", nodeId: "n", token }));
+    expect(readFleetConfig(p)).toBeNull();
+    // Same rules as writing: a short token is not a valid config.
     writeFileSync(p, JSON.stringify({ controllerUrl: "http://m:7860", nodeId: "n", token: "t" }));
-    expect(readFleetConfig(p)).toEqual({ controllerUrl: "http://m:7860", nodeId: "n", token: "t" });
-    writeFileSync(p, JSON.stringify({ controllerUrl: "ftp://m", nodeId: "n", token: "t" }));
     expect(readFleetConfig(p)).toBeNull();
     writeFileSync(p, "{not json");
     expect(readFleetConfig(p)).toBeNull();

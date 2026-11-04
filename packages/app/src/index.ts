@@ -81,4 +81,4 @@ export type { RollingUploaderOpts } from "./rolling-upload.js";
 export { RemuxQueue, type RemuxQueueLike, type RemuxWaitOutcome } from "./remux-queue.js";
 export { makeNodeRemuxHookFactory, recoverNodeRemux, recoverNodeRemuxInBackground, convertSegmentInPlace, resolveNodeOutputFormat, shouldConvertAtSeal, nodeOutputFormatLock, verifyRemuxed, NODE_REMUX_TMP_SUFFIX } from "./node-remux.js";
 // Fleet agent (plans/042): worker side of the master ↔ worker long connection.
-export { readFleetConfig, writeFleetConfig, startFleetAgent, type FleetAgent, type FleetAgentConfig, type FleetNodeCommand } from "./fleet-agent.js";
+export { readFleetConfig, writeFleetConfig, startFleetAgent, watchFleetAgent, type FleetAgent, type FleetAgentConfig, type FleetNodeCommand } from "./fleet-agent.js";
