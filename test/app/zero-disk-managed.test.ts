@@ -78,6 +78,7 @@ describe("TaskManager refuses a managed zero-disk task before spawning", () => {
   let root: string;
   beforeEach(() => {
     store = new TaskStore(":memory:");
+    store.setSetting("liveGate", "false"); // gate behaviour: test/app/live-gate.test.ts
     spawner = new MockSpawner();
     root = mkdtempSync(join(tmpdir(), "zd-managed-"));
     process.env.DOUYIN_REC_ROOT = root;
@@ -131,6 +132,7 @@ describe("TaskManager refuses a managed zero-disk task before spawning", () => {
 describe("sync + API view", () => {
   it("the delivered JSON is stored by sync but never exposed by the redacted API view", () => {
     const store = new TaskStore(":memory:");
+    store.setSetting("liveGate", "false"); // gate behaviour: test/app/live-gate.test.ts
     applyRemoteTasks(store, [{
       platform: "douyin", roomSlug: "12345", room: "12345", name: "a", quality: "origin", engine: "ffmpeg", danmu: 1,
       segmentSec: 1800, scheduleStart: null, scheduleEnd: null, enabled: true, useCookie: true, cookies: null, outDir: null,

@@ -9,6 +9,7 @@
  */
 import type { Task } from "../store.js";
 import { resolveOutputDir } from "../paths.js";
+import { recordNameArg } from "../live-gate.js";
 
 /**
  * Build the `record` subcommand argv for a task. Output shape:
@@ -39,16 +40,10 @@ export function buildRecordArgs(task: Task, cookiesFile?: string): string[] {
     "--segment",
     String(task.segmentSec),
   ];
-  if (task.name) {
-    // per-streamer output subfolder + filename prefix
-    args.push("--name", task.name);
-  } else if (task.streamUpload && task.anchorName) {
-    // Zero-disk only: it has no recording filename to inherit the anchor from, so a cached
-    // anchor keeps title templates and danmu metadata from falling back to the room slug.
-    // Deliberately scoped to streamUpload: the normal recorder resolves the owner itself from
-    // each stream, and a stale cached name would rename its output subfolder.
-    args.push("--name", task.anchorName);
-  }
+  // Per-streamer output subfolder + filename prefix. Zero-disk tasks fall back to the cached anchor
+  // name (see recordNameArg, shared with the serve-side live gate).
+  const nameArg = recordNameArg(task);
+  if (nameArg) args.push("--name", nameArg);
   if (cookiesFile) {
     args.push("--cookies-file", cookiesFile);
   }

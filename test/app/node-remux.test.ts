@@ -533,6 +533,7 @@ describe("接线:TaskManager 在 spawn 前经唯一判定点把生效格式交�
   }
   const argsFor = (taskOver: Record<string, unknown>, opts: { applicable: boolean }): string[] => {
     const store = new TaskStore(":memory:");
+    store.setSetting("liveGate", "false"); // gate behaviour: test/app/live-gate.test.ts
     const t = store.addTask({ room: "12345", outputFormat: "mkv", ...taskOver });
     let seen: Record<string, unknown> | undefined;
     const spawner = { spawn: (task: Record<string, unknown>) => { seen = task; return new FakeProc(1); } } as unknown as Spawner;
@@ -551,6 +552,7 @@ describe("接线:TaskManager 在 spawn 前经唯一判定点把生效格式交�
   });
   it("TaskManager 未注入判定函数 → 恒 original(不替换)", () => {
     const store = new TaskStore(":memory:");
+    store.setSetting("liveGate", "false"); // gate behaviour: test/app/live-gate.test.ts
     const t = store.addTask({ room: "12345", outputFormat: "mkv" });
     let seen: { outputFormat?: string } = {};
     const spawner = { spawn: (task: { outputFormat?: string }) => { seen = task; return new FakeProc(1); } } as unknown as Spawner;

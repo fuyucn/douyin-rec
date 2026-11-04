@@ -65,6 +65,7 @@ function TaskCompactRow({ task }: { task: Task }): ReactNode {
           recording={task.recording}
           stopping={task.stopping}
           recordingWorkers={task.recordingWorkers}
+          gated={task.gated}
         />
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
@@ -353,6 +354,7 @@ export function TaskList(): ReactNode {
                         stopping={task.stopping}
                         recording={task.recording}
                         recordingWorkers={task.recordingWorkers}
+                        gated={task.gated}
                       />
                     </td>
                     <td className="text-right whitespace-nowrap">

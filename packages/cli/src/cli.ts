@@ -13,7 +13,7 @@ import "./load-env.js"; // 副作用:必须最先 import——从 <cwd>/.env 灌
                          // 抢在下面 @drec/app 的 DEFAULT_COOKIES(模块加载时就读 env)求值之前生效。
 import { SyncGate } from "./sync-gate.js";
 import { streamPartMaxMs } from "./stream-part-duration.js";
-import { zeroDiskRoom, zeroDiskSpoolName, zeroDiskXmlPath } from "./zero-disk-room.js";
+import { zeroDiskSpoolName, zeroDiskXmlPath } from "./zero-disk-room.js";
 import { zeroDiskUploadCookie } from "./zero-disk-upload-cookie.js";
 import { Command } from "commander";
 // 节点侧上传(experimental,plans/027)的节点侧命令(隔离在独立文件,便于快速开关/回退)。
@@ -22,7 +22,7 @@ import { NODE_COMMANDS, notifyOutboxArgs, runNodeCommandCli } from "./node-comma
 import { registerRecoverOrderCommands } from "./hub-recover-order-commands.js";
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { ZERO_DISK_DELIVERY_ENV, biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, normalizeSeasonSectionId, parseOutputFormat, resolveSeasonSectionId, stageExt, resolveDiskMinGB, resolveJobLogPath, stageSessionDir, ttlMemoAsync, recordingRoomDir, sanitizePathSegment, zonedStamp } from "@drec/core";
+import { ZERO_DISK_DELIVERY_ENV, biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, normalizeSeasonSectionId, parseOutputFormat, resolveSeasonSectionId, stageExt, resolveDiskMinGB, resolveJobLogPath, stageSessionDir, ttlMemoAsync, sanitizePathSegment, zonedStamp } from "@drec/core";
 import type { EnqueueRequest, HubResources, OutputFormat, StageFormat } from "@drec/core";
 import { RecordingSession, XmlDanmuWriter } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
@@ -307,34 +307,30 @@ program
     if (streamUploadEnabled) {
       // 直连新包(不再经 processors re-export):生产路径的依赖要明确,否则"换实现"
       // 看起来像改 processors,容易连带碰到后处理插件层。
-      const { runLivePump, alignFileSize, DEFAULT_SEGMENT_CAP, DEFAULT_STALL_TIMEOUT_MS, DEFAULT_RECOVERY_WINDOW_MS, readLivePumpState, livePumpStatePath, spoolPathsToKeep, archivedSpoolPathsToKeep, spoolSweepSafe, resolvePumpDir } = await import("@drec/zero-upload");
+      const { runLivePump, alignFileSize, DEFAULT_SEGMENT_CAP, DEFAULT_STALL_TIMEOUT_MS, DEFAULT_RECOVERY_WINDOW_MS, readLivePumpState, livePumpStatePath, spoolPathsToKeep, archivedSpoolPathsToKeep, spoolSweepSafe } = await import("@drec/zero-upload");
       const {
         rootBiliupCookies, sweepOrphanSpools, resolveStreamUploadMeta,
         resolveStreamUploadTitle, resolveStreamPartTitle,
         zeroDiskNodePreflight, writeZeroDiskStatus, createZeroDiskReporter, makeNodeSubmitGate,
+        resolveZeroDiskPumpDirs,
       } = await import("@drec/app");
       // Hub-rule metadata is the same single source as rolling upload (rule upload >
       // hub.config uploadDefaults > built-in defaults). Explicit stream-upload flags still win
       // because they only serve manual debugging.
       const roomSlug = platform.extractRoomSlug(roomToUrl(o.room));
-      const pumpRoom = zeroDiskRoom(platform, o.room);
       // Issue #360: with the room layout on, spool/state/xml live in the room directory and the
       // spool file carries the anchor name. The layout is read once per process; a running pump
       // never changes directory underneath itself. Legacy stays at the output root.
       const pumpLayout = readOutputLayout();
       const pumpAnchor = o.name?.trim() || "";
-      // Always resolve the room directory, even in legacy layout: the rollback check below must
-      // inspect the room-dir state, not the root one.
-      const roomDir = recordingRoomDir(opts.outDir, [pumpAnchor, roomSlug], {
-        platform: platform.id, roomSlug, anchorName: pumpAnchor || roomSlug,
-      }, { layout: "room" }) ?? opts.outDir;
-      const pumpSpoolDir = pumpLayout === "room" ? roomDir : opts.outDir;
-      // Sticky directory: a broadcast that already has a legacy state keeps using the root, so
-      // an upgrade never moves a live archive or its unconfirmed WAL. New broadcasts use the
-      // room directory. Nothing is migrated, so there is no half-migrated state to lose.
-      const pumpFilesDir = pumpLayout === "room"
-        ? resolvePumpDir(pumpSpoolDir, opts.outDir, pumpRoom)
-        : opts.outDir;
+      // Directory resolution is shared with the serve-side live gate (it must look at the same
+      // state file the child recovers from). The room directory is resolved even in legacy
+      // layout: the rollback check below inspects the room-dir state, not the root one.
+      // Sticky: a broadcast that already has a legacy state keeps using the root, so an upgrade
+      // never moves a live archive or its unconfirmed WAL. Nothing is migrated.
+      const { pumpRoom, roomDir, pumpFilesDir } = resolveZeroDiskPumpDirs({
+        platform, rawRoom: o.room, outDir: opts.outDir, anchorName: pumpAnchor, layout: pumpLayout,
+      });
       if (pumpFilesDir !== opts.outDir) mkdirSync(pumpFilesDir, { recursive: true });
       // A rollback to the legacy layout must not strand a room-dir WAL: nothing would ever
       // re-upload those unconfirmed parts. Alert (and keep recording into the root, where the

@@ -134,7 +134,7 @@ const DICT = {
       noSegment: "整场不切段",
       rollingUpload: "上传方式", lastRun: "最近一次运行", stageOnly: "存档(不上传)", pipelineSteps: "处理步骤",
     },
-    badge: { disabled: "已停用", draining: "排空中", stopping: "停止中", recording: "录制中", recordingOn: "录制中 · {nodes}", workersIdle: "等待开播 · {nodes}", workersUnavailable: "节点离线 · {nodes}", checkedAgo: "{ago}前核对", checkedAgoTitle: "远端录制状态是定时探测的缓存,这一结论来自 {ago} 前的探测", waiting: "等待开播中", idle: "已启用·待命", error: "错误" },
+    badge: { disabled: "已停用", draining: "排空中", stopping: "停止中", recording: "录制中", recordingOn: "录制中 · {nodes}", workersIdle: "等待开播 · {nodes}", workersUnavailable: "节点离线 · {nodes}", checkedAgo: "{ago}前核对", checkedAgoTitle: "远端录制状态是定时探测的缓存,这一结论来自 {ago} 前的探测", waiting: "等待开播中", gated: "未占用进程", gatedHint: "未开播,未占用录制进程;开播后自动启动录制", idle: "已启用·待命", error: "错误" },
     danmuKind: { off: "关闭", gift: "含礼物", anon: "匿名" },
     dialog: {
       createTitle: "新建录制任务", editTitle: "编辑任务", desc: "填写直播间与录制参数，全局 Cookie 在右上角统一管理。",
@@ -724,7 +724,7 @@ const DICT = {
       noSegment: "No segmentation",
       rollingUpload: "Upload mode", lastRun: "Last run", stageOnly: "Archive only (no upload)", pipelineSteps: "Pipeline steps",
     },
-    badge: { disabled: "Disabled", draining: "Draining", stopping: "Stopping", recording: "Recording", recordingOn: "Recording · {nodes}", workersIdle: "Waiting · {nodes}", workersUnavailable: "Offline · {nodes}", checkedAgo: "checked {ago} ago", checkedAgoTitle: "Remote recording state is a polled cache; this result is from a probe {ago} ago", waiting: "Waiting", idle: "Idle", error: "Error" },
+    badge: { disabled: "Disabled", draining: "Draining", stopping: "Stopping", recording: "Recording", recordingOn: "Recording · {nodes}", workersIdle: "Waiting · {nodes}", workersUnavailable: "Offline · {nodes}", checkedAgo: "checked {ago} ago", checkedAgoTitle: "Remote recording state is a polled cache; this result is from a probe {ago} ago", waiting: "Waiting", gated: "no process", gatedHint: "Not live yet; no recorder process is held and recording starts automatically once live", idle: "Idle", error: "Error" },
     danmuKind: { off: "Off", gift: "Gifts", anon: "Anonymous" },
     dialog: {
       createTitle: "New recording task", editTitle: "Edit task", desc: "Set the room and recording options. The global cookie is managed at the top-right.",

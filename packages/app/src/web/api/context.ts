@@ -194,6 +194,8 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
       ...(stopping ? { stopping } : {}),
       anchorName: manager.getAnchorName(t.id) ?? t.anchorName,
       recording: manager.isRecording(t.id),
+      // Waiting behind the live gate: running but no recorder process is held (see TaskManager).
+      ...(manager.isGated?.(t.id) ? { gated: true } : {}),
       ...(rollingStatus ? { rollingApplied: rollingStatus.applied, ...(rollingStatus.drift ? { rollingPending: true } : {}) } : {}),
       // 空数组不下发:前端 recordingWorkers?.length 判定依赖它。
       ...(workers && workers.length > 0 ? { recordingWorkers: workers } : {}),
