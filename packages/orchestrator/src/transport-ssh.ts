@@ -1,4 +1,6 @@
 // packages/orchestrator/src/transport-ssh.ts
+import { getFleetLink, type FleetLink } from "./fleet-hub.js";
+import { withFleet } from "./fleet-run.js";
 import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { encodeEnqueue, isJobAbort, normalizeNodeResultFile, normalizeZeroDiskReport, type ZeroDiskReport, registerChild, throwIfAborted, type EnqueueRequest, type EnqueueResponse, type ProcessReceipt, type RemoteTaskSpec } from "@drec/core";
@@ -28,6 +30,12 @@ export interface SshOpts {
    * 但 ssh 的 stdout/stderr 可能长时间无输出,按静默判死会误杀正常上传。
    */
   nodePipelineTimeoutMs?: number;
+  /**
+   * Fleet long connection (plans/042). Omitted → the process-wide link the master registered at hub start
+   * (`setFleetLink`); `null` → ssh only. Without a link (or for a node that is not connected) behaviour is
+   * exactly the ssh path.
+   */
+  fleet?: FleetLink | null;
 }
 
 // SSH 心跳 + 免交互:ServerAlive 5s×3≈15s 检测死连接自动断(tailscale 偶发 stall 不再永久挂);
@@ -110,8 +118,11 @@ export class SshTransport implements Transport {
   private runLong: (argv: string[]) => Promise<string>;
   constructor(private o: SshOpts) {
     this.id = o.id;
-    this.run = o.run ?? defaultRun(o.host);
-    this.runStatus = o.run ?? defaultRun(o.host, 8_000);
+    const nodePrefix = o.remoteNode ?? `node ${o.dataRoot}/dist/douyin-rec.mjs`;
+    const link = (): FleetLink | null => (o.fleet === undefined ? getFleetLink() : o.fleet);
+    // Long-running node pipelines (runLong) stay on ssh: they need their own process and timeout budget.
+    this.run = withFleet(o.run ?? defaultRun(o.host), { nodeId: o.id, nodePrefix, link, timeoutMs: 45_000 });
+    this.runStatus = withFleet(o.run ?? defaultRun(o.host, 8_000), { nodeId: o.id, nodePrefix, link, timeoutMs: 8_000 });
     // 注入的 fake run(测试)沿用同一个,只有真实 ssh 才用更长的预算。
     this.runLong = o.run ?? defaultRun(o.host, o.nodePipelineTimeoutMs ?? 30 * 60_000);
     this.rsync = o.rsync ?? ((remote, localDir) => new Promise((res, rej) => {

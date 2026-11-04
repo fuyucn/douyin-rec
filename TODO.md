@@ -14,6 +14,11 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-135 Worker 轻量化：节点 agent 长连接 + 按需录制进程（issue [#448](https://github.com/fuyucn/douyin-rec/issues/448)，分支 `perf/worker-footprint`，2026-11-03）**
+  — E2.1.Micro worker 被 master 控制面每分钟 ~28 次 ssh 拉起 node 进程（≈0.4 vCPU，steal 75%），等开播子进程每个 ~45MB 常驻导致 swap。
+  **做什么**: 隐藏命令注册表 → 节点出站 WebSocket 长连接（心跳/事件/请求应答，ssh 回落）→ inventory 增量 → 录制进程内存实测 → 判活闸门。
+  **验收**: 见 plan「预期效果」表（控制面 node 进程 0/分、繁忙 worker steal < 20%、待命内存 ~60MB），上线后同方法复测。
+  — 见 plans/042_worker_footprint.md
 - [~] **T-134 直播统计 tab（issue [#443](https://github.com/fuyucn/douyin-rec/issues/443) → PR [#444](https://github.com/fuyucn/douyin-rec/pull/444)，2026-11-03）**
   — master 对账旁路采集各节点会话落 `room-stats.db`，新增 /stats 页展示热力图/节点负载/配置总览。
   **做什么**: 库 + 聚合 + API（/api/stats）+ 前端页；契约在 core。

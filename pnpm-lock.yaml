@@ -214,6 +214,13 @@ importers:
       '@drec/post-process':
         specifier: workspace:*
         version: link:../post-process
+      ws:
+        specifier: ^8.21.0
+        version: 8.21.0
+    devDependencies:
+      '@types/ws':
+        specifier: ^8.5.0
+        version: 8.18.1
 
   packages/post-process:
     dependencies:

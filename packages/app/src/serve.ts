@@ -27,6 +27,8 @@ import { ProcQueueStore, ProcRunner, SimpleSlotLimiter } from "@drec/proc-queue"
 import { TaskManager } from "./task-manager.js";
 import { masterSendsTransition, roomIsLive, workerProbeUsable, type LiveTick } from "./live-notify.js";
 import { NotifyOutbox } from "./notify-outbox.js";
+import { readFleetConfig, startFleetAgent, type FleetAgent, type FleetNodeCommand } from "./fleet-agent.js";
+import { APP_VERSION } from "./version.js";
 import { TaskLogStore } from "@drec/observability";
 import { NodeRecordSpawner } from "./process/spawner.js";
 import { sweepCredentialFiles } from "./process/credential-file.js";
@@ -60,6 +62,12 @@ export interface ServeDeps {
   getWebhook: () => string | undefined;
   /** 多节点 hub 编排实现(由 cli 注入,app 不依赖 orchestrator)。 */
   hubStarter?: HubStarter;
+  /**
+   * Node command registry (cli/node-commands.ts), injected by the CLI. With `<root>/config/fleet.json`
+   * present on a worker (no --hub), serve runs the fleet agent that answers the master over one long
+   * connection instead of ssh-spawned processes (plans/042).
+   */
+  fleetCommands?: Readonly<Record<string, FleetNodeCommand>>;
 }
 
 /** 跑起 Web 控制台(+ 可选调度 + 可选 hub)。行为与拆分前 `task serve` 完全一致。 */
@@ -210,6 +218,25 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
         console.warn(`[rolling] 启动刷新边录边传生效值失败(回落旧开关迁移):${String((e as Error)?.message ?? e)}`);
       }
     }
+    // Fleet agent (plans/042): workers only. fleet.json is re-read every minute so a master-issued join
+    // (or token rotation) takes effect without restarting serve. Absent/invalid → off, the master uses ssh.
+    const fleetConfigPath = join(rootConfigDir(), "fleet.json");
+    let fleetAgent: FleetAgent | null = null;
+    let fleetConfigKey = "";
+    const reloadFleetAgent = (): void => {
+      if (hubEnabled || !deps.fleetCommands) return;
+      const cfg = readFleetConfig(fleetConfigPath);
+      const key = cfg ? JSON.stringify(cfg) : "";
+      if (key === fleetConfigKey) return;
+      fleetConfigKey = key;
+      fleetAgent?.stop();
+      fleetAgent = cfg
+        ? startFleetAgent({ config: cfg, dataRoot: drecRoot(), appVersion: APP_VERSION, commands: deps.fleetCommands, log: (m) => serveLog.info(m) })
+        : null;
+    };
+    reloadFleetAgent();
+    const fleetReload = setInterval(reloadFleetAgent, 60_000);
+    fleetReload.unref?.();
     // hub 台账路径与 cli hubStarter 同一推导(<db>-sync.db)——「hub 任务」端点读它展示进度/ETA/日志。
     const syncDbPath = resolveDbPath(o.db).replace(/\.db$/, "-sync.db");
     // T4:台账变更监视 → SSE(/api/hub/stream)。
@@ -338,6 +365,8 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
         if (prev === undefined) { lastRec.set(t.id, next); continue; }
         if (rec === prev.live) { lastRec.set(t.id, next); continue; }
         lastRec.set(t.id, next);
+        // Tell the master right away instead of at the next heartbeat tick.
+        fleetAgent?.triggerHeartbeat();
         const anchor = taskDisplayName(t, manager.getAnchorName(t.id));
         const selfNotifies = !masterSendsTransition(prev, next);
         events.emit(
@@ -550,6 +579,8 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
         serveLog.error("[proc] runner 停止出错:", err);
       });
       clearInterval(recWatch);
+      clearInterval(fleetReload);
+      fleetAgent?.stop();
       if (notifyRelay) clearInterval(notifyRelay);
       notifyOutbox?.close();
       clearInterval(diskWatch);
@@ -589,6 +620,11 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
         serveLog.info("定时调度已关闭（--no-schedule）：仅手动启停");
       }
     };
+    // Fleet long connection (plans/042): workers dial the master on this same port. Anything else that asks
+    // for an upgrade is refused.
+    server.on("upgrade", (req, socket, head) => {
+      if (!(hubEnabled && hubStarter?.fleetUpgrade?.(req, socket, head))) socket.destroy();
+    });
     if (host) server.listen(port, host, onListen);
     else server.listen(port, onListen);
 }
