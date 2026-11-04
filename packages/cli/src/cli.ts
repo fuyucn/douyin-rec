@@ -214,7 +214,7 @@ program
   .option("--stream-upload <0|1>", "直播直传: 1=ffmpeg stdout 直传 UPOS 并续同一稿件,上传确认后删本地回退文件;0=关闭(默认)")
   .option("--stream-upload-size <bytes>", "流式直传每 P 字节上界(默认对齐后的 1.5GiB)")
   .option("--stream-upload-sec <sec>", "流式直传每 P 时长阈值(秒),与 --stream-upload-size 谁先到算一 P")
-  .option("--stream-upload-stall-sec <sec>", "流式直传无写入看门狗(秒;默认 60):无写入超过该时长即封口并重连,慢速但持续的数据不会误封")
+  .option("--stream-upload-stall-sec <sec>", "流式直传无写入看门狗(秒;默认 120,最低 60):无写入超过该时长即封口并重连,慢速但持续的数据不会误封")
   .option("--stream-upload-recover-sec <sec>", "流式直传停滞后的自动恢复窗口(秒;默认 1200,最低 60)")
   .option("--stream-upload-ratio-alert <0-1>", "流式直传每 P 媒体时长/墙钟时长 低于该比例时告警(默认 0.85,0=关闭)")
   .option("--stream-upload-tid <tid>", "流式直传投稿分区(默认 21)")

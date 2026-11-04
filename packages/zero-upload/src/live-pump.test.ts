@@ -26,6 +26,8 @@ import {
   DEFAULT_SEGMENT_CAP,
   DEFAULT_STALL_TIMEOUT_MS,
   DEFAULT_MEDIA_WALL_ALERT_RATIO,
+  ARCHIVE_PARTS_WARN_AT,
+  RATIO_ALERT_COOLDOWN_MS,
   LivePumpSession,
   archivedSpoolPathsToKeep,
   spoolPathsToKeep,
@@ -4051,24 +4053,49 @@ describe("plans/044: bounded upload waits are progress for the finalizing judge"
   });
 });
 
-describe("issue #464: 60s stall watchdog and per-part media accounting", () => {
-  it("defaults the no-write watchdog to 60s (aligned with the file-recorder ffmpeg watchdog)", () => {
-    expect(DEFAULT_STALL_TIMEOUT_MS).toBe(60_000);
+describe("issue #464: stall watchdog (user-decided 120s default) and per-part media accounting", () => {
+  it("defaults the no-write watchdog to 120s (user decision, issue #464)", () => {
+    expect(DEFAULT_STALL_TIMEOUT_MS).toBe(120_000);
   });
 
-  it("seals on the default 60s watchdog when stdout goes silent, and reports the stall", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "live-pump-stall60-"));
+  it("does not seal 90s of silence by default, then seals on the default watchdog and reports the stall", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "live-pump-stall120-"));
     try {
       installFakeFfmpeg(Buffer.alloc(0), { holdOpen: true });
       vi.useFakeTimers();
       try {
         const p = runStream({ args: ["-fake"], sizeCap: CHUNK * 100, firstSink: new PartSink({ sizeCap: CHUNK * 100, spoolPath: join(dir, "s.ts"), session: session(), spoolMode: "none", fetchImpl: makeFetch().fake }), openNext: () => { throw new Error("no second part"); }, onPartSealed: () => {} });
+        // 90s of total silence is still inside the default 120s window: no seal yet.
+        let sealed = false;
+        void p.then(() => { sealed = true; });
+        await vi.advanceTimersByTimeAsync(90_000);
+        expect(sealed).toBe(false);
+        await vi.advanceTimersByTimeAsync(40_000);
+        const r = await p;
+        expect(r.endedBy).toBe("stalled");
+        expect(r.stalledMs).toBeGreaterThanOrEqual(120_000);
+        expect(r.stalledMs).toBeLessThan(126_000);
+        expect(r.finalPart?.sealedBy).toBe("stalled");
+      } finally {
+        vi.useRealTimers();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still honours an explicit 60s override (CLI minimum stays 60)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "live-pump-stall60-"));
+    try {
+      installFakeFfmpeg(Buffer.alloc(0), { holdOpen: true });
+      vi.useFakeTimers();
+      try {
+        const p = runStream({ args: ["-fake"], stallTimeoutMs: 60_000, sizeCap: CHUNK * 100, firstSink: new PartSink({ sizeCap: CHUNK * 100, spoolPath: join(dir, "s.ts"), session: session(), spoolMode: "none", fetchImpl: makeFetch().fake }), openNext: () => { throw new Error("no second part"); }, onPartSealed: () => {} });
         await vi.advanceTimersByTimeAsync(65_000);
         const r = await p;
         expect(r.endedBy).toBe("stalled");
         expect(r.stalledMs).toBeGreaterThanOrEqual(60_000);
         expect(r.stalledMs).toBeLessThan(66_000);
-        expect(r.finalPart?.sealedBy).toBe("stalled");
       } finally {
         vi.useRealTimers();
       }
@@ -4122,8 +4149,9 @@ describe("issue #464: 60s stall watchdog and per-part media accounting", () => {
   it("accounts per-part PTS holes: a 45s jump is excluded from media time but reported", async () => {
     const dir = mkdtempSync(join(tmpdir(), "live-pump-jump-"));
     try {
-      // 6 GOPs x 4 frames x 3000 ticks = 0.8s of media; a 45s forward jump must not inflate it.
-      const data = tsStream({ gops: 6, jump: { atGop: 3, ticks: 45 * 90_000 } });
+      // 6 GOPs x 4 frames x 3000 ticks of media, starting 300s into the PTS clock; a 45s
+      // forward jump must neither inflate the duration nor leak raw ticks into the report.
+      const data = tsStream({ gops: 6, startPts: 300 * 90_000, jump: { atGop: 3, ticks: 45 * 90_000 } });
       installFakeFfmpeg(data);
       const { fake } = makeFetch();
       const r = await runSegment({ args: ["-fake"], sizeCap: CHUNK * 100_000, spoolPath: join(dir, "j.ts"), session: session(), fetchImpl: fake });
@@ -4132,8 +4160,9 @@ describe("issue #464: 60s stall watchdog and per-part media accounting", () => {
       expect(r.ptsJumpSec).toBeLessThan(46);
       expect(r.ptsDurationSec).toBeGreaterThan(0.6);
       expect(r.ptsDurationSec).toBeLessThan(1.2);
-      expect(r.ptsStartSec).toBeDefined();
-      expect(r.ptsEndSec).toBeDefined();
+      // Seconds, not raw 90 kHz ticks (300s = 27,000,000 ticks would be the bug).
+      expect(r.ptsStartSec).toBe(300);
+      expect(r.ptsEndSec).toBeCloseTo(300 + (23 * 3000 + 45 * 90_000) / 90_000, 6);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -4223,6 +4252,107 @@ describe("issue #464: 60s stall watchdog and per-part media accounting", () => {
       });
       expect(r.ok, r.error ?? "").toBe(true);
       expect(alerts).toHaveLength(0);
+    } finally {
+      setSpawnForTest(undefined);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("cools the ratio alert down: a second starved part in the same run is suppressed and counted", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "live-pump-cool-"));
+    try {
+      writeFileSync(join(dir, "cookies.json"), JSON.stringify({
+        cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
+      }));
+      const fake = ((input: string | URL | Request) => {
+        const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
+        if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
+        if (u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
+        if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
+        if (u.pathname === "/x/vu/web/add/v3") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BVLcool1" } }));
+        if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BVLcool1", title: "t", tid: 21 }, videos: [] } }));
+        if (u.pathname === "/x/web/archives") return Promise.resolve(json({ code: 0, data: { arc_audits: [] } }));
+        return Promise.resolve(json({ code: 0, data: {} }));
+      }) as unknown as typeof fetch;
+      const alerts: string[] = [];
+      const logs: string[] = [];
+      let confirmed = 0;
+      // Every connection writes ~53s of media, then goes silent: two stall-sealed starved parts
+      // land well inside one cooldown window, so only the first may page.
+      installFakeFfmpeg(tsStream({ gops: 400 }), { holdOpen: true });
+      vi.useFakeTimers();
+      try {
+        const p = runLivePump({
+          cookiesPath: join(dir, "cookies.json"), room: "cool", spoolDir: dir, title: "cool",
+          tid: 21, tag: "x", private: true, sizeCap: 8 * 1024 * 1024,
+          queueCapacity: 4096, stallTimeoutMs: 100_000,
+          quality: "origin", submit: true, spoolMode: "none", fetchImpl: fake,
+          fetch: async () => ({ living: true, url: "http://x/y.ts" }),
+          sleep: async () => {},
+          shouldStop: async () => confirmed >= 2,
+          onPartConfirmed: (info: { count: number }) => { confirmed = info.count; },
+          onAlert: (m) => alerts.push(m),
+          log: (m) => logs.push(m),
+        });
+        await vi.advanceTimersByTimeAsync(450_000);
+        const r = await p;
+        expect(r.ok, r.error ?? "").toBe(true);
+        expect(confirmed).toBeGreaterThanOrEqual(2);
+        expect(alerts).toHaveLength(1);
+        expect(logs.some((m) => m.includes("抑制"))).toBe(true);
+      } finally {
+        vi.useRealTimers();
+        setSpawnForTest(undefined);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("alerts once when the archive reaches the parts-per-archive warning line", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "live-pump-cap-"));
+    try {
+      writeFileSync(join(dir, "cookies.json"), JSON.stringify({
+        cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
+      }));
+      const fake = ((input: string | URL | Request) => {
+        const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
+        if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
+        if (u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
+        if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
+        if (u.pathname === "/x/vu/web/add/v3") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BVLcap01" } }));
+        if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BVLcap01", title: "t", tid: 21 }, videos: [] } }));
+        if (u.pathname === "/x/web/archives") return Promise.resolve(json({ code: 0, data: { arc_audits: [] } }));
+        return Promise.resolve(json({ code: 0, data: {} }));
+      }) as unknown as typeof fetch;
+      const alerts: string[] = [];
+      let acquisitions = 0;
+      // Resume an archive that already holds the warning line minus one confirmed part; the
+      // next confirmed part crosses it and must fire the alert exactly once.
+      const parts = Array.from({ length: ARCHIVE_PARTS_WARN_AT - 1 }, (_, i) => ({
+        index: i, spoolPath: join(dir, `gone_${i}.ts`), filename: `gone_${i}.ts`,
+        stem: `n260000cap${String(i).padStart(4, "0")}`, title: `P${i + 1}`,
+        bytes: CHUNK, durationSec: 1, confirmed: true,
+      }));
+      writeFileSync(livePumpStatePath(dir, "cap"), JSON.stringify({
+        schemaVersion: 1, room: "cap", createdAt: Date.now(), title: "cap", tid: 21, tag: "x",
+        private: true, bvid: "BVLcap01", aid: 7, parts, updatedAt: Date.now(),
+      }));
+      installFakeFfmpeg(tsStream({ gops: 400 }));
+      const r = await runLivePump({
+        cookiesPath: join(dir, "cookies.json"), room: "cap", spoolDir: dir, title: "cap",
+        tid: 21, tag: "x", private: true, sizeCap: 8 * 1024 * 1024, queueCapacity: 4096,
+        quality: "origin", submit: true, spoolMode: "none", fetchImpl: fake,
+        fetch: async () => ({ living: ++acquisitions === 1, url: "http://x/y.ts" }),
+        sleep: async () => {},
+        onAlert: (m) => alerts.push(m),
+        log: () => {},
+      });
+      expect(r.ok, r.error ?? "").toBe(true);
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]).toContain(`已达 ${ARCHIVE_PARTS_WARN_AT} 个`);
     } finally {
       setSpawnForTest(undefined);
       rmSync(dir, { recursive: true, force: true });

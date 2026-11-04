@@ -55,7 +55,9 @@ export interface TsCutterOptions {
 
 /** Media time covered by one part, from the primary stream's PTS (video, or first stream). */
 export interface PartTiming {
+  /** First video PTS of the part, in seconds (raw 90 kHz ticks stay internal). */
   firstPts: number;
+  /** Last video PTS of the part, in seconds (raw 90 kHz ticks stay internal). */
   lastPts: number;
   /**
    * Media time covered, wrap-safe: the sum of forward PTS steps, with jumps ignored (see
@@ -170,7 +172,9 @@ export class TsCutter {
     const t = this.timing;
     if (!t) return null;
     return {
-      firstPts: t.first, lastPts: t.last, durationSec: t.span / PTS_HZ,
+      // Seconds everywhere: the only conversion point from the internal 90 kHz ticks, so
+      // callers (per-part reports) cannot mix ticks into second-based logs.
+      firstPts: t.first / PTS_HZ, lastPts: t.last / PTS_HZ, durationSec: t.span / PTS_HZ,
       ...(this.jumpSec > 0 ? { ptsJumpSec: this.jumpSec, ptsJumpCount: this.jumpCount } : {}),
     };
   }

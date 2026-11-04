@@ -103,17 +103,33 @@ export function alignFileSize(n: number): number {
 export const DEFAULT_SEGMENT_CAP = alignFileSize(1.5 * 1024 * 1024 * 1024);
 
 /**
- * A live HTTP video stream normally emits bytes continuously. A minute without a single stdout
- * chunk means the source socket is half-open or the CDN stopped producing data; ffmpeg can sit
- * in ppoll forever because `-reconnect_at_eof` never sees EOF. Aligned with the file-recorder
- * ffmpeg watchdog (60s, issue #464): every silent minute is broadcast content lost for good,
- * so the old 5-minute default sealed far too late. Data that keeps flowing slowly never seals:
- * the timer only runs on total stdout silence.
+ * A live HTTP video stream normally emits bytes continuously. Two minutes without a single
+ * stdout chunk means the source socket is half-open or the CDN stopped producing data; ffmpeg
+ * can sit in ppoll forever because `-reconnect_at_eof` never sees EOF. The old 5-minute default
+ * sealed far too late. 120s is the user's decision (issue #464): a compromise that cuts
+ * full-silence loss by ~3 minutes per stall while letting short 1-2 minute upstream silences
+ * recover on the same connection instead of forcing a cold reconnect and extra parts. Data
+ * that keeps flowing slowly never seals: the timer only runs on total stdout silence.
  */
-export const DEFAULT_STALL_TIMEOUT_MS = 60_000;
+export const DEFAULT_STALL_TIMEOUT_MS = 120_000;
 
 /** Alert when a confirmed part's media time falls below this fraction of its wall time. */
 export const DEFAULT_MEDIA_WALL_ALERT_RATIO = 0.85;
+
+/**
+ * Minimum spacing between media/wall ratio alerts within one run. A flaky broadcast can starve
+ * every part; without a cooldown that pages once per stall. Alerts skipped while cooling down
+ * are counted and surfaced in the next alert or at the end of the run.
+ */
+export const RATIO_ALERT_COOLDOWN_MS = 30 * 60_000;
+
+/**
+ * Warn once per run when the archive's confirmed part count reaches this line. Bilibili is
+ * believed to cap parts per archive around 100 — an unverified number, not a documented
+ * contract, so it is deliberately not encoded here; this lower line gives a human time to react
+ * before an append starts failing.
+ */
+export const ARCHIVE_PARTS_WARN_AT = 80;
 
 /** After a stall, keep the same archive available for this long before ending the run. */
 export const DEFAULT_RECOVERY_WINDOW_MS = 20 * 60_000;
@@ -1647,7 +1663,7 @@ export interface RunStreamOpts {
   /** A part that ended at a cut while the stream keeps going. */
   onPartSealed: (part: SealedPart) => void;
   signal?: AbortSignal;
-  /** Kill ffmpeg after this long without a stdout chunk. Default 60s; 0 disables. */
+  /** Kill ffmpeg after this long without a stdout chunk. Default 120s; 0 disables. */
   stallTimeoutMs?: number;
   /** Test seam: how long to wait for stdout EOF after killing ffmpeg before destroying it. */
   destroyGraceMs?: number;
@@ -1939,7 +1955,7 @@ export interface RunSegmentOpts {
   /** Same as {@link PartSinkOpts.onDegrade}: fired the moment streaming degrades. */
   onDegrade?: (reason: string) => void;
   signal?: AbortSignal;
-  /** Kill ffmpeg after this long without a stdout chunk. Default 60s; 0 disables. */
+  /** Kill ffmpeg after this long without a stdout chunk. Default 120s; 0 disables. */
   stallTimeoutMs?: number;
   /** Test seam: how long to wait for stdout EOF after killing ffmpeg before destroying it. */
   destroyGraceMs?: number;
@@ -2453,7 +2469,7 @@ export interface RunLivePumpOptions {
   sizeCap: number;
   /** Duration cap per part; whichever fires first seals the part. */
   maxMs?: number;
-  /** Kill ffmpeg after this long without a stdout chunk. Default 60s; 0 disables. */
+  /** Kill ffmpeg after this long without a stdout chunk. Default 120s; 0 disables. */
   stallTimeoutMs?: number;
   /** Wait this long for the same room to return after a stall before ending the run. */
   recoverWindowMs?: number;
@@ -2875,6 +2891,9 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
   const recoverWindowMs = Math.max(1_000, o.recoverWindowMs ?? DEFAULT_RECOVERY_WINDOW_MS);
   let recoveryDeadline: number | undefined;
   let recoveryTimedOut = false;
+  let lastMediaWallAlertAt = 0;
+  let mediaWallAlertsSuppressed = 0;
+  let archivePartsWarned = false;
   const spoolMode = o.spoolMode ?? "full";
   const spoolDirClean = o.spoolDir.replace(/\/$/, "");
   const defaultFileName = (seg: number): string => `${Date.now()}_${String(seg).padStart(3, "0")}.live.ts`;
@@ -2939,6 +2958,21 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     // A failed part must stop the pull: parts after it could not be submitted anyway.
     currentConnAbort?.abort();
     return { kind: "ended" };
+  };
+
+  /**
+   * Once-per-run early warning when the archive collects many parts: the platform is believed
+   * to cap parts per archive (see {@link ARCHIVE_PARTS_WARN_AT}); a long broadcast must fail
+   * loudly instead of losing every part after the cap.
+   */
+  const checkArchivePartsWarn = (): void => {
+    if (archivePartsWarned) return;
+    const confirmed = session.parts.filter((p) => p.confirmed).length;
+    if (confirmed < ARCHIVE_PARTS_WARN_AT) return;
+    archivePartsWarned = true;
+    const msg = `稿件分 P 已达 ${confirmed} 个(预警线 ${ARCHIVE_PARTS_WARN_AT}):平台对单稿件分 P 数有 believed 上限,继续追加可能失败,请人工关注`;
+    log(`[直播直传] ⚠️ ${msg}`);
+    try { o.onAlert?.(msg); } catch { /* alert channel must not break the run */ }
   };
 
   /** complete → dts scan → submit for one sealed part. Mirrors the sequential per-part code. */
@@ -3102,6 +3136,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
               ...(bv ? { bvid: bv } : {}),
             });
           } catch { /* progress reporting must never fail an upload */ }
+          checkArchivePartsWarn();
           recoveryDeadline = Date.now() + recoverWindowMs;
           return { kind: "continue" };
         }
@@ -3173,6 +3208,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         const bv = submitted.bvid ?? session.bvid;
         o.onPartConfirmed?.({ count: session.parts.filter((p) => p.confirmed).length, ...(bv ? { bvid: bv } : {}) });
       } catch { /* progress reporting must never fail an upload */ }
+      checkArchivePartsWarn();
     }
     pushSegment(report);
     // A normal part with bytes proves the source is producing again. Do not let an old stall
@@ -3202,11 +3238,19 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     // with real media behind it must.
     if (alertRatio > 0 && r.ptsDurationSec !== undefined && !part.stopped
       && wallSec >= 90 && r.ptsDurationSec >= 30 && r.ptsDurationSec / wallSec < alertRatio) {
-      const msg = `段${seg + 1} 媒体 ${r.ptsDurationSec.toFixed(0)}s / 墙钟 ${wallSec.toFixed(0)}s`
-        + `(比例 ${(r.ptsDurationSec / wallSec).toFixed(2)} < ${alertRatio})`
-        + `${r.ptsJumpCount ? `,其中 PTS 空洞 ${r.ptsJumpCount} 处共 ${(r.ptsJumpSec ?? 0).toFixed(0)}s` : ""},直播内容疑似缺失`;
-      log(`[直播直传] ⚠️ ${msg}`);
-      try { o.onAlert?.(msg); } catch { /* alert channel must not break the run */ }
+      const now = Date.now();
+      if (now - lastMediaWallAlertAt < RATIO_ALERT_COOLDOWN_MS) {
+        mediaWallAlertsSuppressed += 1;
+      } else {
+        lastMediaWallAlertAt = now;
+        const suppressedNote = mediaWallAlertsSuppressed > 0 ? `,此前冷却期内已抑制 ${mediaWallAlertsSuppressed} 条同类告警` : "";
+        mediaWallAlertsSuppressed = 0;
+        const msg = `段${seg + 1} 媒体 ${r.ptsDurationSec.toFixed(0)}s / 墙钟 ${wallSec.toFixed(0)}s`
+          + `(比例 ${(r.ptsDurationSec / wallSec).toFixed(2)} < ${alertRatio})`
+          + `${r.ptsJumpCount ? `,其中 PTS 空洞 ${r.ptsJumpCount} 处共 ${(r.ptsJumpSec ?? 0).toFixed(0)}s` : ""},直播内容疑似缺失${suppressedNote}`;
+        log(`[直播直传] ⚠️ ${msg}`);
+        try { o.onAlert?.(msg); } catch { /* alert channel must not break the run */ }
+      }
     }
     if (r.sessionLeaked) log("[直播直传] ⚠️ UPOS 会话半截泄漏:协议无 abort,须按原文件重传覆盖");
     if (!part.final) return { kind: "continue" };
@@ -3592,6 +3636,12 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       continue;
     }
     if (finalDisposition?.kind === "ended") break;
+  }
+
+  // Suppressed ratio alerts must not vanish: the count rides in the next alert when one fires,
+  // and in this end-of-run line when none does.
+  if (mediaWallAlertsSuppressed > 0) {
+    log(`[直播直传] ⚠️ 分段媒体/墙钟告警冷却期(每 ${Math.round(RATIO_ALERT_COOLDOWN_MS / 60_000)} 分钟至多一条)内共抑制 ${mediaWallAlertsSuppressed} 条`);
   }
 
   if (recoveryTimedOut && segments.length === 0) {
