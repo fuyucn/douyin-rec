@@ -10,6 +10,8 @@ import { describe, expect, it } from "vitest";
 
 const root = join(import.meta.dirname, "..", "..");
 const cli = readFileSync(join(root, "packages/cli/src/cli.ts"), "utf-8");
+// Node-side command bodies live in the shared registry (plans/042 Task 1).
+const nodeCommands = readFileSync(join(root, "packages/cli/src/node-commands.ts"), "utf-8");
 
 describe("T16 sync receipt wiring", () => {
   it("master sync computes and sends expectedVersion", () => {
@@ -27,11 +29,11 @@ describe("T16 sync receipt wiring", () => {
   });
 
   it("_apply-tasks forwards the payload through applyTasksPayload", () => {
-    expect(cli).toContain("applyTasksPayload(store, b64, undefined");
+    expect(nodeCommands).toContain("applyTasksPayload(store, b64, undefined");
   });
 
   it("_node-status reports appVersionAtApply from the snapshot", () => {
     expect(cli).toContain("appVersionAtApply = st?.appVersion ?? null");
-    expect(cli).toContain("appVersionAtApply = st.appVersion ?? null");
+    expect(nodeCommands).toContain("appVersionAtApply = st.appVersion ?? null");
   });
 });

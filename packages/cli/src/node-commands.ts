@@ -1,0 +1,366 @@
+/**
+ * node-commands.ts — the single implementation of the node-side control-plane commands (plans/042 Task 1).
+ *
+ * The master asks a worker questions ("which rooms are recording", "free disk", "apply these tasks", ...).
+ * Today every question is an ssh call that spawns `node dist/douyin-rec.mjs _<cmd> <dataRoot> ...`; the
+ * fleet long connection (Task 2/3) answers the same questions inside the resident `task serve`. Both paths
+ * must run this one registry so they can never drift apart.
+ *
+ * Contract: each command returns exactly the bytes the hidden CLI command printed before (`stdout`) and the
+ * exit code it set. `SshTransport` parses that stdout unchanged. A command may still throw for unexpected
+ * failures; the CLI path lets that propagate to the top-level handler as before.
+ *
+ * Keep this module's static imports light: `cli.ts` imports it eagerly, and every ssh probe pays for the
+ * bundle's top-level work. Heavy packages are imported lazily inside each command.
+ */
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { freeGBOf, listProcessors, platformForRoom, redactLogLines, type ProcActiveDTO } from "@drec/core";
+import { applyNodeDataRoot } from "./node-pipeline-commands.js";
+
+export interface NodeCommandResult {
+  stdout: string;
+  exitCode: number;
+}
+
+/** `args` are the positional arguments after `<dataRoot>`, plus `--flag value` pairs where a command has options. */
+export type NodeCommand = (dataRoot: string, args: string[]) => Promise<NodeCommandResult>;
+
+const json = (value: unknown, exitCode = 0): NodeCommandResult => ({ stdout: JSON.stringify(value) + "\n", exitCode });
+const errorJson = (e: unknown): NodeCommandResult => json({ error: String((e as Error)?.message ?? e) }, 1);
+
+/**
+ * Scan `/proc` for `record` child processes that currently have a media download grandchild (ffmpeg/mesio)
+ * and return their room identities.
+ *
+ * Single source of truth for `is-done` (one room) and `recording-status` (all rooms). Criterion: the
+ * command line carries `--room <URL/room id>` and `/proc/<pid>/task/<pid>/children` is non-empty (= a
+ * downloader is writing). Waiting for a broadcast, with no downloader child, is not recording.
+ * Non-Linux hosts (local macOS development) have no `/proc` → empty.
+ */
+export function scanRecordingRooms(): { platform: string; roomSlug: string }[] {
+  const rooms = new Map<string, { platform: string; roomSlug: string }>();
+  try {
+    for (const entry of readdirSync("/proc", { withFileTypes: true })) {
+      if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
+      let cmdline: string[];
+      try {
+        cmdline = readFileSync(`/proc/${entry.name}/cmdline`, "utf8").split("\0").filter(Boolean);
+      } catch {
+        continue; // process just exited / no permission
+      }
+      const roomIdx = cmdline.indexOf("--room");
+      if (roomIdx < 0 || roomIdx + 1 >= cmdline.length) continue;
+      try {
+        const platform = platformForRoom(cmdline[roomIdx + 1]);
+        const roomSlug = platform.extractRoomSlug(cmdline[roomIdx + 1]);
+        const children = readFileSync(`/proc/${entry.name}/task/${entry.name}/children`, "utf8").trim();
+        if (children) rooms.set(`${platform.id}:${roomSlug}`, { platform: platform.id, roomSlug });
+      } catch {
+        /* process just exited, or the room cannot be parsed */
+      }
+    }
+  } catch {
+    /* no /proc (non-Linux) → no processes */
+  }
+  return [...rooms.values()];
+}
+
+/** Read `--name value` options out of `args`; unknown flags are ignored. */
+function readOptions(args: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a.startsWith("--") && i + 1 < args.length) {
+      out[a.slice(2)] = args[i + 1];
+      i++;
+    }
+  }
+  return out;
+}
+
+/** Build `notify-outbox` args from commander options, in a stable order (used by the CLI and the fleet master). */
+export function notifyOutboxArgs(o: { after?: string; limit?: string; ack?: string }): string[] {
+  const args: string[] = [];
+  if (o.after !== undefined) args.push("--after", o.after);
+  if (o.limit !== undefined) args.push("--limit", o.limit);
+  if (o.ack !== undefined) args.push("--ack", o.ack);
+  return args;
+}
+
+/** Local serve API used by commands that need state only the serve process holds. */
+const serveApiBase = (): string => process.env.DREC_SERVE_API ?? "http://127.0.0.1:7860"; // issue-guard: allow (loopback)
+
+export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freeze({
+  // "true" once no downloader is writing for this room (master settle polls this).
+  // Only this room counts: a global ffmpeg count made other rooms' recordings stall this room's settle.
+  "is-done": async (_dataRoot, [roomSlug]) => ({
+    stdout: (scanRecordingRooms().some((room) => room.roomSlug === roomSlug) ? "false" : "true") + "\n",
+    exitCode: 0,
+  }),
+
+  // Recording rooms + live-upload progress (F1). Progress is best-effort: failures leave it empty.
+  "recording-status": async (dataRoot) => {
+    const rooms = scanRecordingRooms();
+    let rolling: unknown[] = [];
+    try {
+      const { scanRollingSessions } = await import("@drec/orchestrator");
+      rolling = scanRollingSessions(join(dataRoot, "recordings"), rooms);
+    } catch { /* progress is auxiliary */ }
+    return json({ rooms, rolling });
+  },
+
+  // Scan <dataRoot>/recordings and return the inventory the master clusters into broadcasts.
+  inventory: async (dataRoot) => {
+    const { TaskStore } = await import("@drec/app");
+    const { ffprobeVideo } = await import("@drec/post-process");
+    const { scanInventory, segmentSecByAnchorOf } = await import("@drec/orchestrator");
+
+    // anchorName/name → roomSlug from this node's own task db
+    const store = new TaskStore(join(dataRoot, "db", "douyin-rec.db"));
+    const taskRooms: Record<string, string> = {};
+    const tasks = store.listTasks();
+    for (const task of tasks) {
+      try {
+        const slug = platformForRoom(task.room).extractRoomSlug(task.room);
+        if (task.name) taskRooms[task.name] = slug;
+        if (task.anchorName) taskRooms[task.anchorName] = slug;
+      } catch { /* skip tasks whose platform can't be resolved */ }
+    }
+    const segmentSecByAnchor = segmentSecByAnchorOf(tasks);
+
+    // durationMs via ffprobe + mtime → startMs/endMs
+    const ffprobe = async (file: string): Promise<{ durationSec: number; startMs: number; endMs: number }> => {
+      const { durationMs } = await ffprobeVideo(file).catch(() => ({ durationMs: 0 }));
+      const endMs = statSync(file).mtimeMs;
+      return { durationSec: durationMs / 1000, endMs, startMs: endMs - durationMs };
+    };
+
+    const inventory = await scanInventory(join(dataRoot, "recordings"), taskRooms, ffprobe, { segmentSecByAnchor });
+    return json(inventory);
+  },
+
+  // Free space of the data-root volume (GB) for the master's disk watchdog.
+  disk: async (dataRoot) => {
+    const { statfs } = await import("node:fs/promises");
+    try {
+      const st = await statfs(dataRoot);
+      return json({ freeGB: Number(freeGBOf(st).toFixed(2)) });
+    } catch (e) {
+      return errorJson(e);
+    }
+  },
+
+  // Privacy-safe projection of every task on this node (no cookies), for master task sync.
+  tasks: async (dataRoot) => {
+    const { TaskStore, listNodeTasks } = await import("@drec/app");
+    const store = new TaskStore(join(dataRoot, "db", "douyin-rec.db"));
+    return json({ tasks: listNodeTasks(store) });
+  },
+
+  // Apply the master's desired tasks.
+  "apply-tasks": async (dataRoot, [b64]) => {
+    const { TaskStore, applyTasksPayload } = await import("@drec/app");
+    const store = new TaskStore(join(dataRoot, "db", "douyin-rec.db"));
+    // T16: expectedVersion travels in the payload; an old master without it → version 0.
+    const result = applyTasksPayload(store, b64, undefined, {
+      // Audit snapshot dir is derived from dataRoot explicitly (no DOUYIN_REC_ROOT here; see managed-state.ts).
+      managedStateDir: join(dataRoot, "config", "managed"),
+    });
+    // Managed tasks that are no longer desired must be hard-stopped (not drained): the user explicitly
+    // stopped the source task / removed the rule, and draining would keep the hub settle waiting for the
+    // broadcast to end. Only the local serve holds the TaskManager, so ask it via
+    // POST /api/tasks/:id/stop (internal=1 is accepted from loopback only).
+    if (result.pending.length > 0) {
+      for (const key of result.pending) {
+        const task = store.listTasks().find((x) => {
+          try {
+            const p = platformForRoom(x.room);
+            return `${p.id}:${p.extractRoomSlug(x.room)}` === key;
+          } catch {
+            return false;
+          }
+        });
+        if (!task) continue;
+        try {
+          const res = await fetch(`${serveApiBase()}/api/tasks/${task.id}/stop?internal=1`, { method: "POST" });
+          if (!res.ok) {
+            console.error(`[task-sync] 硬停任务 id=${task.id}(${key}) 失败: HTTP ${res.status}`);
+          }
+        } catch (e) {
+          // serve down/restarting → the next sync puts it back in pending; daemon drain is the last resort.
+          console.error(`[task-sync] 硬停任务 id=${task.id}(${key}) 失败: ${(e as Error).message}`);
+        }
+      }
+    }
+    // Managed tasks without an anchorName yet: ask the local serve to refetch it in the background
+    // (fetching needs the platform runtime). Fire concurrently with a short timeout so a slow serve never
+    // blocks task sync.
+    const needsAnchor = store.listTasks().filter((t) => t.managedBy === "hub" && !t.anchorName);
+    await Promise.allSettled(
+      needsAnchor.map(async (t) => {
+        try {
+          await fetch(`${serveApiBase()}/api/tasks/${t.id}/refresh-anchor`, {
+            method: "POST",
+            signal: AbortSignal.timeout(3000),
+          });
+        } catch {
+          // serve down/timeout → ignore; task-manager falls back to scraping the name from logs on live.
+        }
+      }),
+    );
+    return json(result);
+  },
+
+  // Tail of one task's recording log (F3). Logs live in the serve's in-memory ring buffer, so ask it.
+  // Read-only: serve down / unknown task → {lines:[], error} with exit 0; observability must not break callers.
+  "task-logs": async (_dataRoot, [taskIdRaw, linesRaw]) => {
+    const taskId = Number(taskIdRaw);
+    // Clamp so one call can't drag thousands of lines over the wire. Default 200, max 1000.
+    const asked = Number(linesRaw);
+    const lines = Number.isFinite(asked) ? Math.min(1000, Math.max(1, Math.trunc(asked))) : 200;
+    if (!Number.isFinite(taskId)) {
+      return json({ lines: [], error: `taskId 非法: ${taskIdRaw}` });
+    }
+    try {
+      const res = await fetch(`${serveApiBase()}/api/tasks/${taskId}/logs`, { signal: AbortSignal.timeout(5000) });
+      if (!res.ok) return json({ lines: [], error: `serve HTTP ${res.status}` });
+      const body = (await res.json()) as { lines?: unknown };
+      const all = Array.isArray(body.lines) ? body.lines.filter((x): x is string => typeof x === "string") : [];
+      // Redact before leaving the node: vendored stream code can print whole cookie strings in errors.
+      return json({ lines: redactLogLines(all.slice(-lines)) });
+    } catch (e) {
+      return json({ lines: [], error: `读本机 serve 失败: ${(e as Error)?.message ?? e}` });
+    }
+  },
+
+  // Apply receipt (T16): which desired version this node applied and which bundle it runs.
+  "node-status": async (dataRoot) => {
+    const { TaskStore, readManagedState, APP_VERSION } = await import("@drec/app");
+    let appliedVersion: number | null = null;
+    let appliedAt: number | null = null;
+    let appVersionAtApply: string | null = null;
+    try {
+      const st = readManagedState(join(dataRoot, "config", "managed"));
+      if (st) {
+        appliedVersion = st.version;
+        appliedAt = st.savedAt;
+        appVersionAtApply = st.appVersion ?? null;
+      }
+    } catch {
+      /* never synced / missing dir → keep null (not an error) */
+    }
+    let taskCount = 0;
+    let managedCount = 0;
+    try {
+      const store = new TaskStore(join(dataRoot, "db", "douyin-rec.db"));
+      const tasks = store.listTasks();
+      taskCount = tasks.length;
+      managedCount = tasks.filter((t) => t.managedBy === "hub").length;
+    } catch {
+      /* db unreadable → counts stay 0; version info is still useful */
+    }
+    // Processing-queue snapshot (plans/036 T3): no db → empty; read failure → field omitted.
+    let procActive: ProcActiveDTO | undefined;
+    try {
+      const { readProcActive } = await import("@drec/proc-queue");
+      procActive = readProcActive(dataRoot);
+    } catch {
+      /* queue unreadable must not sink the whole command */
+    }
+    return json({
+      appVersion: APP_VERSION,
+      appliedVersion,
+      appliedAt,
+      appVersionAtApply,
+      taskCount,
+      managedCount,
+      ...(procActive ? { procActive } : {}),
+    });
+  },
+
+  // Page through this node's notification outbox; `--ack` confirms ids first. `--limit 0` = ack only.
+  "notify-outbox": async (dataRoot, args) => {
+    const o = readOptions(args);
+    const { NotifyOutbox } = await import("@drec/app");
+    const box = new NotifyOutbox(join(dataRoot, "db", "notify-outbox.db"));
+    try {
+      const ids = (o.ack ?? "").split(",").map((x) => Number(x.trim())).filter((n) => Number.isFinite(n) && n > 0);
+      if (ids.length > 0) box.ack(ids);
+      box.prune();
+      const limitRaw = Number(o.limit ?? 200);
+      const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(1000, limitRaw) : 200;
+      const afterRaw = Number(o.after ?? 0);
+      const after = Number.isFinite(afterRaw) && afterRaw > 0 ? afterRaw : 0;
+      // limit=0 is "ack only": return no rows so every ack doesn't drag 200 rows across the network.
+      const events = Number(o.limit) === 0 ? [] : box.list(after, limit);
+      return json({ events });
+    } finally {
+      box.close();
+    }
+  },
+
+  // Enqueue a processing job (remux only).
+  enqueue: async (dataRoot, [b64]) => {
+    try {
+      await applyNodeDataRoot(dataRoot);
+      const { decodeEnqueue } = await import("@drec/core");
+      const { handleEnqueue } = await import("@drec/app");
+      const capabilities = listProcessors().map((p) => p.kind);
+      return json(handleEnqueue(dataRoot, decodeEnqueue(b64), { capabilities }));
+    } catch (e) {
+      return errorJson(e);
+    }
+  },
+
+  // Processing receipts (plans/036 §2.4): request = base64(JSON jobId array). Unknown jobIds are absent.
+  "proc-status": async (dataRoot, [b64]) => {
+    try {
+      const { decodeJobIds, handleProcStatus } = await import("@drec/app");
+      return json({ receipts: handleProcStatus(dataRoot, decodeJobIds(b64)) });
+    } catch (e) {
+      return errorJson(e);
+    }
+  },
+
+  // Cancel processing jobs (plans/038): pending rows are cancelled directly; running rows are closed out by the runner.
+  "proc-cancel": async (dataRoot, [b64]) => {
+    try {
+      const { decodeJobIds, handleProcCancel } = await import("@drec/app");
+      return json({ receipts: handleProcCancel(dataRoot, decodeJobIds(b64)) });
+    } catch (e) {
+      return errorJson(e);
+    }
+  },
+
+  // Node-side upload capabilities (biliup/cookies/disk/fonts) + registered processor kinds.
+  "node-capabilities": async (dataRoot) => {
+    await applyNodeDataRoot(dataRoot);
+    const { probeNodeCapabilities } = await import("@drec/app");
+    try {
+      const { advertisedCapabilities } = await import("@drec/core");
+      const caps = await probeNodeCapabilities(dataRoot);
+      return json({ ...caps, processors: advertisedCapabilities() });
+    } catch (e) {
+      return errorJson(e);
+    }
+  },
+
+  // Zero-disk receipts + per-room status (issue #331), read-only.
+  "zero-disk-report": async (dataRoot) => {
+    await applyNodeDataRoot(dataRoot);
+    const { buildZeroDiskReport } = await import("@drec/app");
+    try {
+      return json(buildZeroDiskReport());
+    } catch (e) {
+      return errorJson(e);
+    }
+  },
+});
+
+/** Run a registry command for the hidden CLI entry point: same stdout bytes and exit code as before. */
+export async function runNodeCommandCli(name: string, dataRoot: string, args: string[]): Promise<void> {
+  const r = await NODE_COMMANDS[name](dataRoot, args);
+  process.stdout.write(r.stdout);
+  if (r.exitCode !== 0) process.exitCode = r.exitCode;
+}

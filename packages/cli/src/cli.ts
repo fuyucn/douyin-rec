@@ -18,11 +18,12 @@ import { zeroDiskUploadCookie } from "./zero-disk-upload-cookie.js";
 import { Command } from "commander";
 // 节点侧上传(experimental,plans/027)的节点侧命令(隔离在独立文件,便于快速开关/回退)。
 import { applyNodeDataRoot, registerNodePipelineCommands } from "./node-pipeline-commands.js";
+import { notifyOutboxArgs, runNodeCommandCli } from "./node-commands.js";
 import { registerRecoverOrderCommands } from "./hub-recover-order-commands.js";
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { ZERO_DISK_DELIVERY_ENV, biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, normalizeSeasonSectionId, parseOutputFormat, resolveSeasonSectionId, stageExt, resolveDiskMinGB, resolveJobLogPath, stageSessionDir, ttlMemoAsync, freeGBOf, redactLogLines, recordingRoomDir, sanitizePathSegment, zonedStamp } from "@drec/core";
-import type { EnqueueRequest, HubResources, ProcActiveDTO, OutputFormat, StageFormat } from "@drec/core";
+import { ZERO_DISK_DELIVERY_ENV, biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, normalizeSeasonSectionId, parseOutputFormat, resolveSeasonSectionId, stageExt, resolveDiskMinGB, resolveJobLogPath, stageSessionDir, ttlMemoAsync, recordingRoomDir, sanitizePathSegment, zonedStamp } from "@drec/core";
+import type { EnqueueRequest, HubResources, OutputFormat, StageFormat } from "@drec/core";
 import { RecordingSession, XmlDanmuWriter } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
 import { zeroDiskRuleError, decorateRecordEvent, getEngine, isWorkerAssigned, listProcessors, platformForRoom, resolveSpecAssignment, type DownloadEngine } from "@drec/core";
@@ -31,7 +32,7 @@ import { groupSessionsInDir, mergeSession, mergeSessions } from "@drec/post-proc
 import { renderXmlToAss } from "@drec/post-process";
 import { burn } from "@drec/post-process";
 import { FONTS_DIR } from "@drec/post-process";
-import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir, readOutputLayout, LiveUploadReporter, NotifyOutbox } from "@drec/app";
+import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir, readOutputLayout, LiveUploadReporter } from "@drec/app";
 import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, isWorkerTargeted, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type ZeroDiskNodeStatusDTO, type RollingDeliveryDTO, type HubPoolSnapshotDTO, type HubBlockedBroadcastDTO, type NodeTaskLogsDTO, type NodeTasksDTO, type WorkerStatus } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, resolveUploadAccountKey, type NotifWebhookToggles } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, buildZeroDiskDelivery, zeroDiskStreamMeta, planZeroDiskSpec, APP_VERSION, syncDbPathFor } from "@drec/app";
@@ -2428,42 +2429,6 @@ program.addCommand(taskCmd);
 // ─── cookie 子命令组：管理全局抖音账号 cookie（所有任务共享）────────────────────
 program.addCommand(buildCookieCommand());
 
-/**
- * 扫 `/proc`,找出「有媒体下载孙进程(ffmpeg/mesio)」的 record 子进程,返回其房间身份。
- *
- * 唯一真理:`_is-done`(某房间是否仍在录)与 `_recording-status`(全部在录房间)共用这一个扫描,
- * 避免两处 `/proc` 解析逻辑各自漂移。非 Linux(本地 macOS 开发)无 `/proc` → 返回空数组。
- *
- * 判据:record 子进程命令行含 `--room <URL/房间号>`,且 `/proc/<pid>/task/<pid>/children`
- * 非空(= 正在写盘的 ffmpeg/mesio)。只在轮询等开播、无下载子进程 = 未在录。
- */
-function scanRecordingRooms(): { platform: string; roomSlug: string }[] {
-  const rooms = new Map<string, { platform: string; roomSlug: string }>();
-  try {
-    for (const entry of readdirSync("/proc", { withFileTypes: true })) {
-      if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
-      let cmdline: string[];
-      try {
-        cmdline = readFileSync(`/proc/${entry.name}/cmdline`, "utf8").split("\0").filter(Boolean);
-      } catch {
-        continue; // 进程刚退出 / 权限不足
-      }
-      const roomIdx = cmdline.indexOf("--room");
-      if (roomIdx < 0 || roomIdx + 1 >= cmdline.length) continue;
-      try {
-        const platform = platformForRoom(cmdline[roomIdx + 1]);
-        const roomSlug = platform.extractRoomSlug(cmdline[roomIdx + 1]);
-        const children = readFileSync(`/proc/${entry.name}/task/${entry.name}/children`, "utf8").trim();
-        if (children) rooms.set(`${platform.id}:${roomSlug}`, { platform: platform.id, roomSlug });
-      } catch {
-        /* 进程刚退出,或房间无法解析 */
-      }
-    }
-  } catch {
-    /* 非 Linux(本地开发)无 /proc → 视为无进程 */
-  }
-  return [...rooms.values()];
-}
 
 // ─── recheck-verify（T32 一次性重核工具）────────────────────────────────
 // 把「B站 pages 还没同步就核验」导致的假 mismatch(needs_manual)按 B站实况翻回 done。
@@ -2491,30 +2456,19 @@ program
 // ─── _is-done <dataRoot> <roomSlug>（隐藏子命令，供 master 通过 SSH 调用）────────
 // 只查「该房间」是否还有活着的下载进程(ffmpeg/mesio 子进程)在写盘,不再数全机 ffmpeg:
 // 之前用全局 ffmpeg 计数,别的房间还在录会把本房间也当成未收播,settle 一直空等。
-function roomRecordingAlive(roomSlug: string): boolean {
-  return scanRecordingRooms().some((room) => room.roomSlug === roomSlug);
-}
 
 program
   .command("_is-done <dataRoot> <roomSlug>", { hidden: true })
   .description("(内部) 判断该房间是否已收播(供 master ssh settle)")
-  .action((_dataRoot: string, roomSlug: string) => {
-    process.stdout.write((roomRecordingAlive(roomSlug) ? "false" : "true") + "\n");
+  .action(async (dataRoot: string, roomSlug: string) => {
+    await runNodeCommandCli("is-done", dataRoot, [roomSlug]);
   });
 
 program
   .command("_recording-status <dataRoot>", { hidden: true })
   .description("(内部) 输出当前正在录制的房间,供 master 控制台轮询")
   .action(async (dataRoot: string) => {
-    const rooms = scanRecordingRooms();
-    // F1:同时带回边录边传的实时进度(只读 sidecar;失败不影响 rooms,旧 master 忽略多出的字段)。
-    let rolling: unknown[] = [];
-    try {
-      const { join: pathJoin } = await import("node:path");
-      const { scanRollingSessions } = await import("@drec/orchestrator");
-      rolling = scanRollingSessions(pathJoin(dataRoot, "recordings"), rooms);
-    } catch { /* 进度是附加信息,拿不到就空 */ }
-    process.stdout.write(JSON.stringify({ rooms, rolling }) + "\n");
+    await runNodeCommandCli("recording-status", dataRoot, []);
   });
 
 // ─── _inventory <dataRoot>（隐藏子命令，供多节点编排 master 通过 SSH 调用）──────────
@@ -2525,36 +2479,7 @@ program
   .command("_inventory <dataRoot>", { hidden: true })
   .description("(内部) 扫描 <dataRoot>/recordings，输出 JSON 清单（供 master ssh 调用）")
   .action(async (dataRoot: string) => {
-    const { join: pathJoin } = await import("node:path");
-    const { statSync } = await import("node:fs");
-    const { TaskStore } = await import("@drec/app");
-    const { ffprobeVideo } = await import("@drec/post-process");
-    const { scanInventory, segmentSecByAnchorOf } = await import("@drec/orchestrator");
-
-    // 打开 slave 自身的 db，构建 taskRooms（anchorName/name → roomSlug）
-    const dbPath = pathJoin(dataRoot, "db", "douyin-rec.db");
-    const store = new TaskStore(dbPath);
-    const taskRooms: Record<string, string> = {};
-    const tasks = store.listTasks();
-    for (const task of tasks) {
-      try {
-        const slug = platformForRoom(task.room).extractRoomSlug(task.room);
-        if (task.name) taskRooms[task.name] = slug;
-        if (task.anchorName) taskRooms[task.anchorName] = slug;
-      } catch { /* skip tasks whose platform can't be resolved */ }
-    }
-    const segmentSecByAnchor = segmentSecByAnchorOf(tasks);
-
-    // ffprobe 适配器：durationMs via ffprobeVideo + mtime → startMs/endMs
-    const ffprobe = async (file: string): Promise<{ durationSec: number; startMs: number; endMs: number }> => {
-      const { durationMs } = await ffprobeVideo(file).catch(() => ({ durationMs: 0 }));
-      const endMs = statSync(file).mtimeMs;
-      return { durationSec: durationMs / 1000, endMs, startMs: endMs - durationMs };
-    };
-
-    const recordingsDir = pathJoin(dataRoot, "recordings");
-    const inventory = await scanInventory(recordingsDir, taskRooms, ffprobe, { segmentSecByAnchor });
-    process.stdout.write(JSON.stringify(inventory) + "\n");
+    await runNodeCommandCli("inventory", dataRoot, []);
   });
 
 // ─── _disk <dataRoot>（隐藏子命令，供 master 通过 SSH 调用）──────────────────────
@@ -2564,15 +2489,7 @@ program
   .command("_disk <dataRoot>", { hidden: true })
   .description("(内部) 输出数据根剩余空间 GB(供 master ssh 调用)")
   .action(async (dataRoot: string) => {
-    const { statfs } = await import("node:fs/promises");
-    try {
-      const st = await statfs(dataRoot);
-      const freeGB = freeGBOf(st);
-      process.stdout.write(JSON.stringify({ freeGB: Number(freeGB.toFixed(2)) }) + "\n");
-    } catch (e) {
-      process.stdout.write(JSON.stringify({ error: String((e as Error)?.message ?? e) }) + "\n");
-      process.exitCode = 1;
-    }
+    await runNodeCommandCli("disk", dataRoot, []);
   });
 
 // ─── _tasks <dataRoot>（隐藏子命令，供 master 通过 SSH 调用）──────────────────────
@@ -2593,10 +2510,7 @@ program
   .command("_tasks <dataRoot>", { hidden: true })
   .description("(内部) 输出节点任务清单 JSON(供 master ssh 调用)")
   .action(async (dataRoot: string) => {
-    const { join: pathJoin } = await import("node:path");
-    const { TaskStore, listNodeTasks } = await import("@drec/app");
-    const store = new TaskStore(pathJoin(dataRoot, "db", "douyin-rec.db"));
-    process.stdout.write(JSON.stringify({ tasks: listNodeTasks(store) }) + "\n");
+    await runNodeCommandCli("tasks", dataRoot, []);
   });
 
 // ─── _apply-tasks <dataRoot> <base64>（隐藏子命令，供 master 通过 SSH 调用）────────
@@ -2606,61 +2520,7 @@ program
   .command("_apply-tasks <dataRoot> <base64>", { hidden: true })
   .description("(内部) 应用 master 下发的期望任务(供 master ssh 调用)")
   .action(async (dataRoot: string, b64: string) => {
-    const { join: pathJoin } = await import("node:path");
-    const { TaskStore, applyTasksPayload } = await import("@drec/app");
-    const store = new TaskStore(pathJoin(dataRoot, "db", "douyin-rec.db"));
-    // T16:payload 的 expectedVersion 由 applyTasksPayload 透传到快照;旧 master 缺字段 → 版本 0。
-    const result = applyTasksPayload(store, b64, undefined, {
-      // 审计快照:目录由 dataRoot 显式派生(本命令只带 dataRoot,无 DOUYIN_REC_ROOT —— 见 managed-state.ts)。
-      managedStateDir: pathJoin(dataRoot, "config", "managed"),
-    });
-    // 不再期望的受管任务必须**硬停**(而非排空):这是「用户停源任务/删规则」的明确意图,
-    // 排空会等到直播自然收播,hub 的 settle 因而一直卡着不建 job。
-    // `_apply-tasks` 是独立短命进程,没有 TaskManager 引用,只能走本机 serve 的
-    // POST /api/tasks/:id/stop → 由 serve 内的 manager 置 expected 停掉子进程(不会触发崩溃自愈重启)。
-    if (result.pending.length > 0) {
-      const apiBase = process.env.DREC_SERVE_API ?? "http://127.0.0.1:7860";
-      for (const key of result.pending) {
-        const task = store.listTasks().find((x) => {
-          try {
-            const p = platformForRoom(x.room);
-            return `${p.id}:${p.extractRoomSlug(x.room)}` === key;
-          } catch {
-            return false;
-          }
-        });
-        if (!task) continue;
-        try {
-          // internal=1 仅允许本机回环:serve 借此放行 hub 受管任务的硬停(外部 API 仍 403)。
-          const res = await fetch(`${apiBase}/api/tasks/${task.id}/stop?internal=1`, { method: "POST" });
-          if (!res.ok) {
-            console.error(`[task-sync] 硬停任务 id=${task.id}(${key}) 失败: HTTP ${res.status}`);
-          }
-        } catch (e) {
-          // serve 未起/重启中 → 下一轮对账会再进 pending 重试;若 serve 一直不可达则回落 daemon 排空兜底。
-          console.error(`[task-sync] 硬停任务 id=${task.id}(${key}) 失败: ${(e as Error).message}`);
-        }
-      }
-    }
-    // 新建或已有但 anchorName 仍为 null 的受管任务:通知本机 serve 后台重抓主播名。
-    // 短命进程无法自行调用 fetchAnchorName(依赖平台 vendor 包),转交给 serve 进程做(有完整运行时)。
-    // fire-and-forget:失败只 warn,下次 enable/disable 或开播时会再次触发。
-    // 逐个 await 会拖慢本命令(ssh 往返),故并发发 + 短超时:serve 慢/挂时不能阻塞同步对账。
-    const apiBase = process.env.DREC_SERVE_API ?? "http://127.0.0.1:7860";
-    const needsAnchor = store.listTasks().filter((t) => t.managedBy === "hub" && !t.anchorName);
-    await Promise.allSettled(
-      needsAnchor.map(async (t) => {
-        try {
-          await fetch(`${apiBase}/api/tasks/${t.id}/refresh-anchor`, {
-            method: "POST",
-            signal: AbortSignal.timeout(3000),
-          });
-        } catch {
-          // serve 未起/超时 → 忽略,开播时 task-manager 会从日志抓名字兜底。
-        }
-      }),
-    );
-    process.stdout.write(JSON.stringify(result) + "\n");
+    await runNodeCommandCli("apply-tasks", dataRoot, [b64]);
   });
 
 // (内部) 读本节点某任务的日志尾巴(F3):master 在 fleet 模式下代查节点日志,不必登节点看网页。
@@ -2670,29 +2530,7 @@ program
   .command("_task-logs <dataRoot> <taskId> <lines>", { hidden: true })
   .description("(内部) 输出某任务最近 n 行日志 JSON(供 master ssh 代查)")
   .action(async (dataRoot: string, taskIdRaw: string, linesRaw: string) => {
-    void dataRoot; // 数据根只用于与其它隐藏命令保持同一签名;日志来自 serve 进程,不经这里读盘。
-    const taskId = Number(taskIdRaw);
-    // 行数夹取:防一个调用把整段日志(上千行)拖过 ssh。默认 200,上限 1000。
-    const asked = Number(linesRaw);
-    const lines = Number.isFinite(asked) ? Math.min(1000, Math.max(1, Math.trunc(asked))) : 200;
-    const apiBase = process.env.DREC_SERVE_API ?? "http://127.0.0.1:7860"; // issue-guard: allow (回环地址,与 _apply-tasks 同一约定)
-    if (!Number.isFinite(taskId)) {
-      process.stdout.write(JSON.stringify({ lines: [], error: `taskId 非法: ${taskIdRaw}` }) + "\n");
-      return;
-    }
-    try {
-      const res = await fetch(`${apiBase}/api/tasks/${taskId}/logs`, { signal: AbortSignal.timeout(5000) });
-      if (!res.ok) {
-        process.stdout.write(JSON.stringify({ lines: [], error: `serve HTTP ${res.status}` }) + "\n");
-        return;
-      }
-      const body = (await res.json()) as { lines?: unknown };
-      const all = Array.isArray(body.lines) ? body.lines.filter((x): x is string => typeof x === "string") : [];
-      // 脱敏后才出节点:日志里可能带 cookie(vendored 取流代码在异常信息里打印整串)。
-      process.stdout.write(JSON.stringify({ lines: redactLogLines(all.slice(-lines)) }) + "\n");
-    } catch (e) {
-      process.stdout.write(JSON.stringify({ lines: [], error: `读本机 serve 失败: ${(e as Error)?.message ?? e}` }) + "\n");
-    }
+    await runNodeCommandCli("task-logs", dataRoot, [taskIdRaw, linesRaw]);
   });
 
 // (内部) 节点状态回执(T16):master 想知道「这台节点应用了哪一版期望、跑的是哪个 bundle」。
@@ -2702,50 +2540,7 @@ program
   .command("_node-status <dataRoot>", { hidden: true })
   .description("(内部) 输出节点应用回执 JSON(appVersion/appliedVersion/appliedAt/任务数;供 master ssh 调用)")
   .action(async (dataRoot: string) => {
-    const { join: pathJoin } = await import("node:path");
-    const { TaskStore, readManagedState } = await import("@drec/app");
-    const { APP_VERSION } = await import("@drec/app");
-    let appliedVersion: number | null = null;
-    let appliedAt: number | null = null;
-    let appVersionAtApply: string | null = null;
-    try {
-      // 快照目录与 _apply-tasks 同一推导(显式传 dataRoot,不从 env 推导)。
-      const st = readManagedState(pathJoin(dataRoot, "config", "managed"));
-      if (st) {
-        appliedVersion = st.version;
-        appliedAt = st.savedAt;
-        appVersionAtApply = st.appVersion ?? null;
-      }
-    } catch {
-      /* 读不到 = 从未同步过 / 目录缺失 → 保持 null(不是错误) */
-    }
-    let taskCount = 0;
-    let managedCount = 0;
-    try {
-      const store = new TaskStore(pathJoin(dataRoot, "db", "douyin-rec.db"));
-      const tasks = store.listTasks();
-      taskCount = tasks.length;
-      managedCount = tasks.filter((t) => t.managedBy === "hub").length;
-    } catch {
-      /* db 打不开 → 计数保持 0;不因此让整条命令失败(版本信息仍然有用) */
-    }
-    // 处理任务表活动快照(plans/036 T3):库不存在 → 全空;读失败 → 省略字段(旧 master 本就忽略)。
-    let procActive: ProcActiveDTO | undefined;
-    try {
-      const { readProcActive } = await import("@drec/proc-queue");
-      procActive = readProcActive(dataRoot);
-    } catch {
-      /* 任务表读不到不拖垮整条命令(版本信息仍有用) */
-    }
-    process.stdout.write(JSON.stringify({
-      appVersion: APP_VERSION,
-      appliedVersion,
-      appliedAt,
-      appVersionAtApply,
-      taskCount,
-      managedCount,
-      ...(procActive ? { procActive } : {}),
-    }) + "\n");
+    await runNodeCommandCli("node-status", dataRoot, []);
   });
 
 // (内部) 处理任务表人工清理(plans/036 §2.3):done/cancelled 超 7 天删;`--purge-failed` 额外删 failed。
@@ -2755,22 +2550,8 @@ program
   .option("--after <id>", "只取 id 大于该游标的事件")
   .option("--limit <n>", "本次最多返回多少条(默认 200)")
   .option("--ack <ids>", "逗号分隔的事件 id,读取后一并确认")
-  .action((dataRoot: string, o: { after?: string; limit?: string; ack?: string }) => {
-    const box = new NotifyOutbox(join(dataRoot, "db", "notify-outbox.db"));
-    try {
-      const ids = (o.ack ?? "").split(",").map((x) => Number(x.trim())).filter((n) => Number.isFinite(n) && n > 0);
-      if (ids.length > 0) box.ack(ids);
-      box.prune();
-      const limitRaw = Number(o.limit ?? 200);
-      const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(1000, limitRaw) : 200;
-      const afterRaw = Number(o.after ?? 0);
-      const after = Number.isFinite(afterRaw) && afterRaw > 0 ? afterRaw : 0;
-      // limit=0 只用于「纯确认」:不回传任何行,避免每次 ack 多拉 200 条跨网传输。
-      const events = Number(o.limit) === 0 ? [] : box.list(after, limit);
-      process.stdout.write(JSON.stringify({ events }) + "\n");
-    } finally {
-      box.close();
-    }
+  .action(async (dataRoot: string, o: { after?: string; limit?: string; ack?: string }) => {
+    await runNodeCommandCli("notify-outbox", dataRoot, notifyOutboxArgs(o));
   });
 
 program
@@ -2799,16 +2580,7 @@ program
   .command("_enqueue <dataRoot> <base64>", { hidden: true })
   .description("(内部) 入队处理任务(仅 remux;供 master ssh 调用)")
   .action(async (dataRoot: string, b64: string) => {
-    try {
-      await applyNodeDataRoot(dataRoot);
-      const { decodeEnqueue } = await import("@drec/core");
-      const { handleEnqueue } = await import("@drec/app");
-      const capabilities = listProcessors().map((p) => p.kind);
-      process.stdout.write(JSON.stringify(handleEnqueue(dataRoot, decodeEnqueue(b64), { capabilities })) + "\n");
-    } catch (e) {
-      process.stdout.write(JSON.stringify({ error: String((e as Error)?.message ?? e) }) + "\n");
-      process.exitCode = 1;
-    }
+    await runNodeCommandCli("enqueue", dataRoot, [b64]);
   });
 
 // (内部) 处理任务回执(plans/036 §2.4 / T9a):请求 = base64(jobId 字符串数组);输出 {receipts: ProcessReceipt[]}。
@@ -2817,13 +2589,7 @@ program
   .command("_proc-status <dataRoot> <base64>", { hidden: true })
   .description("(内部) 查询处理任务回执(供 master ssh 调用)")
   .action(async (dataRoot: string, b64: string) => {
-    try {
-      const { decodeJobIds, handleProcStatus } = await import("@drec/app");
-      process.stdout.write(JSON.stringify({ receipts: handleProcStatus(dataRoot, decodeJobIds(b64)) }) + "\n");
-    } catch (e) {
-      process.stdout.write(JSON.stringify({ error: String((e as Error)?.message ?? e) }) + "\n");
-      process.exitCode = 1;
-    }
+    await runNodeCommandCli("proc-status", dataRoot, [b64]);
   });
 
 // (internal) Cancel processing jobs (plans/038): pending rows are cancelled directly; running rows are closed out by the runner after verification.
@@ -2831,13 +2597,7 @@ program
   .command("_proc-cancel <dataRoot> <base64>", { hidden: true })
   .description("(internal) cancel processing jobs (called by the master over ssh)")
   .action(async (dataRoot: string, b64: string) => {
-    try {
-      const { decodeJobIds, handleProcCancel } = await import("@drec/app");
-      process.stdout.write(JSON.stringify({ receipts: handleProcCancel(dataRoot, decodeJobIds(b64)) }) + "\n");
-    } catch (e) {
-      process.stdout.write(JSON.stringify({ error: String((e as Error)?.message ?? e) }) + "\n");
-      process.exitCode = 1;
-    }
+    await runNodeCommandCli("proc-cancel", dataRoot, [b64]);
   });
 
 // 节点侧上传(experimental,plans/027)的隐藏子命令隔离在独立文件,便于快速开关/回退。
