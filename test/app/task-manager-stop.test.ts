@@ -39,6 +39,7 @@ let id: number;
 
 beforeEach(() => {
   store = new TaskStore(":memory:");
+  store.setSetting("liveGate", "false"); // gate behaviour: test/app/live-gate.test.ts
   logs = [];
   const spawner: Spawner = { spawn: (t) => (proc = new SlowStopProcess(t.id)) } as Spawner;
   mgr = new TaskManager(store, spawner, { log: (m) => logs.push(m) });

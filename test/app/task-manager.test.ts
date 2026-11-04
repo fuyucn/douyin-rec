@@ -81,6 +81,7 @@ let store: TaskStore;
 
 beforeEach(() => {
   store = new TaskStore(":memory:");
+  store.setSetting("liveGate", "false"); // gate behaviour: test/app/live-gate.test.ts
 });
 
 function addTask(

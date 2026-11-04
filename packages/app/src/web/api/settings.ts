@@ -182,6 +182,19 @@ export function buildSettings(ctx: ApiCtx) {
       };
     },
 
+    getLiveGate(): ApiResult {
+      // Default on: only an explicit "false" disables the live gate.
+      return { status: 200, body: { enabled: store.getSetting("liveGate") !== "false" } };
+    },
+
+    setLiveGate(input: { enabled?: boolean }): ApiResult {
+      if (typeof input.enabled !== "boolean") return err(400, "enabled 必须是布尔值");
+      store.setSetting("liveGate", input.enabled ? "true" : "false");
+      // Turning the gate off is the live fallback to the old behaviour: gated tasks spawn right now.
+      const released = input.enabled ? 0 : (manager.releaseGates?.() ?? 0);
+      return { status: 200, body: { enabled: input.enabled, released } };
+    },
+
     getTimezone(): ApiResult {
       return {
         status: 200,

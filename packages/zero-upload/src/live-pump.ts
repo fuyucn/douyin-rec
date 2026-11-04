@@ -341,6 +341,19 @@ export function readLivePumpState(path: string): LivePumpState | null {
   }
 }
 
+/**
+ * Whether a zero-disk run left work behind in the state file at `path`: a missing file means no
+ * (nothing to recover); a file that exists but cannot be read or parsed is assumed to hold
+ * unconfirmed parts, because the run that recovers them would otherwise be delayed. Shared by the
+ * serve-side live gate, which must agree with the child's own recovery on what "unconfirmed" is.
+ */
+export function livePumpHasUnconfirmed(path: string): boolean {
+  if (!existsSync(path)) return false;
+  const state = readLivePumpState(path);
+  if (!state) return true;
+  return !!state.pending || state.parts.some((p) => !p?.confirmed);
+}
+
 export function writeLivePumpState(path: string, state: LivePumpState): void {
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.tmp.${process.pid}.${Date.now().toString(36)}`;

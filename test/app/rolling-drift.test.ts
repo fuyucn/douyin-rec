@@ -79,6 +79,7 @@ async function ticks(d: TaskDaemon, n: number): Promise<void> {
 
 beforeEach(() => {
   store = new TaskStore(":memory:");
+  store.setSetting("liveGate", "false"); // gate behaviour: test/app/live-gate.test.ts
   spawner = new MockSpawner();
   mgr = new TaskManager(store, spawner, { log: () => {} });
   logs = [];

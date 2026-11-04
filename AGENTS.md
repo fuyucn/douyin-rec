@@ -243,6 +243,14 @@ tools/ scripts/rename assets/fonts   # 保留:合并辅助 / 重命名 / 烧字�
   0 落盘的「同一场」判定（打开稿件状态）放在**开播那一刻**，不在进程启动时；弹幕只在开播后连接（未开播时解析的
   liveId 是上一场的）。TaskManager 重启耗尽后记放弃时间，daemon 冷却 10 分钟内不自动拉起（手动启停清除），
   否则「放弃」约 20s 后就被 daemon 当作进入窗口重启，形成无限循环。
+- **判活闸门**（plans/042 Task 6，`task-manager.ts` 的 `gates` + `live-gate.ts`）：`start()` 在 `trySpawn` 前唯一插入点；
+  `settings.liveGate !== "false"`（默认开）时，未开播的任务**不起 `record` 子进程**，serve 内按 `getLiving` 轮询
+  （首次 0–5s 抖动，之后 `platform.pollIntervalMs ?? 30s`；判活抛错指数退避 30s→5min，永不报错/不耗重启预算，#308），开播才走原 `trySpawn`。
+  闸门中 `isRunning=true / isRecording=false / status=running`，`TaskDTO.gated=true`；所有停止路径（stop/requestStop/stopWithin/stopGraceful/hub 抑制）
+  立即取消，在途判活结果不会再 spawn。含边录边传与直播直传；唯一例外是直播直传有未确认分 P（状态文件含未确认/pending，或读不出来）→ 立即 spawn，
+  判定与子进程共用 `resolveZeroDiskPumpDirs` + `livePumpHasUnconfirmed`。崩溃重启直接 spawn、不经闸门；收播后子进程不退回闸门（推迟）。
+  判活按 `settings.douyinApiMode` 在**同步调用期间**临时设 `DOUYIN_REC_API_MODE`、返回前还原（不泄漏到 serve 其它路径）。
+  关开关：`POST /api/live-gate {enabled:false}` 立即释放全部闸门中任务。
 - **输出格式·节点侧原地替换**（issue #137，`app/node-remux.ts` 薄封装 + `@drec/processors` 的 remux 模块，plans/036 T6）：任务字段 `outputFormat`（original/mp4/mkv）。仅**无后处理**
   的任务生效 —— `TaskManager.spawnFor` 经唯一判定点 `resolveNodeOutputFormat` 决定是否给子进程传 `--output-format`
   （hub 受管 / 有 **enabled** 规则绑定 / 边录边传 → original 不传；`enabled=false` 的规则视同未绑定、走封口转换；规则之后才绑定则下一次 spawn 起生效；判定唯一输入 `shouldConvertAtSeal`；**有 enabled 规则绑定的任务封口时仍不转（处理中途从不转换），但自 T9b 起改由收尾后转换，不再锁**，见下）。子进程经 manager 的

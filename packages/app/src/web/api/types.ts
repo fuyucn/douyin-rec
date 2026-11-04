@@ -37,6 +37,10 @@ export interface ManagerLike {
   getAnchorName(id: number): string | null;
   /** 是否真正在录视频（区分「录制中」vs running 但「等待开播中」）。 */
   isRecording(id: number): boolean;
+  /** Waiting behind the live gate (no child process held). Optional: older mocks omit it. */
+  isGated?(id: number): boolean;
+  /** Spawn every gated task now (liveGate turned off); returns how many. */
+  releaseGates?(): number;
   /** 边录边传「实际生效 vs 期望」(issue #89);不在跑 → null。可选:旧的测试替身可不实现。 */
   rollingStatus?(id: number): { applied: boolean; desired: boolean; drift: boolean } | null;
   /** Per-task captured log lines (oldest → newest) for the 日志 console. */
@@ -310,6 +314,10 @@ export interface Api {
   /** POST /api/douyin-api-mode { mode } — 设抖音 API 模式(balance/web/webHTML/mobile/random);
    *  非法值回落默认 balance。改设置下次 spawn 生效(经 env 注入录制子进程)。 */
   setDouyinApiMode(input: { mode?: string }): ApiResult;
+  /** GET /api/live-gate — 判活闸门开关(settings.liveGate;默认开)。 */
+  getLiveGate(): ApiResult;
+  /** POST /api/live-gate { enabled } — 开关判活闸门;关闭时闸门中的任务立即启动录制进程(released=数量)。 */
+  setLiveGate(input: { enabled?: boolean }): ApiResult;
   /** GET /api/timezone — 当前生效时区(settings.timezone,留空=默认)+ 默认值。 */
   getTimezone(): ApiResult;
   /** POST /api/timezone { timezone } — 设时区(config 驱动,覆盖 host 环境变量,立即生效不用重启);

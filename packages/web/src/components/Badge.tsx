@@ -59,6 +59,7 @@ export function StatusBadge({
   recording,
   stopping,
   recordingWorkers,
+  gated,
 }: {
   running: boolean;
   status: string;
@@ -68,6 +69,8 @@ export function StatusBadge({
   /** true=真正在录视频；running 但未录(等开播/重连) → 显示「等待开播中」。 */
   recording?: boolean;
   recordingWorkers?: Task["recordingWorkers"];
+  /** true=判活闸门中:已启动、未开播,没有占用录制进程(仅提示,状态口径不变)。 */
+  gated?: boolean;
 }): ReactNode {
   const t = useT();
   // 本地每秒走一次:否则「N 秒前核对」会冻结在渲染那一刻的数字 —— 推送驱动的页面
@@ -79,16 +82,19 @@ export function StatusBadge({
   // 否则用户把一个 3 分钟前的旧结论当成实时(节点探测失败时缓存会一直是旧值)。
   const staleness = recordingAgeLabel(recordingWorkers, now);
   const style = PHASE_STYLE[phase.kind];
+  // The hint only makes sense while the badge reads "waiting" for the local task.
+  const showGated = gated === true && phase.kind === "waiting";
   const allWorkers = (recordingWorkers ?? []).map((w) => w.workerName);
   const nodes = phase.kind === "recording" && phase.recordingNodes.length > 0 ? phase.recordingNodes
     : phase.kind === "offline" ? phase.unavailableNodes
       : phase.kind === "waiting" && allWorkers.length > 0 ? allWorkers
         : [];
   return (
-    <Badge tone={style.tone} title={staleness ? t("badge.checkedAgoTitle", { ago: staleness }) : undefined}>
+    <Badge tone={style.tone} title={staleness ? t("badge.checkedAgoTitle", { ago: staleness }) : showGated ? t("badge.gatedHint") : undefined}>
       <Dot color={style.dot} pulse={style.pulse} />
       {nodes.length > 0 ? t(phase.textKey, { nodes: nodes.join(" + ") }) : t(phase.textKey)}
       {staleness ? <span className="ml-1 opacity-70">{staleness}</span> : null}
+      {showGated ? <span className="ml-1 opacity-70">{t("badge.gated")}</span> : null}
     </Badge>
   );
 }

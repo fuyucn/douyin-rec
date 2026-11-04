@@ -17,6 +17,26 @@ import type { Spawner } from "./process/spawner.js";
 import type { RecorderProcess, ExitInfo } from "./process/recorder-process.js";
 import { TaskLogStore } from "@drec/observability";
 import { preflightManagedZeroDiskTask, type ZeroDiskPreflight } from "./zero-disk-node.js";
+import { probeRoomLiving, zeroDiskHasUnconfirmedParts } from "./live-gate.js";
+
+/** Default gate poll interval (same as the recorder's live poll) when the platform sets none. */
+const GATE_POLL_MS = 30_000;
+/** First gate poll is delayed by up to this much so one daemon tick does not fire N probes at once. */
+const GATE_JITTER_MS = 5_000;
+/** Ceiling of the exponential backoff after consecutive probe failures. */
+const GATE_BACKOFF_MAX_MS = 5 * 60_000;
+/** A probe that has not answered by then counts as a failure (a hung request must not stall the gate). */
+const GATE_PROBE_TIMEOUT_MS = 60_000;
+
+/**
+ * A task that should be recording but whose room is not live yet. It holds no child process: serve
+ * polls the platform and spawns only once the room is live (plans/042 Task 6).
+ */
+interface Gate {
+  timer: NodeJS.Timeout | null;
+  /** Consecutive probe failures (drives backoff and log throttling); reset by any successful probe. */
+  failures: number;
+}
 
 /** Live runtime info for a task, surfaced to the web 详情 page. */
 export interface TaskRuntime {
@@ -47,6 +67,18 @@ export interface TaskManagerOpts {
    * tests inject a fake. A refusal never spawns (no silent fallback to defaults).
    */
   zeroDiskPreflight?: (task: Task) => ZeroDiskPreflight;
+  /**
+   * Authoritative liveness probe used by the live gate. Defaults to the platform's `getLiving` with
+   * the Douyin API mode from `settings.douyinApiMode` (same endpoint the child uses). Throws on failure.
+   */
+  probeLiving?: (task: Task) => Promise<boolean>;
+  /**
+   * Whether a zero-disk task has unconfirmed parts from an earlier run (such a task skips the gate and
+   * spawns at once so the child finishes the delivery). Defaults to the child's own state-file check.
+   */
+  hasUnconfirmedZeroDisk?: (task: Task) => boolean;
+  /** Random source for the first-poll jitter in [0,1). Tests inject a constant. Default Math.random. */
+  random?: () => number;
   /** Respawn a process that exits UNEXPECTEDLY (crash). Default false. */
   autoRestart?: boolean;
   /** Delay before a restart respawn, ms. Default 5000. */
@@ -108,9 +140,14 @@ export class TaskManager {
   private readonly schedule: (cb: () => void, ms: number) => void;
   private readonly logStore: TaskLogStore;
   private readonly clock: () => number;
+  private readonly probeLiving: (task: Task) => Promise<boolean>;
+  private readonly hasUnconfirmedZeroDisk: (task: Task) => boolean;
+  private readonly random: () => number;
 
   /** taskId → live RecorderProcess. */
   private readonly procs = new Map<number, RecorderProcess>();
+  /** taskId → live gate (task started but its room is not live yet; no child process is held). */
+  private readonly gates = new Map<number, Gate>();
   /** taskId → consecutive auto-restart count (reset on explicit start/stop). */
   private readonly restarts = new Map<number, number>();
   /** taskId → epoch ms the restart budget ran out (cleared by an explicit start or stop). */
@@ -155,6 +192,10 @@ export class TaskManager {
       opts.schedule ?? ((cb, ms): void => void setTimeout(cb, ms).unref?.());
     this.logStore = opts.logStore ?? new TaskLogStore();
     this.clock = opts.clock ?? ((): number => Date.now());
+    this.random = opts.random ?? Math.random;
+    this.probeLiving = opts.probeLiving
+      ?? ((task): Promise<boolean> => probeRoomLiving(task, this.store.getSetting("douyinApiMode") || undefined));
+    this.hasUnconfirmedZeroDisk = opts.hasUnconfirmedZeroDisk ?? ((task): boolean => zeroDiskHasUnconfirmedParts(task));
   }
 
   /**
@@ -174,7 +215,7 @@ export class TaskManager {
 
   /** Live runtime: running flag + startedAt + elapsed for the web 详情 page. */
   getRuntime(taskId: number): TaskRuntime {
-    const running = this.procs.has(taskId);
+    const running = this.procs.has(taskId) || this.gates.has(taskId);
     const startedAt = this.startedAt.get(taskId) ?? null;
     return {
       running,
@@ -200,6 +241,11 @@ export class TaskManager {
     } catch (e) {
       this.log(`[task_manager] notifyRecordingState(id=${taskId}) 出错(忽略): ${(e as Error)?.message ?? e}`);
     }
+  }
+
+  /** True while the task waits behind the live gate (started, room not live, no child process held). */
+  isGated(taskId: number): boolean {
+    return this.gates.has(taskId);
   }
 
   /** 是否真正在录视频（true=录制中；false=进程在跑但等待开播/重连中）。 */
@@ -246,7 +292,7 @@ export class TaskManager {
 
   /** Spawn the task if not already running. Returns false if running/missing. */
   start(taskId: number): boolean {
-    if (this.procs.has(taskId)) return false;
+    if (this.procs.has(taskId) || this.gates.has(taskId)) return false;
     this.gaveUpAt.delete(taskId);
     const task = this.store.getTask(taskId);
     if (!task) {
@@ -257,7 +303,8 @@ export class TaskManager {
     // 同一房间被两个任务同时录 → 两个内容重复的稿件,而 B 站没有删稿 API,代价不可逆。
     // 这是配置错误,必须在启动前挡掉,而不是等用户看到两个稿件。
     if (task.streamUpload) {
-      const clash = [...this.procs.keys()].find((id) => {
+      // Gated tasks count: they will spawn as soon as the room goes live.
+      const clash = [...this.procs.keys(), ...this.gates.keys()].find((id) => {
         const other = this.store.getTask(id);
         return other?.streamUpload === true && this.sameRoom(other, task);
       });
@@ -271,11 +318,143 @@ export class TaskManager {
       }
     }
     this.restarts.set(taskId, 0);
+    // Single gate insertion point: an explicit/daemon start of a not-live task holds no process.
+    // Crash restarts (handleExit) deliberately spawn directly and never come through here.
+    if (this.shouldGate(task)) {
+      this.enterGate(taskId);
+      this.store.setStatus(taskId, "running");
+      this.notifyRecordingState(taskId);
+      this.logTask(taskId, `[task_manager] ▶ 启动任务 id=${taskId}（${task.name ?? task.room}）等待开播(判活闸门,不占用录制进程)`);
+      return true;
+    }
     if (!this.trySpawn(taskId)) return false;
     this.store.setStatus(taskId, "running");
     this.notifyRecordingState(taskId);
     this.logTask(taskId, `[task_manager] ▶ 启动任务 id=${taskId}（${task.name ?? task.room}）`);
     return true;
+  }
+
+  /**
+   * The ONLY gate predicate. On unless `settings.liveGate === "false"`. Rolling upload and zero-disk
+   * tasks are gated too; the one exception is a zero-disk task with unconfirmed parts from an earlier
+   * run, which spawns immediately so the child can finish the delivery.
+   */
+  private shouldGate(task: Task): boolean {
+    if (this.store.getSetting("liveGate") === "false") return false;
+    if (task.streamUpload && this.hasUnconfirmedZeroDisk(task)) {
+      this.logTask(task.id, `[task_manager] 直播直传有未确认分 P,不进判活闸门,立即启动以续传`);
+      return false;
+    }
+    return true;
+  }
+
+  private enterGate(taskId: number): void {
+    const gate: Gate = { timer: null, failures: 0 };
+    this.gates.set(taskId, gate);
+    // Jitter only the first probe: a daemon tick can start many tasks at once.
+    this.scheduleGatePoll(taskId, gate, Math.floor(this.random() * GATE_JITTER_MS));
+  }
+
+  private scheduleGatePoll(taskId: number, gate: Gate, delayMs: number): void {
+    gate.timer = setTimeout(() => void this.gatePoll(taskId, gate), delayMs);
+    gate.timer.unref?.();
+  }
+
+  /** Cancel the gate of a task (stop paths). True if there was one. A poll in flight sees the gate gone. */
+  private cancelGate(taskId: number): boolean {
+    const gate = this.gates.get(taskId);
+    if (!gate) return false;
+    if (gate.timer) clearTimeout(gate.timer);
+    this.gates.delete(taskId);
+    return true;
+  }
+
+  /** Cancel a gate and mark the task stopped (a gated task has nothing to drain, so every stop is immediate). */
+  private stopGated(taskId: number): boolean {
+    if (!this.cancelGate(taskId)) return false;
+    this.store.setStatus(taskId, "stopped");
+    this.notifyRecordingState(taskId);
+    this.logTask(taskId, `[task_manager] ■ 停止任务 id=${taskId}(未开播,判活闸门已取消)`);
+    return true;
+  }
+
+  private async gatePoll(taskId: number, gate: Gate): Promise<void> {
+    gate.timer = null;
+    if (this.gates.get(taskId) !== gate) return;
+    const task = this.store.getTask(taskId);
+    if (!task) {
+      this.cancelGate(taskId);
+      return;
+    }
+    // Turning the setting off is the live fallback to the old behaviour: spawn right away.
+    if (this.store.getSetting("liveGate") === "false") {
+      this.openGate(taskId, gate, "判活闸门已关闭");
+      return;
+    }
+    let living = false;
+    let failure: unknown = null;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      living = await Promise.race([
+        this.probeLiving(task),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("判活超时")), GATE_PROBE_TIMEOUT_MS);
+          timer.unref?.();
+        }),
+      ]);
+    } catch (e) {
+      failure = e ?? new Error("判活失败");
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    // A stop / delete / restart while the probe was in flight cancels the gate: never spawn after that.
+    if (this.gates.get(taskId) !== gate) return;
+    if (failure) {
+      // Probe failures (risk control, network) never leave the gate, never change the status and never
+      // spend the restart budget (#308): back off 30s → 5min and keep polling.
+      gate.failures += 1;
+      if (gate.failures === 1 || gate.failures % 10 === 0) {
+        this.logTask(taskId, `[task_manager] 判活失败(连续 ${gate.failures} 次,将退避重试): ${(failure as Error)?.message ?? failure}`);
+      }
+      const backoff = Math.min(GATE_BACKOFF_MAX_MS, GATE_POLL_MS * 2 ** (gate.failures - 1));
+      this.scheduleGatePoll(taskId, gate, backoff);
+      return;
+    }
+    gate.failures = 0;
+    if (!living) {
+      this.scheduleGatePoll(taskId, gate, this.gateIntervalMs(task));
+      return;
+    }
+    this.openGate(taskId, gate, "已开播");
+  }
+
+  private gateIntervalMs(task: Task): number {
+    try {
+      return platformForRoom(task.room).pollIntervalMs ?? GATE_POLL_MS;
+    } catch {
+      return GATE_POLL_MS;
+    }
+  }
+
+  /** Leave the gate and spawn through the normal path (spawnFor runs beforeSpawn + the zero-disk preflight). */
+  private openGate(taskId: number, gate: Gate, why: string): void {
+    if (this.gates.get(taskId) !== gate) return;
+    this.cancelGate(taskId);
+    if (this.procs.has(taskId)) return;
+    if (!this.trySpawn(taskId)) return; // trySpawn already set error status, logged and alerted
+    this.store.setStatus(taskId, "running");
+    this.notifyRecordingState(taskId);
+    this.logTask(taskId, `[task_manager] ▶ 任务 id=${taskId} ${why},启动录制进程`);
+  }
+
+  /** Spawn every gated task now (the `liveGate` setting was turned off). Returns how many were released. */
+  releaseGates(): number {
+    let n = 0;
+    for (const [id, gate] of [...this.gates]) {
+      this.openGate(id, gate, "判活闸门已关闭");
+      n += 1;
+    }
+    return n;
   }
 
   /** 两个任务是否录同一房间(按平台 + 房间 slug,不用原始 URL 字符串比较)。 */
@@ -305,7 +484,10 @@ export class TaskManager {
     this.restarts.delete(taskId);
     this.gaveUpAt.delete(taskId);
     this.draining.delete(taskId);
-    if (!proc) return;
+    if (!proc) {
+      this.stopGated(taskId);
+      return;
+    }
     this.logTask(taskId, `[task_manager] ■ 停止任务 id=${taskId}`);
     await proc.stop();
     // onExit (expected) handler sets status + clears the map entry.
@@ -349,7 +531,11 @@ export class TaskManager {
    */
   async stopGraceful(taskId: number): Promise<void> {
     const proc = this.procs.get(taskId);
-    if (!proc) return;
+    if (!proc) {
+      // Gated: nothing is recording, so a drain is an immediate stop.
+      this.stopGated(taskId);
+      return;
+    }
     // 硬停在途(例如 rolling 任务在给末段上传留宽限):硬停优先,不能再转成排空——否则 status 会被改成 draining、
     // 日志写成「自然收播」,且 daemon tick 会重新卡到进程退出。
     if (this.stopping.has(taskId)) return;
@@ -373,15 +559,16 @@ export class TaskManager {
 
   /** Stop every running task. */
   async stopAll(): Promise<void> {
-    await Promise.all([...this.procs.keys()].map((id) => this.stop(id)));
+    await Promise.all([...this.procs.keys(), ...this.gates.keys()].map((id) => this.stop(id)));
   }
 
+  /** Started and not stopped: a live child process OR waiting behind the live gate. */
   isRunning(taskId: number): boolean {
-    return this.procs.has(taskId);
+    return this.procs.has(taskId) || this.gates.has(taskId);
   }
 
   runningIds(): number[] {
-    return [...this.procs.keys()];
+    return [...this.procs.keys(), ...this.gates.keys()];
   }
 
   /**

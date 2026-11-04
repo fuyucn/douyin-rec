@@ -90,6 +90,18 @@ class MockManager implements ManagerLike {
   forceRunning(id: number): void {
     this.running.add(id);
   }
+  /** Live gate (plans/042 Task 6): tasks waiting behind the gate / how many releaseGates reports. */
+  readonly gated = new Set<number>();
+  releaseCalls = 0;
+  isGated(id: number): boolean {
+    return this.gated.has(id);
+  }
+  releaseGates(): number {
+    this.releaseCalls += 1;
+    const n = this.gated.size;
+    this.gated.clear();
+    return n;
+  }
 }
 
 let store: TaskStore;
@@ -101,6 +113,40 @@ beforeEach(() => {
   manager = new MockManager();
   const deps: ApiDeps = { store, manager };
   api = makeApi(deps);
+});
+
+describe("判活闸门设置端点与 TaskDTO.gated", () => {
+  it("默认开;只有显式 false 才关", () => {
+    expect((api.getLiveGate().body as { enabled: boolean }).enabled).toBe(true);
+    api.setLiveGate({ enabled: false });
+    expect(store.getSetting("liveGate")).toBe("false");
+    expect((api.getLiveGate().body as { enabled: boolean }).enabled).toBe(false);
+    api.setLiveGate({ enabled: true });
+    expect((api.getLiveGate().body as { enabled: boolean }).enabled).toBe(true);
+  });
+  it("关闭时释放闸门中的任务(released 回显数量);开启不释放", () => {
+    manager.gated.add(1); manager.gated.add(2);
+    const on = api.setLiveGate({ enabled: true });
+    expect((on.body as { released: number }).released).toBe(0);
+    expect(manager.releaseCalls).toBe(0);
+    const off = api.setLiveGate({ enabled: false });
+    expect((off.body as { released: number }).released).toBe(2);
+    expect(manager.releaseCalls).toBe(1);
+  });
+  it("非布尔 → 400,且不改设置", () => {
+    expect(api.setLiveGate({}).status).toBe(400);
+    expect(api.setLiveGate({ enabled: "no" as unknown as boolean }).status).toBe(400);
+    expect(store.getSetting("liveGate")).toBeFalsy();
+  });
+  it("任务视图只对闸门中的任务带 gated:true", () => {
+    const a = store.addTask({ room: "111" }).id;
+    const b = store.addTask({ room: "222" }).id;
+    manager.forceRunning(a); manager.forceRunning(b);
+    manager.gated.add(a);
+    const list = api.listTasks().body as Array<{ id: number; gated?: boolean }>;
+    expect(list.find((t) => t.id === a)!.gated).toBe(true);
+    expect(list.find((t) => t.id === b)!.gated).toBeUndefined();
+  });
 });
 
 describe("抖音 API 模式设置端点", () => {

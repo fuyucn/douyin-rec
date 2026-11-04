@@ -155,6 +155,7 @@ class MockSpawner implements Spawner {
 describe("TaskDaemon — composition with TaskManager", () => {
   it("does not restart a task the manager gave up on until the cooldown passes (#308)", async () => {
     const store = new TaskStore(":memory:");
+    store.setSetting("liveGate", "false"); // gate behaviour: test/app/live-gate.test.ts
     const id = store.addTask({ room: "r", enabled: true }).id;
     const spawner = new MockSpawner();
     let now = 5_000_000;
@@ -184,6 +185,7 @@ describe("TaskDaemon — composition with TaskManager", () => {
 
   it("starts an eligible task via the manager (spawns a subprocess) on tick", async () => {
     const store = new TaskStore(":memory:");
+    store.setSetting("liveGate", "false"); // gate behaviour: test/app/live-gate.test.ts
     const id = store.addTask({ room: "r", scheduleStart: "06:00", scheduleEnd: "09:00", enabled: true }).id;
     const spawner = new MockSpawner();
     const mgr = new TaskManager(store, spawner, { log: () => {} });
@@ -197,6 +199,7 @@ describe("TaskDaemon — composition with TaskManager", () => {
 
   it("does NOT spawn anything when the window is closed", async () => {
     const store = new TaskStore(":memory:");
+    store.setSetting("liveGate", "false"); // gate behaviour: test/app/live-gate.test.ts
     store.addTask({ room: "r", scheduleStart: "03:00", scheduleEnd: "03:01", enabled: true });
     const spawner = new MockSpawner();
     const mgr = new TaskManager(store, spawner, { log: () => {} });
@@ -209,6 +212,7 @@ describe("TaskDaemon — composition with TaskManager", () => {
 
   it("T-33:磁盘低于水位 → 拒绝启动新任务,但已在录的场照常停/不收影响", async () => {
     const store = new TaskStore(":memory:");
+    store.setSetting("liveGate", "false"); // gate behaviour: test/app/live-gate.test.ts
     store.addTask({ room: "r", scheduleStart: "06:00", scheduleEnd: "09:00", enabled: true });
     const spawner = new MockSpawner();
     const mgr = new TaskManager(store, spawner, { log: () => {} });
@@ -224,6 +228,7 @@ describe("TaskDaemon — composition with TaskManager", () => {
 
   it("T-33:磁盘达到水位 → 启动新任务;查不到剩余(返回 null)→ 不拦(保守放行,已有看门狗告警)", async () => {
     const store = new TaskStore(":memory:");
+    store.setSetting("liveGate", "false"); // gate behaviour: test/app/live-gate.test.ts
     store.addTask({ room: "r", scheduleStart: "06:00", scheduleEnd: "09:00", enabled: true });
     const spawner = new MockSpawner();
     const mgr = new TaskManager(store, spawner, { log: () => {} });
@@ -248,6 +253,7 @@ describe("TaskDaemon — composition with TaskManager", () => {
 
   it("stops a running task once it leaves its window", async () => {
     const store = new TaskStore(":memory:");
+    store.setSetting("liveGate", "false"); // gate behaviour: test/app/live-gate.test.ts
     const id = store.addTask({ room: "r", scheduleStart: "06:00", scheduleEnd: "09:00", enabled: true }).id;
     const spawner = new MockSpawner();
     const mgr = new TaskManager(store, spawner, { log: () => {} });
@@ -264,6 +270,7 @@ describe("TaskDaemon — composition with TaskManager", () => {
 
   it("window-end uses GRACEFUL drain: a still-live broadcast keeps recording (status=draining)", async () => {
     const store = new TaskStore(":memory:");
+    store.setSetting("liveGate", "false"); // gate behaviour: test/app/live-gate.test.ts
     const id = store.addTask({ room: "r", scheduleStart: "06:00", scheduleEnd: "09:00", enabled: true }).id;
     const spawner = new MockSpawner();
     const mgr = new TaskManager(store, spawner, { log: () => {} });
@@ -291,6 +298,7 @@ describe("TaskDaemon — composition with TaskManager", () => {
 
   it("P0 overrun: a draining task whose NEW window opened is NOT restarted (warns), then self-heals", async () => {
     const store = new TaskStore(":memory:");
+    store.setSetting("liveGate", "false"); // gate behaviour: test/app/live-gate.test.ts
     // Overnight-ish: window 06:00-09:00; we'll re-open the window after drain.
     const id = store.addTask({ room: "r", scheduleStart: "06:00", scheduleEnd: "09:00", enabled: true }).id;
     const spawner = new MockSpawner();
@@ -323,6 +331,7 @@ describe("TaskDaemon — composition with TaskManager", () => {
 
   it("localSuppressedIds:抑制名单中的任务不启动;在跑的立即硬停(让位远端节点)", async () => {
     const store = new TaskStore(":memory:");
+    store.setSetting("liveGate", "false"); // gate behaviour: test/app/live-gate.test.ts
     const idA = store.addTask({ room: "a", enabled: true }).id; // 无窗口 = 始终 eligible
     const idB = store.addTask({ room: "b", enabled: true }).id;
     const spawner = new MockSpawner();
@@ -349,6 +358,7 @@ describe("TaskDaemon — composition with TaskManager", () => {
 
   it("stop() stops all recorders and is idempotent", async () => {
     const store = new TaskStore(":memory:");
+    store.setSetting("liveGate", "false"); // gate behaviour: test/app/live-gate.test.ts
     store.addTask({ room: "a", enabled: true });
     store.addTask({ room: "b", enabled: true });
     const spawner = new MockSpawner();

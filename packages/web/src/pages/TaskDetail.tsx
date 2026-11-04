@@ -109,6 +109,7 @@ export function TaskDetail(): ReactNode {
                   recording={task.recording}
                   stopping={task.stopping}
                   recordingWorkers={task.recordingWorkers}
+                  gated={task.gated}
                 />
                 {task.managedBy === "hub" && (
                   <span className="badge badge-muted" title={t("tasks.managedHint")}>{t("tasks.managed")}</span>
