@@ -20,3 +20,13 @@ export function isAtomicTempName(name: string): boolean {
   const stem = b.slice(0, b.length - extname(b).length);
   return stem.length > PART_INFIX.length + 1 && stem.endsWith(PART_INFIX);
 }
+
+/**
+ * Whether a file name (basename or path) is a live-pump (zero-disk / direct-upload) temporary part:
+ * `<head>_<date>_<HH-mm-ss>_<NNN>[-n].live.ts` or the legacy `<epochMs>_<NNN>.live.ts`.
+ * The live pump re-uploads these itself; they are never hub recording sources. Single source of
+ * truth: callers must not re-derive this from a segment-number pattern.
+ */
+export function isLivePumpPartName(name: string): boolean {
+  return basename(name).toLowerCase().endsWith(".live.ts");
+}
