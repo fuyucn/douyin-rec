@@ -65,6 +65,9 @@
 - **心跳只带原样 stdout**：`recording-status` / `disk` / `node-status` 三条命令的输出原样缓存在 master，`SshTransport` 的解析代码零改动；`is-done` 由缓存的在录房间直接推出。
 - **接入方式**：hub 全局配置 加 `fleet.controllerUrl`（master 被 worker 访问的 tailscale 地址）才启用（opt-in，需重启 master 生效）；master 每分钟检查未连上的 ssh 节点，最多每 30 分钟经 ssh `_fleet-join`（配置走 stdin）下发一次凭据；节点 serve 每分钟重读 节点 fleet 配置，无需重启。
 - **回落**：未连接 / 超时 / 未知命令 / 数据根不符 → 原 ssh 路径；命令自身失败（非 0）照常抛错，不重试 ssh。经长连接路由的命令都幂等，回复丢失后走 ssh 重试是安全的。
+- **存活判定**：master 只把请求路由给 25s 内收到过帧的节点（心跳每 10s），半开连接立即回落 ssh；45s 无帧才断开连接。与上文「ping 5s / 30s 判离线」的差异是有意的：路由新鲜度比断开阈值更紧。
+- **凭据下发**：先经 ssh 写到节点，节点确认写入后 master 才存新哈希；下发失败不吊销节点手上的旧凭据。
+- **本期不做（另立任务）**：Web 节点页显示「长连接 / ssh 回落」；inventory 的 `inventoryRev` 门控（master 仍按对账周期请求 inventory，靠 Task 4 的 ffprobe 缓存降成本）；收播事件即时触发单房间对账（当前心跳发现在录房间变化只刷新控制台状态，收播仍由周期对账发现）。「预期效果」表中对应两行以本条为准。
 
 ## Global Constraints
 
