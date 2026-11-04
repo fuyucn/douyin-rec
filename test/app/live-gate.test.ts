@@ -655,4 +655,65 @@ describe("live gate: crash-restart timer vs gate (single owner of the next spawn
       p.pollIntervalMs = prev;
     }
   });
+
+  it("trySpawn refusing because of a gate sets error + alerts (never leaves running with no owner)", async () => {
+    const id = add();
+    const downs: string[] = [];
+    const mgr = mk(async () => false, { onTaskDown: (_i, r) => downs.push(r) });
+    mgr.start(id);
+    (mgr as unknown as { trySpawn(i: number): boolean }).trySpawn(id);
+    expect(store.getTask(id)!.status).toBe("error");
+    expect(downs).toHaveLength(1);
+  });
+
+  it("start() taking over a pending crash restart keeps the counter: a crash loop still gives up", async () => {
+    const id = add();
+    const downs: string[] = [];
+    const pending: Array<() => void> = [];
+    const mgr = mk(async () => true, {
+      autoRestart: true, maxRestarts: 2, restartDelayMs: 5_000, onTaskDown: (_i, r) => downs.push(r),
+      schedule: (cb) => { pending.push(cb); },
+    });
+    mgr.start(id);
+    await advance(0);
+    for (let i = 0; i < 3 && downs.length === 0; i++) {
+      spawner.spawned.at(-1)!.exit({ code: 1, signal: null, expected: false }); // crash -> restart pending
+      if (downs.length) break;
+      mgr.start(id); // daemon takes over during the delay
+      await advance(0);
+      pending.splice(0).forEach((cb) => cb());
+    }
+    expect(downs).toHaveLength(1);
+    expect(mgr.restartCooldownRemainingMs(id)).toBeGreaterThan(0);
+  });
+
+  it("manual start after give-up still resets the counter", async () => {
+    const id = add();
+    const mgr = mk(async () => true, { autoRestart: true, maxRestarts: 1, restartDelayMs: 0, schedule: (cb) => cb() });
+    mgr.start(id);
+    await advance(0);
+    spawner.spawned.at(-1)!.exit({ code: 1, signal: null, expected: false }); // restart 1
+    spawner.spawned.at(-1)!.exit({ code: 1, signal: null, expected: false }); // gives up
+    expect(mgr.restartCooldownRemainingMs(id)).toBeGreaterThan(0);
+    expect(mgr.start(id)).toBe(true);
+    expect(mgr.restartCooldownRemainingMs(id)).toBe(0);
+    await advance(0);
+    const n = spawner.spawned.length;
+    spawner.spawned.at(-1)!.exit({ code: 1, signal: null, expected: false });
+    expect(spawner.spawned.length).toBe(n + 1); // fresh budget: one restart allowed again
+  });
+
+  it("a clean exit followed by a fresh start does not inherit a stale counter", async () => {
+    const id = add();
+    const mgr = mk(async () => true, { autoRestart: true, maxRestarts: 1, restartDelayMs: 0, schedule: (cb) => cb() });
+    mgr.start(id);
+    await advance(0);
+    spawner.spawned.at(-1)!.exit({ code: 1, signal: null, expected: false }); // restart 1 (count=1)
+    spawner.spawned.at(-1)!.exit({ code: 0, signal: null, expected: true }); // clean stop, no pending restart
+    mgr.start(id);
+    await advance(0);
+    const n = spawner.spawned.length;
+    spawner.spawned.at(-1)!.exit({ code: 1, signal: null, expected: false });
+    expect(spawner.spawned.length).toBe(n + 1);
+  });
 });

@@ -148,6 +148,8 @@ export class TaskManager {
   private readonly procs = new Map<number, RecorderProcess>();
   /** taskId → live gate (task started but its room is not live yet; no child process is held). */
   private readonly gates = new Map<number, Gate>();
+  /** taskIds with a crash-restart timer scheduled and not yet fired (start() may take it over). */
+  private readonly restartPending = new Set<number>();
   /** taskId → consecutive auto-restart count (reset on explicit start/stop). */
   private readonly restarts = new Map<number, number>();
   /** taskId → epoch ms the restart budget ran out (cleared by an explicit start or stop). */
@@ -294,6 +296,9 @@ export class TaskManager {
   start(taskId: number): boolean {
     if (this.procs.has(taskId) || this.gates.has(taskId)) return false;
     this.gaveUpAt.delete(taskId);
+    // Taking over a pending crash restart keeps the counter, so a crash loop that is repeatedly
+    // "started" by the daemon still reaches maxRestarts / gaveUpAt. Anything else starts fresh.
+    const takesOverRestart = this.restartPending.has(taskId) && this.restarts.has(taskId);
     const task = this.store.getTask(taskId);
     if (!task) {
       this.log(`[task_manager] start: 未找到任务 id=${taskId}`);
@@ -317,7 +322,7 @@ export class TaskManager {
         return false;
       }
     }
-    this.restarts.set(taskId, 0);
+    if (!takesOverRestart) this.restarts.set(taskId, 0);
     try {
       this.assertZeroDiskPreflight(task);
     } catch (e) {
@@ -492,6 +497,7 @@ export class TaskManager {
     const proc = this.procs.get(taskId);
     // Reset restart budget so an in-flight restart timer becomes a no-op.
     this.restarts.delete(taskId);
+    this.restartPending.delete(taskId);
     this.gaveUpAt.delete(taskId);
     this.draining.delete(taskId);
     // Always cancel the gate, whether or not a child exists: a gate must never outlive a stop.
@@ -589,7 +595,9 @@ export class TaskManager {
     // Invariant: a gated task is spawned only by openGate (which removes the gate first). Anything
     // else spawning here would leave a gate and a child coexisting for one task.
     if (this.gates.has(taskId)) {
-      this.logTask(taskId, `[task_manager] 任务 id=${taskId} 仍在判活闸门中,拒绝直接启动进程`);
+      // Invariant violation: treat like any start failure so the task never stays "running" with
+      // neither gate nor child (callers rely on false meaning the error was already handled).
+      this.failStart(taskId, new Error("内部错误:判活闸门存在时不得直接启动进程"));
       return false;
     }
     try {
@@ -771,7 +779,9 @@ export class TaskManager {
       taskId,
       `[task_manager] ↻ 任务 id=${taskId} 将在 ${this.restartDelayMs}ms 后第 ${count} 次重启`,
     );
+    this.restartPending.add(taskId);
     this.schedule(() => {
+      this.restartPending.delete(taskId);
       // Guard: a stop() between scheduling and firing clears the budget.
       if (!this.restarts.has(taskId)) return;
       if (this.procs.has(taskId)) return;
