@@ -103,11 +103,17 @@ export function alignFileSize(n: number): number {
 export const DEFAULT_SEGMENT_CAP = alignFileSize(1.5 * 1024 * 1024 * 1024);
 
 /**
- * A live HTTP video stream normally emits bytes continuously. Five minutes without a single
- * stdout chunk means the source socket is half-open or the CDN stopped producing data; ffmpeg
- * can sit in ppoll forever because `-reconnect_at_eof` never sees EOF.
+ * A live HTTP video stream normally emits bytes continuously. A minute without a single stdout
+ * chunk means the source socket is half-open or the CDN stopped producing data; ffmpeg can sit
+ * in ppoll forever because `-reconnect_at_eof` never sees EOF. Aligned with the file-recorder
+ * ffmpeg watchdog (60s, issue #464): every silent minute is broadcast content lost for good,
+ * so the old 5-minute default sealed far too late. Data that keeps flowing slowly never seals:
+ * the timer only runs on total stdout silence.
  */
-export const DEFAULT_STALL_TIMEOUT_MS = 5 * 60_000;
+export const DEFAULT_STALL_TIMEOUT_MS = 60_000;
+
+/** Alert when a confirmed part's media time falls below this fraction of its wall time. */
+export const DEFAULT_MEDIA_WALL_ALERT_RATIO = 0.85;
 
 /** After a stall, keep the same archive available for this long before ending the run. */
 export const DEFAULT_RECOVERY_WINDOW_MS = 20 * 60_000;
@@ -251,6 +257,14 @@ export interface SegmentRunResult {
   sealedMs?: number;
   /** Media duration of this part from video PTS (seconds); absent when the stream carried no timestamp. */
   ptsDurationSec?: number;
+  /** First video PTS of the part (seconds); absent when the stream carried no timestamp. */
+  ptsStartSec?: number;
+  /** Last video PTS of the part (seconds); absent when the stream carried no timestamp. */
+  ptsEndSec?: number;
+  /** Total seconds of forward PTS jumps inside the part (media missing at resume points). */
+  ptsJumpSec?: number;
+  /** Number of forward PTS jumps inside the part. */
+  ptsJumpCount?: number;
   /** 投稿前自检得到的时长(秒);0/undefined = 未测或不合格(**不得投稿**)。 */
   spoolDurationSec?: number;
   /** complete 成功时的 UPOS stem;建稿 `videos[].filename` 必须用它。 */
@@ -1601,6 +1615,10 @@ export interface SealedPart {
   /** Wall-clock the part was open (a stall window is excluded). */
   sealedMs: number;
   stalledMs?: number;
+  /** Total seconds of forward PTS jumps inside the part (media missing at resume points). */
+  ptsJumpSec?: number;
+  /** Number of forward PTS jumps inside the part. */
+  ptsJumpCount?: number;
   /** True when this part ended the connection (EOF, stall, abort, or stop at a cut). */
   final: boolean;
   /** True when `stopAtCut` ended the connection here (the stream itself was still healthy). */
@@ -1629,7 +1647,7 @@ export interface RunStreamOpts {
   /** A part that ended at a cut while the stream keeps going. */
   onPartSealed: (part: SealedPart) => void;
   signal?: AbortSignal;
-  /** Kill ffmpeg after this long without a stdout chunk. Default 5 minutes; 0 disables. */
+  /** Kill ffmpeg after this long without a stdout chunk. Default 60s; 0 disables. */
   stallTimeoutMs?: number;
   /** Test seam: how long to wait for stdout EOF after killing ffmpeg before destroying it. */
   destroyGraceMs?: number;
@@ -1759,6 +1777,7 @@ export async function runStream(o: RunStreamOpts): Promise<StreamRunResult> {
       tsDiscontinuities: tsDisc - discBase,
       sealedMs: (stalled ? lastDataAt : Date.now()) - curStartedAt,
       ...(final && stalled ? { stalledMs: stalledAt - lastDataAt } : {}),
+      ...(timing?.ptsJumpSec ? { ptsJumpSec: timing.ptsJumpSec, ptsJumpCount: timing.ptsJumpCount } : {}),
     };
     discBase = tsDisc;
     return part;
@@ -1880,6 +1899,7 @@ function segmentResultOf(part: SealedPart, sink: PartSinkResult, exit: SegmentEx
     ...(part.sealedBy === "duration" ? { durationSealHit: true } : {}),
     ...(part.stalledMs !== undefined ? { stalledMs: part.stalledMs } : {}),
     ...(part.timing && part.timing.durationSec > 0 ? { ptsDurationSec: part.timing.durationSec } : {}),
+    ...(part.timing ? { ptsStartSec: part.timing.firstPts, ptsEndSec: part.timing.lastPts, ...(part.timing.ptsJumpSec ? { ptsJumpSec: part.timing.ptsJumpSec, ptsJumpCount: part.timing.ptsJumpCount } : {}) } : {}),
   };
 }
 
@@ -1919,7 +1939,7 @@ export interface RunSegmentOpts {
   /** Same as {@link PartSinkOpts.onDegrade}: fired the moment streaming degrades. */
   onDegrade?: (reason: string) => void;
   signal?: AbortSignal;
-  /** Kill ffmpeg after this long without a stdout chunk. Default 5 minutes; 0 disables. */
+  /** Kill ffmpeg after this long without a stdout chunk. Default 60s; 0 disables. */
   stallTimeoutMs?: number;
   /** Test seam: how long to wait for stdout EOF after killing ffmpeg before destroying it. */
   destroyGraceMs?: number;
@@ -2433,10 +2453,16 @@ export interface RunLivePumpOptions {
   sizeCap: number;
   /** Duration cap per part; whichever fires first seals the part. */
   maxMs?: number;
-  /** Kill ffmpeg after this long without a stdout chunk. Default 5 minutes; 0 disables. */
+  /** Kill ffmpeg after this long without a stdout chunk. Default 60s; 0 disables. */
   stallTimeoutMs?: number;
   /** Wait this long for the same room to return after a stall before ending the run. */
   recoverWindowMs?: number;
+  /**
+   * Alert via {@link onAlert} when a confirmed part's media duration (video PTS) is below this
+   * fraction of its wall time (0-1; default {@link DEFAULT_MEDIA_WALL_ALERT_RATIO}). Long tails
+   * and intentional stops are exempt. 0 disables the alert.
+   */
+  mediaWallAlertRatio?: number;
   /** Max parts to record in this run (0/undefined = keep going until offline). */
   maxSegments?: number;
   /**
@@ -3161,6 +3187,27 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       `${r.degradedReason ? `,降级: ${r.degradedReason}` : ""}` +
       `${r.usedFileFallback ? ",整文件回退成功" : ""}`,
     );
+    // End-of-part media report (issue #464): PTS span vs wall time plus the PTS jumps (holes)
+    // observed inside the part. All values are already in memory at seal time — no ffprobe here.
+    const wallSec = (part.sealedMs + (part.stalledMs ?? 0)) / 1000;
+    const mediaBits: string[] = [];
+    if (r.ptsDurationSec !== undefined) {
+      mediaBits.push(`媒体 ${r.ptsDurationSec.toFixed(0)}s(PTS ${r.ptsStartSec?.toFixed(0) ?? "?"}→${r.ptsEndSec?.toFixed(0) ?? "?"})`);
+    }
+    mediaBits.push(`墙钟 ${wallSec.toFixed(0)}s`);
+    if (r.ptsJumpCount) mediaBits.push(`空洞 ${r.ptsJumpCount} 处共 ${(r.ptsJumpSec ?? 0).toFixed(0)}s`);
+    log(`[直播直传] 段${seg + 1} 数据: ${mediaBits.join(",")}`);
+    const alertRatio = o.mediaWallAlertRatio ?? DEFAULT_MEDIA_WALL_ALERT_RATIO;
+    // Guards: tiny tails and first-byte latency must not page anyone; a stalled or gappy part
+    // with real media behind it must.
+    if (alertRatio > 0 && r.ptsDurationSec !== undefined && !part.stopped
+      && wallSec >= 90 && r.ptsDurationSec >= 30 && r.ptsDurationSec / wallSec < alertRatio) {
+      const msg = `段${seg + 1} 媒体 ${r.ptsDurationSec.toFixed(0)}s / 墙钟 ${wallSec.toFixed(0)}s`
+        + `(比例 ${(r.ptsDurationSec / wallSec).toFixed(2)} < ${alertRatio})`
+        + `${r.ptsJumpCount ? `,其中 PTS 空洞 ${r.ptsJumpCount} 处共 ${(r.ptsJumpSec ?? 0).toFixed(0)}s` : ""},直播内容疑似缺失`;
+      log(`[直播直传] ⚠️ ${msg}`);
+      try { o.onAlert?.(msg); } catch { /* alert channel must not break the run */ }
+    }
     if (r.sessionLeaked) log("[直播直传] ⚠️ UPOS 会话半截泄漏:协议无 abort,须按原文件重传覆盖");
     if (!part.final) return { kind: "continue" };
     if (r.sealedBy === "abort") return { kind: "ended" };

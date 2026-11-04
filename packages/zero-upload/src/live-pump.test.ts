@@ -24,6 +24,8 @@ import {
   countTsDiscontinuities,
   resolvePumpDir,
   DEFAULT_SEGMENT_CAP,
+  DEFAULT_STALL_TIMEOUT_MS,
+  DEFAULT_MEDIA_WALL_ALERT_RATIO,
   LivePumpSession,
   archivedSpoolPathsToKeep,
   spoolPathsToKeep,
@@ -4047,4 +4049,183 @@ describe("plans/044: bounded upload waits are progress for the finalizing judge"
   it("a 50 min chain of backoff sleeps keeps the finalizing child active", async () => {
     expect(await run()).toBe("active");
   });
+});
+
+describe("issue #464: 60s stall watchdog and per-part media accounting", () => {
+  it("defaults the no-write watchdog to 60s (aligned with the file-recorder ffmpeg watchdog)", () => {
+    expect(DEFAULT_STALL_TIMEOUT_MS).toBe(60_000);
+  });
+
+  it("seals on the default 60s watchdog when stdout goes silent, and reports the stall", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "live-pump-stall60-"));
+    try {
+      installFakeFfmpeg(Buffer.alloc(0), { holdOpen: true });
+      vi.useFakeTimers();
+      try {
+        const p = runStream({ args: ["-fake"], sizeCap: CHUNK * 100, firstSink: new PartSink({ sizeCap: CHUNK * 100, spoolPath: join(dir, "s.ts"), session: session(), spoolMode: "none", fetchImpl: makeFetch().fake }), openNext: () => { throw new Error("no second part"); }, onPartSealed: () => {} });
+        await vi.advanceTimersByTimeAsync(65_000);
+        const r = await p;
+        expect(r.endedBy).toBe("stalled");
+        expect(r.stalledMs).toBeGreaterThanOrEqual(60_000);
+        expect(r.stalledMs).toBeLessThan(66_000);
+        expect(r.finalPart?.sealedBy).toBe("stalled");
+      } finally {
+        vi.useRealTimers();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("never seals slow-but-flowing data: chunks every 30s keep the watchdog fed", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "live-pump-slow-"));
+    try {
+      // Custom spawn: a chunk of TS every 30s (worse than any healthy CDN), then EOF.
+      const data = tsStream({ gops: 20 });
+      const stdout = new PassThrough();
+      const events = {} as Record<string, Array<(...a: unknown[]) => void>>;
+      setSpawnForTest((() => {
+        const proc: ChildProcessLike = {
+          stdout,
+          stderr: new PassThrough(),
+          on(ev, fn) { (events[ev] ??= []).push(fn); },
+          kill() { stdout.end(); },
+        };
+        void (async (): Promise<void> => {
+          for (let off = 0; off < data.length; off += 4096) {
+            await new Promise((r) => setTimeout(r, 30_000));
+            stdout.write(data.subarray(off, off + 4096));
+          }
+          stdout.end();
+          await new Promise((r) => setTimeout(r, 5));
+          for (const fn of events.close ?? []) fn(0, null);
+        })();
+        return proc;
+      }) as SpawnFn);
+      vi.useFakeTimers();
+      try {
+        const p = runStream({ args: ["-fake"], sizeCap: CHUNK * 100_000, firstSink: new PartSink({ sizeCap: CHUNK * 100_000, spoolPath: join(dir, "s.ts"), session: session(), spoolMode: "none", fetchImpl: makeFetch().fake }), openNext: () => { throw new Error("no second part"); }, onPartSealed: () => {} });
+        await vi.advanceTimersByTimeAsync(20 * 30_000 + 10_000);
+        const r = await p;
+        expect(r.endedBy).toBe("eof");
+        expect(r.finalPart?.sealedBy).toBe("eof");
+        expect(r.stalledMs).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+        setSpawnForTest(undefined);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("accounts per-part PTS holes: a 45s jump is excluded from media time but reported", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "live-pump-jump-"));
+    try {
+      // 6 GOPs x 4 frames x 3000 ticks = 0.8s of media; a 45s forward jump must not inflate it.
+      const data = tsStream({ gops: 6, jump: { atGop: 3, ticks: 45 * 90_000 } });
+      installFakeFfmpeg(data);
+      const { fake } = makeFetch();
+      const r = await runSegment({ args: ["-fake"], sizeCap: CHUNK * 100_000, spoolPath: join(dir, "j.ts"), session: session(), fetchImpl: fake });
+      expect(r.ptsJumpCount).toBe(1);
+      expect(r.ptsJumpSec).toBeGreaterThan(44);
+      expect(r.ptsJumpSec).toBeLessThan(46);
+      expect(r.ptsDurationSec).toBeGreaterThan(0.6);
+      expect(r.ptsDurationSec).toBeLessThan(1.2);
+      expect(r.ptsStartSec).toBeDefined();
+      expect(r.ptsEndSec).toBeDefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("alerts when a confirmed part carries far less media than wall time, and stays quiet on healthy parts", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "live-pump-ratio-"));
+    try {
+      writeFileSync(join(dir, "cookies.json"), JSON.stringify({
+        cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
+      }));
+      const fake = ((input: string | URL | Request) => {
+        const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
+        if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
+        if (u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
+        if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
+        if (u.pathname === "/x/vu/web/add/v3") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BVLratio1" } }));
+        if (u.pathname === "/x/vu/web/edit") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BVLratio1" } }));
+        return Promise.resolve(json({ code: 0, data: {} }));
+      }) as unknown as typeof fetch;
+      const alerts: string[] = [];
+      // ~53s of media written at once, then silence: the watchdog seals the part with
+      // media/wall far below the alert ratio (stall window is part of the wall time).
+      installFakeFfmpeg(tsStream({ gops: 400 }), { holdOpen: true });
+      let acquisitions = 0;
+      vi.useFakeTimers();
+      try {
+        const p = runLivePump({
+          cookiesPath: join(dir, "cookies.json"), room: "ratio", spoolDir: dir, title: "ratio",
+          tid: 21, tag: "x", private: true, sizeCap: 8 * 1024 * 1024,
+          queueCapacity: 4096,
+          stallTimeoutMs: 100_000, mediaWallAlertRatio: DEFAULT_MEDIA_WALL_ALERT_RATIO,
+          quality: "origin", submit: true, spoolMode: "none", fetchImpl: fake,
+          fetch: async () => { acquisitions += 1; return { living: true, url: "http://x/y.ts" }; },
+          sleep: async () => {},
+          shouldStop: async () => alerts.length > 0,
+          onAlert: (m) => alerts.push(m),
+          log: () => {},
+        });
+        await vi.advanceTimersByTimeAsync(115_000);
+        const r = await p;
+        expect(r.ok, r.error ?? "").toBe(true);
+        expect(acquisitions).toBeGreaterThanOrEqual(1);
+        expect(alerts).toHaveLength(1);
+        expect(alerts[0]).toContain("媒体");
+        expect(alerts[0]).toContain("墙钟");
+      } finally {
+        vi.useRealTimers();
+        setSpawnForTest(undefined);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("does not alert when the part is confirmed with no stall and PTS present", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "live-pump-ratio-ok-"));
+    try {
+      writeFileSync(join(dir, "cookies.json"), JSON.stringify({
+        cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
+      }));
+      const fake = ((input: string | URL | Request) => {
+        const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
+        if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
+        if (u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
+        if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
+        if (u.pathname === "/x/vu/web/add/v3") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BVLratio2" } }));
+        if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BVLratio2", title: "t", tid: 21 }, videos: [] } }));
+        if (u.pathname === "/x/web/archives") return Promise.resolve(json({ code: 0, data: { arc_audits: [] } }));
+        return Promise.resolve(json({ code: 0, data: {} }));
+      }) as unknown as typeof fetch;
+      const alerts: string[] = [];
+      let acquisitions = 0;
+      // Healthy connection: the stream ends on its own (EOF), so wall time tracks media time
+      // and the ratio guards keep the alert quiet.
+      installFakeFfmpeg(tsStream({ gops: 4000 }));
+      const r = await runLivePump({
+        cookiesPath: join(dir, "cookies.json"), room: "ratio-ok", spoolDir: dir, title: "ratio-ok",
+        tid: 21, tag: "x", private: true, sizeCap: 64 * 1024 * 1024, queueCapacity: 16384,
+        quality: "origin", submit: true, spoolMode: "none", fetchImpl: fake,
+        fetch: async () => { acquisitions += 1; return { living: acquisitions === 1, url: "http://x/y.ts" }; },
+        sleep: async () => {},
+        onAlert: (m) => alerts.push(m),
+        log: () => {},
+      });
+      expect(r.ok, r.error ?? "").toBe(true);
+      expect(alerts).toHaveLength(0);
+    } finally {
+      setSpawnForTest(undefined);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
 });

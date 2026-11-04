@@ -101,6 +101,7 @@ interface RecordCliOpts {
   streamUploadSec?: string;
   streamUploadStallSec?: string;
   streamUploadRecoverSec?: string;
+  streamUploadRatioAlert?: string;
   streamUploadTid?: string;
   streamUploadTag?: string;
   streamUploadPrivate?: string;
@@ -213,8 +214,9 @@ program
   .option("--stream-upload <0|1>", "直播直传: 1=ffmpeg stdout 直传 UPOS 并续同一稿件,上传确认后删本地回退文件;0=关闭(默认)")
   .option("--stream-upload-size <bytes>", "流式直传每 P 字节上界(默认对齐后的 1.5GiB)")
   .option("--stream-upload-sec <sec>", "流式直传每 P 时长阈值(秒),与 --stream-upload-size 谁先到算一 P")
-  .option("--stream-upload-stall-sec <sec>", "流式直传无写入看门狗(秒;默认 300,最低 60):超时自动封口并追稿")
+  .option("--stream-upload-stall-sec <sec>", "流式直传无写入看门狗(秒;默认 60):无写入超过该时长即封口并重连,慢速但持续的数据不会误封")
   .option("--stream-upload-recover-sec <sec>", "流式直传停滞后的自动恢复窗口(秒;默认 1200,最低 60)")
+  .option("--stream-upload-ratio-alert <0-1>", "流式直传每 P 媒体时长/墙钟时长 低于该比例时告警(默认 0.85,0=关闭)")
   .option("--stream-upload-tid <tid>", "流式直传投稿分区(默认 21)")
   .option("--stream-upload-tag <tag>", "流式直传标签(逗号分隔;省略=hub 规则/hub.config 默认)")
   .option("--stream-upload-spool <full|none>", "直播直传是否保留本地回退文件: full=可整文件回退(默认), none=不留本地副本", "full")
@@ -320,7 +322,7 @@ program
     if (streamUploadEnabled) {
       // 直连新包(不再经 processors re-export):生产路径的依赖要明确,否则"换实现"
       // 看起来像改 processors,容易连带碰到后处理插件层。
-      const { runLivePump, alignFileSize, DEFAULT_SEGMENT_CAP, DEFAULT_STALL_TIMEOUT_MS, DEFAULT_RECOVERY_WINDOW_MS, readLivePumpState, livePumpStatePath, spoolPathsToKeep, archivedSpoolPathsToKeep, spoolSweepSafe } = await import("@drec/zero-upload");
+      const { runLivePump, alignFileSize, DEFAULT_SEGMENT_CAP, DEFAULT_STALL_TIMEOUT_MS, DEFAULT_RECOVERY_WINDOW_MS, DEFAULT_MEDIA_WALL_ALERT_RATIO, readLivePumpState, livePumpStatePath, spoolPathsToKeep, archivedSpoolPathsToKeep, spoolSweepSafe } = await import("@drec/zero-upload");
       const {
         rootBiliupCookies, sweepOrphanSpools, resolveStreamUploadMeta,
         resolveStreamUploadTitle, resolveStreamPartTitle,
@@ -404,6 +406,10 @@ program
       };
       const stallTimeoutMs = secondsSetting(o.streamUploadStallSec, DEFAULT_STALL_TIMEOUT_MS);
       const recoverWindowMs = secondsSetting(o.streamUploadRecoverSec, DEFAULT_RECOVERY_WINDOW_MS);
+      const ratioRaw = Number(o.streamUploadRatioAlert);
+      const mediaWallAlertRatio = Number.isFinite(ratioRaw) && ratioRaw >= 0 && ratioRaw <= 1
+        ? ratioRaw
+        : DEFAULT_MEDIA_WALL_ALERT_RATIO;
       // A resumed session keeps the archive identity from its state file; only a fresh session
       // uses this title. `--name` is the anchor/output name, not a title override, so hub title
       // templates remain effective for named tasks.
@@ -593,6 +599,7 @@ program
         maxMs: streamPartMaxMs(o.streamUploadSec, o.segment),
         stallTimeoutMs,
         recoverWindowMs,
+        mediaWallAlertRatio,
         maxSegments: 0,
         submit: true,
         spoolMode: o.streamUploadSpool === "none" ? "none" : "full",
