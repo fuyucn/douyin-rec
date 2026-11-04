@@ -2503,6 +2503,19 @@ const MiB = 1024 * 1024;
 /** Below this a segment is treated as "the stream just ended", not a real part. */
 const MIN_PART_BYTES = 1024 * 1024;
 
+/**
+ * A final part holding less than two video frames (PTS seen, no span): the stream ended or
+ * was killed right after a cut. It has no duration, ffprobe cannot read it, and it is not worth a
+ * part. Treating it as a failed/unconfirmed part would fail an otherwise clean run, or leave a row
+ * in the recovery state that blocks every later start.
+ */
+function negligibleTail(part: SealedPart): boolean {
+  if (!part.final || part.sink.spooledBytes >= MIN_PART_BYTES) return false;
+  // Only when video timestamps WERE seen but span nothing. A stream without any PTS (or a
+  // non-TS test input) has no media clock to judge by, and keeps the old rules.
+  return !!part.timing && !(part.timing.durationSec > 0);
+}
+
 /** Error text for a part lost on the zero-disk path (no local fallback). */
 export const ZERO_DISK_PART_LOST = "上传跟不上录制且未保留本地 spool:该分 P 已丢失";
 
@@ -2821,6 +2834,11 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     const { index, seg, fileName, spoolPath } = ctx;
     const sig = ctx.ac.signal;
     const sinkRes = await part.sink.finished;
+    if (negligibleTail(part) && sinkRes.spooledBytes > 0) {
+      log(`[直播直传] 段${seg + 1} 只有不足两帧(${sinkRes.spooledBytes}B),判定为切点后的尾巴,丢弃`);
+      if (spoolMode === "full") { try { rmSync(spoolPath, { force: true }); } catch { /* best effort */ } }
+      return part.sealedBy === "stalled" ? { kind: "stall-empty" } : { kind: "ended" };
+    }
     const r = await finalizeRecordedPart({
       rec: segmentResultOf(part, sinkRes, exit ?? NO_EXIT),
       session: sinkRes.session,
@@ -3084,7 +3102,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
   const noteSealed = (ctx: PartCtx, part: SealedPart): void => {
     if (spoolMode !== "full" || o.submit === false) return;
     const bytes = part.sink.spooledBytes;
-    if (bytes <= 0 || session.parts.some((p) => p.index === ctx.index)) return;
+    if (bytes <= 0 || negligibleTail(part) || session.parts.some((p) => p.index === ctx.index)) return;
     const note = session.noteUnconfirmedPart({
       index: ctx.index, spoolPath: ctx.spoolPath, title: titleOf(ctx), bytes, durationSec: estimateDuration(part),
     });
@@ -3113,6 +3131,10 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       return;
     }
     const bytes = part.sink.spooledBytes;
+    if (negligibleTail(part)) {
+      log(`[直播直传] ${label} ${why};只有不足两帧的尾巴,不值得保留`);
+      return;
+    }
     if (o.submit === false || bytes <= 0) {
       log(`[直播直传] ${label} ${why}(spool 保留: ${ctx.spoolPath})`);
       return;

@@ -3243,7 +3243,8 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
   };
 
   it.each(["none"] as const)("[%s] a run that delivered parts stays ok with its bvid when a stop loses the part being recorded (lostParts + alert)", async (spoolMode) => {
-    installFakeFfmpeg(tsStream({ gops: 40 }), { chunkEvery: 752, delayMs: 3 });
+    // Part 1 (16 frames), then 8 frames of part 2 and the stream stalls: the stop finds a real part recording.
+    installFakeFfmpeg(tsStream({ gops: 6 }), { chunkEvery: 752, holdOpen: true });
     const ac = new AbortController();
     const u = fakeUpos();
     const alerts: string[] = [];
@@ -3464,6 +3465,33 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     const st = readLivePumpState(livePumpStatePath(dir, "sm"))!;
     expect(st.parts.length).toBeGreaterThanOrEqual(3);
     expect(u.names.slice(0, st.parts.length)).toEqual(st.parts.map((p) => p.filename));
+  }, 30_000);
+
+  it("a one-frame tail cut by the failure stop is not kept as a recoverable part (it would block every later start)", async () => {
+    // 16 frames = one part (cut at the 17th frame's keyframe), then exactly one frame, then the stream stalls.
+    const input = tsStream({ gops: 5 }).subarray(0, TS_PACKET_BYTES * 2 + 752 * 17);
+    installFakeFfmpeg(input, { chunkEvery: 752, holdOpen: true });
+    let failing = true;
+    const u = fakeUpos({ completeDelayMs: () => 100, failComplete: () => failing });
+    const r1 = await runLivePump(baseOpts(u, { spoolMode: "full", autoRetryUpload: false }));
+    expect(r1.ok).toBe(false);
+    const st1 = readLivePumpState(livePumpStatePath(dir, "sm"))!;
+    // Only the real part is recoverable; the one-frame tail is not.
+    expect(st1.parts.map((p) => p.index)).toEqual([0]);
+    failing = false;
+    const r2 = await runLivePump(baseOpts(u, { spoolMode: "full", fetch: async () => ({ living: false }) }));
+    expect(r2.ok, r2.error ?? "").toBe(true);
+    expect(readLivePumpState(livePumpStatePath(dir, "sm"))!.parts.every((p) => p.confirmed)).toBe(true);
+  }, 30_000);
+
+  it("a stream that ends one frame after a cut ends the run cleanly (the tail is not an unreadable failed part)", async () => {
+    const input = tsStream({ gops: 5 }).subarray(0, TS_PACKET_BYTES * 2 + 752 * 17);
+    installFakeFfmpeg(input, { chunkEvery: 752 });
+    const u = fakeUpos();
+    const r = await runLivePump(baseOpts(u, { spoolMode: "full" }));
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(u.archive).toEqual(["p1"]);
+    expect(readdirSync(dir).filter((f) => f.endsWith(".live.ts"))).toEqual([]);
   }, 30_000);
 
   it("a state file from before the ordered list (one unconfirmed part) still loads and recovers", async () => {
