@@ -95,5 +95,5 @@
 
 - 恢复重传前，每个未确认 spool 都要过与新录分 P 相同的可读性探测 + dts gap 扫描。
 - dts gap：spool 改名 `.held-gap`、不投稿、告警，并从恢复状态摘除；它之后的分 P 照常按序补传，稿件缺这一 P 属已告警的已知缺口。
-- 不可读（ffprobe 读不出 duration）：**按设计阻塞该房间**——它不是已知 gap，摘行会静默丢掉唯一副本，且后续分 P 不得越过未确认分 P。手工处置：修复或确认作废该 spool，再从状态文件 `live-pump-<room>.state.json` 的 `parts` 里删掉对应行，下次启动即继续。
+- 不可读（ffprobe 读不出 duration）：**按设计阻塞该房间**——它不是已知 gap，摘行会静默丢掉唯一副本，且后续分 P 不得越过未确认分 P。手工处置：修复或确认作废该 spool，再从该房间直播直传状态文件（见 `livePumpStatePath`）的 `parts` 里删掉对应行，下次启动即继续。
 - 停止时丢失与交付互不覆盖：只要已有分 P 入稿，run 仍 `ok:true`（照常记台账），丢失以 `lostParts` / `unknownParts` + 告警呈现。
