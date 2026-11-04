@@ -19,10 +19,10 @@ async function startHub(o: Partial<ConstructorParameters<typeof FleetHub>[0]> = 
   server.on("upgrade", (req, socket, head) => {
     if (!hub.handleUpgrade(req, socket, head)) socket.destroy();
   });
-  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r())); // issue-guard: allow (loopback / test fixture)
   cleanups.push(() => { hub.close(); server.close(); });
   const port = (server.address() as { port: number }).port;
-  return { hub, url: `ws://127.0.0.1:${port}/api/fleet/ws` };
+  return { hub, url: `ws://127.0.0.1:${port}/api/fleet/ws` }; // issue-guard: allow (loopback / test fixture)
 }
 
 /** A node stand-in that records frames. */

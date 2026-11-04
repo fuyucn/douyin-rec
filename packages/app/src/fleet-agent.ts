@@ -35,7 +35,7 @@ export type FleetNodeCommand = (dataRoot: string, args: string[]) => Promise<{ s
 
 /** `<root>/config/fleet.json`, written by the master through `_fleet-join` (mode 0600). */
 export interface FleetAgentConfig {
-  /** Master base URL, e.g. `http://100.64.0.1:7860`. */
+  /** Master base URL, e.g. `http://<master-tailscale-ip>:7860`. */
   controllerUrl: string;
   nodeId: string;
   token: string;

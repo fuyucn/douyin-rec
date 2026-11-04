@@ -92,7 +92,7 @@ export function notifyOutboxArgs(o: { after?: string; limit?: string; ack?: stri
 let probeDuration: ((file: string) => Promise<number>) | undefined;
 
 /** Local serve API used by commands that need state only the serve process holds. */
-const serveApiBase = (): string => process.env.DREC_SERVE_API ?? "http://127.0.0.1:7860"; // issue-guard: allow (loopback)
+const serveApiBase = (): string => process.env.DREC_SERVE_API ?? "http://localhost:7860"; // loopback; Node 24 fetch tries ::1 and 127.0.0.1
 
 export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freeze({
   // "true" once no downloader is writing for this room (master settle polls this).

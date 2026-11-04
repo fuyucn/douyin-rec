@@ -1421,7 +1421,7 @@ const hubStarter: HubStarter = {
       };
       /**
        * Fleet long connection (plans/042). Opt-in: set `controllerUrl` to this master's address as the
-       * workers reach it (tailscale), e.g. "http://100.64.0.1:7860". Absent → ssh only, as before.
+       * workers reach it (tailscale), e.g. "http://<master-tailscale-ip>:7860". Absent → ssh only, as before.
        */
       fleet?: { controllerUrl?: string };
     };

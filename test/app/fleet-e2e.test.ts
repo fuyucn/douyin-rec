@@ -22,7 +22,7 @@ describe("fleet end to end", () => {
     const hub = new FleetHub({ verifyToken: (n, t) => n === "vps1" && t === "tok" });
     const server: Server = createServer((_q, r) => r.end());
     server.on("upgrade", (req, socket, head) => { if (!hub.handleUpgrade(req, socket, head)) socket.destroy(); });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r())); // issue-guard: allow (loopback / test fixture)
     cleanups.push(() => { hub.close(); server.close(); });
     const port = (server.address() as { port: number }).port;
 
@@ -33,7 +33,7 @@ describe("fleet end to end", () => {
       tasks: async () => ({ stdout: '{"tasks":[]}\n', exitCode: 0 }),
     };
     const agent = startFleetAgent({
-      config: { controllerUrl: `http://127.0.0.1:${port}`, nodeId: "vps1", token: "tok" },
+      config: { controllerUrl: `http://127.0.0.1:${port}`, nodeId: "vps1", token: "tok" }, // issue-guard: allow (loopback / test fixture)
       dataRoot: "/data", appVersion: "x", commands, heartbeatMs: 50,
     });
     cleanups.push(() => agent.stop());

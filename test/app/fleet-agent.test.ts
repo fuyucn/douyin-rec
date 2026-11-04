@@ -57,7 +57,7 @@ async function startMaster(): Promise<{
       });
     }
   };
-  return { url: `http://127.0.0.1:${port}`, frames, sockets, next };
+  return { url: `http://127.0.0.1:${port}`, frames, sockets, next }; // issue-guard: allow (loopback / test fixture)
 }
 
 const commands: Record<string, FleetNodeCommand> = {
@@ -172,7 +172,7 @@ describe("fleet agent", () => {
 
 describe("fleet agent helpers", () => {
   it("fleetSocketUrl maps http→ws and https→wss on the fleet path", () => {
-    expect(fleetSocketUrl("http://100.64.0.1:7860")).toBe("ws://100.64.0.1:7860/api/fleet/ws");
+    expect(fleetSocketUrl("http://100.64.0.1:7860")).toBe("ws://100.64.0.1:7860/api/fleet/ws"); // issue-guard: allow (loopback / test fixture)
     expect(fleetSocketUrl("https://m.example/")).toBe("wss://m.example/api/fleet/ws");
   });
 
