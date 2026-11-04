@@ -14,6 +14,7 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-137 录制进程统一状态文件 + hub 不再误收直播直传临时分 P（issue [#456](https://github.com/fuyucn/douyin-rec/issues/456)，计划 [plans/044_session_state_handover.md](plans/044_session_state_handover.md)，分支 `feat/recorder-state`，2026-11-04）** — **做什么**:会话分组跳过临时分 P;每个 record 子进程写独立状态文件(模式/阶段/owner/退出码),is-done 与 recording-status 改用节点侧唯一判定。**为什么**:直播直传收尾期被判已收播,hub 拉 0 字节临时分 P → needs_manual 误报(3 次);三种模式「是否仍在工作」口径分散。**验收**:直播直传整场无误报;收尾期 is-done=false;旧节点回落行为不变。第二期(部署不打断录制)推迟。
 - [~] **T-136 直播直传切分 P 丢一段直播 + 误发开播/收播（issue [#452](https://github.com/fuyucn/douyin-rec/issues/452)，计划 [plans/043_live_pump_seamless.md](plans/043_live_pump_seamless.md)，分支 `fix/live-pump-seamless`，2026-11-04）** — **做什么**:一场一个 ffmpeg,关键帧处切 TS 分 P,旧分 P 后台收尾;落 spool / 不落 spool 都改。**为什么**:每个分 P 重起 ffmpeg,切换空档实测 ≥58s,且空档内被判不在录。**验收**:分 P 字节拼接守恒;各分 P 时长和 ≈ 直播时长;整场 recording 恒 true;B 站转码可播。
 - [~] **T-135 Worker 轻量化：节点 agent 长连接 + 按需录制进程（issue [#448](https://github.com/fuyucn/douyin-rec/issues/448)，分支 `perf/worker-footprint`，2026-11-03）**
   — E2.1.Micro worker 被 master 控制面每分钟 ~28 次 ssh 拉起 node 进程（≈0.4 vCPU，steal 75%），等开播子进程每个 ~45MB 常驻导致 swap。
