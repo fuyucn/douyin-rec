@@ -1553,6 +1553,9 @@ export class PartSink {
         // Neither is a deliberate drop / non-upload sink failure: the uploader's end-of-queue
         // error is expected bookkeeping then, not a degradation.
         if (this.nonUploadFail || o.signal?.aborted || (e as Error)?.name === "AbortError") return;
+        // A part that never received a byte (empty seal on ffmpeg exit / stall-empty) fails the
+        // uploader by design; that was silent before and is not a degradation of a real upload.
+        if (this.spooled === 0) return;
         // Zero-disk has no local copy: a failed chunk upload loses the part, say so.
         this.degrade(this.o.spoolMode === "none" ? `${msg};零落盘无本地副本,该分 P 丢失` : msg);
       },

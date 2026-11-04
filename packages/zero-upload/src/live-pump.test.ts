@@ -1761,6 +1761,22 @@ describe("降级可见性(#461):当场上报 + 原因保留", () => {
     // 零落盘等待缓冲满走 waitAbandoned,backpressured 仍为 true(泵级会升级为该分 P 硬失败)。
     expect(res.backpressured).toBe(true);
   });
+
+  it.each(["full", "none"] as const)("空分 P(seal 无写入):不触发降级告警(%s)", async (spoolMode) => {
+    // ffmpeg 退出/停滞空段会以空封口:上传器照旧报「流比声明短」(main 既有行为,静默),
+    // 但不得把它当成降级告警(重连循环里会每次尝试都告警)。
+    const { fake } = makeFetch();
+    const degraded: string[] = [];
+    const sink = new PartSink({
+      sizeCap: CHUNK * 4, spoolPath: join(dir, `empty-${spoolMode}.mkv`), session: session(), fetchImpl: fake,
+      spoolMode, onDegrade: (reason) => degraded.push(reason),
+    });
+    sink.seal();
+    const res = await sink.finished;
+    expect(degraded).toEqual([]);
+    expect(res.uploadError).toMatch(/没有数据/);
+    expect(res.spooledBytes).toBe(0);
+  });
 });
 
 describe("封口信号来自进程退出而非后继段(设计约束回归)", () => {
