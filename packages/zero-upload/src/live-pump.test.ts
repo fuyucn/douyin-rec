@@ -2496,6 +2496,29 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
     expect(phases).toEqual(["polling", "finalizing", "polling"]);
   });
 
+  it("plans/044: a startup recovery that gives up with unconfirmed parts left stays finalizing (never restored to polling)", async () => {
+    const statePath = join(dir, "live-pump-r.state.json");
+    writeLivePumpState(statePath, {
+      schemaVersion: 1, room: "r", createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
+      parts: [
+        // Spool and held-gap sibling are both gone: a real gap, so recovery refuses and the part stays unconfirmed.
+        { index: 0, spoolPath: join(dir, "missing.ts"), filename: "missing.ts", stem: "stem0", title: "P1", bytes: 1, durationSec: 1, confirmed: false },
+      ],
+      updatedAt: Date.now(),
+    });
+    const phases: string[] = [];
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "r", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: 1024, quality: "origin", submit: true, spoolMode: "none", waitForBroadcast: true,
+      fetchImpl: (async () => new Response("{}", { status: 200 })) as unknown as typeof fetch,
+      probeDuration: async () => 60, scanDtsGap: async () => null, sleep: async () => {}, log: () => {},
+      onPhase: (p) => phases.push(p),
+      fetch: async () => ({ living: false }),
+    });
+    expect(r.ok).toBe(false);
+    expect(phases.at(-1)).toBe("finalizing");
+  });
+
   it("recovers create intent by exact title and does not create a second archive", async () => {
     const { impl, posts, videos } = makeSessionFetch();
     videos().push({ cid: 10, filename: "stem0", title: "P1" });

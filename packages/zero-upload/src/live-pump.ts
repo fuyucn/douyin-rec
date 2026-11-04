@@ -2598,11 +2598,11 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
   // TaskManager derives the task's recording phase from these exact markers
   // (`[状态] 录制中` / `[状态] 等待开播`). Without them a zero-disk task shows as "running"
   // but never "recording", so the UI cannot tell waiting-for-stream from actually recording.
-  let curPhase: "polling" | "recording" | "finalizing" = "polling";
   const phase = (p: "polling" | "recording" | "finalizing"): void => {
-    curPhase = p;
     try { o.onPhase?.(p); } catch { /* observability only */ }
   };
+  /** Phase while no stream is being pulled: parts that stayed unconfirmed are still upload work → finalizing. */
+  const idlePhase = (s: LivePumpSession): "polling" | "finalizing" => (s.hasUnconfirmed ? "finalizing" : "polling");
   emit({ at: Date.now(), kind: "waiting" });
   phase("polling");
   log("[状态] 等待开播");
@@ -2671,7 +2671,6 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     if (o.submit !== false) {
       // Whenever this child owns unconfirmed upload work the phase is `finalizing` (plans/044): WAL recovery and
       // the whole-file re-upload of a previous run's parts must never look like "idle, waiting for a broadcast".
-      const resumePhase = curPhase;
       phase("finalizing");
       try {
       const recovered = await session.recover();
@@ -2716,7 +2715,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         }
       }
       } finally {
-        phase(resumePhase);
+        phase(idlePhase(session));
       }
     }
     return { session };
@@ -3277,7 +3276,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     let s: StreamAcquirer | null;
     // Every part of the previous connection has settled; we are waiting for a stream again. Parts that stayed
     // unconfirmed (kept spool, held gap) are still upload work this child owns → finalizing, not idle polling.
-    phase(session.hasUnconfirmed ? "finalizing" : "polling");
+    phase(idlePhase(session));
     if (recoveryDeadline !== undefined) {
       s = await waitForBroadcast(recoveryDeadline);
       if (!s) {
