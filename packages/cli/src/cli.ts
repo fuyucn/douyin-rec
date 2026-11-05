@@ -1410,7 +1410,7 @@ const hubStarter: HubStarter = {
     const { ffprobeVideo } = await import("@drec/post-process");
     const { handleEnqueue, handleProcStatus, handleProcCancel } = await import("@drec/app");
     const { statSync } = await import("node:fs");
-    const { uploadPlain, appendGroup, countVideoParts, hubStore, resolveRuleSyncRoom, workerStore, rootHubDir, rootHubConfig, rootConfigDir, rootStageDir, rootLogsDir, drecRoot, listNodeTasks, applyRemoteTasks, resolveTaskStreamCookies, recordRoomSessions } = await import("@drec/app");
+    const { uploadPlain, appendGroup, countVideoParts, hubStore, resolveRuleSyncRoom, desiredSpecsForWorker, workerStore, rootHubDir, rootHubConfig, rootConfigDir, rootStageDir, rootLogsDir, drecRoot, listNodeTasks, applyRemoteTasks, resolveTaskStreamCookies, recordRoomSessions } = await import("@drec/app");
     const { FileLogger } = await import("@drec/observability");
     const { recordExpectedVersion, recordSyncError } = await import("@drec/app");
 
@@ -1665,7 +1665,6 @@ const hubStarter: HubStarter = {
       for (const rule of hubStore.listHubRules(hubDir)) {
         const src = rule.recording?.sourceTaskId ? opts.store.getTask(rule.recording.sourceTaskId) : null;
         if (!src?.streamUpload) continue;
-        const p = platformForRoom(src.room);
         const sync = resolveRuleSyncRoom(rule, src.room);
         const srcSlug = sync.roomSlug;
         warnRuleIdentityMismatch(rule, sync, opts.warn);
@@ -1915,147 +1914,27 @@ const hubStarter: HubStarter = {
     // hub 受管录制任务同步:对每个 worker 计算「期望任务」并下发。
     // 规则里 recording.sourceTaskId 绑定的 master 任务 → 推送到规则 workers 勾选的节点;
     // 节点侧 applyRemoteTasks 按 (platform, roomSlug) 对账(收编/更新/两阶段删除)。
-    const desiredFor = (workerId: string): RemoteTaskSpec[] => {
-      const out: RemoteTaskSpec[] = [];
-      const capsOfThis = loadWorkers().find((w) => w.id === workerId)?.capabilities;
-      for (const rule of hubStore.listHubRules(hubDir)) {
-        // 语义矩阵(#442 返工后,吸收 review F1/F3;删除意图只有一个来源):
-        //   规则启用 ∧ 本节点被勾选维度移除 → 下发 deleted:true **点名删除**
-        //     (节点两阶段删除;这是用户明确的重配意图,#442 的主场景)。
-        //   规则停用 / 能力不满足 → 维持 enabled:false **停用保留**:
-        //     ① 本机源任务的停用就靠这条条目写回 —— 漏掉会让 master 本机在规则停用后
-        //        继续录制(localSuppressedSourceTaskIds 刻意不管停用规则,review F1);
-        //     ② 停用/能力不满足是可逆状态,不该触发节点删除、也不该丢节点重写值。
-        //   规则文件消失 / sourceTaskId 解绑 / 源任务不存在 → continue(缺席,节点两阶段删除)。
-        // 归属判定 = core isWorkerAssigned / isWorkerTargeted(单一真理源,reconciler/状态探测/本机抑制共用)。
-        const src = rule.recording?.sourceTaskId ? opts.store.getTask(rule.recording.sourceTaskId) : null;
-        if (!src) continue;                        // 真删除意图:规则没绑源任务 / 源任务已删
-        const p = platformForRoom(src.room);
-        // Issue #481: never drop a bound rule from desired because its filename stem diverges from the source
-        // task's room; sync identity comes from the source task (main's effective behaviour).
-        const sync = resolveRuleSyncRoom(rule, src.room);
-        const srcSlug = sync.roomSlug;
-        warnRuleIdentityMismatch(rule, sync, opts.warn);
-        // #442:删除意图只来自「未勾选」这一个维度。规则停用与能力不满足仍产 enabled:false
-        // (停用保留);deleted 条目不带凭据/回调/输出目录 —— 删除提示用不到它们,也不该
-        // 把这些内容发给不再承担该房间的节点(会进节点审计快照)。
-        const ruleDisabled = rule.enabled === false;
-        const targeted = isWorkerTargeted(rule, workerId);
-        if (!ruleDisabled && !targeted) {
-          out.push({
-            platform: sync.platform,
-            roomSlug: srcSlug,
-            room: src.room,
-            name: src.name,
-            quality: src.quality,
-            engine: src.engine,
-            danmu: src.danmu,
-            segmentSec: src.segmentSec,
-            outputFormat: src.outputFormat,
-            scheduleStart: src.scheduleStart,
-            scheduleEnd: src.scheduleEnd,
-            enabled: false,
-            useCookie: src.useCookie,
-            cookies: null,
-            outDir: null,
-            webhook: null,
-            anchorName: src.anchorName,
-            rollingUpload: src.rollingUpload,
-            rollingEffective: src.rollingUpload,
-            assigned: false,
-            deleted: true,
-          });
-          continue;
-        }
-        // 停用保留路径(规则停用 / 能力不满足 / 正常已分配)按原逻辑构造完整 spec:
-        // 字段与正常路径**同源构造**:早前写成两个 push 各抄一遍字段,
-        // 抄漏一个字段就是「禁用路径丢配置」的静默 bug(自审发现,已合为一条)。
-        const { assigned, enabled: specEnabledBase } = resolveSpecAssignment(rule, workerId, capsOfThis, src.enabled);
-        // Zero-disk on a side node (issue #331): the master ships the resolved upload metadata and the
-        // expected account; an old / unconfirmed node, or an unbuildable delivery, gets the task
-        // DISABLED with a visible reason, never defaults. One decision point: `planZeroDiskSpec`.
-        const workerDataRoot = loadWorkers().find((w) => w.id === workerId)?.dataRoot;
-        const zdKey = blockedKey(workerId, sync.platform, srcSlug);
-        const zd = planZeroDiskSpec({
-          streamUpload: src.streamUpload,
-          workerId,
-          assigned,
-          enabled: specEnabledBase,
-          allowsPush: zeroDiskFleet.allowsPush(workerId),
-          ruleError: zeroDiskRuleError(src.streamUpload, { enabled: rule.enabled, mode: rule.pipeline?.upload?.mode, workers: rule.workers, steps: rule.pipeline?.steps }),
-          build: () => buildZeroDiskDelivery({
-            platform: sync.platform,
-            roomSlug: srcSlug,
-            // The master's configured upload login (same file its own pipeline uploads with).
-            ...(hubCfg.cookies ? { masterCookiesPath: hubCfg.cookies } : {}),
-            ...(workerDataRoot ? { workerDataRoot } : {}),
-          }),
-          ...(zeroDiskLastGood.get(zdKey) ? { lastGood: zeroDiskLastGood.get(zdKey)! } : {}),
-        });
-        if (zd.delivery && !zd.stale) zeroDiskLastGood.set(zdKey, zd.delivery);
-        if (zd.stale && zeroDiskStaleWarned.get(zdKey) !== zd.stale) {
-          zeroDiskStaleWarned.set(zdKey, zd.stale);
-          opts.warn(`[zero-disk] 无法重建下发对象(${zd.stale});沿用上次的,避免停掉在传的稿件`);
-        }
-        if (!zd.stale) zeroDiskStaleWarned.delete(zdKey);
-        if (zd.blocked) zeroDiskBlocked.set(zdKey, zd.blocked);
-        const specEnabled = zd.enabled;
-        const zeroDiskDelivery = zd.delivery;
-        // ⚠️ **local(master 本机)是特例**:它的 applyTasks 写的是**源任务本身**,
-        // 而源任务的 enabled 是「用户要不要录这个房间」的**全局意图**,不是「本节点是否被选中」。
-        // 若这里也按 targeted 强制 false,那么「把 local 从某房间 workers 里移除」会被写成
-        // 「全局停录」→ 连 VPS1 一起停(线上实测:三节点全停)。
-        // 本机的「不该录」由**专门的抑制机制**处理(localSuppressedSourceTaskIds →
-        // startTask 只置意图不起子进程),不在这条路径上表达。
-        const isLocalWorker = workerId === "local";
-        const rollingFields = rollingSpecFields(
-          { enabled: rule.enabled, mode: rule.pipeline?.upload?.mode, workers: rule.workers, steps: rule.pipeline?.steps },
-          src.rollingUpload,
-          isLocalWorker,
-        );
-        out.push({
-          platform: sync.platform,
-          roomSlug: srcSlug,
-          room: src.room,
-          name: src.name,
-          quality: src.quality,
-          engine: src.engine,
-          danmu: src.danmu,
-          segmentSec: src.segmentSec,
-          outputFormat: src.outputFormat,
-          scheduleStart: src.scheduleStart,
-          scheduleEnd: src.scheduleEnd,
-          // 本机(local)要分两种情况,不能一刀切:
-          //   ① 规则被**禁用** → 停用(source task enabled=false)。与远端节点一致:
-          //      「规则禁用 = 暂停该房间」是全节点语义,本机不该例外。
-          //   ② 规则启用、只是**没勾选本机** → 保持 src.enabled。本机的「不该录」由
-          //      抑制机制(localSuppressedSourceTaskIds)表达,写成 enabled=false 会污染全局意图。
-          // 远端节点:统一 `assigned && src.enabled`(停用保留时强制 false;见 core resolveSpecAssignment)。
-          enabled: specEnabled,
-          useCookie: src.useCookie,
-          cookies: resolveTaskStreamCookies(src, opts.store),
-          outDir: src.outDir,
-          webhook: src.webhook,
-          anchorName: src.anchorName,
-          // 归属标记(issue #73):节点据此默认隐藏「受管且未分配且未在录」的任务。旧节点忽略该字段。
-          assigned,
-          // 边录边传(issue #40):**唯一判定 = core resolveRollingPolicy**,只在 master 这里算一次
-          // (规则 mode=rolling / 旧任务开关迁移 / 规则 stage 优先 / 多节点重复投稿闸门),
-          // 结果作为只读派生字段 `rollingEffective` 下发;录制端只读它,不再自行读规则判定。
-          //   - 远端节点:`rollingUpload`(旧字段)同样下发生效值 —— 旧节点包只认它,行为与改前一致。
-          //   - 本机(local):applyTasks 写的是**源任务本身**,其旧 `rollingUpload` 是用户旧值
-          //     (迁移来源,不能被覆盖,同 enabled 的特例),故只更新派生字段 `rollingEffective`。
-          ...rollingFields,
-          // Zero-disk lives on the task, but the desired spec is a full task projection:
-          // omitting it makes local applyTasks write `false` back to the source task on every
-          // sync tick, silently turning zero-disk off.
-          streamUpload: src.streamUpload,
-          streamUploadSpool: src.streamUploadSpool,
-          ...(zeroDiskDelivery ? { zeroDiskDelivery } : {}),
-        });
-      }
-      return out;
-    };
+    // Issue #481: the room-list/spec builder lives in @drec/app so it can be driven by tests; this is only
+    // the adapter that injects the master live state.
+    const desiredFor = (workerId: string): RemoteTaskSpec[] => desiredSpecsForWorker(workerId, {
+      rules: hubStore.listHubRules(hubDir),
+      getTask: (id) => opts.store.getTask(id),
+      workers: loadWorkers(),
+      cookiesPath: hubCfg.cookies,
+      resolveCookies: (t) => resolveTaskStreamCookies(t, opts.store),
+      allowsPush: (id) => zeroDiskFleet.allowsPush(id),
+      blockedKey,
+      delivery: {
+        lastGood: (k) => zeroDiskLastGood.get(k),
+        remember: (k, d) => { zeroDiskLastGood.set(k, d); },
+        staleWarned: (k) => zeroDiskStaleWarned.get(k),
+        setStale: (k, reason) => { zeroDiskStaleWarned.set(k, reason); },
+        clearStale: (k) => { zeroDiskStaleWarned.delete(k); },
+        block: (k, reason) => { zeroDiskBlocked.set(k, reason); },
+      },
+      warn: opts.warn,
+      onRuleIdentityMismatch: (rule, sync) => warnRuleIdentityMismatch(rule, sync, opts.warn),
+    });
     // 周期 tick 与 web API 的「变更即同步」共用同一函数:内部守卫防重入,
     // 期间再有请求则合并成一轮补跑(期望任务是全量对账,不丢变更)。
     const syncTasks = async (req?: { force?: boolean }): Promise<void> => {

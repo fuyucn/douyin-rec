@@ -17,6 +17,7 @@ export type { ApplyTasksResult } from "./task-sync.js";
 export * as hubStore from "./hub-store.js";
 export type { HubRule } from "./hub-store.js";
 export { resolveRuleSyncRoom } from "./hub-store.js";
+export { desiredSpecsForWorker, type HubDesiredCtx, type HubDesiredWorker } from "./hub-desired.js";
 // 文件版 worker(录制节点)配置(hub.config.json 的 workers 数组):cli reconciler + api 用。
 export * as workerStore from "./worker-store.js";
 export type { WorkerConfig } from "./worker-store.js";

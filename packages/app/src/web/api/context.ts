@@ -261,11 +261,10 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
 
   // hub 规则 → DTO:补 anchorName(若有同 roomSlug 的录制任务,显示其主播名/任务名)。
   const hubRuleView = (r: hubStore.HubRule): HubRuleDTO => {
+    // Issue #481: a bound rule belongs to its source task regardless of the filename stem; matching by id
+    // keeps the anchor name / task name / rolling display for divergent rules (same identity as sync).
     const srcTask = r.recording?.sourceTaskId
-      ? store.listTasks().find(
-          (task) => task.id === r.recording!.sourceTaskId &&
-            platformForRoom(task.room).extractRoomSlug(task.room) === r.roomSlug,
-        ) ?? null
+      ? store.listTasks().find((task) => task.id === r.recording!.sourceTaskId) ?? null
       : null;
     const t = srcTask ?? store.listTasks().find(
       (task) => platformForRoom(task.room).extractRoomSlug(task.room) === r.roomSlug,

@@ -7,7 +7,9 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getHubRule, hubKey, listHubRules, reorderHubRules, resolveRuleSyncRoom, updateHubRule, upsertHubRule } from "../../packages/app/src/hub-store.js";
+import { getHubRule, hubKey, listHubRules, reorderHubRules, resolveRuleSyncRoom, updateHubRule, upsertHubRule, type HubRule } from "../../packages/app/src/hub-store.js";
+import { desiredSpecsForWorker } from "../../packages/app/src/hub-desired.js";
+import type { Task } from "../../packages/app/src/store.js";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "hub-identity-")); });
@@ -142,5 +144,52 @@ describe("legacy / edge input (issue #481 review)", () => {
   it("wiring: last-run lookup uses the task-derived room key, not the rule stem", () => {
     const ctx = readFileSync(new URL("../../packages/app/src/web/api/context.ts", import.meta.url), "utf-8");
     expect(ctx).toContain("listHubJobs(deps.syncDbPath, { room: hubStore.hubKey(platform.id, roomSlug)");
+  });
+});
+
+describe("desired spec builder (extracted from cli) — issue #481 review 2", () => {
+  const srcTask = (over: Partial<Task> = {}): Task => ({
+    id: 1, room: room("222"), name: null, quality: "origin", engine: "ffmpeg", danmu: 1, segmentSec: 1800,
+    scheduleStart: null, scheduleEnd: null, enabled: true, useCookie: true, cookies: null, outDir: null,
+    webhook: null, anchorName: null, rollingUpload: false, rollingEffective: false,
+    streamUpload: false, streamUploadSpool: true, outputFormat: "original",
+    ...over,
+  } as Task);
+  const ctx = (rule: HubRule, warned: Array<{ key: string; roomSlug: string }>) => ({
+    rules: [rule],
+    getTask: (id: number) => (id === 1 ? srcTask() : null),
+    workers: [{ id: "vps2" }],
+    resolveCookies: () => null,
+    allowsPush: () => false,
+    blockedKey: (w: string, p: string, r: string) => w + "|" + p + "|" + r,
+    delivery: {
+      lastGood: () => undefined, remember: () => {}, staleWarned: () => undefined,
+      setStale: () => {}, clearStale: () => {}, block: () => {},
+    },
+    warn: () => {},
+    onRuleIdentityMismatch: (r: HubRule, sync: { roomSlug: string; mismatched: boolean }) => { if (sync.mismatched) warned.push({ key: r.key, roomSlug: sync.roomSlug }); },
+  });
+
+  it("divergent rule bound to a source task → spec uses the TASK room and is NOT absent", () => {
+    const warned: Array<{ key: string; roomSlug: string }> = [];
+    const rule: HubRule = {
+      key: hubKey("douyin", "111"), platform: "douyin", roomSlug: "111", room: room("222"),
+      enabled: true, pipeline: {}, recording: { sourceTaskId: 1 }, workers: ["vps2"],
+    };
+    const specs = desiredSpecsForWorker("vps2", ctx(rule, warned));
+    expect(specs).toHaveLength(1); // present → node will not two-phase delete it
+    expect(specs[0]).toMatchObject({ platform: "douyin", roomSlug: "222", room: room("222") });
+    expect(warned).toEqual([{ key: rule.key, roomSlug: "222" }]);
+  });
+
+  it("normal rule: spec identity equals the stem and no mismatch warning", () => {
+    const warned: Array<{ key: string; roomSlug: string }> = [];
+    const rule: HubRule = {
+      key: hubKey("douyin", "222"), platform: "douyin", roomSlug: "222", room: room("222"),
+      enabled: true, pipeline: {}, recording: { sourceTaskId: 1 }, workers: ["vps2"],
+    };
+    const specs = desiredSpecsForWorker("vps2", ctx(rule, warned));
+    expect(specs[0].roomSlug).toBe("222");
+    expect(warned).toEqual([]);
   });
 });
