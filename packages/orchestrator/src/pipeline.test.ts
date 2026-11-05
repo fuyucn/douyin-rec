@@ -1620,6 +1620,10 @@ describe("runPipeline", () => {
       expect(shouldUseNodeSideUpload({ uploadMode: "upload", steps: { nodeSideUpload: true } }, burnOn).ok).toBe(false);
       // 全部满足
       expect(shouldUseNodeSideUpload({ uploadMode: "upload", steps: { nodeSideUpload: true } }, burnOff).ok).toBe(true);
+      // 全局开关关闭(issue #471):其它条件全满足也不走节点侧
+      const disabled = shouldUseNodeSideUpload({ uploadMode: "upload", steps: { nodeSideUpload: true } }, burnOff, false);
+      expect(disabled.ok).toBe(false);
+      if (!disabled.ok) expect(disabled.reason).toContain("NODE_SIDE_UPLOAD_ENABLED");
     });
 
     it("diskWatermarkGate:纯判定(低于拦 / 等于高于放行 / 阈值缺失或<=0 关闭)", async () => {

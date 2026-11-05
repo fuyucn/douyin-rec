@@ -19,6 +19,7 @@ import {
   parseRemuxTmpName, remuxTmpPath, verifyRemuxed, packetAllowance, recoverNodeRemuxInBackground,
   type MediaProbe, type NodeRemuxDeps,
 } from "../../packages/app/src/node-remux.js";
+import { shouldUseNodeSideUpload } from "@drec/core";
 import { buildRecordArgs } from "../../packages/app/src/process/record-args.js";
 import { TaskManager } from "../../packages/app/src/task-manager.js";
 import { TaskStore } from "../../packages/app/src/store.js";
@@ -438,6 +439,29 @@ describe("T8:shouldConvertAtSeal / 锁同源 + 禁用规则不算绑定(plans/03
     upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", enabled: true });
     expect(resolveNodeOutputFormat(mk(), hubDir)).toBe("original");
     expect(nodeOutputFormatLock(mk(), hubDir)).toBe("hub-rule"); // 仅房间键命中 → 锁(收尾不会按本任务格式转)
+  });
+  it("节点侧上传总开关关闭 → 不再按「节点侧投放」算锁,与权威判定一致(issue #471)", () => {
+    // Sources are deleted on the node after upload, and a node-side order leaves no copy on stage:
+    // with the feature on, nothing survives anywhere → the format dropdown is locked.
+    upsertHubRule(hubDir, {
+      platform: "douyin", roomSlug: "111", enabled: true, recording: { sourceTaskId: 7 },
+      pipeline: {
+        upload: { mode: "upload" },
+        steps: { nodeSideUpload: true, burnDanmu: false, burnLivechat: false },
+        cleanup: { sourceAfterDone: true },
+      },
+    });
+    const cfg = { uploadMode: "upload" as const, steps: { nodeSideUpload: true } };
+    const burn = { burnDanmu: false, burnLivechat: false };
+
+    // Production default (flag on): a node-side order keeps no source copy → nothing survives → locked.
+    expect(shouldUseNodeSideUpload(cfg, burn).ok).toBe(true);
+    expect(nodeOutputFormatLock(mk(), hubDir)).toBe("no-survivors");
+
+    // Flag off: node-side upload does not apply, so the source segments survive and nothing is locked.
+    // The lock must follow the same verdict instead of assuming node-side delivery.
+    expect(shouldUseNodeSideUpload(cfg, burn, false).ok).toBe(false);
+    expect(nodeOutputFormatLock(mk(), hubDir, { nodeSideUploadEnabled: false })).toBeUndefined();
   });
   it("hub-rule:源任务规则优先于仅房间键命中的规则(两条同时存在 → 不锁)", () => {
     upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", enabled: true }); // 房间键命中、无源
