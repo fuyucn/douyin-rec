@@ -16,7 +16,7 @@ import { readResources, writeResources, validateResources, DEFAULT_HUB_RESOURCES
 import { statSync, accessSync, constants as fsConstants } from "node:fs";
 
 export function buildSettings(ctx: ApiCtx) {
-  const { deps, store, manager, hubDir, hubConfigPath,
+  const { deps, store, manager, hubDir,
     err } = ctx;
   return {
     /**
@@ -24,6 +24,9 @@ export function buildSettings(ctx: ApiCtx) {
      *
      * 回 `source` 让 UI 知道「改完会写去哪」:arg-file/root-file 写文件、settings 写 settings 表、
      * inline 无法持久化(此时 PUT 直接 400,而不是假装保存成功)。
+     *
+     * 读的是**实际生效的那份配置**(resolved 的 json 优先):inline / settings 来源的内容不在文件里,
+     * 只按 path 读会显示根文件或默认值(issue #473)。
      */
     getHubResources(): ApiResult {
       const resolved = deps.hubConfigSource?.();
@@ -31,7 +34,7 @@ export function buildSettings(ctx: ApiCtx) {
       return {
         status: 200,
         body: {
-          resources: readResources(resolved.path ?? hubConfigPath),
+          resources: readResources(resolved),
           source: resolved.source,
           path: resolved.path ?? null,
           defaults: DEFAULT_HUB_RESOURCES,
@@ -68,9 +71,12 @@ export function buildSettings(ctx: ApiCtx) {
         if (!resolved.path) return err(400, "无法定位 hub 配置文件");
         writeResources(resolved.path, patch);
       }
+      // Re-resolve so the response reflects what was just written (file reads / settings rows are
+      // cheap and uncached); the pre-write snapshot would be stale for every source.
+      const fresh = deps.hubConfigSource?.() ?? resolved;
       return {
         status: 200,
-        body: { resources: readResources(resolved.path ?? hubConfigPath), source: resolved.source },
+        body: { resources: readResources(fresh), source: resolved.source },
       };
     },
 

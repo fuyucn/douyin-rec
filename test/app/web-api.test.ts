@@ -2441,6 +2441,54 @@ describe("T15 /api/hub/resources", () => {
     s.close();
   });
 
+
+  it("GET 读实际生效的来源:inline / settings 的值不被根文件盖掉(issue #473)", () => {
+    // inline: the resources live only in the resolved JSON, never in the file on disk.
+    {
+      const s = new TaskStore(":memory:");
+      const dir = mkdtempSync(join(tmpdir(), "hubres-api-"));
+      const cfgPath = join(dir, "hub.config.json");
+      writeFileSync(cfgPath, JSON.stringify({ resources: { maxCpuParallel: 1 } }), "utf-8");
+      const a = makeApi({
+        store: s, manager: new MockManager(), hubDir: dir, hubConfigPath: cfgPath,
+        hubConfigSource: () => ({ json: JSON.stringify({ workers: [], resources: { maxCpuParallel: 6 } }), source: "inline" as const }),
+      });
+      const body = a.getHubResources().body as { resources: { maxCpuParallel: number }; source: string };
+      expect(body.source).toBe("inline");
+      expect(body.resources.maxCpuParallel).toBe(6); // not the file's 1
+      s.close();
+    }
+    // settings: same shape (json only, no path).
+    {
+      const s = new TaskStore(":memory:");
+      const dir = mkdtempSync(join(tmpdir(), "hubres-api-"));
+      const cfgPath = join(dir, "hub.config.json");
+      writeFileSync(cfgPath, JSON.stringify({ resources: { maxCpuParallel: 2 } }), "utf-8");
+      const a = makeApi({
+        store: s, manager: new MockManager(), hubDir: dir, hubConfigPath: cfgPath,
+        hubConfigSource: () => ({ json: JSON.stringify({ resources: { maxCpuParallel: 5 } }), source: "settings" as const }),
+      });
+      const body = a.getHubResources().body as { resources: { maxCpuParallel: number }; source: string };
+      expect(body.source).toBe("settings");
+      expect(body.resources.maxCpuParallel).toBe(5); // not the file's 2
+      s.close();
+    }
+  });
+
+  it("PUT 响应回读新值(hubConfigSource 每轮现解析)", () => {
+    const s = new TaskStore(":memory:");
+    const dir = mkdtempSync(join(tmpdir(), "hubres-api-"));
+    const cfgPath = join(dir, "hub.config.json");
+    writeFileSync(cfgPath, JSON.stringify({ resources: { maxCpuParallel: 1 } }), "utf-8");
+    const a = makeApi({
+      store: s, manager: new MockManager(), hubDir: dir, hubConfigPath: cfgPath,
+      hubConfigSource: () => ({ json: readFileSync(cfgPath, "utf-8"), path: cfgPath, source: "root-file" as const }),
+    });
+    const body = a.putHubResources({ maxCpuParallel: 8 }).body as { resources: { maxCpuParallel: number } };
+    expect(body.resources.maxCpuParallel).toBe(8);
+    s.close();
+  });
+
   it("PUT 写回文件且**保留 workers**(不把节点列表写坏)", () => {
     const { s, a, cfgPath } = setup("root-file");
     expect(a.putHubResources({ maxCpuParallel: 4 }).status).toBe(200);
