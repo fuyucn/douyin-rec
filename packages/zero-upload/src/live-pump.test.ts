@@ -4182,7 +4182,7 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
     }
   });
 
-  it("alerts when a confirmed part carries far less media than wall time, and stays quiet on healthy parts", async () => {
+  it("does NOT alert for a stall seal whose deficit is exactly the no-write wait (issue #504)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "live-pump-ratio-"));
     try {
       writeFileSync(join(dir, "cookies.json"), JSON.stringify({
@@ -4199,9 +4199,12 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
         return Promise.resolve(json({ code: 0, data: {} }));
       }) as unknown as typeof fetch;
       const alerts: string[] = [];
-      // ~53s of media written at once, then silence: the watchdog seals the part with
-      // media/wall far below the alert ratio (stall window is part of the wall time).
-      installFakeFfmpeg(tsStream({ gops: 400 }), { holdOpen: true });
+      const logs: string[] = [];
+      let confirmed = 0;
+      // ~93s of media written in real time (so sealedMs matches the media span), then silence until
+      // the 100s watchdog seals the part at the last byte. stalledMs ≈ the silent wait. Counting that
+      // wait as wall time used to turn this into "missing content" (measured deficits matched it).
+      installFakeFfmpeg(tsStream({ gops: 700 }), { chunkEvery: 4096, delayMs: 181, holdOpen: true });
       let acquisitions = 0;
       vi.useFakeTimers();
       try {
@@ -4213,17 +4216,81 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
           quality: "origin", submit: true, spoolMode: "none", fetchImpl: fake,
           fetch: async () => { acquisitions += 1; return { living: true, url: "http://x/y.ts" }; },
           sleep: async () => {},
-          shouldStop: async () => alerts.length > 0,
+          // The run ends after the first confirmed part (there is no alert to wait for any more).
+          shouldStop: async () => confirmed >= 1,
+          onPartConfirmed: (info: { count: number }) => { confirmed = info.count; },
           onAlert: (m) => alerts.push(m),
-          log: () => {},
+          log: (m) => logs.push(m),
         });
-        await vi.advanceTimersByTimeAsync(115_000);
+        await vi.advanceTimersByTimeAsync(260_000);
         const r = await p;
         expect(r.ok, r.error ?? "").toBe(true);
         expect(acquisitions).toBeGreaterThanOrEqual(1);
+        // Media ≈ 93s, data window ≈ 93s, plus ~100s of silence after the last byte: the ratio is
+        // ~1.0, so the guard must stay quiet and must not count the silent wait as wall time.
+        expect(alerts).toHaveLength(0);
+        expect(logs.some((m) => m.includes("无写入等待") && m.includes("不计入墙钟"))).toBe(true);
+      } finally {
+        vi.useRealTimers();
+        setSpawnForTest(undefined);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("still alerts for a real gap inside the data window, and the message does not blame the stall wait", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "live-pump-ratio-gap-"));
+    try {
+      writeFileSync(join(dir, "cookies.json"), JSON.stringify({
+        cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
+      }));
+      const fake = ((input: string | URL | Request) => {
+        const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
+        if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
+        if (u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
+        if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
+        if (u.pathname === "/x/vu/web/add/v3") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BVLratio3" } }));
+        if (u.pathname === "/x/vu/web/edit") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BVLratio3" } }));
+        if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BVLratio3", title: "t", tid: 21 }, videos: [] } }));
+        if (u.pathname === "/x/web/archives") return Promise.resolve(json({ code: 0, data: { arc_audits: [] } }));
+        return Promise.resolve(json({ code: 0, data: {} }));
+      }) as unknown as typeof fetch;
+      const alerts: string[] = [];
+      const logs: string[] = [];
+      let confirmed = 0;
+      // ~53s of media dribbled over ~146s of data-writing time (a real gap: the source is alive but
+      // delivering far less content than the clock), then silence until the watchdog seals it. The
+      // gap is inside the data window, so the alert must fire even though a stall wait follows.
+      installFakeFfmpeg(tsStream({ gops: 400 }), { chunkEvery: 4096, delayMs: 500, holdOpen: true });
+      vi.useFakeTimers();
+      try {
+        const p = runLivePump({
+          cookiesPath: join(dir, "cookies.json"), room: "ratio-gap", spoolDir: dir, title: "ratio-gap",
+          tid: 21, tag: "x", private: true, sizeCap: 8 * 1024 * 1024,
+          queueCapacity: 4096,
+          stallTimeoutMs: 100_000, mediaWallAlertRatio: DEFAULT_MEDIA_WALL_ALERT_RATIO,
+          quality: "origin", submit: true, spoolMode: "none", fetchImpl: fake,
+          fetch: async () => ({ living: true, url: "http://x/y.ts" }),
+          sleep: async () => {},
+          shouldStop: async () => alerts.length > 0,
+          onPartConfirmed: (info: { count: number }) => { confirmed = info.count; },
+          onAlert: (m) => alerts.push(m),
+          log: (m) => logs.push(m),
+        });
+        await vi.advanceTimersByTimeAsync(400_000);
+        const r = await p;
+        expect(r.ok, r.error ?? "").toBe(true);
+        expect(confirmed).toBeGreaterThanOrEqual(1);
         expect(alerts).toHaveLength(1);
         expect(alerts[0]).toContain("媒体");
         expect(alerts[0]).toContain("墙钟");
+        expect(alerts[0]).toContain("疑似缺失");
+        // Issue #504: the deficit is inside the data window — the silent wait must be named as
+        // excluded, never as the cause.
+        expect(alerts[0]).toContain("无写入等待");
+        expect(alerts[0]).toContain("不计入比例");
       } finally {
         vi.useRealTimers();
         setSpawnForTest(undefined);
@@ -4292,9 +4359,11 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
       const alerts: string[] = [];
       const logs: string[] = [];
       let confirmed = 0;
-      // Every connection writes ~53s of media, then goes silent: two stall-sealed starved parts
-      // land well inside one cooldown window, so only the first may page.
-      installFakeFfmpeg(tsStream({ gops: 400 }), { holdOpen: true });
+      // Every connection dribbles ~53s of media over ~146s of data-writing time (a real gap: media
+      // far below the data window), then goes silent until the watchdog seals it. Two such parts
+      // land well inside one cooldown window, so only the first may page (issue #504: the silent
+      // wait itself is never counted as wall time).
+      installFakeFfmpeg(tsStream({ gops: 400 }), { chunkEvery: 4096, delayMs: 500, holdOpen: true });
       vi.useFakeTimers();
       try {
         const p = runLivePump({
@@ -4309,7 +4378,7 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
           onAlert: (m) => alerts.push(m),
           log: (m) => logs.push(m),
         });
-        await vi.advanceTimersByTimeAsync(450_000);
+        await vi.advanceTimersByTimeAsync(800_000);
         const r = await p;
         expect(r.ok, r.error ?? "").toBe(true);
         expect(confirmed).toBeGreaterThanOrEqual(2);
@@ -4446,9 +4515,11 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
         return Promise.resolve(json({ code: 0, data: {} }));
       }) as unknown as typeof fetch;
       const alerts: string[] = [];
-      // Parts seal every ~100s of fake time: alert #1 at ~100s, the 30min cooldown then
-      // expires at ~1900s, and part 19 pages again carrying the 17 suppressed alerts.
-      installFakeFfmpeg(tsStream({ gops: 400 }), { holdOpen: true });
+      let confirmed = 0;
+      // Each part dribbles ~53s of media over ~146s of data time (real gap) and then stalls for
+      // 100s, so a part takes ~246s of fake time: the 30min cooldown expires after ~7 parts and the
+      // next one pages again carrying the suppressed count (issue #504: only the data window counts).
+      installFakeFfmpeg(tsStream({ gops: 400 }), { chunkEvery: 4096, delayMs: 500, holdOpen: true });
       vi.useFakeTimers();
       try {
         const p = runLivePump({
@@ -4458,14 +4529,19 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
           quality: "origin", submit: true, spoolMode: "none", fetchImpl: fake,
           fetch: async () => ({ living: true, url: "http://x/y.ts" }),
           shouldStop: async () => alerts.length >= 2,
+          onPartConfirmed: (info: { count: number }) => { confirmed = info.count; },
           onAlert: (m) => alerts.push(m),
           log: () => {},
         });
-        await vi.advanceTimersByTimeAsync(2_000_000);
+        await vi.advanceTimersByTimeAsync(3_000_000);
         const r = await p;
         expect(r.ok, r.error ?? "").toBe(true);
         expect(alerts).toHaveLength(2);
-        expect(alerts[1]).toContain("已抑制 17 条");
+        // Every part between the two alerts was suppressed and counted: parts confirmed so far
+        // minus the two that paged.
+        const suppressed = Number(/已抑制 (\d+) 条/.exec(alerts[1])?.[1] ?? 0);
+        expect(suppressed).toBeGreaterThan(0);
+        expect(suppressed).toBe(confirmed - 2);
       } finally {
         vi.useRealTimers();
         setSpawnForTest(undefined);
@@ -4498,9 +4574,10 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
       const alerts: string[] = [];
       const logs: string[] = [];
       let confirmed = 0;
-      // Two starved parts (alert + suppressed), then part 3 fails its archive append: the run
-      // exits through the in-loop fatal return, and the finally must still report the count.
-      installFakeFfmpeg(tsStream({ gops: 400 }), { holdOpen: true });
+      // Two starved parts (alert + suppressed; each dribbles media over ~146s of data time so the
+      // gap is real, issue #504), then part 3 fails its archive append: the run exits through the
+      // in-loop fatal return, and the finally must still report the count.
+      installFakeFfmpeg(tsStream({ gops: 400 }), { chunkEvery: 4096, delayMs: 500, holdOpen: true });
       vi.useFakeTimers();
       try {
         const p = runLivePump({
@@ -4517,7 +4594,7 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
           onAlert: (m) => alerts.push(m),
           log: (m) => logs.push(m),
         });
-        await vi.advanceTimersByTimeAsync(450_000);
+        await vi.advanceTimersByTimeAsync(800_000);
         const r = await p;
         expect(r.ok, r.error ?? "").toBe(false);
         expect(alerts).toHaveLength(1);
