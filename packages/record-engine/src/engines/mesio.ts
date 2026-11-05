@@ -5,8 +5,9 @@
  * header 现经 EngineSpawnArgs.headers → `-H 'K: V'` 透传,故合并为一个引擎)。mesio 自带 FLV/HLS
  * 一致性修复(--fix)+ 按时长分段(-d)。产物 .flv 分段 {nameBase}_%i.flv(对齐 concat 会话分组)。
  *
- * 进度上报:mesio 无 ffmpeg 的 `time=` 进度,改用「输出目录 .flv 总大小是否增长」喂 markProgress
+ * 进度上报:mesio 无 ffmpeg 的 `time=` 进度,改用「**本会话**分段总大小是否增长」喂 markProgress
  * (返回 cleanup 清掉 setInterval)。会话首段路径 = {nameBase}_000.flv(mesio 自管多段、无逐段回调)。
+ * 只统计 `{nameBase}_NNN.flv`:同目录另一个任务/会话的写入不能给它续命(issue #474)。
  */
 import { join } from "node:path";
 import { readdirSync, statSync, existsSync } from "node:fs";
@@ -29,7 +30,45 @@ export function resolveMesioBin(): string {
 const MESIO = resolveMesioBin();
 
 /** 输出文件增长看门狗检查间隔(对齐原录制器的 STALL_CHECK_MS=15s)。 */
-const FILE_WATCH_MS = 15_000;
+export const FILE_WATCH_MS = 15_000;
+
+/**
+ * Bytes of the `.flv` segments **this** mesio writes: mesio names them `{nameBase}_NNN.flv`
+ * (`-n {nameBase}_%i`, split into several files), so match the whole prefix, not one exact name.
+ *
+ * Returns `null` when the output directory cannot be read (not created yet): the caller keeps its
+ * previous reading rather than treating that as progress.
+ */
+export function ownSegmentBytes(dir: string, nameBase: string): number | null {
+  const prefix = nameBase ? `${nameBase}_` : undefined;
+  let names: string[];
+  try { names = readdirSync(dir); } catch { return null; }
+  let total = 0;
+  for (const f of names) {
+    if (!/\.flv$/i.test(f)) continue;
+    // TODO(?): a caller that spawns mesio with an empty nameBase cannot be told apart from its
+    // neighbours, so fall back to counting every *.flv (the pre-#474 behaviour) instead of never
+    // reporting progress. Every current caller passes a nameBase.
+    if (prefix !== undefined && !f.startsWith(prefix)) continue;
+    try { total += statSync(join(dir, f)).size; } catch { /* file being written or just deleted */ }
+  }
+  return total;
+}
+
+/**
+ * File-growth watchdog: every {@link FILE_WATCH_MS}, report progress when OUR segments grew.
+ * Returns the (unref'd) interval so `spawn` can clear it on exit.
+ */
+export function startMesioProgressWatch(dir: string, nameBase: string, markProgress: () => void): NodeJS.Timeout {
+  let lastTotalBytes = -1;
+  const timer = setInterval(() => {
+    const total = ownSegmentBytes(dir, nameBase);
+    if (total === null) return; // directory not created yet
+    if (total > lastTotalBytes) { lastTotalBytes = total; markProgress(); }
+  }, FILE_WATCH_MS);
+  timer.unref?.();
+  return timer;
+}
 
 /** 构造 mesio argv(纯函数,便于单测)。 */
 export function buildMesioArgs(a: Pick<EngineSpawnArgs, "url" | "headers" | "dir" | "nameBase" | "segSec">): string[] {
@@ -83,19 +122,8 @@ export const mesioEngine: DownloadEngine = {
       if (s) a.pushStderr(s);
     });
 
-    // 文件增长看门狗:每 FILE_WATCH_MS 扫 dir 下 .flv 总大小,增长则 markProgress。
-    let lastTotalBytes = -1;
-    const fileWatch = setInterval(() => {
-      let total = 0;
-      try {
-        for (const f of readdirSync(a.dir)) {
-          if (!/\.flv$/i.test(f)) continue;
-          try { total += statSync(join(a.dir, f)).size; } catch { /* 文件正写/刚删 */ }
-        }
-      } catch { return; } // 目录还没建好
-      if (total > lastTotalBytes) { lastTotalBytes = total; a.markProgress(); }
-    }, FILE_WATCH_MS);
-    fileWatch.unref?.();
+    // File-growth watchdog: only the segments this mesio writes count (issue #474).
+    const fileWatch = startMesioProgressWatch(a.dir, a.nameBase, () => a.markProgress());
 
     return {
       proc,
