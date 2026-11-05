@@ -149,7 +149,7 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
     try {
       await api.updateRoom(room.key, r.payload);
       toast(t("rooms.saved"), "success");
-      hintSeasonAfterSave(form.seasonId, (m) => toast(m, "success"), t("hub.ruleDialog.seasonIdHintPrefix"));
+      hintSeasonAfterSave(form.seasonId, room.processing?.pipeline?.upload?.seasonId, (m) => toast(m, "success"), t("hub.ruleDialog.seasonIdHintPrefix"));
       onSaved();
     } catch (e) {
       // Backend says which half failed and whether it rolled back — show it verbatim.

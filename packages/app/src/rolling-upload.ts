@@ -60,7 +60,7 @@ import {
   SLOT_BUSY_MARKER,
   addArchiveToSeasonIfConfigured,
   seasonCheckpointState,
-  resolveSeasonSectionId,
+  resolveSeasonTarget,
   isValidPartSizeMiB,
   type UploadSlot,
   type RollingSegment,
@@ -1148,8 +1148,9 @@ function resolveRollingUploadMetaInner(
     /* 无 hub.config → 用规则/内置默认 */
   }
   const up = ruleActive ? rule?.pipeline?.upload : undefined;
-  const seasonSectionId = resolveSeasonSectionId(up?.seasonSectionId, uploadDefaults.seasonSectionId);
-  const seasonId = resolveSeasonSectionId(up?.seasonId, uploadDefaults.seasonId);
+  // One precedence rule for both keys (core resolveSeasonTarget): rule.seasonId > rule.seasonSectionId
+  // > defaults.seasonId > defaults.seasonSectionId. The meta carries exactly one of the two.
+  const season = resolveSeasonTarget(up?.seasonId, up?.seasonSectionId, uploadDefaults.seasonId, uploadDefaults.seasonSectionId);
   return {
     meta: {
       tag: up?.tag || uploadDefaults.tag || "直播,录像",
@@ -1158,8 +1159,8 @@ function resolveRollingUploadMetaInner(
       titleTemplate: (up?.titleTemplate ?? "").trim() || uploadDefaults.titleTemplate,
       submissionTitleTemplate: (up?.submissionTitleTemplate ?? "").trim() || uploadDefaults.submissionTitleTemplate,
       partTitleTemplate: (up?.partTitleTemplate ?? "").trim() || uploadDefaults.partTitleTemplate,
-      ...(seasonSectionId ? { seasonSectionId } : {}),
-      ...(seasonId ? { seasonId } : {}),
+      ...(season?.kind === "seasonId" ? { seasonId: season.seasonId } : {}),
+      ...(season?.kind === "sectionId" ? { seasonSectionId: season.sectionId } : {}),
     },
     // 可见性:规则 upload.private 缺省 true(= 仅自己可见)。**保守默认 true**(公开是不可逆的曝光)。
     private: up?.private !== false,

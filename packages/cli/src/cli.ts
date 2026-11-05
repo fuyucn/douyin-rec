@@ -22,7 +22,7 @@ import { NODE_COMMANDS, localRoomProbes, notifyOutboxArgs, runNodeCommandCli } f
 import { registerRecoverOrderCommands } from "./hub-recover-order-commands.js";
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { ZERO_DISK_DELIVERY_ENV, biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, normalizeSeasonSectionId, parseOutputFormat, resolveSeasonSectionId, stageExt, resolveDiskMinGB, resolveJobLogPath, stageSessionDir, ttlMemoAsync, sanitizePathSegment, zonedStamp } from "@drec/core";
+import { ZERO_DISK_DELIVERY_ENV, biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, parseOutputFormat, resolveSeasonTarget, stageExt, resolveDiskMinGB, resolveJobLogPath, stageSessionDir, ttlMemoAsync, sanitizePathSegment, zonedStamp } from "@drec/core";
 import type { EnqueueRequest, HubResources, OutputFormat, StageFormat } from "@drec/core";
 import { RecordingSession, XmlDanmuWriter } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
@@ -1676,8 +1676,14 @@ const hubStarter: HubStarter = {
     const diskMinGB = resolveDiskMinGB(hubCfg.resources?.diskMinGB, (m) => console.warn(m)).gb;
     const defaultTag = uploadDefaults.tag ?? "直播,录像";
     const defaultTid = uploadDefaults.tid ?? 21;
-    const defaultSeasonSectionId = normalizeSeasonSectionId(uploadDefaults.seasonSectionId);
-    const defaultSeasonId = normalizeSeasonSectionId(uploadDefaults.seasonId);
+    // 赛季目标的**唯一判定** = core resolveSeasonTarget(规则 > 默认,seasonId > 旧 sectionId)。
+    // 这里只是把目标摊平成 uploadMeta 的两个键,不重复判定逻辑。
+    type SeasonPick = { seasonId?: number; seasonSectionId?: number };
+    const seasonFields = (t: ReturnType<typeof resolveSeasonTarget>): SeasonPick =>
+      t?.kind === "seasonId" ? { seasonId: t.seasonId }
+        : t?.kind === "sectionId" ? { seasonSectionId: t.sectionId }
+          : {};
+    const globalSeason = resolveSeasonTarget(undefined, undefined, uploadDefaults.seasonId, uploadDefaults.seasonSectionId);
 
     const { spawn } = await import("node:child_process");
     // T15:并行度/内存门槛**每轮热读**(UI 改完立即生效,无需重启)。
@@ -1804,8 +1810,7 @@ const hubStarter: HubStarter = {
           titleTemplate: uploadDefaults.titleTemplate,
           submissionTitleTemplate: uploadDefaults.submissionTitleTemplate,
           partTitleTemplate: uploadDefaults.partTitleTemplate,
-          ...(defaultSeasonSectionId ? { seasonSectionId: defaultSeasonSectionId } : {}),
-          ...(defaultSeasonId ? { seasonId: defaultSeasonId } : {}),
+          ...seasonFields(globalSeason),
         },
         timeZone: effectiveTimezone(opts.store),
       },
@@ -1819,8 +1824,7 @@ const hubStarter: HubStarter = {
       const rule = hubStore.getHubRule(hubDir, hubStore.hubKey(platform, slug));
       if (!rule || !rule.enabled) return null; // 无任务文件或已禁用 → hub 不处理该房间
       const p = rule.pipeline ?? {};
-      const seasonSectionId = resolveSeasonSectionId(p.upload?.seasonSectionId, uploadDefaults.seasonSectionId);
-      const seasonId = resolveSeasonSectionId(p.upload?.seasonId, uploadDefaults.seasonId);
+      const season = resolveSeasonTarget(p.upload?.seasonId, p.upload?.seasonSectionId, uploadDefaults.seasonId, uploadDefaults.seasonSectionId);
       return {
         cleanMaxGapSec: hubCfg.cleanMaxGapSec ?? 30,
         // 磁盘水位闸门(issue #8):同上,与 reconciler 看门狗同一个配置键与默认值(不新增第二套口径)。
@@ -1828,6 +1832,8 @@ const hubStarter: HubStarter = {
         reconnectWindowMs: p.reconnectWindowMs ?? hubCfg.reconnectWindowMs,
         stageDir: hubCfg.stageDir ?? rootStageDir(),
         cookies: hubCfg.cookies ?? "",
+        // 同全局兜底:master 侧 workflow/segment-pipeline 的赛季缓存也要落盘(否则只有内存缓存)。
+        seasonDataRoot: drecRoot(),
         uploadMode: isUploadingMode(p.upload?.mode) ? "upload" : "stage", // upload/rolling → 传(rolling 只是上传时机提前,未建稿则整场管线兜底);其它值(含旧 stage-only)→ stage
         uploadPrivate: p.upload?.private !== false,                    // 缺省 / true → 仅自己可见
         uploadMeta: {
@@ -1837,8 +1843,7 @@ const hubStarter: HubStarter = {
           titleTemplate: (p.upload?.titleTemplate ?? "").trim() || uploadDefaults.titleTemplate,
           submissionTitleTemplate: (p.upload?.submissionTitleTemplate ?? "").trim() || uploadDefaults.submissionTitleTemplate,
           partTitleTemplate: (p.upload?.partTitleTemplate ?? "").trim() || uploadDefaults.partTitleTemplate,
-          ...(seasonSectionId ? { seasonSectionId } : {}),
-          ...(seasonId ? { seasonId } : {}),
+          ...seasonFields(season),
         },
         timeZone: effectiveTimezone(opts.store),
         steps: p.steps,

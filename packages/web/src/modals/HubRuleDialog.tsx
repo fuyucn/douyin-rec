@@ -324,6 +324,8 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
         };
     // 编辑时换了源任务 → 规则也要重新绑定(PUT rooms 的 processing 不含 sourceTaskId)。
     const sourceTaskChanged = isEdit && rule.recording?.sourceTaskId !== form.sourceTaskId;
+    // 保存前的合集 ID:只在真正变化时才去主控解析一次(未变化的值此前已解析过)。
+    const previousSeasonId = rule === null ? null : rule.pipeline?.upload?.seasonId ?? null;
 
     setBusy(true);
     try {
@@ -344,7 +346,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
         }
         onClose();
         toast(t("hub.ruleDialog.updated"), "success");
-        hintSeasonAfterSave(form.seasonId, (m) => toast(m, "success"), t("hub.ruleDialog.seasonIdHintPrefix"));
+        hintSeasonAfterSave(form.seasonId, previousSeasonId, (m) => toast(m, "success"), t("hub.ruleDialog.seasonIdHintPrefix"));
         onSaved();
         return;
       }
@@ -361,7 +363,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
       }
       onClose();
       toast(t("hub.ruleDialog.created"), "success");
-      hintSeasonAfterSave(form.seasonId, (m) => toast(m, "success"), t("hub.ruleDialog.seasonIdHintPrefix"));
+      hintSeasonAfterSave(form.seasonId, previousSeasonId, (m) => toast(m, "success"), t("hub.ruleDialog.seasonIdHintPrefix"));
       onSaved();
     } catch (e) {
       toast(errMessage(e), "error");

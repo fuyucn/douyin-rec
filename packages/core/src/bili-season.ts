@@ -9,7 +9,17 @@
  */
 import { readFileSync } from "node:fs";
 import { biliupCookieHeader, biliupCsrf } from "./upload-gate.js";
-import { clearSeasonIdCachePath, resolveSectionIdFromSeasonId } from "./bili-season-resolve.js";
+import {
+  SEASON_ID_HINT,
+  clearSeasonIdCachePath,
+  normalizeSeasonValue,
+  resolveSectionIdFromSeasonId,
+} from "./bili-season-resolve.js";
+
+/** Normalize a configured section id (alias of the resolver's helper; one rule, one place). */
+export { normalizeSeasonValue as normalizeSeasonSectionId };
+/** Local alias so this module's own call sites read the same as the public name. */
+const normalizeSeasonSectionId = normalizeSeasonValue;
 
 const MEMBER = "https://member.bilibili.com";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
@@ -40,12 +50,6 @@ interface SeasonTarget {
   /** Overall deadline for the whole attempt; defaults to {@link SEASON_TOTAL_TIMEOUT_MS}. */
   totalTimeoutMs?: number;
   sleep?: (ms: number) => Promise<void>;
-}
-
-/** Normalize a configured section id: positive safe integer, otherwise undefined (feature off). */
-export function normalizeSeasonSectionId(value: unknown): number | undefined {
-  const n = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
-  return typeof n === "number" && Number.isSafeInteger(n) && n > 0 ? n : undefined;
 }
 
 /**
@@ -269,17 +273,28 @@ export function seasonCheckpointState(outcome: SeasonAddOutcome): "pending" | "d
   return outcome.retryable ? "pending" : "failed";
 }
 
-/** Human-readable one-line outcome for job logs. */
-export function describeSeasonOutcome(r: SeasonAddOutcome): string {
+/**
+ * Human-readable one-line outcome for job logs.
+ * On the season-id path pass `seasonId` so the line names the configured 合集 instead of a bare
+ * section id (and never the useless "小节 0" when resolution itself failed).
+ */
+export function describeSeasonOutcome(r: SeasonAddOutcome, seasonId?: number): string {
+  // `skipped` carries no sectionId; every other variant does.
+  const sectionId = r.status === "skipped" ? 0 : r.sectionId;
+  const target = seasonId === undefined
+    ? "合集小节 " + String(sectionId)
+    : sectionId > 0
+      ? "合集 " + String(seasonId) + " 的小节 " + String(sectionId)
+      : "合集 " + String(seasonId);
   switch (r.status) {
     case "added":
-      return `[season] 已加入合集小节 ${r.sectionId}(av${r.aid}, cid ${r.cid})`;
+      return "[season] 已加入" + target + "(av" + String(r.aid) + ", cid " + String(r.cid) + ")";
     case "already":
-      return `[season] 稿件 av${r.aid} 已在合集小节 ${r.sectionId} 中`;
+      return "[season] 稿件 av" + String(r.aid) + " 已在" + target + " 中";
     case "skipped":
-      return `[season] 跳过:${r.reason}`;
+      return "[season] 跳过:" + r.reason;
     case "failed":
-      return `[season] 加入合集小节 ${r.sectionId} 失败${r.retryable ? "(可重试)" : ""}:${r.error}`;
+      return "[season] 加入" + target + " 失败" + (r.retryable ? "(可重试)" : "") + ":" + r.error;
   }
 }
 
@@ -288,15 +303,22 @@ export function describeSeasonOutcome(r: SeasonAddOutcome): string {
  * that its outcome reaches the job log through one place.
  */
 export async function addArchiveToSeasonWithNote(
-  o: SeasonTarget & { note?: (msg: string) => void },
+  o: SeasonTarget & { note?: (msg: string) => void; seasonId?: number | null },
 ): Promise<SeasonAddOutcome> {
+  const loggingSeasonId = o.seasonId ?? undefined;
   let outcome: SeasonAddOutcome;
   try {
     outcome = await addArchiveToSeason(o);
   } catch (e) {
     outcome = { status: "failed", sectionId: o.sectionId, error: String((e as Error)?.message ?? e).slice(0, 200), retryable: true };
   }
-  try { o.note?.(describeSeasonOutcome(outcome)); } catch { /* logging never fails an upload */ }
+  // Season-id path: a definite rejection is almost always a wrong 合集 ID (or one that belongs to
+  // another account), so append the user-facing hint to the one log line for this attempt.
+  if (loggingSeasonId !== undefined && outcome.status === "failed" && !outcome.retryable
+      && !outcome.error.includes(SEASON_ID_HINT)) {
+    outcome = { ...outcome, error: outcome.error + "; " + SEASON_ID_HINT };
+  }
+  try { o.note?.(describeSeasonOutcome(outcome, loggingSeasonId)); } catch { /* logging never fails an upload */ }
   return outcome;
 }
 
@@ -324,13 +346,13 @@ export async function addArchiveToSeasonIfConfigured(
     ...(o.title ? { title: o.title } : {}),
     ...(o.reconcileFirst ? { reconcileFirst: o.reconcileFirst } : {}),
     ...(o.fetchImpl ? { fetchImpl: o.fetchImpl } : {}),
-    ...(o.timeoutMs ? { timeoutMs: o.timeoutMs } : {}),
-    ...(o.totalTimeoutMs ? { totalTimeoutMs: o.totalTimeoutMs } : {}),
+    ...(o.timeoutMs !== undefined ? { timeoutMs: o.timeoutMs } : {}),
+    ...(o.totalTimeoutMs !== undefined ? { totalTimeoutMs: o.totalTimeoutMs } : {}),
     ...(o.sleep ? { sleep: o.sleep } : {}),
     ...(o.note ? { note: o.note } : {}),
   });
   const sectionId = normalizeSeasonSectionId(o.sectionId);
-  if (!sectionId) return { status: "skipped", reason: "合集 ID 未配置" };
+  if (!sectionId) return { status: "skipped", reason: "合集小节 ID 未配置" };
   return addArchiveToSeasonWithNote({ ...o, sectionId });
 }
 
@@ -353,34 +375,63 @@ export async function addArchiveToSeasonById(o: {
   note?: (msg: string) => void;
 }): Promise<SeasonAddOutcome> {
   const { seasonId, cookiesPath, dataRoot } = o;
-  const attempt = async (): Promise<SeasonAddOutcome> => {
-    const resolved = await resolveSectionIdFromSeasonId({
-      seasonId, cookiesPath, dataRoot, fetchImpl: o.fetchImpl, timeoutMs: o.timeoutMs,
-    });
-    if (!("sectionId" in resolved)) {
-      const outcome: SeasonAddOutcome = { status: "failed", sectionId: 0, error: resolved.error, retryable: resolved.retryable };
-      try { o.note?.(describeSeasonOutcome(outcome)); } catch { /* logging never fails an upload */ }
-      return outcome;
+  const note = o.note;
+  // This is the upload path: an exception here must never escape into it. Same contract as
+  // addArchiveToSeasonWithNote: any failure becomes retryable "pending".
+  try {
+    // One wall-clock budget for resolve + add + (one) retry.
+    const deadline = Date.now() + (o.totalTimeoutMs ?? SEASON_TOTAL_TIMEOUT_MS);
+
+    const attempt = async (): Promise<{ outcome: SeasonAddOutcome; fromCache: boolean }> => {
+      const resolved = await resolveSectionIdFromSeasonId({
+        seasonId,
+        cookiesPath,
+        ...(dataRoot ? { dataRoot } : {}),
+        ...(o.fetchImpl ? { fetchImpl: o.fetchImpl } : {}),
+        ...(o.timeoutMs ? { timeoutMs: o.timeoutMs } : {}),
+        deadlineMs: deadline,
+      });
+      if (resolved.status === "failed") {
+        // Resolution itself failed: no POST, and no second scan (a re-scan cannot help).
+        const outcome: SeasonAddOutcome = { status: "failed", sectionId: 0, error: resolved.error, retryable: resolved.retryable };
+        try { note?.(describeSeasonOutcome(outcome, seasonId)); } catch { /* logging never fails */ }
+        return { outcome, fromCache: false };
+      }
+      const outcome = await addArchiveToSeasonWithNote({
+        sectionId: resolved.sectionId,
+        seasonId,
+        cookiesPath,
+        ...(o.aid ? { aid: o.aid } : {}),
+        ...(o.bvid ? { bvid: o.bvid } : {}),
+        ...(o.title ? { title: o.title } : {}),
+        ...(o.reconcileFirst ? { reconcileFirst: o.reconcileFirst } : {}),
+        ...(o.fetchImpl ? { fetchImpl: o.fetchImpl } : {}),
+        ...(o.timeoutMs ? { timeoutMs: o.timeoutMs } : {}),
+        // Share the one deadline: the add step gets whatever is left of resolve + add + retry.
+        totalTimeoutMs: Math.max(1, deadline - Date.now()),
+        ...(o.sleep ? { sleep: o.sleep } : {}),
+        ...(note ? { note } : {}),
+      });
+      return { outcome, fromCache: resolved.fromCache };
+    };
+
+    const first = await attempt();
+    // Re-resolve + retry ONCE, and only when the rejected section came from the cache: a stale
+    // cached section is worth a fresh scan, while a fresh resolution (or a resolver failure) already
+    // reflects the account's current state, so a second scan/POST there is pure extra risk.
+    if (first.outcome.status === "failed" && !first.outcome.retryable && first.fromCache) {
+      clearSeasonIdCachePath(cookiesPath, seasonId, dataRoot);
+      return (await attempt()).outcome;
     }
-    return addArchiveToSeasonWithNote({
-      sectionId: resolved.sectionId,
-      cookiesPath,
-      aid: o.aid,
-      bvid: o.bvid,
-      title: o.title,
-      reconcileFirst: o.reconcileFirst,
-      fetchImpl: o.fetchImpl,
-      timeoutMs: o.timeoutMs,
-      totalTimeoutMs: o.totalTimeoutMs,
-      sleep: o.sleep,
-      note: o.note,
-    });
-  };
-  const first = await attempt();
-  if (first.status === "failed" && !first.retryable) {
-    // The cached section was wrong (definite rejection): drop it and re-resolve+retry once.
-    clearSeasonIdCachePath(cookiesPath, seasonId, dataRoot);
-    return attempt();
+    return first.outcome;
+  } catch (e) {
+    const outcome: SeasonAddOutcome = {
+      status: "failed",
+      sectionId: 0,
+      error: String((e as Error)?.message ?? e).slice(0, 200),
+      retryable: true,
+    };
+    try { note?.(describeSeasonOutcome(outcome, seasonId)); } catch { /* logging never fails an upload */ }
+    return outcome;
   }
-  return first;
 }

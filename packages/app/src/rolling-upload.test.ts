@@ -959,6 +959,44 @@ describe("0 落盘稿件 metadata 与边录边传同口径(规则 > hub.config >
     expect(resolveStreamUploadMeta("douyin", "123").seasonSectionId).toBeUndefined();
   });
 
+  it("seasonId 优先级:规则 seasonId > 规则旧 sectionId > 默认 seasonId > 默认旧 sectionId(null = 关)", () => {
+    const writeDefault = (o: object) => writeFileSync(path.join(root, "config", "hub.config.json"), JSON.stringify(o), "utf-8");
+    const writeRule = (o: object) => writeFileSync(path.join(root, "config", "hub", "douyin.123.json"), JSON.stringify({
+      pipeline: { upload: { mode: "rolling", tag: "规则标签", tid: 21, ...o } },
+    }), "utf-8");
+    const meta = () => resolveRollingUploadMeta("douyin", "123").meta;
+    const stream = () => resolveStreamUploadMeta("douyin", "123");
+
+    // rule.seasonId 胜过规则旧 sectionId 与所有默认
+    writeDefault({ uploadDefaults: { tid: 17, seasonId: 30, seasonSectionId: 40 } });
+    writeRule({ seasonId: 10, seasonSectionId: 20 });
+    expect(meta().seasonId).toBe(10);
+    expect(meta().seasonSectionId).toBeUndefined();
+    expect(stream().seasonId).toBe(10);
+
+    // 规则旧 sectionId(数字)挡住「继承来的」默认 seasonId
+    writeRule({ seasonSectionId: 20 });
+    expect(meta().seasonSectionId).toBe(20);
+    expect(meta().seasonId).toBeUndefined();
+    expect(stream().seasonSectionId).toBe(20);
+    expect(stream().seasonId).toBeUndefined();
+
+    // 规则旧 sectionId = null 也是显式关闭,同样不继承默认 seasonId
+    writeRule({ seasonSectionId: null });
+    expect(meta().seasonSectionId).toBeUndefined();
+    expect(meta().seasonId).toBeUndefined();
+
+    // 规则什么都没配 → 默认,seasonId 优先
+    writeRule({});
+    expect(meta().seasonId).toBe(30);
+    expect(meta().seasonSectionId).toBeUndefined();
+
+    // 默认只有旧 sectionId → 用旧 sectionId
+    writeDefault({ uploadDefaults: { tid: 17, seasonSectionId: 40 } });
+    expect(meta().seasonSectionId).toBe(40);
+    expect(meta().seasonId).toBeUndefined();
+  });
+
   it("partSizeMiB 只来自启用的规则;越界/空值回落默认", () => {
     const rule = (size: unknown, extra: object = {}) => writeFileSync(path.join(root, "config", "hub", "douyin.123.json"), JSON.stringify({
       ...extra, pipeline: { upload: { mode: "rolling", tag: "规则标签", tid: 21, partSizeMiB: size } },

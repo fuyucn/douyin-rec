@@ -18,7 +18,7 @@ import { parseOutputFormat, platformForRoom, redactTaskSecrets, streamUploadConf
 import type { ApiCtx } from "./context.js";
 import type { ApiResult } from "./types.js";
 import { refreshLocalRollingEffective } from "../../rolling-effective.js";
-import { drecRoot, rootBiliupCookies } from "../../paths.js";
+import { rootBiliupCookies } from "../../paths.js";
 import { hintSeasonTitleForMaster } from "@drec/core";
 import * as hubStore from "../../hub-store.js";
 import { activeHubJobKeys, deleteHubJobHistory } from "../../hub-jobs.js";
@@ -481,17 +481,17 @@ export function buildRooms(ctx: ApiCtx) {
 
     /**
      * GET /api/season/hint?seasonId=N — 保存后的**非阻塞**提示(issue #460)。
-     * 用主控账号解析合集/小节名;解析不到(网络/非本账号)返回节点侧兜底文案。
-     * 永不写库、永不阻塞保存 —— 录制的节点仍会用自己的账号重新解析。
+     * 用主控账号解析合集/小节名;解析不到(网络/非本账号/多小节)返回对应兜底文案。
+     * 只读:不读缓存也不写缓存,永不落库、永不阻塞保存 —— 录制节点仍用自己的账号重新解析。
      */
     async seasonHint(seasonId: number): Promise<ApiResult> {
       if (!(typeof seasonId === "number" && Number.isSafeInteger(seasonId) && seasonId > 0)) {
         return err(400, `seasonId 必须是正整数,收到 ${JSON.stringify(seasonId)}`);
       }
+      // The hint helper itself is no-cache + short-deadline; nothing here can persist or hang.
       const title = await hintSeasonTitleForMaster({
         seasonId,
         cookiesPath: deps.biliupCookiesPath ?? rootBiliupCookies(),
-        dataRoot: drecRoot(),
       });
       return { status: 200, body: { seasonId, title } };
     },
