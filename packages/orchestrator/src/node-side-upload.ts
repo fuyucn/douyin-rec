@@ -1,11 +1,13 @@
 /**
  * node-side-upload.ts — 节点侧上传(**experimental**,见 plans/027)的 master 侧全部逻辑。
  *
- * ⚠️ 本文件是实验功能的**唯一入口**。要快速开关/回退,只动这一个文件:
- *   - **全局停用**:把 `NODE_SIDE_UPLOAD_ENABLED` 改成 `false` → 即使规则里开了
- *     `pipeline.steps.nodeSideUpload` 也一律回落现状(不改任何规则文件)。
- *   - **彻底移除**:删本文件 + `@drec/app` 的 `node-pipeline.ts` + cli 的
- *     `node-pipeline-commands.ts`,再删 pipeline.ts 里的调用点(见 `maybeRunNodeSideUpload`)。
+ * ⚠️ 要快速开关/回退:
+ *   - **全局停用**:把 `packages/core/src/node-side-upload-policy.ts` 里的
+ *     `NODE_SIDE_UPLOAD_ENABLED` 改成 `false`(本文件只从 core re-export,开关已不在此)→
+ *     即使规则里开了 `pipeline.steps.nodeSideUpload` 也一律回落现状(不改任何规则文件)。
+ *   - **彻底移除**:删本文件 + `@drec/core` 的 `node-side-upload-policy.ts` + `@drec/app` 的
+ *     `node-pipeline.ts` + cli 的 `node-pipeline-commands.ts`,并删掉 `@drec/app` `node-remux.ts`
+ *     里的调用点,再删 pipeline.ts 里的调用点(见 `maybeRunNodeSideUpload`)。
  *
  * 背景(为什么做):实测 pull(rsync 回传录像)是后处理主要耗时(165s~4198s),而 9/16 房间
  * 不烧录、其 merge 只是 `-c copy` 纯 I/O —— 这类房间可让 winner 节点本地 remux + 上传,
