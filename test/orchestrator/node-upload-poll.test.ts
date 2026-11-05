@@ -120,6 +120,15 @@ describe("canFallbackToBlocking", () => {
     expect(await canFallbackToBlocking(t(async () => []), ["j1"])).toEqual({ ok: true });
   });
 
+  it("a node whose queue db cannot be read is unknown (refused), not an empty queue (issue #470)", async () => {
+    const r = await canFallbackToBlocking(
+      t(async () => { throw new Error("_proc-status 失败: proc-queue status unavailable: no such table: proc_jobs"); }),
+      ["j1"],
+    );
+    expect(r.ok).toBe(false);
+    expect((r as { reason: string }).reason).toContain("queue state unknown");
+  });
+
   it("treats an unreachable node, an old bundle and a missing channel as unknown (refused)", async () => {
     const down = await canFallbackToBlocking(t(async () => { throw new Error("ssh timeout"); }), ["j1"]);
     expect(down).toMatchObject({ ok: false });
