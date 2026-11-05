@@ -412,8 +412,7 @@
     是无效操作 —— 要改概率得调 weight。本轮未改 priority。
 
 ## 待办（Next）
-- [~] **T-145 fix(recorder): mesio 卡死看门狗统计目录内所有 .flv,会被同目录其他写入骗过（issue [#474](https://github.com/fuyucn/douyin-rec/issues/474)，计划 [045](plans/045_codebase_optimization.md) B5，2026-11-04）** — 证据/改法/验收见 issue。
-- [ ] **T-146 fix(manager): 同场窗口 10 分钟与 core 权威 30 分钟不一致（issue [#475](https://github.com/fuyucn/douyin-rec/issues/475)，计划 [045](plans/045_codebase_optimization.md) B6，2026-11-04）** — 证据/改法/验收见 issue。
+- [~] **T-146 fix(manager): 同场窗口 10 分钟与 core 权威 30 分钟不一致（issue [#475](https://github.com/fuyucn/douyin-rec/issues/475)，计划 [045](plans/045_codebase_optimization.md) B6，2026-11-04）** — 证据/改法/验收见 issue。
 - [ ] **T-147 fix(bilibili): 显示开播却拿不到播放地址时静默当作未开播（issue [#476](https://github.com/fuyucn/douyin-rec/issues/476)，计划 [045](plans/045_codebase_optimization.md) B7，2026-11-04）** — 证据/改法/验收见 issue。
 - [ ] **T-148 fix(manager): 会话边车写入失败被吞,无日志无告警（issue [#477](https://github.com/fuyucn/douyin-rec/issues/477)，计划 [045](plans/045_codebase_optimization.md) B8，2026-11-04）** — 证据/改法/验收见 issue。
 - [ ] **T-149 fix(hub): 台账迁移吞掉所有 ALTER 错误,只校验 3 列（issue [#478](https://github.com/fuyucn/douyin-rec/issues/478)，计划 [045](plans/045_codebase_optimization.md) B9，2026-11-04）** — 证据/改法/验收见 issue。
@@ -789,6 +788,7 @@
   属模型取舍，不是可顺手加的功能。**为什么**：冗余模型把轮询量乘了 N，是 VPS 被限流的根因之一。
 
 ## 已完成
+- [x] **T-145 fix(recorder): mesio 卡死看门狗统计目录内所有 .flv,会被同目录其他写入骗过（issue [#474](https://github.com/fuyucn/douyin-rec/issues/474)，计划 [045](plans/045_codebase_optimization.md) B5，2026-11-04）** — 证据/改法/验收见 issue。（2026-11-04，PR #491）
 - [x] **T-144 fix(web): GET /api/hub/resources 忽略内联/设置来源的 hub 配置（issue [#473](https://github.com/fuyucn/douyin-rec/issues/473)，计划 [045](plans/045_codebase_optimization.md) B4，2026-11-04）** — 证据/改法/验收见 issue。（2026-11-04，PR #489）
 - [x] **T-143 fix(cli): --danmu no 反而开启弹幕;布尔参数词表有 4 份且不一致（issue [#472](https://github.com/fuyucn/douyin-rec/issues/472)，计划 [045](plans/045_codebase_optimization.md) B3，2026-11-04）** — 证据/改法/验收见 issue。（2026-11-04，PR #488）
 - [x] **T-142 fix(hub): 节点输出格式锁手抄「节点侧上传」判定,漏掉全局总开关（issue [#471](https://github.com/fuyucn/douyin-rec/issues/471)，计划 [045](plans/045_codebase_optimization.md) B2，2026-11-04）** — 证据/改法/验收见 issue。（2026-11-04，PR #486）
