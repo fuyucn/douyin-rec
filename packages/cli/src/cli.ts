@@ -1202,6 +1202,11 @@ program
 // app 不直接依赖 @drec/orchestrator（orchestrator 依赖 app），由 cli 作为 L5 入口注入。
 // web API 在 hub 规则/worker 变更后立即触发一次任务同步(不等 60s 周期 tick)。
 let hubSyncTasks: ((opts?: { force?: boolean }) => Promise<void>) | undefined;
+/**
+ * Issue #480: reason sets already warned about, so a persistent bad-spec bug warns once per distinct set
+ * instead of on every sync tick for the life of the process.
+ */
+const warnedSkipReasons = new Set<string>();
 /** Master side of the fleet long connection (plans/042); null when `fleet.controllerUrl` is not configured. */
 let hubFleet: import("@drec/orchestrator").FleetController | null = null;
 /** For every SshTransport this process builds: fleet first, ssh otherwise (read per call). */
@@ -2104,6 +2109,18 @@ const hubStarter: HubStarter = {
             if (r.applied.length > 0 || r.removed.length > 0 || r.pending.length > 0) {
               opts.log(`[hub] 任务同步 ${w.id}: applied=${r.applied.length} removed=${r.removed.length}`
                 + ` pending=${r.pending.length}${force ? " (forced)" : ""}`);
+            }
+            // Issue #480: a node skips malformed specs instead of failing the whole batch — surface the count
+            // so a master bug does not look like a healthy sync. Old nodes never send the field.
+            if (r.skipped && r.skipped.length > 0) {
+              // Rate-limited per distinct reason set per process: a persistent master bug would otherwise warn
+              // on every sync tick for the life of the serve process.
+              const reasonSet = [...new Set(r.skipped.map((s) => s.reason))].sort().join("|");
+              if (!warnedSkipReasons.has(reasonSet)) {
+                warnedSkipReasons.add(reasonSet);
+                opts.warn(`[hub] 任务同步 ${w.id}: 节点跳过 ${r.skipped.length} 条坏配置`
+                  + `(其余照常应用;坏条目对应的本机任务不会被删除): ${r.skipped.map((s) => `#${s.index + 1} ${s.reason}`).join("; ")}`);
+              }
             }
             // 节点侧安全阀命中(T-2):必须让 master 侧看得见,否则「下发被拒」在 UI 上是静默的 ——
             // 用户只会看到任务没变,却不知道是节点在保护自己。
