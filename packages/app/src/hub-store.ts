@@ -14,7 +14,7 @@
  */
 import { readdirSync, readFileSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
-import { isWorkerAssigned, type HubPipelineConfig, type HubRecordingConfig } from "@drec/core";
+import { isWorkerAssigned, platformForRoom, type HubPipelineConfig, type HubRecordingConfig } from "@drec/core";
 import { normalizeRoom } from "./store.js";
 
 /** 一条 hub 规则(内存表示;持久化为 {key}.json)。 */
@@ -86,6 +86,16 @@ export function mergePipeline(
   return base;
 }
 
+/** 兼容回退:由 room 派生 platform + roomSlug(只用于「无点 stem」的旧文件,issue #481)。 */
+function deriveKeyFromRoom(room: string): { platform: string; roomSlug: string } {
+  const norm = normalizeRoom(room);
+  const p = platformForRoom(norm);
+  return { platform: p.id, roomSlug: p.extractRoomSlug(norm) };
+}
+
+/** 无点 stem 的兼容告警每 stem 只打一次(读路径每轮都会跑)。 */
+const warnedDotlessStem = new Set<string>();
+
 /** 把文件名 stem 拆回 platform + roomSlug(按首个 `.`;无点则整体当 roomSlug、平台 douyin)。 */
 function parseStem(stem: string): { platform: string; roomSlug: string } {
   const i = stem.indexOf(".");
@@ -98,8 +108,20 @@ function parseStem(stem: string): { platform: string; roomSlug: string } {
  * 否则 list 会返回一个「没有对应文件」的 key(PATCH 404),再次 create 还会生成第二个文件。
  */
 function fileToRule(stem: string, raw: HubFile): HubRule {
-  const { platform, roomSlug } = parseStem(stem);
+  const parsed = parseStem(stem);
   const room = (raw.room ?? "").trim();
+  // A dotless stem cannot carry the platform (pre-#481 hand-written files). Keep main's platform by deriving it
+  // from room; the key stays the stem so the file remains addressable. Warn once per stem.
+  let { platform, roomSlug } = parsed;
+  if (!stem.includes(".") && room) {
+    try {
+      ({ platform, roomSlug } = deriveKeyFromRoom(room));
+      if (!warnedDotlessStem.has(stem)) {
+        warnedDotlessStem.add(stem);
+        console.warn(`[hub-store] 规则文件名无平台前缀(${stem}.json),平台/房间号按 room 推导为 ${platform}.${roomSlug};建议手工改名为 <platform>.<roomSlug>.json`);
+      }
+    } catch { /* unparsable room: keep the dotless fallback */ }
+  }
   return {
     key: stem,
     roomSlug,
@@ -152,7 +174,9 @@ function toHubFile(rule: {
   order?: number;
 }): HubFile {
   return {
-    ...(rule.room ? { room: rule.room } : {}),
+    // Issue #481: presence is what matters, not truthiness — a truthy-but-blank input.room is stored as "" by
+    // upsert today (normalizeRoom trims it), so keep that byte-for-byte.
+    ...(rule.room !== undefined ? { room: rule.room } : {}),
     enabled: rule.enabled,
     pipeline: rule.pipeline,
     recording: rule.recording,
@@ -160,6 +184,20 @@ function toHubFile(rule: {
     requires: rule.requires,
     order: rule.order,
   };
+}
+
+/**
+ * Issue #481: the room a bound rule actually syncs is the SOURCE TASK's room, never the filename stem.
+ * A divergent stem (rule.room/task room edited after creation) must keep syncing — dropping the room from
+ * desired would make task-sync two-phase delete the remote managed task. `mismatched` is for a one-off warn.
+ */
+export function resolveRuleSyncRoom(
+  rule: { platform: string; roomSlug: string },
+  sourceRoom: string,
+): { platform: string; roomSlug: string; mismatched: boolean } {
+  const p = platformForRoom(sourceRoom);
+  const roomSlug = p.extractRoomSlug(sourceRoom);
+  return { platform: p.id, roomSlug, mismatched: p.id !== rule.platform || roomSlug !== rule.roomSlug };
 }
 
 /** 排序键:order 升序(未排过序的规则置后),同位按 key 稳定排序。 */

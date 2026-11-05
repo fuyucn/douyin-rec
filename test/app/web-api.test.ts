@@ -3048,27 +3048,6 @@ describe("setMesioPath 校验(issue #427:路径直进录制子进程,web 入口�
 });
 
 describe("hub rule identity is the filename stem (issue #481)", () => {
-  it("creating again for a source task whose room changed updates THAT rule file, no duplicate", () => {
-    const hubDir = mkdtempSync(join(tmpdir(), "hub-ident-"));
-    // Rules live in hubDir; the hub config lives elsewhere so it never shows up as a rule file.
-    const hubConfigPath = join(mkdtempSync(join(tmpdir(), "hub-ident-cfg-")), "hub.config.json");
-    writeFileSync(hubConfigPath, JSON.stringify({
-      workers: [{ id: "local", name: "本机", kind: "local", dataRoot: "/data" }],
-    }, null, 2));
-    const a = makeApi({ store, manager, hubDir, hubConfigPath });
-    const t = a.createTask({ room: "123456" }).body as { id: number };
-    const first = a.createHubRule({ recording: { sourceTaskId: t.id } }).body as { key: string };
-    expect(first.key).toBeTruthy();
-
-    // The divergence source from the issue: the source task's room is edited after the rule exists.
-    store.updateTask(t.id, { room: "999" });
-
-    const second = a.createHubRule({ recording: { sourceTaskId: t.id } }).body as { key: string };
-    expect(second.key).toBe(first.key); // same file, not a second room-derived one
-    expect(readdirSync(hubDir).filter((n) => n.endsWith(".json"))).toHaveLength(1);
-    expect((a.listHubRules().body as Array<{ key: string }>).map((r) => r.key)).toEqual([first.key]);
-  });
-
   it("PATCH by the listed key hits the divergent rule file (no 404, no ghost)", () => {
     const hubDir = mkdtempSync(join(tmpdir(), "hub-ident2-"));
     const hubConfigPath = join(mkdtempSync(join(tmpdir(), "hub-ident2-cfg-")), "hub.config.json");

@@ -9,7 +9,7 @@
  * 判定仍只在 master 做;录制端只读 `rollingEffective`。无规则的任务写 NULL(= 回落旧开关迁移,单机行为不变)。
  */
 import { platformForRoom, resolveRollingPolicy, rollingReasonText, type RollingPolicy, type RollingPolicyRule } from "@drec/core";
-import { listHubRules } from "./hub-store.js";
+import { listHubRules, resolveRuleSyncRoom } from "./hub-store.js";
 import type { TaskStore } from "./store.js";
 
 /** 「请求了边录边传却被拦下」的原因只在变化时打一行日志(同步 tick 每分钟重算,不能刷屏)。 */
@@ -65,11 +65,17 @@ export function refreshLocalRollingEffective(
     if (taskIds && !taskIds.includes(t.id)) continue;
     if (t.managedBy === "hub") continue; // 受管任务的生效值由 master 下发,不在本机重算
     const rule = bySource.get(t.id);
-    // 绑定必须同房间(与 cli desiredFor 同口径)。
-    const bound = rule && platformForRoom(t.room).extractRoomSlug(t.room) === rule.roomSlug ? rule : undefined;
+    // Issue #481: a bound rule always applies to its source task's room. The filename stem is only the file
+    // identity; a divergent stem must NOT clear the derived value to NULL (that would silently flip the task
+    // back to the legacy flag). Main's effective behaviour was "bound => apply".
+    const bound = rule;
     if (!bound) {
       store.updateTask(t.id, { rollingEffective: null });
       continue;
+    }
+    const sync = resolveRuleSyncRoom(bound, t.room);
+    if (sync.mismatched) {
+      log?.(`[rolling] 规则 ${bound.key} 的 stem 房间(${bound.roomSlug})与源任务房间(${sync.roomSlug})不一致;按源任务继续计算生效值`);
     }
     // 与 cli `desiredFor`(master 下发)传**同一组**入参(含 steps → 烧录互斥),两处判定结果恒一致。
     const policy = resolveRollingPolicy(

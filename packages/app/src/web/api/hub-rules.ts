@@ -58,14 +58,10 @@ export function buildHubRules(ctx: ApiCtx) {
       // rejects every other case.
       const rerr = task.streamUpload ? null : recordingError(sourceTaskId, roomSlug);
       if (rerr) return err(400, rerr);
-      // Issue #481: the file stem is the rule identity. If this source task already owns a rule file (its task
-      // room may have been edited after creation, so the stem no longer matches the room), update THAT file
-      // instead of creating a second one next to it.
-      const existingByTask = hubStore.listHubRules(hubDir).find((r) => r.recording?.sourceTaskId === Number(sourceTaskId));
-      const keyPlatform = existingByTask?.platform ?? platform.id;
-      const keySlug = existingByTask?.roomSlug ?? roomSlug;
       // 同房间规则已存在时 upsert 会深合并 pipeline → 按合并后校验。
-      const existingRule = existingByTask ?? hubStore.getHubRule(hubDir, hubStore.hubKey(keyPlatform, keySlug));
+      // Issue #481: identity is the filename stem, but create still keys the file by the source task's CURRENT
+      // room — reusing an older divergent stem would write the new room into it and leave a dead rule.
+      const existingRule = hubStore.getHubRule(hubDir, hubStore.hubKey(platform.id, roomSlug));
       const perr = validatePipeline(input, existingRule?.pipeline);
       if (perr) return err(400, perr);
       // create is an upsert: validate what will be stored (merged), not just the request body.
@@ -86,8 +82,8 @@ export function buildHubRules(ctx: ApiCtx) {
       if (roomErr) return err(400, roomErr);
       try {
         const rule = hubStore.upsertHubRule(hubDir, {
-          platform: keyPlatform,
-          roomSlug: keySlug,
+          platform: platform.id,
+          roomSlug,
           room: task.room,
           enabled: input.enabled,
           pipeline: input.pipeline,

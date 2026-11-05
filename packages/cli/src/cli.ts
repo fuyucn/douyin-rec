@@ -1245,6 +1245,24 @@ let hubDeliverySnapshot: RollingDeliveryDTO[] = [];
 const PROBE_CACHE_MS = 30_000;
 const readRollingDelivery = (): RollingDeliveryDTO[] => hubDeliverySnapshot;
 const recordingSnapshotKey = (platform: string, roomSlug: string): string => `${platform}:${roomSlug}`;
+
+/**
+ * Issue #481: the rule file stem is the identity, but the SOURCE TASK decides which room is actually synced.
+ * A divergent stem (rule.room edited / task room edited after creation) must not drop the room from desired —
+ * that would make task-sync delete the remote managed task. Warn once per (stem -> task room) pair.
+ */
+const warnedRuleIdentity = new Set<string>();
+const warnRuleIdentityMismatch = (
+  rule: { key: string; platform: string; roomSlug: string },
+  sync: { platform: string; roomSlug: string; mismatched: boolean },
+  warn: (m: string) => void,
+): void => {
+  if (!sync.mismatched) return;
+  const token = `${rule.key}->${sync.platform}.${sync.roomSlug}`;
+  if (warnedRuleIdentity.has(token)) return;
+  warnedRuleIdentity.add(token);
+  warn(`[hub] 规则 ${rule.key} 的 stem(${rule.platform}.${rule.roomSlug})与绑定源任务房间(${sync.platform}.${sync.roomSlug})不一致;按源任务房间继续同步`);
+};
 const readRecordingWorkers = (platform: string, roomSlug: string): RecordingWorkerStatusDTO[] =>
   hubRecordingSnapshot.get(recordingSnapshotKey(platform, roomSlug)) ?? [];
 const readZeroDiskStatus = (platform: string, roomSlug: string): ZeroDiskNodeStatusDTO[] =>
@@ -1392,7 +1410,7 @@ const hubStarter: HubStarter = {
     const { ffprobeVideo } = await import("@drec/post-process");
     const { handleEnqueue, handleProcStatus, handleProcCancel } = await import("@drec/app");
     const { statSync } = await import("node:fs");
-    const { uploadPlain, appendGroup, countVideoParts, hubStore, workerStore, rootHubDir, rootHubConfig, rootConfigDir, rootStageDir, rootLogsDir, drecRoot, listNodeTasks, applyRemoteTasks, resolveTaskStreamCookies, recordRoomSessions } = await import("@drec/app");
+    const { uploadPlain, appendGroup, countVideoParts, hubStore, resolveRuleSyncRoom, workerStore, rootHubDir, rootHubConfig, rootConfigDir, rootStageDir, rootLogsDir, drecRoot, listNodeTasks, applyRemoteTasks, resolveTaskStreamCookies, recordRoomSessions } = await import("@drec/app");
     const { FileLogger } = await import("@drec/observability");
     const { recordExpectedVersion, recordSyncError } = await import("@drec/app");
 
@@ -1573,8 +1591,9 @@ const hubStarter: HubStarter = {
           const source = opts.store.getTask(sourceId);
           if (!source) continue;
           const platform = platformForRoom(source.room);
-          const roomSlug = platform.extractRoomSlug(source.room);
-          if (roomSlug !== rule.roomSlug || platform.id !== rule.platform) continue;
+          const sync = resolveRuleSyncRoom(rule, source.room);
+          const roomSlug = sync.roomSlug;
+          warnRuleIdentityMismatch(rule, sync, opts.warn);
           const selectedIds = rule.workers?.length
             ? rule.workers
             : configuredWorkers.map((worker) => worker.id);
@@ -1647,11 +1666,13 @@ const hubStarter: HubStarter = {
         const src = rule.recording?.sourceTaskId ? opts.store.getTask(rule.recording.sourceTaskId) : null;
         if (!src?.streamUpload) continue;
         const p = platformForRoom(src.room);
-        if (p.extractRoomSlug(src.room) !== rule.roomSlug) continue;
+        const sync = resolveRuleSyncRoom(rule, src.room);
+        const srcSlug = sync.roomSlug;
+        warnRuleIdentityMismatch(rule, sync, opts.warn);
         for (const w of loadWorkers()) {
           if (w.kind === "local" || w.id === "local") continue;
           if (!isWorkerAssigned(rule, w.id, w.capabilities)) continue;
-          out.push({ workerId: w.id, platform: p.id, roomSlug: rule.roomSlug });
+          out.push({ workerId: w.id, platform: sync.platform, roomSlug: srcSlug });
         }
       }
       return out;
@@ -1910,7 +1931,11 @@ const hubStarter: HubStarter = {
         const src = rule.recording?.sourceTaskId ? opts.store.getTask(rule.recording.sourceTaskId) : null;
         if (!src) continue;                        // 真删除意图:规则没绑源任务 / 源任务已删
         const p = platformForRoom(src.room);
-        if (p.extractRoomSlug(src.room) !== rule.roomSlug) continue; // 绑定必须同房间
+        // Issue #481: never drop a bound rule from desired because its filename stem diverges from the source
+        // task's room; sync identity comes from the source task (main's effective behaviour).
+        const sync = resolveRuleSyncRoom(rule, src.room);
+        const srcSlug = sync.roomSlug;
+        warnRuleIdentityMismatch(rule, sync, opts.warn);
         // #442:删除意图只来自「未勾选」这一个维度。规则停用与能力不满足仍产 enabled:false
         // (停用保留);deleted 条目不带凭据/回调/输出目录 —— 删除提示用不到它们,也不该
         // 把这些内容发给不再承担该房间的节点(会进节点审计快照)。
@@ -1918,8 +1943,8 @@ const hubStarter: HubStarter = {
         const targeted = isWorkerTargeted(rule, workerId);
         if (!ruleDisabled && !targeted) {
           out.push({
-            platform: p.id,
-            roomSlug: rule.roomSlug,
+            platform: sync.platform,
+            roomSlug: srcSlug,
             room: src.room,
             name: src.name,
             quality: src.quality,
@@ -1950,7 +1975,7 @@ const hubStarter: HubStarter = {
         // expected account; an old / unconfirmed node, or an unbuildable delivery, gets the task
         // DISABLED with a visible reason, never defaults. One decision point: `planZeroDiskSpec`.
         const workerDataRoot = loadWorkers().find((w) => w.id === workerId)?.dataRoot;
-        const zdKey = blockedKey(workerId, p.id, rule.roomSlug);
+        const zdKey = blockedKey(workerId, sync.platform, srcSlug);
         const zd = planZeroDiskSpec({
           streamUpload: src.streamUpload,
           workerId,
@@ -1959,8 +1984,8 @@ const hubStarter: HubStarter = {
           allowsPush: zeroDiskFleet.allowsPush(workerId),
           ruleError: zeroDiskRuleError(src.streamUpload, { enabled: rule.enabled, mode: rule.pipeline?.upload?.mode, workers: rule.workers, steps: rule.pipeline?.steps }),
           build: () => buildZeroDiskDelivery({
-            platform: p.id,
-            roomSlug: rule.roomSlug,
+            platform: sync.platform,
+            roomSlug: srcSlug,
             // The master's configured upload login (same file its own pipeline uploads with).
             ...(hubCfg.cookies ? { masterCookiesPath: hubCfg.cookies } : {}),
             ...(workerDataRoot ? { workerDataRoot } : {}),
@@ -1989,8 +2014,8 @@ const hubStarter: HubStarter = {
           isLocalWorker,
         );
         out.push({
-          platform: p.id,
-          roomSlug: rule.roomSlug,
+          platform: sync.platform,
+          roomSlug: srcSlug,
           room: src.room,
           name: src.name,
           quality: src.quality,

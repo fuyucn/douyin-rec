@@ -3,11 +3,11 @@
  * A rule whose room was edited after creation used to list under a room-derived key that had no file
  * (PATCH 404) and a second create produced a duplicate file.
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getHubRule, hubKey, listHubRules, reorderHubRules, updateHubRule, upsertHubRule } from "../../packages/app/src/hub-store.js";
+import { getHubRule, hubKey, listHubRules, reorderHubRules, resolveRuleSyncRoom, updateHubRule, upsertHubRule } from "../../packages/app/src/hub-store.js";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "hub-identity-")); });
@@ -92,3 +92,55 @@ describe("rule identity = filename stem (issue #481)", () => {
   });
 });
 
+
+describe("bound rule sync identity comes from the source task (issue #481 review)", () => {
+  it("divergent stem: the source task's room wins, flagged as mismatched (never skipped)", () => {
+    // desiredFor / rolling-effective must keep syncing this room; only a warn is emitted.
+    expect(resolveRuleSyncRoom({ platform: "douyin", roomSlug: "111" }, room("222")))
+      .toEqual({ platform: "douyin", roomSlug: "222", mismatched: true });
+  });
+
+  it("normal rule: identity unchanged and not flagged", () => {
+    expect(resolveRuleSyncRoom({ platform: "douyin", roomSlug: "333" }, room("333")))
+      .toEqual({ platform: "douyin", roomSlug: "333", mismatched: false });
+  });
+
+  it("wiring: cli desiredFor / status / zero-disk and rolling-effective use the helper, not a mismatch skip", () => {
+    const cli = readFileSync(new URL("../../packages/cli/src/cli.ts", import.meta.url), "utf-8");
+    expect(cli).toContain("resolveRuleSyncRoom");
+    expect(cli).not.toContain("!== rule.roomSlug) continue"); // the old "drop from desired" guard
+    const rolling = readFileSync(new URL("../../packages/app/src/rolling-effective.ts", import.meta.url), "utf-8");
+    expect(rolling).toContain("resolveRuleSyncRoom");
+    expect(rolling).not.toContain("=== rule.roomSlug ? rule : undefined");
+  });
+});
+
+describe("legacy / edge input (issue #481 review)", () => {
+  it("dotless stem with room: platform/roomSlug fall back to the room (keeps main behaviour), key stays the stem", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // Pre-#481 hand-written file: no platform prefix in the filename.
+      writeFileSync(join(dir, "999.json"), JSON.stringify({ room: "https://live.bilibili.com/12345", enabled: true }) + String.fromCharCode(10), "utf-8");
+      const r = getHubRule(dir, "999")!;
+      expect(r.key).toBe("999");
+      expect(r.platform).toBe("bilibili"); // derived from room, like main
+      expect(r.roomSlug).toBe("12345");
+      expect(warn.mock.calls.some((c) => String(c[0]).includes("规则文件名无平台前缀"))).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("truthy-but-blank input.room is persisted as '' (main kept an empty room value)", () => {
+    const key = hubKey("douyin", "777");
+    upsertHubRule(dir, { platform: "douyin", roomSlug: "777", room: "   " });
+    const raw = jsonOf(key);
+    expect("room" in raw).toBe(true);
+    expect(raw.room).toBe("");
+  });
+
+  it("wiring: last-run lookup uses the task-derived room key, not the rule stem", () => {
+    const ctx = readFileSync(new URL("../../packages/app/src/web/api/context.ts", import.meta.url), "utf-8");
+    expect(ctx).toContain("listHubJobs(deps.syncDbPath, { room: hubStore.hubKey(platform.id, roomSlug)");
+  });
+});

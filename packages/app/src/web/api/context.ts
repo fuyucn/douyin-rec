@@ -167,7 +167,9 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
           if (p.steps?.burnLivechat !== false) steps.push("livechat");
           let lastRun: { state: string; bv: string | null } | null = null;
           if (deps.syncDbPath) {
-            const r = listHubJobs(deps.syncDbPath, { room: rule.key, limit: 1 }).jobs[0];
+            // Issue #481: ledger rows are keyed by the TASK's room (streamKey), not by the rule filename stem.
+            // Using rule.key would lose last-run info for a divergent rule.
+            const r = listHubJobs(deps.syncDbPath, { room: hubStore.hubKey(platform.id, roomSlug), limit: 1 }).jobs[0];
             if (r) lastRun = { state: r.state, bv: r.bv };
           }
           hubRule = {
