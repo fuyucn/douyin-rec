@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { dirname, join } from "node:path";
 import { parseJobId } from "@drec/core";
 import { ProcQueueStore, BatchRejected, procQueueDbPath, fileTagOf, GC_RETAIN_MS, LEASE_MS } from "@drec/proc-queue";
+import { SCHEMA_VERSION } from "../../packages/proc-queue/src/schema.js";
 import { makeEnv, type Env } from "./helpers.js";
 
 let env: Env;
@@ -23,7 +24,7 @@ describe("procQueueDbPath", () => {
 });
 
 describe("迁移", () => {
-  it("repeated first open is idempotent (same-process connections; real multi-process lives in store-multiproc.test.ts): user_version=5, data kept, tables present", () => {
+  it("repeated first open is idempotent (same-process connections; real multi-process lives in store-multiproc.test.ts): current user_version, data kept, tables present", () => {
     const s1 = env.open();
     const r = s1.enqueue(env.job("a.ts"), roots());
     expect(r.state).toBe("pending");
@@ -31,7 +32,7 @@ describe("迁移", () => {
     const s3 = env.open();
     expect(s3.get(r.jobId)?.state).toBe("pending");
     const raw = new DatabaseSync(env.dbPath);
-    expect((raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(5);
+    expect((raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(SCHEMA_VERSION);
     const tables = (raw.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>).map((t) => t.name);
     expect(tables).toEqual(expect.arrayContaining(["proc_jobs", "proc_runner_lease", "proc_order_cursor", "proc_lease_reservation"]));
     raw.close();
@@ -532,6 +533,32 @@ describe("list / active / gc", () => {
     expect(s.get(fresh)?.state).toBe("done");
   });
 
+  it("gc:skipped 与 done/cancelled 同口径保留 7 天后删", () => {
+    const s = env.open();
+    lease(s);
+    const old = s.enqueue(env.job("sk.ts"), roots()).jobId;
+    s.claim({ kinds: ["fake"], owner: "A", accept: (j) => j.jobId === old });
+    expect(s.finish(old, "A", { state: "skipped", reason: "skip-hub-owned" })).toBe(true);
+    env.clock.t += GC_RETAIN_MS + 1;
+    lease(s);
+    const fresh = s.enqueue(env.job("sk2.ts"), roots()).jobId;
+    s.claim({ kinds: ["fake"], owner: "A", accept: (j) => j.jobId === fresh });
+    expect(s.finish(fresh, "A", { state: "skipped", reason: "skip-source-gone" })).toBe(true);
+    expect(s.gc()).toBe(1);
+    expect(s.get(old)).toBeNull();
+    expect(s.get(fresh)?.state).toBe("skipped");
+  });
+
+  it("PR1 拒绝写入 reconciling(出边由 PR3 落地),行保持 running 可恢复", () => {
+    const s = env.open();
+    lease(s);
+    const r = s.enqueue(env.job("a.ts"), roots());
+    s.claim({ kinds: ["fake"], owner: "A" });
+    expect(s.finish(r.jobId, "A", { state: "reconciling", error: "submit interrupted", reason: "reconcile-start" })).toBe(false);
+    expect(s.get(r.jobId)?.state).toBe("running");
+    expect(s.gc()).toBe(0);
+  });
+
   it("gc purgeFailed 删 failed,uncertain 须先 ack 才删", () => {
     const s = env.open();
     lease(s);
@@ -551,6 +578,25 @@ describe("list / active / gc", () => {
 });
 
 describe("v1 -> v2 migration (plan 038 T01)", () => {
+  it("a legacy v5 database with no new-state rows upgrades without schema columns", () => {
+    const s0 = env.open();
+    const r = s0.enqueue(env.job("a.ts"), roots());
+    s0.close();
+    const raw = new DatabaseSync(env.dbPath);
+    raw.exec("PRAGMA user_version=5;");
+    raw.close();
+    const s = env.open();
+    expect(s.get(r.jobId)?.state).toBe("pending");
+    const cols = (new DatabaseSync(env.dbPath).prepare("PRAGMA table_info(proc_jobs)").all() as Array<{ name: string }>).map((c) => c.name);
+    expect(cols).not.toContain("ctx");
+    expect(cols).not.toContain("chain");
+    const part = env.job("b.ts", { kind: "upload-part", params: { ctx: { v: 1, orderKey: "k", index: 1, file: join(env.root, "recordings", "b.ts"), fp: { size: 1, mtimeMs: 1 } } } });
+    const enqueued = s.enqueue(part, roots());
+    expect(enqueued.state).toBe("pending");
+    expect(s.get(enqueued.jobId)?.params.ctx).toMatchObject({ v: 1 });
+    s.close();
+  });
+
   it("an existing v1 db gains 8 columns and the cursor table; old rows read the new columns as null", () => {
     const path = join(env.root, "db", "old.db");
     mkdirSync(dirname(path), { recursive: true });
