@@ -58,6 +58,13 @@ describe("biliup processor (plan 038 T08)", () => {
         calls.push(u);
         return new Response(JSON.stringify({ code: 0, data: null }), { status: 200 });
       }
+      // issue #460: the configured 123 is a legacy section id inside season 500.
+      if (u.includes("/x2/creative/web/seasons")) {
+        return new Response(JSON.stringify({
+          code: 0,
+          data: { seasons: [{ season: { id: 500 }, sections: { sections: [{ id: 123 }] } }], total: 1 },
+        }), { status: 200 });
+      }
       return new Response(JSON.stringify({ code: -1 }), { status: 404 });
     }) as unknown as typeof fetch);
     try {
