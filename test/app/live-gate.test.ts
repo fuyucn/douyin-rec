@@ -529,41 +529,72 @@ describe("zero-disk unconfirmed-parts check (real state files)", () => {
   });
 });
 
-describe("douyin API mode used by the gate probe", () => {
+/**
+ * Issue #479: the gate passes the Douyin API mode as a per-call option instead of rewriting
+ * `process.env`. The old approach was only correct while the platform read the mode synchronously before
+ * its first await, and concurrent probes could observe each other's value.
+ */
+describe("douyin API mode passed to the gate probe (issue #479)", () => {
   afterEach(() => { vi.restoreAllMocks(); delete process.env.DOUYIN_REC_API_MODE; });
 
-  it("applies settings.douyinApiMode for the call only and restores the env before any await", async () => {
-    vi.useRealTimers();
-    const platform = platformForRoom("12345");
-    let seen: string | undefined = "unset";
-    vi.spyOn(platform, "getLiving").mockImplementation(async () => {
-      seen = process.env.DOUYIN_REC_API_MODE; // read synchronously, like douyin-live's getLiving
-      await Promise.resolve();
-      return true;
+  /** Fake platform getLiving that records the per-call apiMode it received (undefined = not passed). */
+  function spyMode(platform: ReturnType<typeof platformForRoom>, seen: Array<string | undefined>, result = false) {
+    vi.spyOn(platform, "getLiving").mockImplementation(async (_room: string, opts?: { apiMode?: string }) => {
+      seen.push(opts?.apiMode);
+      return result;
     });
-    const p = probeRoomLiving({ room: "12345" }, "web");
-    expect(process.env.DOUYIN_REC_API_MODE).toBeUndefined(); // restored synchronously: no global leak
-    expect(await p).toBe(true);
-    expect(seen).toBe("web");
-  });
+  }
 
-  it("restores a pre-existing env value and leaves the env alone when no mode is configured", async () => {
+  it("passes settings.douyinApiMode as a per-call option and never touches the env", async () => {
     vi.useRealTimers();
     const platform = platformForRoom("12345");
     const seen: Array<string | undefined> = [];
-    vi.spyOn(platform, "getLiving").mockImplementation(async () => { seen.push(process.env.DOUYIN_REC_API_MODE); return false; });
-    process.env.DOUYIN_REC_API_MODE = "mobile";
-    await probeRoomLiving({ room: "12345" }, "web");
-    expect(process.env.DOUYIN_REC_API_MODE).toBe("mobile");
-    await probeRoomLiving({ room: "12345" }, undefined);
+    spyMode(platform, seen, true);
+    const envBefore = process.env.DOUYIN_REC_API_MODE;
+
+    expect(await probeRoomLiving({ room: "12345" }, "web")).toBe(true);
+    expect(seen).toEqual(["web"]);
+    expect(process.env.DOUYIN_REC_API_MODE).toBe(envBefore); // no mutation at all, before or after the await
+  });
+
+  it("two concurrent probes with different modes each see their own mode", async () => {
+    vi.useRealTimers();
+    const platform = platformForRoom("12345");
+    const seen: Array<string | undefined> = [];
+    // The second probe resolves only after the first has been observed, so a shared mutable source would bleed.
+    let releaseFirst!: () => void;
+    const firstSeen = new Promise<void>((r) => { releaseFirst = r; });
+    vi.spyOn(platform, "getLiving").mockImplementation(async (_room: string, opts?: { apiMode?: string }) => {
+      seen.push(opts?.apiMode);
+      await firstSeen;
+      return false;
+    });
+    const envBefore = process.env.DOUYIN_REC_API_MODE;
+    const a = probeRoomLiving({ room: "12345" }, "web");
+    const b = probeRoomLiving({ room: "12345" }, "mobile");
+    expect(seen).toEqual(["web", "mobile"]); // each call carries its own mode
+    releaseFirst();
+    await Promise.all([a, b]);
     expect(seen).toEqual(["web", "mobile"]);
+    expect(process.env.DOUYIN_REC_API_MODE).toBe(envBefore);
+  });
+
+  it("no configured mode → the option is omitted, so the platform keeps reading the env", async () => {
+    vi.useRealTimers();
+    const platform = platformForRoom("12345");
+    const seen: Array<string | undefined> = [];
+    spyMode(platform, seen);
+    process.env.DOUYIN_REC_API_MODE = "mobile";
+    await probeRoomLiving({ room: "12345" }, undefined);
+    expect(seen).toEqual([undefined]); // not passed: env stays the single default source
+    expect(process.env.DOUYIN_REC_API_MODE).toBe("mobile");
   });
 
   it("TaskManager default probe reads the setting at call time", async () => {
     vi.useFakeTimers();
     const platform = platformForRoom("12345");
     const seen: Array<string | undefined> = [];
-    vi.spyOn(platform, "getLiving").mockImplementation(async () => { seen.push(process.env.DOUYIN_REC_API_MODE); return false; });
+    spyMode(platform, seen);
     store.setSetting("douyinApiMode", "webHTML");
     const mgr = new TaskManager(store, spawner, { random: () => 0, log: () => {}, hasUnconfirmedZeroDisk: () => false });
     mgr.start(add());

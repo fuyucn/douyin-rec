@@ -11,9 +11,6 @@ import { livePumpHasUnconfirmed, livePumpStatePath, resolvePumpDir } from "@drec
 import type { Task } from "./store.js";
 import { readOutputLayout, resolveOutputDir } from "./paths.js";
 
-/** Env var the Douyin platform reads for its API mode; the spawner injects the same one into children. */
-const DOUYIN_API_MODE_ENV = "DOUYIN_REC_API_MODE";
-
 /**
  * Room key used by the zero-disk pump. The pump passes it straight to Platform.getStream; platforms
  * that need a numeric room id (Douyin) reject a full live URL, so normalize at this boundary.
@@ -94,23 +91,15 @@ export function zeroDiskHasUnconfirmedParts(task: Task, layout: PathLayout = rea
 }
 
 /**
- * Authoritative liveness probe for the gate. Douyin's `getLiving` reads its API mode from
- * `DOUYIN_REC_API_MODE` synchronously when called, so the setting is applied to the env only for the
- * duration of the synchronous call and restored before any await. No other code path in the serve
- * process ever observes the value (a global `process.env` change would also steer unrelated Douyin
- * lookups such as anchor-name fetches), yet the probe uses the same endpoint as the child it gates.
+ * Authoritative liveness probe for the gate. The Douyin API mode from `settings.douyinApiMode` is passed
+ * as a per-call option (issue #479), so the probe uses the same endpoint as the child it gates without
+ * touching `process.env`: a global env change would steer unrelated Douyin lookups in the serve process
+ * (anchor-name fetches) and concurrent gates could bleed into each other. Platforms that do not read the
+ * option (bilibili, kuaishou) behave exactly as before; so do all other `getLiving` callers, which omit it.
  */
 export function probeRoomLiving(task: Pick<Task, "room">, apiMode: string | undefined): Promise<boolean> {
   const platform = platformForRoom(task.room);
-  const mode = apiMode?.trim();
   const channel = zeroDiskRoom(platform, task.room);
-  if (!mode) return platform.getLiving(channel);
-  const prev = process.env[DOUYIN_API_MODE_ENV];
-  process.env[DOUYIN_API_MODE_ENV] = mode;
-  try {
-    return platform.getLiving(channel);
-  } finally {
-    if (prev === undefined) delete process.env[DOUYIN_API_MODE_ENV];
-    else process.env[DOUYIN_API_MODE_ENV] = prev;
-  }
+  const mode = apiMode?.trim();
+  return mode ? platform.getLiving(channel, { apiMode: mode }) : platform.getLiving(channel);
 }

@@ -9,7 +9,7 @@
  *
  * 平台层(../index.ts)的 Platform 方法只委托到这里导出的 getStream/getLiving/getRoomInfo/getUname。
  */
-import type { PlatformStream } from "@drec/core";
+import type { PlatformProbeOpts, PlatformStream } from "@drec/core";
 
 /** bilibili 画质 qn(从高到低):10000 原画 / 400 蓝光 / 250 超清 / 150 高清 / 80 流畅。 */
 export const BILIBILI_QUALITIES = ["10000", "400", "250", "150", "80"] as const;
@@ -149,6 +149,6 @@ export async function getStream(channelId: string, quality: string, cookies?: st
 }
 
 /** 判活:房间号 → 是否直播中(权威 live_status)。 */
-export async function getLiving(channelId: string): Promise<boolean> {
+export async function getLiving(channelId: string, _opts?: PlatformProbeOpts): Promise<boolean> {
   return (await getRoomInfo(channelId)).living;
 }

@@ -20,7 +20,7 @@
  *   - 画质档按 bitrate 阈值映射(参考实现同款):OD=最高 / BD≤4000 / UHD≤2000 / HD≤1000 / SD≤800 / LD≤600。
  *   - h264(codec 兼容)优先于 hevc;FLV 优先于 HLS playUrl。
  */
-import type { PlatformStream } from "@drec/core";
+import type { PlatformProbeOpts, PlatformStream } from "@drec/core";
 
 /** 快手画质档(从高到低,映射 bitrate 阈值见 QUALITY_MAX_BITRATE)。 */
 export const KUAISHOU_QUALITIES = ["OD", "BD", "UHD", "HD", "SD", "LD"] as const;
@@ -389,7 +389,7 @@ export async function getStream(userId: string, quality: string, cookies?: strin
  * 风控/接口异常时**抛错**(= 未知),而不是返回 false —— 否则录制器会把「请求过快」误判成
  * 「主播已下播」而提前收尾/漏录(见 docs/kuaishou-rate-limit.md)。
  */
-export async function getLiving(userId: string): Promise<boolean> {
+export async function getLiving(userId: string, _opts?: PlatformProbeOpts): Promise<boolean> {
   let page: PlatformStream;
   try {
     page = await getStreamViaPage(userId, "OD");
