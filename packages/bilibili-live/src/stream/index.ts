@@ -110,8 +110,10 @@ export function pickStreamUrl(playInfo: Record<string, unknown>): string | undef
 }
 
 /**
- * 取流:房间号 → 可录制流(living/url/owner/title/headers/raw)。未开播/无流 → {living:false}。
- * `cookies` 可选(登录态):带上可取大会员/高画质流;不带则匿名取基础画质(当前默认)。
+ * Resolve a room's recordable stream (living/url/owner/title/headers/raw).
+ * Offline → {living:false}. Live but no playable URL → {living:true, no url, unplayableReason}:
+ * issue #476, the recorder alerts once and keeps polling instead of treating the room as offline.
+ * `cookies` is the optional logged-in session (member / high-quality streams); omitted = anonymous.
  */
 export async function getStream(channelId: string, quality: string, cookies?: string): Promise<PlatformStream> {
   const info = await getRoomInfo(channelId);
@@ -125,7 +127,18 @@ export async function getStream(channelId: string, quality: string, cookies?: st
   // 二次确认(getRoomPlayInfo 也带 live_status,避免 get_info 与取流之间下播的竞态)。
   if (Number(play.live_status) !== 1) return { living: false };
   const url = pickStreamUrl((play.playurl_info as Record<string, unknown>) ?? {});
-  if (!url) return { living: false }; // 无可用流(可能刚下播/风控)→ 当未开播,基类继续轮询
+  if (!url) {
+    // Both calls say "live" but no playable URL came back (CDN not ready, or risk control withholding
+    // the stream). Reporting {living:false} here (issue #476) made the recorder believe the room was
+    // offline and poll silently for the whole broadcast. Report live without a URL instead: the
+    // recorder alerts once per broadcast and keeps polling until a URL appears.
+    return {
+      living: true,
+      title: info.title,
+      raw: play,
+      unplayableReason: "直播中但 playurl 未给出可播放地址(CDN 未就绪或被风控)",
+    };
+  }
   const owner = (await getUname(info.uid)) ?? "";
   // bilibili CDN(bilivideo.com)校验来路 → 录制器(ffmpeg/mesio)拉流必须带这些头,否则 403。
   const headers = { Referer: "https://live.bilibili.com/", "User-Agent": UA };
