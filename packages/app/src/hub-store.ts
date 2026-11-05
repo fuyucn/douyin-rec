@@ -14,7 +14,7 @@
  */
 import { readdirSync, readFileSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
-import { platformForRoom, isWorkerAssigned, type HubPipelineConfig, type HubRecordingConfig } from "@drec/core";
+import { isWorkerAssigned, platformForRoom, type HubPipelineConfig, type HubRecordingConfig } from "@drec/core";
 import { normalizeRoom } from "./store.js";
 
 /** 一条 hub 规则(内存表示;持久化为 {key}.json)。 */
@@ -86,13 +86,15 @@ export function mergePipeline(
   return base;
 }
 
-/** 由 room 派生 platform + roomSlug + key(唯一真理 = 平台的 extractRoomSlug)。 */
-function deriveKey(room: string): { platform: string; roomSlug: string; key: string } {
+/** 兼容回退:由 room 派生 platform + roomSlug(只用于「无点 stem」的旧文件,issue #481)。 */
+function deriveKeyFromRoom(room: string): { platform: string; roomSlug: string } {
   const norm = normalizeRoom(room);
   const p = platformForRoom(norm);
-  const roomSlug = p.extractRoomSlug(norm);
-  return { platform: p.id, roomSlug, key: hubKey(p.id, roomSlug) };
+  return { platform: p.id, roomSlug: p.extractRoomSlug(norm) };
 }
+
+/** 无点 stem 的兼容告警每 stem 只打一次(读路径每轮都会跑)。 */
+const warnedDotlessStem = new Set<string>();
 
 /** 把文件名 stem 拆回 platform + roomSlug(按首个 `.`;无点则整体当 roomSlug、平台 douyin)。 */
 function parseStem(stem: string): { platform: string; roomSlug: string } {
@@ -100,14 +102,30 @@ function parseStem(stem: string): { platform: string; roomSlug: string } {
   return i < 0 ? { platform: "douyin", roomSlug: stem } : { platform: stem.slice(0, i), roomSlug: stem.slice(i + 1) };
 }
 
+/**
+ * 磁盘文件 → 内存规则。**Issue #481:文件名 stem 是唯一身份**,platform/roomSlug 一律从 stem 还原;
+ * `room` 只是展示/数据字段(源任务房间被改过后可能与 stem 不一致,不得再让它决定 key)。
+ * 否则 list 会返回一个「没有对应文件」的 key(PATCH 404),再次 create 还会生成第二个文件。
+ */
 function fileToRule(stem: string, raw: HubFile): HubRule {
+  const parsed = parseStem(stem);
   const room = (raw.room ?? "").trim();
-  // room 优先(权威);无 room 则从文件名 stem 还原。
-  const d = room ? deriveKey(room) : { ...parseStem(stem), key: stem };
+  // A dotless stem cannot carry the platform (pre-#481 hand-written files). Keep main's platform by deriving it
+  // from room; the key stays the stem so the file remains addressable. Warn once per stem.
+  let { platform, roomSlug } = parsed;
+  if (!stem.includes(".") && room) {
+    try {
+      ({ platform, roomSlug } = deriveKeyFromRoom(room));
+      if (!warnedDotlessStem.has(stem)) {
+        warnedDotlessStem.add(stem);
+        console.warn(`[hub-store] 规则文件名无平台前缀(${stem}.json),平台/房间号按 room 推导为 ${platform}.${roomSlug};建议手工改名为 <platform>.<roomSlug>.json`);
+      }
+    } catch { /* unparsable room: keep the dotless fallback */ }
+  }
   return {
-    key: d.key,
-    roomSlug: d.roomSlug,
-    platform: d.platform,
+    key: stem,
+    roomSlug,
+    platform,
     room,
     // 文件省略 enabled 视为启用(文件存在=已配置;enabled 仅作开关)。
     enabled: raw.enabled !== false,
@@ -138,6 +156,48 @@ function writeRule(dir: string, key: string, file: HubFile): void {
   const tmp = join(dir, `.${key}.json.tmp`);
   writeFileSync(tmp, JSON.stringify(file, null, 2) + "\n", "utf-8");
   renameSync(tmp, path);
+}
+
+/**
+ * 内存规则 → 磁盘文件(issue #481:**唯一**的序列化点;三个写入口都走这里,不再各拼一份)。
+ * 字段语义与改动前逐字一致:undefined 的键由 JSON.stringify 省略(不写 null);
+ * `room` 为空则不落盘;其余字段总是写出。唯一按调用点保留的差异是 room 的来源:
+ * upsert 写入 `normalizeRoom(input.room)`(调用方显式给了房间),update/reorder 原样沿用已有值。
+ */
+function toHubFile(rule: {
+  room?: string;
+  enabled: boolean;
+  pipeline: HubPipelineConfig;
+  recording?: HubRecordingConfig;
+  workers?: string[];
+  requires?: string[];
+  order?: number;
+}): HubFile {
+  return {
+    // Issue #481: presence is what matters, not truthiness — a truthy-but-blank input.room is stored as "" by
+    // upsert today (normalizeRoom trims it), so keep that byte-for-byte.
+    ...(rule.room !== undefined ? { room: rule.room } : {}),
+    enabled: rule.enabled,
+    pipeline: rule.pipeline,
+    recording: rule.recording,
+    workers: rule.workers,
+    requires: rule.requires,
+    order: rule.order,
+  };
+}
+
+/**
+ * Issue #481: the room a bound rule actually syncs is the SOURCE TASK's room, never the filename stem.
+ * A divergent stem (rule.room/task room edited after creation) must keep syncing — dropping the room from
+ * desired would make task-sync two-phase delete the remote managed task. `mismatched` is for a one-off warn.
+ */
+export function resolveRuleSyncRoom(
+  rule: { platform: string; roomSlug: string },
+  sourceRoom: string,
+): { platform: string; roomSlug: string; mismatched: boolean } {
+  const p = platformForRoom(sourceRoom);
+  const roomSlug = p.extractRoomSlug(sourceRoom);
+  return { platform: p.id, roomSlug, mismatched: p.id !== rule.platform || roomSlug !== rule.roomSlug };
 }
 
 /** 排序键:order 升序(未排过序的规则置后),同位按 key 稳定排序。 */
@@ -219,8 +279,8 @@ export function upsertHubRule(
 ): HubRule {
   const key = hubKey(input.platform, input.roomSlug);
   const existing = readRule(dir, key);
-  writeRule(dir, key, {
-    ...(input.room ? { room: normalizeRoom(input.room) } : {}),
+  writeRule(dir, key, toHubFile({
+    room: input.room ? normalizeRoom(input.room) : undefined,
     enabled: input.enabled ?? existing?.enabled ?? true,
     // pipeline **深合并**(不是整体替换):调用方(尤其 web 表单)只提交它知道的字段,
     // 整体替换会静默抹掉 cleanup / 标题模板等它没提交的字段。见 mergePipeline 注释。
@@ -232,7 +292,7 @@ export function upsertHubRule(
     requires: input.requires ?? existing?.requires,
     // order 同理:只在 reorderHubRules 显式写入;upsert/update 均沿用。
     order: existing?.order,
-  });
+  }));
   return getHubRule(dir, key)!;
 }
 
@@ -244,8 +304,8 @@ export function updateHubRule(
 ): HubRule | null {
   const existing = readRule(dir, key);
   if (!existing) return null;
-  writeRule(dir, key, {
-    ...(existing.room ? { room: existing.room } : {}),
+  writeRule(dir, key, toHubFile({
+    room: existing.room || undefined,
     enabled: patch.enabled ?? existing.enabled,
     pipeline: mergePipeline(existing.pipeline, patch.pipeline),
     recording: patch.recording ?? existing.recording,
@@ -253,7 +313,7 @@ export function updateHubRule(
     workers: patch.workers ?? existing.workers,
     requires: patch.requires ?? existing.requires,
     order: existing.order,
-  });
+  }));
   return getHubRule(dir, key);
 }
 
@@ -266,15 +326,15 @@ export function reorderHubRules(dir: string, keys: string[]): HubRule[] {
   }
   for (let i = 0; i < keys.length; i++) {
     const r = byKey.get(keys[i])!;
-    writeRule(dir, r.key, {
-      ...(r.room ? { room: r.room } : {}),
+    writeRule(dir, r.key, toHubFile({
+      room: r.room || undefined,
       enabled: r.enabled,
       pipeline: r.pipeline,
       recording: r.recording,
       workers: r.workers,
       requires: r.requires,
       order: i,
-    });
+    }));
   }
   return listHubRules(dir);
 }

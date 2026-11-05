@@ -10,7 +10,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const root = join(import.meta.dirname, "..", "..");
-const cli = readFileSync(join(root, "packages/cli/src/cli.ts"), "utf-8");
+// Issue #481: the desired-set builder moved from the CLI entry into @drec/app (testable, no vendor imports).
+const cli = readFileSync(join(root, "packages/app/src/hub-desired.ts"), "utf-8");
 const sync = readFileSync(join(root, "packages/app/src/task-sync.ts"), "utf-8");
 
 describe("#442 只下发启用且分配的房间(下发侧语义钉死)", () => {

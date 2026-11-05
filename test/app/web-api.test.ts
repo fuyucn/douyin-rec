@@ -10,7 +10,7 @@ import { buildRecordArgs } from "../../packages/app/src/process/record-args.js";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { platformForRoom } from "@drec/core";
 import { DatabaseSync } from "node:sqlite";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TaskStore, type Task } from "../../packages/app/src/store.js";
@@ -3046,3 +3046,60 @@ describe("setMesioPath 校验(issue #427:路径直进录制子进程,web 入口�
     expect((ok.body as { mesioPath: string }).mesioPath).toBe(exec);
   });
 });
+
+describe("hub rule identity is the filename stem (issue #481)", () => {
+  it("changing the source task room: create writes the NEW slug file and leaves the old stem untouched", () => {
+    const hubDir = mkdtempSync(join(tmpdir(), "hub-ident3-"));
+    const hubConfigPath = join(mkdtempSync(join(tmpdir(), "hub-ident3-cfg-")), "hub.config.json");
+    writeFileSync(hubConfigPath, JSON.stringify({ workers: [{ id: "local", name: "本机", kind: "local", dataRoot: "/data" }] }, null, 2));
+    const a = makeApi({ store, manager, hubDir, hubConfigPath });
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    const first = a.createHubRule({ recording: { sourceTaskId: t.id } }).body as { key: string };
+    const oldPath = join(hubDir, first.key + ".json");
+    const oldBytes = readFileSync(oldPath, "utf-8");
+
+    store.updateTask(t.id, { room: "999" });
+    const second = a.createHubRule({ recording: { sourceTaskId: t.id } }).body as { key: string };
+
+    // Two distinct outcomes on disk: a NEW file for the new slug, and the old stem file unchanged.
+    expect(second.key).not.toBe(first.key);
+    expect(existsSync(oldPath)).toBe(true);
+    expect(readFileSync(oldPath, "utf-8")).toBe(oldBytes);
+    expect(existsSync(join(hubDir, second.key + ".json"))).toBe(true);
+    expect(readdirSync(hubDir).filter((n) => n.endsWith(".json"))).toHaveLength(2);
+  });
+
+  it("divergent rule still shows its source task display (anchor/task name) in the rules list", () => {
+    const hubDir = mkdtempSync(join(tmpdir(), "hub-ident4-"));
+    const hubConfigPath = join(mkdtempSync(join(tmpdir(), "hub-ident4-cfg-")), "hub.config.json");
+    writeFileSync(hubConfigPath, JSON.stringify({ workers: [] }, null, 2));
+    const src = store.addTask({ room: "https://live.douyin.com/222", name: "任务名X" });
+    // Divergent: stem says room 111, the bound source task lives in room 222.
+    writeFileSync(join(hubDir, "douyin.111.json"), JSON.stringify({
+      room: "https://live.douyin.com/222", enabled: true, pipeline: {}, recording: { sourceTaskId: src.id },
+    }) + String.fromCharCode(10), "utf-8");
+    const a = makeApi({ store, manager, hubDir, hubConfigPath });
+    const rule = (a.listHubRules().body as Array<{ key: string; taskName?: string | null; room?: string }>)[0];
+    expect(rule.key).toBe("douyin.111");
+    expect(rule.taskName).toBe("任务名X"); // bound by id, not by stem/room match
+  });
+
+  it("PATCH by the listed key hits the divergent rule file (no 404, no ghost)", () => {
+    const hubDir = mkdtempSync(join(tmpdir(), "hub-ident2-"));
+    const hubConfigPath = join(mkdtempSync(join(tmpdir(), "hub-ident2-cfg-")), "hub.config.json");
+    writeFileSync(hubConfigPath, JSON.stringify({ workers: [] }, null, 2));
+    // Legacy state: file stem says 111, the display room says 222 (task room edited after creation).
+    writeFileSync(join(hubDir, "douyin.111.json"), JSON.stringify({
+      room: "https://live.douyin.com/222", enabled: true, pipeline: {},
+    }) + String.fromCharCode(10), "utf-8");
+    const a = makeApi({ store, manager, hubDir, hubConfigPath });
+    const listed = a.listHubRules().body as Array<{ key: string }>;
+    expect(listed.map((r) => r.key)).toEqual(["douyin.111"]);
+    const patched = a.updateHubRule("douyin.111", { enabled: false });
+    expect(patched.status).toBe(200);
+    expect((patched.body as { key: string }).key).toBe("douyin.111");
+    expect(JSON.parse(readFileSync(join(hubDir, "douyin.111.json"), "utf-8")).enabled).toBe(false);
+    expect(readdirSync(hubDir).filter((n) => n.endsWith(".json"))).toHaveLength(1); // no room-derived ghost
+  });
+});
+
