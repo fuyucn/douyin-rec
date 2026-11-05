@@ -1,8 +1,9 @@
 /**
  * Issue #479: the Douyin API mode resolver — an explicit per-call value (the live gate's option) wins over
- * the process env (the record child's %BT%DOUYIN_REC_API_MODE%BT%), and an unknown value never selects a bogus
- * endpoint. Only the pure resolver is tested here: %BT%douyin-live%BT%'s platform entry imports sm-crypto, which
- * vitest cannot load (see the AGENTS.md note); the resolver itself only depends on @drec/core.
+ * the process env (the record child's `DOUYIN_REC_API_MODE`), and an unknown value never selects a bogus
+ * endpoint. Only the pure resolver is covered here (its own precedence rules); that the platform actually
+ * forwards the per-call value to getInfo is pinned separately in platform-getliving.test.ts, where the
+ * sm-crypto-heavy `./stream/index.js` is mocked so `douyin-live`'s entry can be imported.
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { resolveApiMode } from "../../packages/douyin-live/src/api-mode.js";
