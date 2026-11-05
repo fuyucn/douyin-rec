@@ -21,6 +21,20 @@ export interface DanmuConnectOpts {
   opts: RecordOpts;
 }
 
+/**
+ * Per-call options for a platform probe. Only the fields a platform actually consumes are read; every
+ * other platform ignores them, so adding an option here never changes another platform's behaviour.
+ */
+export interface PlatformProbeOpts {
+  /**
+   * Issue #479: the Douyin API mode for THIS call, overriding the process env default
+   * (`DOUYIN_REC_API_MODE`). Callers that already know the setting (the serve-side live gate) pass it
+   * explicitly instead of mutating `process.env`, which was only correct as long as the platform read
+   * the mode synchronously before its first await. Omitted -> the platform reads the env as before.
+   */
+  apiMode?: string;
+}
+
 /** 取流探测结果(平台无关):是否在播 + 当前可录制流 URL + 主播/标题 + 平台专属原始数据。 */
 export interface PlatformStream {
   living: boolean;
@@ -78,8 +92,11 @@ export interface Platform {
    * 未来某平台需要登录态才能取流时,无需改接口——直接在自己的 getStream 里读 cookies 即可。
    */
   getStream(channelId: string, quality: string, cookies?: string): Promise<PlatformStream>;
-  /** 轻量权威判活(drain 收播判定 / 重连 / API 可达性);失败应抛错(由调用方按场景兜底)。 */
-  getLiving(channelId: string): Promise<boolean>;
+  /**
+   * 轻量权威判活(drain 收播判定 / 重连 / API 可达性);失败应抛错(由调用方按场景兜底)。
+   * `opts` 是可选 per-call 覆盖(issue #479);省略时行为与以前完全一致(平台自己读 env)。
+   */
+  getLiving(channelId: string, opts?: PlatformProbeOpts): Promise<boolean>;
   /**
    * 连接本平台弹幕,返回一个**未 start** 的 DanmuSource(manager 负责 start/stop)。
    * 返回 null = 本平台无弹幕能力(如 bilibili 尚未实现)。弹幕的「按名查 provider」注册表

@@ -206,9 +206,11 @@ export const douyinPlatform: Platform = {
       raw: res, // 完整结果留给录制器子类(logStreamMeta 等)
     };
   },
-  async getLiving(channelId) {
+  async getLiving(channelId, opts) {
     // 判活同用该模式(别硬编码):默认 balance 可避免单点(如 webHTML 被拦)把「在播」误判成「未开播」。
-    return !!(await getInfo(channelId, { api: resolveApiMode() })).living;
+    // Issue #479: an explicit per-call mode wins over the env, so a caller that knows the setting (the
+    // live gate) never has to mutate process.env around this call.
+    return !!(await getInfo(channelId, { api: resolveApiMode(opts?.apiMode) })).living;
   },
   // 弹幕收进平台:返回未 start 的 DouyinDanmuSource(manager 在 onLive 才 start)。
   connectDanmu: () => new DouyinDanmuSource(),
