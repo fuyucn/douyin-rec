@@ -58,4 +58,12 @@ describe("parseBoolFlag", () => {
     expect(parseBoolFlag("no", true)).toBe(false);
     expect(parseBoolFlag("none", true)).toBe(false);
   });
+
+  it("blank keeps the call site's default; n/y are recognised (issue #472)", () => {
+    // Was: "" fell through to true, so this is the one intentional change at this site.
+    expect(parseBoolFlag("", false)).toBe(false);
+    expect(parseBoolFlag("   ", true)).toBe(true);
+    expect(parseBoolFlag("n", true)).toBe(false);   // was true (unknown)
+    expect(parseBoolFlag("y", false)).toBe(true);   // unchanged (unknown was also true)
+  });
 });
