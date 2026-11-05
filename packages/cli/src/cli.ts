@@ -1404,7 +1404,7 @@ const hubStarter: HubStarter = {
       stageDir?: string;
       cookies?: string;
       cleanMaxGapSec?: number;
-      /** 断流重连合并窗(ms);缺省 10 分钟。 */
+      /** Reconnect wait window (ms); defaults to core `SAME_BROADCAST_GAP_MS` (30 min). */
       reconnectWindowMs?: number;
       /** Consecutive unreachable rounds after which a blocked broadcast turns needs_manual; default 12, <=0 disables. */
       blockedManualRounds?: number;
