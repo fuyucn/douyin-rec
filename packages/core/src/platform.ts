@@ -43,6 +43,13 @@ export interface PlatformStream {
    * 录制器据此进入降频轮询 + 显式日志(否则「等待开播」会把风控伪装成「主播没开播」,掩盖漏录)。
    */
   throttledReason?: string;
+  /**
+   * Issue #476: the platform confirms the broadcaster is live but this probe produced no playable
+   * URL (CDN not ready / risk control withholding the stream). Unlike `throttledReason` this is NOT
+   * a backoff signal: the recorder keeps its normal poll cadence, raises one alert per broadcast, and
+   * starts recording as soon as a URL shows up. Absent on probes that are offline or have a URL.
+   */
+  unplayableReason?: string;
 }
 
 /** 一个直播平台的能力契约。 */
