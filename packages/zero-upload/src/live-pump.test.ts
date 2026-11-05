@@ -3428,9 +3428,11 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     const ff = installFakeFfmpeg(tsStream({ gops: 10 }), { chunkEvery: 1500, holdOpen: (i) => i === 0 });
     const u = fakeUpos();
     const logs: string[] = [];
+    const events: Array<{ kind: string; part?: number }> = [];
     const r = await runLivePump(baseOpts(u, {
       spoolMode, stallTimeoutMs: 40, recoverWindowMs: 3_000, idlePollMs: 10, maxSegments: 0,
       log: (m) => logs.push(m),
+      reporter: { event: (e) => events.push({ kind: e.kind, ...(e.part !== undefined ? { part: e.part } : {}) }), progress: () => {} },
     }));
     expect(r.ok, r.error ?? "").toBe(true);
     expect(ff.spawns).toBeGreaterThanOrEqual(2);
@@ -3438,6 +3440,16 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     expect(logs.filter((l) => l === "[状态] 录制中").length).toBe(ff.spawns); // once per connection
     expect(u.archive.length).toBe(r.segments.length);
     expect(r.segments.length).toBeGreaterThanOrEqual(2);
+    // After a part is confirmed the pump polls for a broadcast before the next connection. The
+    // timeline must say "waiting", not the last part's `submitting`, or the console reads as
+    // "still submitting" for the whole stall-recovery window (issue: room page kept showing live).
+    const confirmed = events.findIndex((e) => e.kind === "part_confirmed");
+    const waitingAfter = events.findIndex((e, i) => i > confirmed && e.kind === "waiting");
+    expect(confirmed).toBeGreaterThanOrEqual(0);
+    expect(waitingAfter, "a waiting event must follow part_confirmed before the next connection").toBeGreaterThan(confirmed);
+    // The next connection's `live` event follows that waiting.
+    const liveAfter = events.findIndex((e, i) => i > waitingAfter && e.kind === "live");
+    expect(liveAfter).toBeGreaterThan(waitingAfter);
   }, 30_000);
 
   it("maxSegments counts parts, not connections", async () => {
