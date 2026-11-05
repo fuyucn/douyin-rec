@@ -5,7 +5,7 @@ Source: five read-only audits at `origin/main` 8a52c842 (record / upload / hub /
 Every item below has file:line evidence in the audit notes; items marked ✔ were spot-checked by the orchestrator.
 
 **Architecture direction**
-- Config is resolved once, in core (`hub-config.ts`), typed once; call sites receive resolved values.
+- Config is resolved once, in core (`hub-config` module), typed once; call sites receive resolved values.
 - Upload = 2 backends (`biliupFile`, `uposStudio`) × N producers (whole set / sealed segments / live cuts / prep outputs),
   sharing one durable `UploadCtx` and one `onArchiveCreated` hook runner. Stores stay with their owners.
 - Master↔node commands go through one typed protocol table.
@@ -30,8 +30,8 @@ Every item below has file:line evidence in the audit notes; items marked ✔ wer
 - [ ] B12 (#481, T-152) hub-store rule identity: room-derived key vs filename stem can diverge → ghost/duplicate rules.
 
 ## Phase 1 — single sources (no RISK)
-- [ ] F1 core `hub-config.ts`: `HubConfig`, `resolveHubResources`, `resolveUploadMeta` (one place for rule > defaults; fixes private/uploadPrivate/public renames). Parity tests first, then delegate the 4 resolvers.
-- [ ] F2 core `task-fields.ts` + one `applyRecordingPatch` (replaces ~12 copies; collapses TaskPayload vs Create/UpdateTaskInput drift).
+- [ ] F1 core `hub-config` module: `HubConfig`, `resolveHubResources`, `resolveUploadMeta` (one place for rule > defaults; fixes private/uploadPrivate/public renames). Parity tests first, then delegate the 4 resolvers.
+- [ ] F2 core `task-fields` module + one `applyRecordingPatch` (replaces ~12 copies; collapses TaskPayload vs Create/UpdateTaskInput drift).
 - [ ] F3 move rule validators to core; validate on rule write, warn-once on read.
 - [ ] F4 one pipeline topology table in core + parity test (core / workflow / web).
 - [ ] F5 `submitWithBackoff(policy)` extraction of the 7 rate-limit loops, values unchanged.
