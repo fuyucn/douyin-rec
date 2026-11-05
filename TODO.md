@@ -413,8 +413,7 @@
     是无效操作 —— 要改概率得调 weight。本轮未改 priority。
 
 ## 待办（Next）
-- [~] **T-148 fix(manager): 会话边车写入失败被吞,无日志无告警（issue [#477](https://github.com/fuyucn/douyin-rec/issues/477)，计划 [045](plans/045_codebase_optimization.md) B8，2026-11-04）** — 证据/改法/验收见 issue。
-- [ ] **T-149 fix(hub): 台账迁移吞掉所有 ALTER 错误,只校验 3 列（issue [#478](https://github.com/fuyucn/douyin-rec/issues/478)，计划 [045](plans/045_codebase_optimization.md) B9，2026-11-04）** — 证据/改法/验收见 issue。
+- [~] **T-149 fix(hub): 台账迁移吞掉所有 ALTER 错误,只校验 3 列（issue [#478](https://github.com/fuyucn/douyin-rec/issues/478)，计划 [045](plans/045_codebase_optimization.md) B9，2026-11-04）** — 证据/改法/验收见 issue。
 - [ ] **T-150 fix(app): 判活闸门临时改 process.env,正确性依赖「await 前同步读取」（issue [#479](https://github.com/fuyucn/douyin-rec/issues/479)，计划 [045](plans/045_codebase_optimization.md) B10，2026-11-04）** — 证据/改法/验收见 issue。
 - [ ] **T-151 fix(node): 下发任务批次里一条坏配置使整个节点全部不应用（issue [#480](https://github.com/fuyucn/douyin-rec/issues/480)，计划 [045](plans/045_codebase_optimization.md) B11，2026-11-04）** — 证据/改法/验收见 issue。
 - [ ] **T-152 fix(hub): 规则身份由房间地址或文件名推导,两者可能分歧（issue [#481](https://github.com/fuyucn/douyin-rec/issues/481)，计划 [045](plans/045_codebase_optimization.md) B12，2026-11-04）** — 证据/改法/验收见 issue。
@@ -787,6 +786,7 @@
   属模型取舍，不是可顺手加的功能。**为什么**：冗余模型把轮询量乘了 N，是 VPS 被限流的根因之一。
 
 ## 已完成
+- [x] **T-148 fix(manager): 会话边车写入失败被吞,无日志无告警（issue [#477](https://github.com/fuyucn/douyin-rec/issues/477)，计划 [045](plans/045_codebase_optimization.md) B8，2026-11-04）** — 证据/改法/验收见 issue。（2026-11-04，PR #497）
 - [x] **T-147 fix(bilibili): 显示开播却拿不到播放地址时静默当作未开播（issue [#476](https://github.com/fuyucn/douyin-rec/issues/476)，计划 [045](plans/045_codebase_optimization.md) B7，2026-11-04）** — 证据/改法/验收见 issue。（2026-11-04，PR #495）
 - [x] **T-146 fix(manager): 同场窗口 10 分钟与 core 权威 30 分钟不一致（issue [#475](https://github.com/fuyucn/douyin-rec/issues/475)，计划 [045](plans/045_codebase_optimization.md) B6，2026-11-04）** — 证据/改法/验收见 issue。（2026-11-04，PR #494）
 - [x] **T-145 fix(recorder): mesio 卡死看门狗统计目录内所有 .flv,会被同目录其他写入骗过（issue [#474](https://github.com/fuyucn/douyin-rec/issues/474)，计划 [045](plans/045_codebase_optimization.md) B5，2026-11-04）** — 证据/改法/验收见 issue。（2026-11-04，PR #491）

@@ -10,6 +10,23 @@ const LEDGER_BUSY_TIMEOUT_MS = 5000;
 /** journal_mode 切换的退避重试上限(同 proc-queue 的 initWal:2 进程并发首开实测约 43% 失败)。 */
 const WAL_RETRIES = 200;
 
+/**
+ * Every table/column initSchema must leave behind (issue #478). Its ALTER/CREATE statements are
+ * idempotent and swallow duplicate-column errors, so a REAL migration failure (disk full, lock) used to
+ * stay invisible and surface later as "never queued" / "no stem". Validated once at the end of the
+ * migration: a missing column/table makes opening the ledger fail loudly, naming what is missing.
+ */
+const EXPECTED_SCHEMA: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ["sync_jobs", ["streamKey", "state", "winnerWorker", "bv", "error", "fails", "startMs", "outputStem",
+    "followups", "uploadPlan", "uploadStatus", "ackedAt", "ackNote", "seasonState", "updatedAt"]],
+  ["sync_candidates", ["streamKey", "workerId", "coverage", "durationSec", "startMs", "endMs",
+    "totalGapSec", "isWinner", "danmuCount", "updatedAt"]],
+  ["sync_job_events", ["streamKey", "state", "at"]],
+  ["sync_job_steps", ["streamKey", "step", "phase", "at", "detail"]],
+  ["sync_node_states", ["streamKey", "node", "state", "error", "attempts", "updatedAt"]],
+  ["sync_parts", ["streamKey", "groupName", "partIndex", "updatedAt"]],
+];
+
 function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
@@ -156,11 +173,6 @@ export class SyncLedger {
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN ackedAt INTEGER"); } catch { /* column exists */ }
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN ackNote TEXT"); } catch { /* column exists */ }
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN seasonState TEXT"); } catch { /* column exists */ }
-    // transition() names these columns on every state change, so a failed ALTER must surface here, not later.
-    const cols = new Set((this.db.prepare("PRAGMA table_info(sync_jobs)").all() as Array<{ name: string }>).map((c) => c.name));
-    if (!cols.has("ackedAt") || !cols.has("ackNote") || !cols.has("seasonState")) {
-      throw new Error("sync_jobs migration failed: ackedAt/ackNote/seasonState columns missing");
-    }
     // 选优候选明细:每场每节点一行,记 coverage/时长/起止/缺口 + 是否胜出,供事后复盘选优依据。
     this.db.exec(`CREATE TABLE IF NOT EXISTS sync_candidates(
       streamKey TEXT NOT NULL, workerId TEXT NOT NULL,
@@ -196,7 +208,26 @@ export class SyncLedger {
     this.db.exec(`CREATE TABLE IF NOT EXISTS sync_parts(
       streamKey TEXT NOT NULL, groupName TEXT NOT NULL, partIndex INTEGER NOT NULL,
       updatedAt INTEGER NOT NULL, PRIMARY KEY(streamKey, groupName, partIndex))`);
+    this.assertSchema();
   }
+
+  /**
+   * Issue #478: verify every expected table/column exists after the idempotent migration. Throws with the
+   * missing names so a failed ALTER/CREATE (disk full, lock, stale view) cannot hide until a later query.
+   */
+  private assertSchema(): void {
+    const problems: string[] = [];
+    for (const [table, expected] of EXPECTED_SCHEMA) {
+      const cols = new Set(
+        (this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name),
+      );
+      if (cols.size === 0) { problems.push(`${table} (table missing)`); continue; }
+      const missing = expected.filter((c) => !cols.has(c));
+      if (missing.length) problems.push(`${table}: missing ${missing.join(", ")}`);
+    }
+    if (problems.length) throw new Error(`ledger migration failed — ${problems.join("; ")}`);
+  }
+
   /**
    * 切 WAL(幂等,issue #428)。已是 WAL 直接返回;否则退避重试 `locked/busy`:并发首开时
    * busy_timeout 对 journal_mode 切换**不生效**(需排他锁,busy handler 不被调用),不重试会让
