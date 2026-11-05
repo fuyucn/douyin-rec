@@ -1013,6 +1013,8 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
         return Promise.resolve(json({ code: 0, data: null }));
       }
       if (u.pathname === "/x2/creative/web/season/section") return Promise.resolve(json({ code: 0, data: { episodes: [] } }));
+      // issue #460: the configured 123 is a legacy section id inside season 500.
+      if (u.pathname === "/x2/creative/web/seasons") return Promise.resolve(json({ code: 0, data: { seasons: [{ season: { id: 500 }, sections: { sections: [{ id: 123 }] } }], total: 1 } }));
       // lookupArchive 读 `data.archive`(扁平形状会被当成空,append 因此失败)。
       if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BILIfake1", title: "t", tid: 21 }, videos: [{ cid: 9, filename: "existing" }] } }));
       return Promise.resolve(json({ code: 0, data: {} }));
