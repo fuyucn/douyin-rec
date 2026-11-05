@@ -412,6 +412,18 @@
     是无效操作 —— 要改概率得调 weight。本轮未改 priority。
 
 ## 待办（Next）
+- [ ] **T-141 fix(hub): _proc-status 把数据库错误当成「任务不存在」,可致收尾转格式静默终结与重复投稿（issue [#470](https://github.com/fuyucn/douyin-rec/issues/470)，计划 [045](plans/045_codebase_optimization.md) B1，2026-11-04）** — 证据/改法/验收见 issue。
+- [ ] **T-142 fix(hub): 节点输出格式锁手抄「节点侧上传」判定,漏掉全局总开关（issue [#471](https://github.com/fuyucn/douyin-rec/issues/471)，计划 [045](plans/045_codebase_optimization.md) B2，2026-11-04）** — 证据/改法/验收见 issue。
+- [ ] **T-143 fix(cli): --danmu no 反而开启弹幕;布尔参数词表有 4 份且不一致（issue [#472](https://github.com/fuyucn/douyin-rec/issues/472)，计划 [045](plans/045_codebase_optimization.md) B3，2026-11-04）** — 证据/改法/验收见 issue。
+- [ ] **T-144 fix(web): GET /api/hub/resources 忽略内联/设置来源的 hub 配置（issue [#473](https://github.com/fuyucn/douyin-rec/issues/473)，计划 [045](plans/045_codebase_optimization.md) B4，2026-11-04）** — 证据/改法/验收见 issue。
+- [ ] **T-145 fix(recorder): mesio 卡死看门狗统计目录内所有 .flv,会被同目录其他写入骗过（issue [#474](https://github.com/fuyucn/douyin-rec/issues/474)，计划 [045](plans/045_codebase_optimization.md) B5，2026-11-04）** — 证据/改法/验收见 issue。
+- [ ] **T-146 fix(manager): 同场窗口 10 分钟与 core 权威 30 分钟不一致（issue [#475](https://github.com/fuyucn/douyin-rec/issues/475)，计划 [045](plans/045_codebase_optimization.md) B6，2026-11-04）** — 证据/改法/验收见 issue。
+- [ ] **T-147 fix(bilibili): 显示开播却拿不到播放地址时静默当作未开播（issue [#476](https://github.com/fuyucn/douyin-rec/issues/476)，计划 [045](plans/045_codebase_optimization.md) B7，2026-11-04）** — 证据/改法/验收见 issue。
+- [ ] **T-148 fix(manager): 会话边车写入失败被吞,无日志无告警（issue [#477](https://github.com/fuyucn/douyin-rec/issues/477)，计划 [045](plans/045_codebase_optimization.md) B8，2026-11-04）** — 证据/改法/验收见 issue。
+- [ ] **T-149 fix(hub): 台账迁移吞掉所有 ALTER 错误,只校验 3 列（issue [#478](https://github.com/fuyucn/douyin-rec/issues/478)，计划 [045](plans/045_codebase_optimization.md) B9，2026-11-04）** — 证据/改法/验收见 issue。
+- [ ] **T-150 fix(app): 判活闸门临时改 process.env,正确性依赖「await 前同步读取」（issue [#479](https://github.com/fuyucn/douyin-rec/issues/479)，计划 [045](plans/045_codebase_optimization.md) B10，2026-11-04）** — 证据/改法/验收见 issue。
+- [ ] **T-151 fix(node): 下发任务批次里一条坏配置使整个节点全部不应用（issue [#480](https://github.com/fuyucn/douyin-rec/issues/480)，计划 [045](plans/045_codebase_optimization.md) B11，2026-11-04）** — 证据/改法/验收见 issue。
+- [ ] **T-152 fix(hub): 规则身份由房间地址或文件名推导,两者可能分歧（issue [#481](https://github.com/fuyucn/douyin-rec/issues/481)，计划 [045](plans/045_codebase_optimization.md) B12，2026-11-04）** — 证据/改法/验收见 issue。
 - [~] **T-97 0 落盘支持单个 side node,由 master 统一管理(issue [#331](https://github.com/fuyucn/douyin-rec/issues/331))** — 2026-10-20。**做什么**:策略放开为「恰好一个节点」;master 随任务下发上传元数据/账号键/凭证路径;节点写回执、master 轮询后写台账(幂等);节点能力位 `zero-disk:v1` 作闸门;master 控制台可见状态/拒绝原因。**为什么**:0 落盘只能占 master 本机带宽;节点规则目录为空会静默退回默认(私稿/默认标题),节点自写台账 master 看不到。**验收**:单 worker 可保存、多节点/烧录仍拒;节点稿件元数据与 master 规则一致(变异验证);回执在 master 台账出现且离线重连不丢不重;账号不一致/旧节点/元数据缺失明确失败;local 行为不变;全量测试/类型/打包通过。
 - [~] **T-96 0 落盘弹幕 xml 每次启动覆盖上一份(issue [#329](https://github.com/fuyucn/douyin-rec/issues/329))** — 2026-10-20。**做什么**:xml 按每次运行独立命名,writer 打开时不截断已有非空文件(改名留存)。**为什么**:0 落盘 xml 是唯一落盘产物,覆盖不可恢复。**验收**:同房间连续两次运行两份弹幕都在;回归测试 + 变异验证;上线后实测两场两份 xml。
 - [~] **T-89 0 落盘稿件状态按同场口径切分(issue [#293](https://github.com/fuyucn/douyin-rec/issues/293))** — 2026-10-20。状态只按房间键,同房间下一场会追加到上一场稿件。**做什么**:启动时按最后活动距今与 `SAME_BROADCAST_GAP_MS` 比较,超过则归档旧状态并新建稿件,不确定则拒绝并报错。**验收**:同房间间隔 61 分钟起新稿件、59/60 分钟续用、归档含未确认分 P 时保留并报错、状态损坏拒绝启动;有变异验证。
