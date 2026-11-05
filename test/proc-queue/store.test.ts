@@ -533,6 +533,32 @@ describe("list / active / gc", () => {
     expect(s.get(fresh)?.state).toBe("done");
   });
 
+  it("gc:skipped 与 done/cancelled 同口径保留 7 天后删", () => {
+    const s = env.open();
+    lease(s);
+    const old = s.enqueue(env.job("sk.ts"), roots()).jobId;
+    s.claim({ kinds: ["fake"], owner: "A", accept: (j) => j.jobId === old });
+    expect(s.finish(old, "A", { state: "skipped", reason: "skip-hub-owned" })).toBe(true);
+    env.clock.t += GC_RETAIN_MS + 1;
+    lease(s);
+    const fresh = s.enqueue(env.job("sk2.ts"), roots()).jobId;
+    s.claim({ kinds: ["fake"], owner: "A", accept: (j) => j.jobId === fresh });
+    expect(s.finish(fresh, "A", { state: "skipped", reason: "skip-source-gone" })).toBe(true);
+    expect(s.gc()).toBe(1);
+    expect(s.get(old)).toBeNull();
+    expect(s.get(fresh)?.state).toBe("skipped");
+  });
+
+  it("PR1 拒绝写入 reconciling(出边由 PR3 落地),行保持 running 可恢复", () => {
+    const s = env.open();
+    lease(s);
+    const r = s.enqueue(env.job("a.ts"), roots());
+    s.claim({ kinds: ["fake"], owner: "A" });
+    expect(s.finish(r.jobId, "A", { state: "reconciling", error: "submit interrupted", reason: "reconcile-start" })).toBe(false);
+    expect(s.get(r.jobId)?.state).toBe("running");
+    expect(s.gc()).toBe(0);
+  });
+
   it("gc purgeFailed 删 failed,uncertain 须先 ack 才删", () => {
     const s = env.open();
     lease(s);

@@ -99,7 +99,6 @@ export interface ChainJob {
   generation: number;
   ctx: PartCtx;
   owner: { taskId?: number; streamKey?: string };
-  createdAt: number;
   /** Optional fault-injection seam for tests; production callers omit it. */
   beforeInsert?: () => void;
 }
@@ -599,9 +598,11 @@ export class ProcQueueStore {
   }
 
   /**
-   * Finish the current running row and insert its deterministic successor in one transaction.
-   * Re-entry after a crash is idempotent: done + successor is accepted, while done without the
-   * successor is rejected (callers must recover rather than silently lose the chain step).
+   * Finish the current running upload row and insert its deterministic cleanup successor in one
+   * transaction. Crash re-entry is read-only idempotent and needs NO valid lease: done + successor
+   * in the same database is itself the proof of completion, while done without the successor is
+   * rejected so a chain step can never be silently lost. The successor ctx is rebuilt with the
+   * confirmed upload row's bv as the single truth; a caller-supplied bv is overwritten.
    */
   completeAndChain(
     jobId: string,
@@ -616,22 +617,20 @@ export class ProcQueueStore {
       ...next,
       jobId: nextJobId, kind: PART_KINDS.cleanup,
       inputs: [next.ctx.file], params: { ctx: next.ctx }, replaceInputs: false,
+      createdAt: this.now(),
     };
     return this.tx(() => {
       const row = this.get(jobId);
-      if (!row || row.claimedBy !== owner) return { ok: false, error: "lease owner mismatch" };
-      if (row.state !== "running" && row.state !== "done") return { ok: false, error: "job is not running or done" };
+      const successor = this.get(nextJobId);
+      if (!row) return { ok: false, error: "unknown job" };
+      if (row.state === "done") {
+        // 只读幂等回执(P1):崩溃重入时租约多半已过期,done+下一行同时在库即为完成证明,不再查租约。
+        return successor ? { ok: true, nextJobId, chained: false } : { ok: false, error: "done without successor" };
+      }
+      if (row.state !== "running") return { ok: false, error: "job is not running or done" };
+      if (row.claimedBy !== owner) return { ok: false, error: "lease owner mismatch" };
       if (opts.attempts !== undefined && row.attempts !== opts.attempts) return { ok: false, error: "generation CAS mismatch" };
       if (!this.leaseValid(row.kind, owner)) return { ok: false, error: "lease invalid or expired" };
-      const successor = this.get(nextJobId);
-      try {
-        assertJobInvariants(nextJob, { allowedRoots: opts.allowedRoots });
-      } catch (e) {
-        return { ok: false, error: (e as Error).message };
-      }
-      if (row.state === "done") return successor
-        ? { ok: true, nextJobId, chained: false }
-        : { ok: false, error: "done without successor" };
       if (successor) return { ok: false, error: "successor exists while predecessor is still running" };
       if (row.kind !== PART_KINDS.upload) return { ok: false, error: "predecessor is not an upload-part" };
       const ctx = row.params.ctx as PartCtx | undefined;
@@ -640,9 +639,16 @@ export class ProcQueueStore {
         return { ok: false, error: "successor ctx does not match the confirmed upload" };
       }
       if (!row.bv) return { ok: false, error: "confirmed upload has no draft identifier" };
+      // bv 单一真理 = 已确认的上传行:覆盖调用方带入的 bv,再对最终落库的 job 校验一次(P3)。
+      const finalNext: ProcessJob = { ...nextJob, params: { ctx: { ...next.ctx, bv: row.bv } } };
+      try {
+        assertJobInvariants(finalNext, { allowedRoots: opts.allowedRoots });
+      } catch (e) {
+        return { ok: false, error: (e as Error).message };
+      }
       next.beforeInsert?.();
       if (!this.applyFinish(row, finish)) return { ok: false, error: "invalid finish transition" };
-      this.insertPendingTx(nextJob, nextJobId);
+      this.insertPendingTx(finalNext, nextJobId);
       return { ok: true, nextJobId, chained: true };
     });
   }
@@ -651,6 +657,9 @@ export class ProcQueueStore {
     const t = this.now();
     let to: JobState = outcome.state;
     if (outcome.state === "cancelled") to = cancelOutcome(row.kind, outcome.hasIntent ?? false);
+    // PR1 只立契约(P2):reconciling 的全部出边由 PR3 的 settleReconciling 落地;在此之前拒绝写入,
+    // 否则会产生没有任何 API 能推进/回收的搁浅行(claim 看不见、gc 不删、人工也无法恢复)。
+    if (to === "reconciling") return false;
     if (!canTransition("running", to, { reason: outcome.state === "reconciling" || outcome.state === "skipped" ? outcome.reason : undefined })) return false;
     const error = "error" in outcome ? (outcome.error ?? null) : null;
     let resultOutputs: string | null = null;
@@ -774,14 +783,14 @@ export class ProcQueueStore {
   // ───────────────────────── 保留 ─────────────────────────
 
   /**
-   * 清理:done/cancelled 超过 `retainMs`(默认 7 天)删;**failed / uncertain 不自动删**。
+   * 清理:done/cancelled/skipped 超过 `retainMs`(默认 7 天)删;**failed / uncertain / reconciling 不自动删**。
    * `purgeFailed` 时额外删 failed(人工清,`_proc-gc --purge-failed` / `POST /api/proc/purge`);
    * uncertain 须先 `ackUncertain` 转 failed 才会被删。返回删除行数。
    */
   gc(o: { retainMs?: number; purgeFailed?: boolean } = {}): number {
     const cutoff = this.now() - (o.retainMs ?? GC_RETAIN_MS);
     let n = Number(
-      this.db.prepare("DELETE FROM proc_jobs WHERE state IN ('done','cancelled') AND finishedAt IS NOT NULL AND finishedAt<?")
+      this.db.prepare("DELETE FROM proc_jobs WHERE state IN ('done','cancelled','skipped') AND finishedAt IS NOT NULL AND finishedAt<?")
         .run(cutoff).changes,
     );
     if (o.purgeFailed) n += Number(this.db.prepare("DELETE FROM proc_jobs WHERE state='failed'").run().changes);
