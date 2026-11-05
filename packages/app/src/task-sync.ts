@@ -51,14 +51,20 @@ function validateSpec(raw: unknown): { ok: true; spec: RemoteTaskSpec } | { ok: 
   if (!slug) return { ok: false, room, reason: "room 无法解析出房间身份" };
   if (typeof spec.platform !== "string" || !spec.platform.trim()) return { ok: false, room, reason: "缺少 platform" };
   if (typeof spec.roomSlug !== "string" || !spec.roomSlug.trim()) return { ok: false, room, reason: "缺少 roomSlug" };
-  return { ok: true, spec: { ...(spec as RemoteTaskSpec), room } };
+  // The trimmed value is only a validation aid: the stored spec keeps the master's bytes untouched, so an
+  // all-good batch stays byte-identical (issue #480 review).
+  return { ok: true, spec: spec as RemoteTaskSpec };
 }
 
 /** `_tasks` 隐藏子命令 / local transport 的输出：节点上全部任务的隐私安全投影(无 cookies)。 */
 export function listNodeTasks(store: TaskStore): NodeTaskDTO[] {
-  return store.listTasks().map((t) => {
-    const { platform, roomSlug } = slugOf(t.room);
-    return {
+  // A local row whose room cannot be parsed is skipped instead of aborting the whole projection: one bad
+  // legacy row must not make this node invisible to the master (issue #480 review).
+  return store.listTasks().flatMap((t) => {
+    const slug = trySlugOf(t.room);
+    if (!slug) return [];
+    const { platform, roomSlug } = slug;
+    return [{
       id: t.id,
       platform,
       roomSlug,
@@ -82,7 +88,7 @@ export function listNodeTasks(store: TaskStore): NodeTaskDTO[] {
       streamUpload: t.streamUpload,
       streamUploadSpool: t.streamUploadSpool,
       outputFormat: t.outputFormat,
-    };
+    }];
   });
 }
 
@@ -252,8 +258,10 @@ export function applyRemoteTasks(
       if (!s) continue; // unparsable local row: never guess, never delete
       const key = `${s.platform}:${s.roomSlug}`;
       if (!deletedKeys.has(key)) continue;
-      if (skipDeletions || protectedKeys.has(key)) {
-        log?.(`[task-sync] 保留受管任务 ${t.id}: ${key}(本轮有无法解析的期望条目,删除阶段整体跳过)`);
+      // A skipped spec for the same room means we cannot trust the "delete" outcome either. (The unknown-room
+      // case never reaches this loop: the whole fast path is gated on !skipDeletions at the call site.)
+      if (protectedKeys.has(key)) {
+        log?.(`[task-sync] 保留受管任务 ${t.id}: ${key}(本轮该房间的期望条目无法解析,不删除)`);
         continue;
       }
       store.removeTask(t.id);
@@ -263,8 +271,8 @@ export function applyRemoteTasks(
   };
   const upsert = (spec: RemoteTaskSpec, key: string): void => {
     const existing = store.listTasks().find((t) => {
-      const s = slugOf(t.room);
-      return s.platform === spec.platform && s.roomSlug === spec.roomSlug;
+      const s = trySlugOf(t.room);
+      return !!s && s.platform === spec.platform && s.roomSlug === spec.roomSlug;
     });
     if (existing) {
       // 远端:收编为受管;master 本地:保持用户可编辑(顺带清掉历史遗留的 hub 标记)。
@@ -389,12 +397,16 @@ export function applyRemoteTasks(
           return { id: t.id, key: `${s.platform}:${s.roomSlug}` };
         });
 
-    if (retainedKeys.size === 0 && !explicitDelete) {
+    // Issue #480 review: rooms whose delivered spec failed to parse are neither retained nor absent — they are
+    // still expected to exist locally, so they count toward "how much of the desired set survived" and must
+    // not trip a false mass-shrink.
+    const expectedSize = new Set([...retainedKeys, ...protectedKeys]).size;
+    if (retainedKeys.size === 0 && !explicitDelete && protectedKeys.size === 0) {
       return { rejected: "empty-desired", totalManaged, enabledManaged, disableOnly: disableOnly() };
     }
     // enabledManaged ≤ 1 时不存在「数量级塌陷」(1→0 已被空期望守卫覆盖),不拦。
     if (enabledManaged <= 1) return null;
-    if (retainedKeys.size > Math.floor(enabledManaged * SHRINK_RATIO)) return null;
+    if (expectedSize > Math.floor(enabledManaged * SHRINK_RATIO)) return null;
     return { rejected: "mass-shrink", totalManaged, enabledManaged, disableOnly: disableOnly() };
   };
 

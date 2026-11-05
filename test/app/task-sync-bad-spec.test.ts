@@ -10,12 +10,17 @@ import type { RemoteTaskSpec } from "@drec/core";
  * Issue #480: one malformed delivered spec must not abort the whole batch, and — crucially — a skipped item
  * must never be treated as "absent from the desired set", i.e. it must not delete/disable a local managed task
  * for that room. Deletion is guarded two ways:
- *  - slug derivable from the bad item -> that room's key is protected;
+ *  - slug derivable from the bad item -> that room's key is protected (delete loop, guard disableOnly, and the
+ *    DREC_EXPLICIT_DELETE=1 fast path all honour it);
  *  - slug not derivable at all       -> the deletion/disable phase is skipped entirely this round.
+ *
+ * The delete-safety cases below deliberately avoid force:true (which bypasses the guard) and one of them turns
+ * on DREC_EXPLICIT_DELETE, so each of the four protection points is mutation-sensitive.
  */
 describe("applyRemoteTasks: bad spec is skipped, batch still applies (issue #480)", () => {
   let dir: string;
   let store: TaskStore;
+  const savedEnv: Record<string, string | undefined> = {};
 
   const spec = (over: Partial<RemoteTaskSpec> = {}): RemoteTaskSpec => ({
     platform: "douyin",
@@ -37,20 +42,35 @@ describe("applyRemoteTasks: bad spec is skipped, batch still applies (issue #480
     rollingUpload: false, rollingEffective: false,
     ...over,
   });
+  const room = (n: string): RemoteTaskSpec => spec({ roomSlug: n, room: `https://live.douyin.com/${n}` });
+
+  /** Adopt N existing rooms as managed, all enabled. */
+  const seedManaged = (rooms: string[]): void => {
+    for (const n of rooms) store.addTask({ room: `https://live.douyin.com/${n}` });
+    applyRemoteTasks(store, rooms.map(room));
+    for (const t of store.listTasks()) expect(t.managedBy).toBe("hub");
+  };
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "task-sync-480-"));
     store = new TaskStore(join(dir, "tasks.db"));
+    for (const k of ["DREC_EXPLICIT_DELETE", "DREC_ALLOW_SHRINK"]) {
+      savedEnv[k] = process.env[k];
+      delete process.env[k];
+    }
   });
   afterEach(() => {
     store.close();
     rmSync(dir, { recursive: true, force: true });
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
   });
 
   it("one bad + one good → the good room is applied, the bad one is skipped and logged (no cookies in the log)", () => {
     const logs: string[] = [];
     const bad = { platform: "douyin", roomSlug: "999", room: null, cookies: "SECRET=abc" };
-    const r = applyRemoteTasks(store, [spec({ roomSlug: "111", room: "https://live.douyin.com/111" }), bad as never], (m) => logs.push(m));
+    const r = applyRemoteTasks(store, [room("111"), bad as never], (m) => logs.push(m));
     expect(r.applied).toEqual(["douyin:111"]);
     expect(store.listTasks().map((t) => t.room)).toEqual(["https://live.douyin.com/111"]);
     expect(r.skipped).toHaveLength(1);
@@ -60,76 +80,97 @@ describe("applyRemoteTasks: bad spec is skipped, batch still applies (issue #480
     expect(logs.join(String.fromCharCode(10))).not.toContain("SECRET=abc"); // credentials never leak into the log
   });
 
-  it("a bad item whose room already has a managed task → that task is neither deleted nor disabled, while other rooms still sync", () => {
-    // force=true keeps the shrink valve out of the picture, so the deletion loop really runs this round and
-    // the per-room protection is what keeps the broken room's task alive.
-    const kept = store.addTask({ room: "https://live.douyin.com/111" });
-    const broken = store.addTask({ room: "https://live.douyin.com/222" });
-    const dropped = store.addTask({ room: "https://live.douyin.com/333" });
-    applyRemoteTasks(store, [
-      spec({ roomSlug: "111", room: "https://live.douyin.com/111" }),
-      spec({ roomSlug: "222", room: "https://live.douyin.com/222" }),
-      spec({ roomSlug: "333", room: "https://live.douyin.com/333" }),
-    ]);
-    for (const id of [kept.id, broken.id, dropped.id]) expect(store.getTask(id)?.managedBy).toBe("hub");
-    // Make 333 removable in this round (two-phase deletion would only disable it otherwise).
-    store.setEnabled(dropped.id, false);
-
+  it("(a) non-force, 4 enabled managed rooms, [good, bad-with-derivable-room] → bad room stays enabled, not pending", () => {
+    seedManaged(["1", "2", "3", "4"]);
+    // Force-free and only 2 retained rooms of 4 → the mass-shrink valve fires and only disables; the bad
+    // room must be excluded from that disable list.
     const logs: string[] = [];
-    // Truncated spec for room 222: platform/roomSlug are gone but the room is still identifiable.
     const r = applyRemoteTasks(
       store,
-      [
-        spec({ roomSlug: "111", room: "https://live.douyin.com/111" }),
-        { room: "https://live.douyin.com/222" } as never,
-      ],
+      [room("1"), { room: "https://live.douyin.com/2" } as never],
       (m) => logs.push(m),
-      { force: true },
     );
-    expect(r.skipped).toHaveLength(1);
-    expect(store.getTask(kept.id)?.managedBy).toBe("hub");       // still applied
-    expect(store.getTask(broken.id)).toMatchObject({ managedBy: "hub", enabled: true }); // NOT treated as absent
-    expect(store.getTask(dropped.id)).toBeNull();                 // genuinely absent rooms still removed
-    expect(r.removed).toEqual(["douyin:333"]);
-    expect(r.pending).toEqual([]);
-    expect(logs.some((m) => m.includes("不按缺席处理"))).toBe(true);
+    expect(r.rejected).toBe("mass-shrink");
+    const bad = store.listTasks().find((t) => t.room === "https://live.douyin.com/2")!;
+    expect(bad).toMatchObject({ managedBy: "hub", enabled: true }); // NOT disabled by the valve
+    expect(r.pending).not.toContain("douyin:2");
+    expect(r.removed).toEqual([]);
+    expect(logs.some((m) => m.includes("不按缺席处理") || m.includes("坏条目"))).toBe(true);
   });
 
-  it("an unparsable item whose room is unknown → no deletions at all this round", () => {
-    for (const room of ["https://live.douyin.com/1", "https://live.douyin.com/2", "https://live.douyin.com/3"]) {
-      const t = store.addTask({ room });
-      applyRemoteTasks(store, [spec({ roomSlug: room.split("/").pop()!, room })], undefined, { adopt: false });
-      store.setManagedBy(t.id, "hub");
-    }
-    expect(store.listTasks()).toHaveLength(3);
-
+  it("(b) non-force, unknown-room bad item + absent rooms → nothing disabled, no rejection", () => {
+    seedManaged(["1", "2", "3", "4"]);
+    // With protected rooms counted, the expected set is still 4-ish, so the valve does not fire; and because
+    // the room is unknown the whole delete/disable phase must be skipped.
     const logs: string[] = [];
-    // The only delivered item is garbage: no room, no platform, no slug.
-    const r = applyRemoteTasks(store, [{ name: "oops" } as never], (m) => logs.push(m), { force: true });
+    const r = applyRemoteTasks(store, [{ name: "oops" } as never], (m) => logs.push(m));
     expect(r.skipped).toHaveLength(1);
+    expect(r.rejected).toBeUndefined(); // guard must not run at all
     expect(r.removed).toEqual([]);
-    expect(store.listTasks().map((t) => t.enabled)).toEqual([true, true, true]);
-    expect(store.listTasks()).toHaveLength(3);
+    expect(r.pending).toEqual([]);
+    expect(store.listTasks().every((t) => t.enabled && t.managedBy === "hub")).toBe(true);
     expect(logs.some((m) => m.includes("跳过全部删除/停用"))).toBe(true);
   });
 
-  it("all-good batch is unchanged: applied/removed/pending identical, no skipped field", () => {
+
+  it("(a2) non-force, healthy ratio: the normal two-phase delete loop must not touch the broken room", () => {
+    seedManaged(["1", "2", "3"]);
+    // 2 good rooms retained + 1 protected = 3 of 3 enabled → no shrink rejection, so the deletion loop really
+    // runs; the broken room must be skipped there instead of being disabled as "absent".
+    const logs: string[] = [];
+    const r = applyRemoteTasks(
+      store,
+      [room("1"), room("2"), { room: "https://live.douyin.com/3" } as never],
+      (m) => logs.push(m),
+    );
+    expect(r.rejected).toBeUndefined();
+    expect(store.listTasks().find((t) => t.room === "https://live.douyin.com/3"))
+      .toMatchObject({ managedBy: "hub", enabled: true });
+    expect(r.pending).toEqual([]);
+    expect(r.removed).toEqual([]);
+    expect(logs.some((m) => m.includes("不按缺席处理"))).toBe(true);
+  });
+
+  it("(c) DREC_EXPLICIT_DELETE=1 + deleted:true: unknown-room bad item → no removal; derivable-room bad item → protected", () => {
+    process.env.DREC_EXPLICIT_DELETE = "1";
+    seedManaged(["1", "2", "3"]);
+    // Unknown room: even the explicit fast path must not delete anything.
+    const logs: string[] = [];
+    const r1 = applyRemoteTasks(
+      store,
+      [spec({ ...room("1"), deleted: true }), { name: "oops" } as never],
+      (m) => logs.push(m),
+    );
+    expect(r1.removed).toEqual([]);
+    expect(store.listTasks()).toHaveLength(3);
+    expect(logs.some((m) => m.includes("跳过全部删除/停用"))).toBe(true);
+
+    // Derivable room: the explicitly deleted room 3 IS removed (intent honoured), while room 2 — whose spec
+    // failed to parse — is protected from the fast path.
+    const logs2: string[] = [];
+    const r2 = applyRemoteTasks(
+      store,
+      [spec({ ...room("1"), deleted: true }), spec({ ...room("2"), deleted: true }), { room: "https://live.douyin.com/2" } as never],
+      (m) => logs2.push(m),
+    );
+    expect(r2.removed).toEqual(["douyin:1"]);
+    expect(store.listTasks().map((t) => t.room).sort()).toEqual([
+      "https://live.douyin.com/2", "https://live.douyin.com/3",
+    ]);
+    expect(logs2.some((m) => m.includes("保留受管任务"))).toBe(true);
+  });
+
+  it("all-good batch is unchanged: applied/removed/pending identical, no skipped field, room bytes untouched", () => {
     const a = store.addTask({ room: "https://live.douyin.com/111" });
     const b = store.addTask({ room: "https://live.douyin.com/222" });
-    // Two managed rooms on this node, only one still desired → the other is removed (unchanged behaviour).
-    applyRemoteTasks(store, [
-      spec({ roomSlug: "111", room: "https://live.douyin.com/111" }),
-      // Disabled so the later removal is immediate (two-phase deletion of a running/enabled task is covered
-      // by the existing T3 tests; this case is only about an all-good batch staying unchanged).
-      spec({ roomSlug: "222", room: "https://live.douyin.com/222", enabled: false }),
-    ]);
+    applyRemoteTasks(store, [room("111"), spec({ ...room("222"), enabled: false })]);
     expect(store.getTask(b.id)?.managedBy).toBe("hub");
-    const r = applyRemoteTasks(store, [spec({ roomSlug: "111", room: "https://live.douyin.com/111" })], undefined, { force: true });
+    const r = applyRemoteTasks(store, [room("111")], undefined, { force: true });
     expect(r.applied).toEqual(["douyin:111"]);
     expect(r.removed).toEqual(["douyin:222"]);
     expect(r.pending).toEqual([]);
     expect(r.skipped).toBeUndefined(); // old masters see the exact previous shape
-    expect(store.getTask(a.id)?.managedBy).toBe("hub");
+    expect(store.getTask(a.id)).toMatchObject({ managedBy: "hub", room: "https://live.douyin.com/111" });
   });
 });
 

@@ -51,7 +51,9 @@ export function readManagedState(dir: string): ManagedState | null {
       version: typeof raw.version === "number" ? raw.version : 0,
       savedAt: typeof raw.savedAt === "number" ? raw.savedAt : 0,
       desired: raw.desired,
-      ...(Array.isArray(raw.skipped) ? { skipped: raw.skipped } : {}),
+      // Issue #480 review: only well-formed entries survive a read — a hand-edited/corrupt snapshot must not
+      // surface junk in the UI.
+      ...(Array.isArray(raw.skipped) ? { skipped: wellFormedSkipped(raw.skipped) } : {}),
       // Old snapshots have no appVersion: omit the field so readers see "unknown"
       // instead of inventing a value for the bundle that applied them.
       ...(typeof raw.appVersion === "string" ? { appVersion: raw.appVersion } : {}),
@@ -59,6 +61,21 @@ export function readManagedState(dir: string): ManagedState | null {
   } catch {
     return null;
   }
+}
+
+/** Keep only entries with an integer index and a non-empty reason (issue #480 review). */
+function wellFormedSkipped(v: unknown[]): NonNullable<ManagedState["skipped"]> {
+  return v.flatMap((e) => {
+    if (!e || typeof e !== "object") return [];
+    const o = e as { index?: unknown; room?: unknown; reason?: unknown };
+    if (typeof o.index !== "number" || !Number.isInteger(o.index) || o.index < 0) return [];
+    if (typeof o.reason !== "string" || !o.reason.trim()) return [];
+    return [{
+      index: o.index,
+      ...(typeof o.room === "string" && o.room ? { room: o.room } : {}),
+      reason: o.reason,
+    }];
+  });
 }
 
 /**
