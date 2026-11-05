@@ -15,7 +15,7 @@
  * Results are cached per (account, N) in memory and in a JSON file NEXT TO the login file, so no
  * caller needs to know a data root. Nothing here throws into an upload path.
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { biliAccountKeyFromCookiesJson, biliupCookieHeader } from "./upload-gate.js";
 
@@ -84,16 +84,19 @@ function readCache(cookiesPath: string): DiskCacheData {
 function writeCache(cookiesPath: string, patch: DiskCacheData, removeKeys: readonly string[] = []): void {
   const p = seasonCacheFile(cookiesPath);
   if (!p) return;
+  const tmp = p + ".tmp-" + String(process.pid);
   try {
-    const dir = dirname(p);
-    if (dir) mkdirSync(dir, { recursive: true });
+    mkdirSync(dirname(p), { recursive: true });
     const merged = readCache(cookiesPath);
     for (const k of removeKeys) delete merged[k];
     for (const [k, v] of Object.entries(patch)) merged[k] = v;
-    const tmp = p + ".tmp-" + String(process.pid);
-    writeFileSync(tmp, JSON.stringify(merged), "utf-8");
+    // Owner-only: the file sits next to the login file and holds account-scoped ids.
+    writeFileSync(tmp, JSON.stringify(merged), { encoding: "utf-8", mode: 0o600 });
     renameSync(tmp, p);
-  } catch { /* cache write failure is non-fatal */ }
+  } catch {
+    // Cache write failure is non-fatal, but never leave a temp file behind.
+    try { unlinkSync(tmp); } catch { /* already gone */ }
+  }
 }
 
 /** Account key of a login file: `bilibili:<mid>`, or `bilibili:unknown` when it has no DedeUserID. */
@@ -124,6 +127,14 @@ function cacheSet(accountKey: string, configured: number, sectionId: number, coo
   const entry: CacheEntry = { sectionId, writtenAt: Date.now() };
   memCache.set(k, entry);
   writeCache(cookiesPath, { [k]: entry });
+}
+
+/**
+ * Remember a section that the ADD step confirmed (added/already). Resolution itself never writes:
+ * caching a section before the add succeeds would keep a rejected section around.
+ */
+export function rememberConfiguredSeasonSection(cookiesPath: string, configured: number, sectionId: number): void {
+  cacheSet(seasonAccountKey(cookiesPath), configured, sectionId, cookiesPath);
 }
 
 /** Drop the (account, N) entry from memory and disk (called when that section is rejected). */
@@ -211,10 +222,16 @@ export async function resolveConfiguredSeasonSection(opts: {
     const ps = 30;
     /** Section ids seen across the account's own seasons (used for the legacy check). */
     const accountSections = new Set<number>();
+    /** Season ids already listed; a duplicate page must not look like progress. */
+    const listedSeasons = new Set<number>();
+    /** How many seasons the response reports (0 when it omits the field). */
+    let reportedTotal = 0;
+    /** True only once the listing is known to be complete. */
+    let listingComplete = false;
 
     for (let pn = 1; pn <= maxPages; pn++) {
       const left = deadline - Date.now();
-      if (left <= 0) return { status: "failed", error: "解析合集超时(预算耗尽)", retryable: true };
+      if (left <= 0) break; // incomplete -> retryable below
 
       const url = MEMBER + "/x2/creative/web/seasons?pn=" + String(pn) + "&ps=" + String(ps);
       const r = await requestJson(doFetch, url, { headers: headers(cookie) }, Math.min(perRequest, left));
@@ -225,14 +242,23 @@ export async function resolveConfiguredSeasonSection(opts: {
 
       const data = (r.raw.data ?? {}) as { seasons?: SeasonListItem[]; total?: number };
       const seasons = Array.isArray(data.seasons) ? data.seasons : [];
+      // A past-the-end page is empty: that is how pagination ends when `total` is unavailable.
+      if (seasons.length === 0) { listingComplete = true; break; }
 
+      const pageTotal = Number(data.total ?? 0);
+      if (Number.isSafeInteger(pageTotal) && pageTotal > 0) reportedTotal = pageTotal;
+
+      let added = 0;
       for (const item of seasons) {
+        const seasonId = Number(item.season?.id ?? 0);
+        if (seasonId > 0 && !listedSeasons.has(seasonId)) { listedSeasons.add(seasonId); added++; }
+
         const sects = Array.isArray(item.sections?.sections) ? item.sections!.sections! : [];
         for (const s of sects) {
           const id = Number(s?.id ?? 0);
           if (id > 0) accountSections.add(id);
         }
-        if (Number(item.season?.id ?? 0) !== configured) continue;
+        if (seasonId !== configured) continue;
 
         if (sects.length === 0) {
           return { status: "failed", error: "合集 " + String(configured) + " 没有小节", retryable: false };
@@ -248,18 +274,25 @@ export async function resolveConfiguredSeasonSection(opts: {
         if (!(sectionId > 0)) {
           return { status: "failed", error: "合集 " + String(configured) + " 的小节 ID 无效", retryable: false };
         }
-        cacheSet(accountKey, configured, sectionId, cookiesPath);
+        // Caller persists this only after the add confirms it.
         return { status: "resolved", sectionId, fromCache: false };
       }
 
-      const total = Number(data.total ?? 0);
-      if (seasons.length < ps || (total > 0 && pn * ps >= total)) break;
+      // Stop only on real completeness: the reported season count is covered, or the page brought
+      // no new season ids. (A page shorter than `ps` is NOT sufficient: the server may cap `ps`.)
+      if (reportedTotal > 0 && listedSeasons.size >= reportedTotal) { listingComplete = true; break; }
+      if (added === 0) { listingComplete = true; break; }
     }
 
     // Not one of the account's seasons: a legacy section id inside one of them is still accepted.
     if (accountSections.has(configured)) {
-      cacheSet(accountKey, configured, configured, cookiesPath);
       return { status: "resolved", sectionId: configured, fromCache: false };
+    }
+
+    if (!listingComplete) {
+      // Page cap / budget ran out with pages still unread: the answer may be on one of them.
+      // Retryable — never "not this account".
+      return { status: "failed", error: "合集列表未读完(稍后重试)", retryable: true };
     }
 
     return {

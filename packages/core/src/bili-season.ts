@@ -11,7 +11,9 @@ import { readFileSync } from "node:fs";
 import { biliupCookieHeader, biliupCsrf } from "./upload-gate.js";
 import {
   SEASON_ID_HINT,
+  SEASON_RESOLVE_TIMEOUT_MS,
   clearConfiguredSeasonCache,
+  rememberConfiguredSeasonSection,
   resolveConfiguredSeasonSection,
   type SeasonSectionLookup,
 } from "./bili-season-resolve.js";
@@ -27,7 +29,14 @@ export type SeasonAddOutcome =
   | { status: "added"; sectionId: number; aid: number; cid: number; title: string }
   | { status: "already"; sectionId: number; aid: number }
   | { status: "skipped"; reason: string }
-  | { status: "failed"; sectionId: number; error: string; retryable: boolean };
+  | {
+      status: "failed";
+      sectionId: number;
+      error: string;
+      retryable: boolean;
+      /** Stable marker for the resume path's "membership unknown" answer (retryable, but worth a fresh look). */
+      reason?: "membership-unknown";
+    };
 
 interface SeasonTarget {
   sectionId: number;
@@ -212,7 +221,13 @@ export async function addArchiveToSeason(o: SeasonTarget): Promise<SeasonAddOutc
     const inSection = await sectionContainsAid(doFetch, cookie, sectionId, view.aid, checkBudget);
     if (inSection === true) return { status: "already", sectionId, aid: view.aid };
     if (inSection === null) {
-      return { status: "failed", sectionId, error: "小节成员状态未知,未重复提交", retryable: true };
+      return {
+        status: "failed",
+        sectionId,
+        error: "小节成员状态未知,未重复提交",
+        retryable: true,
+        reason: "membership-unknown",
+      };
     }
   }
 
@@ -345,7 +360,8 @@ export async function addArchiveToSeasonIfConfigured(
       cookiesPath: o.cookiesPath,
       ...(o.fetchImpl ? { fetchImpl: o.fetchImpl } : {}),
       ...(o.timeoutMs !== undefined ? { timeoutMs: o.timeoutMs } : {}),
-      deadlineMs: deadline,
+      // Resolve gets at most its own slice, so the add (view + membership + POST) keeps budget.
+      deadlineMs: Math.min(deadline, Date.now() + SEASON_RESOLVE_TIMEOUT_MS),
     });
 
     const fail = (error: string, retryable: boolean): SeasonAddOutcome => {
@@ -366,13 +382,36 @@ export async function addArchiveToSeasonIfConfigured(
     });
 
     const firstOutcome = await addFor(first.sectionId);
-    if (firstOutcome.status === "failed" && !firstOutcome.retryable && first.fromCache) {
-      // A cached section was rejected for good: drop it and re-resolve once. Only a *different*
-      // section is worth another POST; the same section would fail the same way.
+    // Persist the section only after the add confirms it: a rejected section must never be cached.
+    if (firstOutcome.status === "added" || firstOutcome.status === "already") {
+      rememberConfiguredSeasonSection(o.cookiesPath, configured, first.sectionId);
+      return firstOutcome;
+    }
+
+    // A stale cached section fails in two ways that are worth one fresh look:
+    //   - the add is rejected for good ("that section is not yours"), or
+    //   - the resume path cannot verify membership ("member state unknown").
+    // Either way: drop the entry, re-resolve once, and re-POST only if the section changed.
+    // We cannot reliably tell a section-level rejection from an archive-level one here, so the
+    // clear happens AT MOST ONCE PER CALL, and the rejected section is never written back (the
+    // cache is only written after a confirmed add) — so a genuinely bad archive cannot make this
+    // loop scan forever across runs either.
+    const staleCachedSection = firstOutcome.status === "failed"
+      && (!firstOutcome.retryable || firstOutcome.reason === "membership-unknown");
+    if (first.fromCache && staleCachedSection) {
       clearConfiguredSeasonCache(o.cookiesPath, configured);
       const second = await resolveOnce();
-      if (second.status === "resolved" && second.sectionId !== first.sectionId) {
-        return addFor(second.sectionId);
+      if (second.status === "failed") {
+        // The fresh lookup failed too: a retryable failure keeps the state pending, a definite one
+        // replaces the stale-section answer with the more precise reason.
+        return fail(second.error, second.retryable);
+      }
+      if (second.sectionId !== first.sectionId) {
+        const retried = await addFor(second.sectionId);
+        if (retried.status === "added" || retried.status === "already") {
+          rememberConfiguredSeasonSection(o.cookiesPath, configured, second.sectionId);
+        }
+        return retried;
       }
     }
     return firstOutcome;
