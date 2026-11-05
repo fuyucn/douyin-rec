@@ -2,6 +2,7 @@
 // 任务表是真 sqlite(临时目录);ssh 的 `run` 用进程内「假节点」调同一执行体,验证编解码往返。
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -216,8 +217,20 @@ describe("_enqueue:回执语义", () => {
 });
 
 describe("_proc-status", () => {
-  it("库不存在 → []", () => {
+  it("库不存在 → [](该节点确实什么都没排队)", () => {
     expect(handleProcStatus(root, ["remux:x#g1"])).toEqual([]);
+  });
+
+  it("库打不开 → 抛错,不是 [](issue #470)", () => {
+    // A directory at the db path makes the open itself fail.
+    mkdirSync(procQueueDbPath(root), { recursive: true });
+    expect(() => handleProcStatus(root, ["remux:x#g1"])).toThrow(/proc-queue status unavailable/);
+  });
+
+  it("查询抛错(库文件损坏)→ 抛错,不是 [](issue #470)", () => {
+    mkdirSync(dirname(procQueueDbPath(root)), { recursive: true });
+    writeFileSync(procQueueDbPath(root), "not a sqlite database", "utf-8");
+    expect(() => handleProcStatus(root, ["remux:x#g1"])).toThrow(/proc-queue status unavailable/);
   });
 
   it("回执含 state / leaseAlive / error;未知 jobId 不出现", () => {

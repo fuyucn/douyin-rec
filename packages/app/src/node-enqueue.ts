@@ -175,15 +175,31 @@ export function handleEnqueue(dataRoot: string, req: EnqueueRequest, opts: Handl
   }
 }
 
-/** `_proc-status` 执行体:库不存在 → `[]`;未知 jobId 不出现在回执里(派发方据缺席判定)。 */
+/** One-line reason for a failed queue read (surfaces through the hidden command's `{error}`). */
+function shortError(e: unknown): string {
+  return String((e as Error)?.message ?? e).slice(0, 200);
+}
+
+/**
+ * `_proc-status` execution body (issue #470).
+ *
+ * - no db file: this node has genuinely queued nothing -> `[]`;
+ * - unreadable db or a failing query: THROW. The hidden command turns that into `{error}` + exit 1,
+ *   both transports reject, and the master treats the round as "queue state unknown". A transient db
+ *   error must never look like "that job is not queued": that verdict ends format-conversion
+ *   followups for good and can bypass the queued-upload guard.
+ *
+ * Unknown job ids stay absent from the receipts (readers take absence as "not queued").
+ */
 export function handleProcStatus(dataRoot: string, jobIds: string[]): ProcessReceipt[] {
   const path = procQueueDbPath(dataRoot);
   if (!existsSync(path)) return [];
+
   let store: ProcQueueStore;
   try {
     store = new ProcQueueStore(path, { readOnly: true });
-  } catch {
-    return [];
+  } catch (e) {
+    throw new Error(`proc-queue status unavailable: ${shortError(e)}`);
   }
   try {
     const out: ProcessReceipt[] = [];
@@ -199,10 +215,11 @@ export function handleProcStatus(dataRoot: string, jobIds: string[]): ProcessRec
       });
     }
     return out;
-  } catch {
-    return []; // 库存在但未迁移(表缺失)等:视为空
+  } catch (e) {
+    // Existing but unreadable (not a db, missing tables, lock): report "unknown", never an empty queue.
+    throw new Error(`proc-queue status unavailable: ${shortError(e)}`);
   } finally {
-    store.close();
+    try { store.close(); } catch { /* closing never changes the verdict */ }
   }
 }
 
