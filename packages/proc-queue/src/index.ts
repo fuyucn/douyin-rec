@@ -8,3 +8,4 @@ export {
   ProcRunner, SimpleSlotLimiter, readProcActive,
   type ProcRunnerOpts, type SlotLimiter,
 } from "./runner.js";
+export { DEFAULT_RECONCILE_MAX_MS, RECONCILE_SHADOW_LOG } from "./runner.js";

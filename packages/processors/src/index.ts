@@ -10,3 +10,4 @@ export * from "./archive-lookup.js";
 export { isSameChild, probeChild, type ChildFingerprint } from "@drec/core";
 export * from "./biliup.js";
 export * from "./biliup-progress.js";
+export * from "./reconcile-part.js";

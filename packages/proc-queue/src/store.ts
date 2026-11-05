@@ -16,7 +16,7 @@ import { dirname, join } from "node:path";
 import {
   assertJobInvariants, canTransition, cancelOutcome, jobIdOf,
   PART_KINDS, type PartCtx,
-  type EnqueueResult, type JobState, type ProcessJob, type UploadProgress,
+  type EnqueueResult, type JobState, type ProcessJob, type TransitionReason, type UploadProgress,
 } from "@drec/core";
 import { migrateSchema } from "./schema.js";
 import { ProcLeaseStore } from "./lease.js";
@@ -106,6 +106,17 @@ export interface ChainJob {
 export type CompleteAndChainResult =
   | { ok: true; nextJobId: string; chained: boolean }
   | { ok: false; error: string };
+
+/** Explicit PR3 settlement outcomes; each reason is re-checked against canTransition inside the write transaction. */
+export type ReconcileOutcome = "yes" | "no" | "unknown" | "timeout";
+
+export interface ReconcileSettleContext {
+  /** Explicit opt-in after a measured settle window exists; default false maps "no" to "unknown". */
+  allowResend?: boolean;
+  bv?: string;
+  note?: string;
+  error?: string;
+}
 
 export interface ProcQueueStoreOpts {
   now?: () => number;
@@ -277,6 +288,12 @@ export class ProcQueueStore {
     const sql = `SELECT * FROM proc_jobs${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY createdAt, rowid LIMIT ?`;
     args.push(f.limit ?? 1000);
     return (this.db.prepare(sql).all(...args) as Row[]).map(toRecord);
+  }
+
+  /** Lightweight per-tick scan for non-terminal reconciliation rows; claim() intentionally does not see them. */
+  listReconciling(limit = 100): ProcJobRecord[] {
+    return (this.db.prepare("SELECT * FROM proc_jobs WHERE state='reconciling' ORDER BY updatedAt, rowid LIMIT ?")
+      .all(limit) as Row[]).map(toRecord);
   }
 
   /** 各 kind 的 running / pending 计数(只含有行的 kind)。 */
@@ -594,6 +611,58 @@ export class ProcQueueStore {
       const row = this.get(jobId);
       if (!row || row.state !== "running" || row.claimedBy !== owner) return false;
       return this.applyFinish(row, outcome);
+    });
+  }
+
+  /**
+   * Independent PR3 entry point: running -> reconciling after an interrupted submit. The old
+   * applyFinish guard remains intentionally, so no legacy finish call can strand a row in a state
+   * that only this API and settleReconciling can advance.
+   */
+  startReconciliation(jobId: string, owner: string, info: { error: string }): boolean {
+    return this.tx(() => {
+      const row = this.get(jobId);
+      if (!row || row.state !== "running" || row.claimedBy !== owner) return false;
+      if (!this.leaseValid(row.kind, owner)) return false;
+      if (!canTransition("running", "reconciling", { reason: "reconcile-start" })) return false;
+      const t = this.now();
+      const res = this.db.prepare(
+        "UPDATE proc_jobs SET state='reconciling', claimedBy=NULL, error=?, finishedAt=NULL, updatedAt=? WHERE jobId=? AND state='running' AND claimedBy=?",
+      ).run(info.error, t, jobId, owner);
+      return Number(res.changes) > 0;
+    });
+  }
+
+  /** The only writer of reconciling out-edges; reason and lease are re-checked atomically. */
+  settleReconciling(
+    jobId: string,
+    owner: string,
+    outcome: ReconcileOutcome,
+    ctx: ReconcileSettleContext = {},
+  ): boolean {
+    return this.tx(() => {
+      const row = this.get(jobId);
+      if (!row || row.state !== "reconciling" || !this.leaseValid(row.kind, owner)) return false;
+      let to: JobState;
+      let reason: TransitionReason;
+      if (outcome === "yes") { to = "done"; reason = "reconcile-yes"; }
+      else if (outcome === "no") {
+        if (ctx.allowResend !== true) { to = "reconciling"; reason = "reconcile-unknown"; }
+        else { to = "pending"; reason = "reconcile-no-resend"; }
+      } else if (outcome === "timeout") { to = "failed"; reason = "reconcile-timeout"; }
+      else { to = "reconciling"; reason = "reconcile-unknown"; }
+      if (!canTransition("reconciling", to, {
+        reason,
+        ...(reason === "reconcile-no-resend" ? { allowReconcileResend: ctx.allowResend === true } : {}),
+      })) return false;
+      const t = this.now();
+      const error = to === "failed" ? (ctx.error ?? "对账时间盒耗尽,转人工核对") : null;
+      const note = to === "done" ? (ctx.note ?? "对账确认稿件已存在") : null;
+      const resultOutputs = to === "done" ? JSON.stringify(row.outputs ?? []) : null;
+      const res = this.db.prepare(
+        "UPDATE proc_jobs SET state=?, claimedBy=NULL, error=?, note=?, resultOutputs=?, updatedAt=?, finishedAt=? WHERE jobId=? AND state='reconciling'",
+      ).run(to, error, note, resultOutputs, t, to === "reconciling" ? null : t, jobId);
+      return Number(res.changes) > 0;
     });
   }
 

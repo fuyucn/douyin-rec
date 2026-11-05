@@ -17,7 +17,7 @@ import { bilibiliPlatform } from "@drec/bilibili-live";
 import { kuaishouPlatform } from "@drec/kuaishou-live";
 import { ffmpegEngine, mesioEngine } from "@drec/record-engine";
 import { existsSync } from "node:fs";
-import { makeBiliupProcessor, remuxProcessor, uploadPrepProcessor } from "@drec/processors";
+import { makeBiliupProcessor, reconcilePartProcessor, remuxProcessor, uploadPrepProcessor } from "@drec/processors";
 import { openNodeUploadGate, openNodeUploadSlot, resolveUploadAccountKey, rootBiliupCookies } from "@drec/app";
 
 // ── 平台 ────────────────────────────────────────────────────────────────────
@@ -35,6 +35,7 @@ registerEngine(mesioEngine);
 // 加处理器 = `@drec/processors` 里一个模块 + 此处一行(与上面 registerPlatform / registerEngine 并列)。
 registerProcessor(remuxProcessor);
 registerProcessor(uploadPrepProcessor);
+registerProcessor(reconcilePartProcessor);
 // biliup on a node: same account rate-limit gate and local cookies as the blocking node pipeline (plan 038 T15b).
 // One gate per process: the runner lives in the long-running serve process, so a gate per job would leak a
 // sqlite handle per upload (the gate exposes no close); the store itself serialises across processes.
