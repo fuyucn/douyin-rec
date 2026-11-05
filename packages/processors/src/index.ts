@@ -1,5 +1,7 @@
 // @drec/processors — 后处理处理器实现(plans/036 §2.2)。入口只做导出;加处理器 = 一个模块 + providers-register 一行。
 export * from "./remux.js";
+// cleanup-part: the only queue processor allowed to delete sources (plan 046 PR2, not wired yet).
+export * from "./cleanup-part.js";
 export { uploadPrepProcessor, produceStageParts, splitGroupsBySession, tryDirectTsLink, type PrepPart, type PrepSpec } from "./upload-prep.js";
 export * from "./run-biliup.js";
 // 0 落盘流式直传已拆到 @drec/zero-upload(upos-stream / live-pump)。这里只做 re-export,
