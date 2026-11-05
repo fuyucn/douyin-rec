@@ -3446,6 +3446,13 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     let s: StreamAcquirer | null;
     // Every part of the previous connection has settled; we are waiting for a stream again. Parts that stayed
     // unconfirmed (kept spool, held gap) are still upload work this child owns → finalizing, not idle polling.
+    // Emit `waiting` so the live-upload timeline reflects "waiting for stream" instead of the
+    // last part's state (e.g. `submitting`), which would read as "still submitting" while the
+    // pump is actually polling for a broadcast (possibly for the whole stall-recovery window).
+    // Only after a connection that opened a part: the first iteration runs right after
+    // `run_start` (already live), so emitting there would just add a spurious waiting between it
+    // and the first `live`.
+    if (partsOpened > 0) emit({ at: Date.now(), kind: "waiting" });
     phase(idlePhase(session));
     if (recoveryDeadline !== undefined) {
       s = await waitForBroadcast(recoveryDeadline);
