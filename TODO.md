@@ -412,8 +412,7 @@
     是无效操作 —— 要改概率得调 weight。本轮未改 priority。
 
 ## 待办（Next）
-- [~] **T-143 fix(cli): --danmu no 反而开启弹幕;布尔参数词表有 4 份且不一致（issue [#472](https://github.com/fuyucn/douyin-rec/issues/472)，计划 [045](plans/045_codebase_optimization.md) B3，2026-11-04）** — 证据/改法/验收见 issue。
-- [ ] **T-144 fix(web): GET /api/hub/resources 忽略内联/设置来源的 hub 配置（issue [#473](https://github.com/fuyucn/douyin-rec/issues/473)，计划 [045](plans/045_codebase_optimization.md) B4，2026-11-04）** — 证据/改法/验收见 issue。
+- [~] **T-144 fix(web): GET /api/hub/resources 忽略内联/设置来源的 hub 配置（issue [#473](https://github.com/fuyucn/douyin-rec/issues/473)，计划 [045](plans/045_codebase_optimization.md) B4，2026-11-04）** — 证据/改法/验收见 issue。
 - [ ] **T-145 fix(recorder): mesio 卡死看门狗统计目录内所有 .flv,会被同目录其他写入骗过（issue [#474](https://github.com/fuyucn/douyin-rec/issues/474)，计划 [045](plans/045_codebase_optimization.md) B5，2026-11-04）** — 证据/改法/验收见 issue。
 - [ ] **T-146 fix(manager): 同场窗口 10 分钟与 core 权威 30 分钟不一致（issue [#475](https://github.com/fuyucn/douyin-rec/issues/475)，计划 [045](plans/045_codebase_optimization.md) B6，2026-11-04）** — 证据/改法/验收见 issue。
 - [ ] **T-147 fix(bilibili): 显示开播却拿不到播放地址时静默当作未开播（issue [#476](https://github.com/fuyucn/douyin-rec/issues/476)，计划 [045](plans/045_codebase_optimization.md) B7，2026-11-04）** — 证据/改法/验收见 issue。
@@ -791,6 +790,7 @@
   属模型取舍，不是可顺手加的功能。**为什么**：冗余模型把轮询量乘了 N，是 VPS 被限流的根因之一。
 
 ## 已完成
+- [x] **T-143 fix(cli): --danmu no 反而开启弹幕;布尔参数词表有 4 份且不一致（issue [#472](https://github.com/fuyucn/douyin-rec/issues/472)，计划 [045](plans/045_codebase_optimization.md) B3，2026-11-04）** — 证据/改法/验收见 issue。（2026-11-04，PR #488）
 - [x] **T-142 fix(hub): 节点输出格式锁手抄「节点侧上传」判定,漏掉全局总开关（issue [#471](https://github.com/fuyucn/douyin-rec/issues/471)，计划 [045](plans/045_codebase_optimization.md) B2，2026-11-04）** — 证据/改法/验收见 issue。（2026-11-04，PR #486）
 - [x] **T-141 fix(hub): _proc-status 把数据库错误当成「任务不存在」,可致收尾转格式静默终结与重复投稿（issue [#470](https://github.com/fuyucn/douyin-rec/issues/470)，计划 [045](plans/045_codebase_optimization.md) B1，2026-11-04）** — 证据/改法/验收见 issue。（2026-11-04，PR #483）
 - [x] **T-140 合集 ID(seasonSectionId 直接填合集 ID)（issue [#460](https://github.com/fuyucn/douyin-rec/issues/460)，分支 `feat/460-season-id-v3`，2026-11-04）** — **做什么**:沿用 `upload.seasonSectionId`/`uploadDefaults.seasonSectionId` 两个既有配置项(值现在表示「合集 ID」,旧的小节 ID 仍可用),全部逻辑收在 core 的 `addArchiveToSeasonIfConfigured` 里,调用点零改动:用上传账号的登录态分页查 `GET /x2/creative/web/seasons`,N 是本账号合集→取唯一小节(多小节→不可重试「合集有多个小节,需指定」);否则 N 是本账号某合集里的小节→按旧语义直接用;都不是→不可重试并提示「请确认填写的是本账号的合集 ID」;网络/超时→可重试。结果按 (账号, N) 缓存到登录文件同目录的一份合集缓存(临时文件+改名、写前重读合并、坏文件按空处理、无账号 ID 不缓存)。缓存小节被明确拒绝时清缓存、重解析一次,仅当新小节不同才重试;解析+加入+重试共用一个总预算。**为什么**:创作中心只给 SEASON id,用户填进 seasonSectionId 会让 episodes/add 返回 -404 → 判定明确拒绝、seasonState=failed 且日志难懂。**验收**:单小节合集→加入且第二次零查询;旧小节 ID 原样可用;多小节/非本账号→一次查询零 POST 且文案清楚;网络错→pending;缓存小节被拒→清缓存重解析、新小节才重试;两账号缓存互不影响;坏缓存文件不抛;无账号 ID 不落缓存;`pnpm test`/`typecheck`/web build/bundle 通过。（2026-11-04，PR #468）
