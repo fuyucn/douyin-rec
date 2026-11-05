@@ -16,7 +16,7 @@
 import { resolve, join } from "node:path";
 import { mkdirSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
-import { createLogger, platformForRoom, recordingRoomDir, sanitizePathSegment, processTimeZone, zonedStamp, type AdmitDecision, type DownloadEngine, type Platform, type PlatformStream, type Recorder, type RecordOpts, type RecorderEvents } from "@drec/core";
+import { createLogger, platformForRoom, recordingRoomDir, sanitizePathSegment, sanitizeSessionFileBase, processTimeZone, zonedStamp, type AdmitDecision, type DownloadEngine, type Platform, type PlatformStream, type Recorder, type RecordOpts, type RecorderEvents } from "@drec/core";
 import { logStreamMeta, type StreamMetaSource } from "@drec/ffmpeg-recorder-extra";
 
 const log = createLogger("stream_recorder");
@@ -73,7 +73,7 @@ export function describeStreamIdentity(probe: Pick<PlatformStream, "url" | "live
 }
 
 /** Re-exported for existing importers; the rule itself lives in core output-paths (issue #333). */
-export { sanitizePathSegment };
+export { sanitizePathSegment, sanitizeSessionFileBase };
 
 export class PollingRecorder implements Recorder {
   readonly name: string;
@@ -146,7 +146,10 @@ export class PollingRecorder implements Recorder {
     // bilibili 等无 raw 的平台 → streamInfoLine 返 undefined(只 ffprobe 设备,也无伤)。
     if (probe.raw) logStreamMeta(url, probe.raw as StreamMetaSource, this.quality);
 
-    const safe = sanitizePathSegment(this.outName || owner) || this.channelId;
+    // The session file base must be `%`-free: both engines expand `%…` in their output templates,
+    // so a `%` in the anchor name made the real files unrecognisable to the growth watchdog (#474).
+    // Directory names are untouched (renaming an existing room dir would orphan its files).
+    const safe = sanitizeSessionFileBase(this.outName || owner) || this.channelId;
     // Directory via the core resolver. Legacy: <out>/<name> (channel id when the name is empty), exactly as before.
     // Room layout: the suffix-matched `<name>_<platform>_<room>` dir (the one this process created on its first
     // spawn, or an earlier one; an anchor rename never moves it), else a new one. Old name dirs are history.
