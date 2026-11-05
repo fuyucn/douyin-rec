@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TaskStore } from "../../packages/app/src/store.js";
 import { applyRemoteTasks } from "../../packages/app/src/task-sync.js";
-import type { RemoteTaskSpec } from "@drec/core";
+import { registerPlatform, type RemoteTaskSpec } from "@drec/core";
 
 /**
  * Issue #480: one malformed delivered spec must not abort the whole batch, and — crucially — a skipped item
@@ -158,6 +158,81 @@ describe("applyRemoteTasks: bad spec is skipped, batch still applies (issue #480
       "https://live.douyin.com/2", "https://live.douyin.com/3",
     ]);
     expect(logs2.some((m) => m.includes("保留受管任务"))).toBe(true);
+  });
+
+
+  it("M6: bad specs for rooms this node never had do NOT count toward the expected set", () => {
+    seedManaged(["1", "2", "3", "4"]);
+    const logs: string[] = [];
+    // Three truncated specs (derivable slug, missing platform) for rooms that exist nowhere on this node:
+    // none retained, none locally managed -> the batch must be rejected, and nothing may be disabled.
+    const r = applyRemoteTasks(
+      store,
+      [
+        { room: "https://live.douyin.com/90" } as never,
+        { room: "https://live.douyin.com/91" } as never,
+        { room: "https://live.douyin.com/92" } as never,
+      ],
+      (m) => logs.push(m),
+    );
+    expect(r.skipped).toHaveLength(3);
+    expect(r.rejected).toBe("empty-desired");
+    expect(store.listTasks().every((t) => t.enabled && t.managedBy === "hub")).toBe(true);
+    expect(r.removed).toEqual([]);
+    expect(r.pending).toEqual([]);
+  });
+
+  it("a protected room with a local managed task keeps a healthy ratio → no false mass-shrink", () => {
+    seedManaged(["1", "2"]);
+    const logs: string[] = [];
+    // 2 enabled managed rooms, 1 good + 1 protected: expectedSize = 2 > floor(2/2) = 1 → no rejection,
+    // and room 2 (whose spec is broken) stays enabled instead of being disabled as absent.
+    const r = applyRemoteTasks(store, [room("1"), { room: "https://live.douyin.com/2" } as never], (m) => logs.push(m));
+    expect(r.rejected).toBeUndefined();
+    expect(store.listTasks().find((t) => t.room === "https://live.douyin.com/2"))
+      .toMatchObject({ managedBy: "hub", enabled: true });
+    expect(r.pending).toEqual([]);
+    expect(r.removed).toEqual([]);
+  });
+
+  it("M7: a local row whose room cannot be slugged does not abort upsert and is not duplicated", () => {
+    // A platform whose extractRoomSlug throws stands in for a corrupt/legacy local row: addTask itself would
+    // normalise the room, so the row is inserted raw to reproduce exactly what the store can hold.
+    registerPlatform({
+      id: "boom",
+      matchUrl: (u: string) => u.includes("boom.local"),
+      roomToUrl: (r: string) => r,
+      extractRoomSlug: () => { throw new Error("boom"); },
+      fetchAnchorName: async () => null,
+      getStream: async () => ({ living: false }),
+      getLiving: async () => false,
+      defaultQuality: "origin",
+      defaultEngine: "ffmpeg",
+      qualities: ["origin"],
+      engines: ["ffmpeg"],
+    });
+    store.db.prepare(
+      "INSERT INTO tasks(room, platform, engine, useCookie, enabled, createdAt) VALUES(?,?,?,?,?,?)",
+    ).run("https://boom.local/1", "douyin", "ffmpeg", 1, 1, new Date().toISOString());
+
+    const r = applyRemoteTasks(store, [room("111")]); // would throw if upsert slugged the bad row
+    expect(r.applied).toEqual(["douyin:111"]);
+    const tasks = store.listTasks();
+    expect(tasks).toHaveLength(2); // bad row kept, exactly one new row
+    expect(tasks.filter((t) => t.room === "https://live.douyin.com/111")).toHaveLength(1);
+    expect(tasks.some((t) => t.room === "https://boom.local/1")).toBe(true);
+  });
+
+  it("all-good batch with a whitespace-padded room URL → the applied spec keeps the master bytes", () => {
+    const padded = "  https://live.douyin.com/111  ";
+    const stateDir = join(dir, "managed");
+    // The audit snapshot records the specs as applied, so it pins whether validation rewrote `room`.
+    applyRemoteTasks(store, [spec({ roomSlug: "111", room: padded })], undefined, { managedStateDir: stateDir });
+    const snap = JSON.parse(readFileSync(join(stateDir, "rooms.json"), "utf-8")) as { desired: RemoteTaskSpec[] };
+    expect(snap.desired).toHaveLength(1);
+    expect(snap.desired[0].room).toBe(padded); // byte-identical: trim is used only for validation
+    // The store itself normalises the room on insert (pre-existing behaviour, unrelated to #480).
+    expect(store.listTasks()[0].room).toBe("https://live.douyin.com/111");
   });
 
   it("all-good batch is unchanged: applied/removed/pending identical, no skipped field, room bytes untouched", () => {

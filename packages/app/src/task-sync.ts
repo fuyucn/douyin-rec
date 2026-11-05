@@ -397,11 +397,20 @@ export function applyRemoteTasks(
           return { id: t.id, key: `${s.platform}:${s.roomSlug}` };
         });
 
-    // Issue #480 review: rooms whose delivered spec failed to parse are neither retained nor absent — they are
-    // still expected to exist locally, so they count toward "how much of the desired set survived" and must
-    // not trip a false mass-shrink.
-    const expectedSize = new Set([...retainedKeys, ...protectedKeys]).size;
-    if (retainedKeys.size === 0 && !explicitDelete && protectedKeys.size === 0) {
+    // Issue #480 (review 2): a protected key only counts toward "how much of the desired set survived" when
+    // this node actually has a managed task for that room. A protected room the node never had is not a reason
+    // to keep tasks for other rooms alive (a batch of unknown-room garbage must still be rejected).
+    const localManagedKeys = new Set(
+      managedTasks.flatMap((t) => {
+        const s = trySlugOf(t.room);
+        return s ? [`${s.platform}:${s.roomSlug}`] : [];
+      }),
+    );
+    const expectedKeys = new Set([...retainedKeys, ...protectedKeys].filter((k) => {
+      return retainedKeys.has(k) || localManagedKeys.has(k);
+    }));
+    const expectedSize = expectedKeys.size;
+    if (retainedKeys.size === 0 && !explicitDelete && expectedSize === 0) {
       return { rejected: "empty-desired", totalManaged, enabledManaged, disableOnly: disableOnly() };
     }
     // enabledManaged ≤ 1 时不存在「数量级塌陷」(1→0 已被空期望守卫覆盖),不拦。
