@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   jobLogFileName, jobLogPathCandidates, legacyStageSessionDir, recordingRoomDir, recordingRoomDirCandidates, resolveJobLogPath, roomDirName,
-  sanitizePathSegment, sanitizeRoomName, stageSessionDir, parseOutputLayout, parseRoomDirName, anchorNameOfSessionBase, stageSessionDirCandidates, findRoomDir, ROOM_NAME_MAX_BYTES,
+  sanitizePathSegment, sanitizeSessionFileBase, sanitizeRoomName, stageSessionDir, parseOutputLayout, parseRoomDirName, anchorNameOfSessionBase, stageSessionDirCandidates, findRoomDir, ROOM_NAME_MAX_BYTES,
 } from "./output-paths.js";
 
 let root: string;
@@ -20,6 +20,23 @@ describe("sanitizePathSegment (unchanged legacy rule)", () => {
     expect(sanitizePathSegment("a b\tc   d")).toBe("a bc d");
     expect(sanitizePathSegment("   ")).toBe("");
     expect(sanitizePathSegment("x".repeat(300))).toHaveLength(300);
+  });
+});
+
+describe("sanitizeSessionFileBase (issue #474: engines expand %… in output templates)", () => {
+  it("replaces % (mesio -n expands %Y/%d/…, ffmpeg segment expands %d-style)", () => {
+    expect(sanitizeSessionFileBase("主播%d_%Y")).toBe("主播_d__Y");
+    expect(sanitizeSessionFileBase("%Y-%m-%d")).toBe("_Y-_m-_d");
+    expect(sanitizeSessionFileBase("100%")).toBe("100_");
+    expect(sanitizeSessionFileBase("%")).toBe("_");
+    expect(sanitizeSessionFileBase("%%%")).toBe("___");
+  });
+
+  it("otherwise behaves exactly like sanitizePathSegment", () => {
+    expect(sanitizeSessionFileBase('a/b\\c:d*e?f"g<h>i|j')).toBe("abcdefghij");
+    expect(sanitizeSessionFileBase("a b\tc   d")).toBe("a bc d");
+    expect(sanitizeSessionFileBase("   ")).toBe("");
+    expect(sanitizeSessionFileBase("一勺小苏打")).toBe("一勺小苏打");
   });
 });
 

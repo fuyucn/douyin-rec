@@ -48,6 +48,26 @@ export function sanitizePathSegment(name: string): string {
     .trim();
 }
 
+/**
+ * Per-session FILE base (issue #474) — `sanitizePathSegment` plus "no percent".
+ *
+ * Both download engines expand `%…` sequences in their output templates: mesio's `-n` expands
+ * %u/%Y/%m/%d/%H/%M/%S/%i (verified against mesio 0.4.1: `x%dy_…_%i` wrote `x04y_…_000.flv`), and
+ * ffmpeg's segment muxer expands `%d`-style patterns. A `%` in an anchor name therefore makes the
+ * files on disk differ from the name the recorder waits for (the mesio growth watchdog looked for
+ * the literal `x%dy_…` file, saw no growth and killed a healthy recording).
+ *
+ * This is the single place the session base is derived, so mesio, ffmpeg, the danmu `.xml` and the
+ * session sidecar (all of which hang off that same base) agree again.
+ *
+ * Directory names are deliberately NOT changed here: renaming an existing on-disk room directory
+ * would orphan the files already in it.
+ */
+export function sanitizeSessionFileBase(name: string): string {
+  // `_` keeps the name readable and is already the separator used by the file layout.
+  return sanitizePathSegment(name).replace(/%/g, "_");
+}
+
 /** Legacy directory name source: the first candidate that is still non-empty after sanitising. */
 export type NameCandidates = string | readonly (string | null | undefined)[];
 
