@@ -346,3 +346,86 @@ describe("backfillNodeStates", () => {
     l.close();
   });
 });
+
+describe("migration validates every expected column (issue #478)", () => {
+  /** PRAGMA column names of a table (or view) in an already-open raw connection. */
+  const colsOf = (raw: DatabaseSync, table: string): string[] =>
+    (raw.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name).sort();
+
+  /** Expected schema = exactly what SyncLedger.initSchema must leave behind. Kept here on purpose: the test
+   *  is the independent copy that fails when the production list and the migration drift apart. */
+  const EXPECTED: Record<string, string[]> = {
+    sync_jobs: ["streamKey", "state", "winnerWorker", "bv", "error", "fails", "startMs", "outputStem",
+      "followups", "uploadPlan", "uploadStatus", "ackedAt", "ackNote", "seasonState", "updatedAt"].sort(),
+    sync_candidates: ["streamKey", "workerId", "coverage", "durationSec", "startMs", "endMs",
+      "totalGapSec", "isWinner", "danmuCount", "updatedAt"].sort(),
+    sync_job_events: ["streamKey", "state", "at"].sort(),
+    sync_job_steps: ["streamKey", "step", "phase", "at", "detail"].sort(),
+    sync_node_states: ["streamKey", "node", "state", "error", "attempts", "updatedAt"].sort(),
+    sync_parts: ["streamKey", "groupName", "partIndex", "updatedAt"].sort(),
+  };
+
+  it("old schema: migrates in place and every expected table/column is present", () => {
+    const p = join(mkdtempSync(join(tmpdir(), "led-478-old-")), "old.db");
+    const raw = new DatabaseSync(p);
+    raw.exec(`CREATE TABLE sync_jobs(streamKey TEXT PRIMARY KEY, state TEXT NOT NULL,
+      winnerTenant TEXT, bv TEXT, error TEXT, fails INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL)`);
+    raw.exec(`CREATE TABLE sync_candidates(streamKey TEXT NOT NULL, tenantId TEXT NOT NULL,
+      coverage REAL NOT NULL, durationSec REAL NOT NULL, startMs INTEGER NOT NULL, endMs INTEGER NOT NULL,
+      totalGapSec REAL NOT NULL, isWinner INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
+      PRIMARY KEY(streamKey, tenantId))`);
+    raw.exec(`CREATE TABLE sync_job_events(streamKey TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL)`);
+    raw.exec(`CREATE TABLE sync_job_steps(streamKey TEXT NOT NULL, step TEXT NOT NULL, phase TEXT NOT NULL, at INTEGER NOT NULL)`);
+    raw.prepare("INSERT INTO sync_jobs(streamKey,state,winnerTenant,updatedAt) VALUES(?,?,?,?)")
+      .run("douyin:1:2026-06-28", "done", "local", 1);
+    raw.close();
+
+    const l = new SyncLedger(p); // old schema must still open (and migrate)
+    l.close();
+
+    const check = new DatabaseSync(p);
+    for (const [table, expected] of Object.entries(EXPECTED)) {
+      expect(colsOf(check, table), table).toEqual(expected);
+    }
+    check.close();
+
+    // Idempotent: an up-to-date DB opens again without throwing, and keeps the migrated values.
+    const again = new SyncLedger(p);
+    expect(again.get("douyin:1:2026-06-28")?.winnerWorker).toBe("local");
+    again.close();
+  });
+
+  it("fresh db: opens (twice) and has the full schema", () => {
+    const p = join(mkdtempSync(join(tmpdir(), "led-478-fresh-")), "j.db");
+    const l = new SyncLedger(p);
+    expect(l.upsertPending("k1").isNew).toBe(true);
+    l.close();
+    const l2 = new SyncLedger(p); // reopen = "already migrated"
+    expect(l2.get("k1")?.state).toBe("pending");
+    l2.close();
+
+    const check = new DatabaseSync(p);
+    for (const [table, expected] of Object.entries(EXPECTED)) {
+      expect(colsOf(check, table), table).toEqual(expected);
+    }
+    check.close();
+  });
+
+  it("simulated ALTER failure (danmuCount cannot be added) → open throws, naming the table and column", () => {
+    const p = join(mkdtempSync(join(tmpdir(), "led-478-broken-")), "j.db");
+    const raw = new DatabaseSync(p);
+    // A view occupies the table name: CREATE TABLE IF NOT EXISTS is ignored and ALTER ... ADD COLUMN fails
+    // ("cannot add a column to a view") — the same silent-failure shape as a real lock/IO error on the ALTER.
+    raw.exec(`CREATE VIEW sync_candidates AS SELECT
+       0 AS streamKey, 0 AS workerId, 0 AS coverage, 0 AS durationSec, 0 AS startMs, 0 AS endMs,
+      0 AS totalGapSec, 0 AS isWinner, 0 AS updatedAt`);
+    raw.close();
+
+    let err: Error | undefined;
+    try { new SyncLedger(p); } catch (e) { err = e as Error; }
+    expect(err).toBeDefined();
+    expect(err!.message).toContain("ledger migration failed");
+    expect(err!.message).toContain("sync_candidates");
+    expect(err!.message).toContain("danmuCount");
+  });
+});
