@@ -3237,13 +3237,20 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     );
     // End-of-part media report (issue #464): PTS span vs wall time plus the PTS jumps (holes)
     // observed inside the part. All values are already in memory at seal time — no ffprobe here.
-    const wallSec = (part.sealedMs + (part.stalledMs ?? 0)) / 1000;
+    //
+    // Issue #504: the comparison window is the time that actually had data (part.sealedMs). For a
+    // stall seal sealedMs already stops at the last byte, and part.stalledMs is the silent wait AFTER
+    // that (stream down / broadcaster offline). Counting the wait as wall time made every short tail
+    // look like missing content (measured deficits matched the preceding "no write" wait exactly).
+    const wallSec = part.sealedMs / 1000;
+    const stallWaitSec = (part.stalledMs ?? 0) / 1000;
     const mediaBits: string[] = [];
     if (r.ptsDurationSec !== undefined) {
       mediaBits.push(`媒体 ${r.ptsDurationSec.toFixed(0)}s(PTS ${r.ptsStartSec?.toFixed(0) ?? "?"}→${r.ptsEndSec?.toFixed(0) ?? "?"})`);
     }
     mediaBits.push(`墙钟 ${wallSec.toFixed(0)}s`);
     if (r.ptsJumpCount) mediaBits.push(`空洞 ${r.ptsJumpCount} 处共 ${(r.ptsJumpSec ?? 0).toFixed(0)}s`);
+    if (stallWaitSec >= 1) mediaBits.push(`无写入等待 ${stallWaitSec.toFixed(0)}s(不计入墙钟)`);
     log(`[直播直传] 段${seg + 1} 数据: ${mediaBits.join(",")}`);
     const alertRatio = o.mediaWallAlertRatio ?? DEFAULT_MEDIA_WALL_ALERT_RATIO;
     // Guards: tiny tails and first-byte latency must not page anyone; a stalled or gappy part
@@ -3257,9 +3264,13 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         lastMediaWallAlertAt = now;
         const suppressedNote = mediaWallAlertsSuppressed > 0 ? `,此前冷却期内已抑制 ${mediaWallAlertsSuppressed} 条同类告警` : "";
         mediaWallAlertsSuppressed = 0;
+        // Issue #504: the deficit is inside the data window, never the stall wait — say so when a wait
+        // exists, so nobody reads this alert as "the silence caused it".
+        const stallNote = stallWaitSec >= 1 ? `,无写入等待 ${stallWaitSec.toFixed(0)}s 不计入比例` : "";
         const msg = `段${seg + 1} 媒体 ${r.ptsDurationSec.toFixed(0)}s / 墙钟 ${wallSec.toFixed(0)}s`
           + `(比例 ${(r.ptsDurationSec / wallSec).toFixed(2)} < ${alertRatio})`
-          + `${r.ptsJumpCount ? `,其中 PTS 空洞 ${r.ptsJumpCount} 处共 ${(r.ptsJumpSec ?? 0).toFixed(0)}s` : ""},直播内容疑似缺失${suppressedNote}`;
+          + `${r.ptsJumpCount ? `,其中 PTS 空洞 ${r.ptsJumpCount} 处共 ${(r.ptsJumpSec ?? 0).toFixed(0)}s` : ""}`
+          + `${stallNote},直播内容疑似缺失${suppressedNote}`;
         log(`[直播直传] ⚠️ ${msg}`);
         try { o.onAlert?.(msg); } catch { /* alert channel must not break the run */ }
       }
