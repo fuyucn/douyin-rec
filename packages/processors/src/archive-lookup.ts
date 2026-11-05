@@ -36,7 +36,7 @@ const MAX_DETAIL_QUERIES = 3;
 const ANSI_ESCAPE = String.fromCharCode(27);
 const ANSI_RE = new RegExp(ANSI_ESCAPE + "\\[[0-?]*[ -/]*[@-~]", "g");
 const BV_RE = /^BV[0-9A-Za-z]{10}$/;
-const LIST_LOG_RE = /^\d{4}-\d{2}-\d{2}T\S+\s+(?:INFO|WARN|ERROR|DEBUG|TRACE)\s+biliup_cli::uploader:/;
+const LIST_LOG_RE = /^\d{4}-\d{2}-\d{2}T\S+\s+(?:INFO|WARN|ERROR|DEBUG|TRACE)\s+biliup_cli::/;
 
 const logDiagnostic = (q: ArchiveQuery, message: string): void => {
   try {
@@ -84,7 +84,7 @@ export function parseArchiveList(out: string): ArchiveHit[] | null {
   if (!text) return [];
   const lines = text.split(/\r?\n/);
   const textRows = lines.flatMap((line) => {
-    const match = /^(BV[0-9A-Za-z]{10})\t([^\t]*)\t([^\t]*)$/.exec(line);
+    const match = /^(BV[0-9A-Za-z]{10})\t([^\t]*)\t([^\t]*)(?:\t|$)/.exec(line);
     return match ? [{ bv: match[1]!, title: match[2]!.trim() }] : [];
   });
   if (textRows.length > 0) {
@@ -185,6 +185,12 @@ async function withDetails(
   const run = q.run ?? defaultRun(cookiesPath);
   const detailed: ArchiveHit[] = [];
   for (const candidate of candidates.slice(0, MAX_DETAIL_QUERIES)) {
+    const hasWindow = candidate.createdAt !== undefined;
+    const hasDuration = candidate.durationSec !== undefined;
+    if (hasWindow && hasDuration) {
+      detailed.push(candidate);
+      continue;
+    }
     let out: string;
     try { out = await run(["show", candidate.bv]); }
     catch (error) {
@@ -200,7 +206,15 @@ async function withDetails(
       logDiagnostic(q, "[archive-lookup] show output does not match its candidate; treating as unknown");
       return null;
     }
-    detailed.push({ ...candidate, ...detail, bv: candidate.bv, title: candidate.title });
+    detailed.push({
+      ...candidate,
+      ...detail,
+      bv: candidate.bv,
+      title: candidate.title,
+      createdAt: detail.createdAt ?? candidate.createdAt,
+      durationSec: detail.durationSec ?? candidate.durationSec,
+      parts: detail.parts ?? candidate.parts,
+    });
   }
   return [...detailed, ...candidates.slice(MAX_DETAIL_QUERIES)];
 }

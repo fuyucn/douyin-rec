@@ -103,6 +103,29 @@ describe("real biliup output (issue #507)", () => {
     ]);
     expect(parseArchiveList(realList([]))).toEqual([]);
     expect(parseArchiveList(logLine("user: 测试账号") + "\n")).toEqual([]);
+    const otherModuleLog = "2026-11-05T12:00:00 " + ESC + "[32m INFO " + ESC + "[0m biliup_cli::commands: done";
+    expect(parseArchiveList(otherModuleLog + "\n")).toEqual([]);
+    expect(parseArchiveList(realList([matchingBv + "\t" + title + "\t开放浏览\t第四列"]))).toEqual([
+      { bv: matchingBv, title },
+    ]);
+  });
+
+  it("reuses list duration without calling show when both ctime and duration are present", async () => {
+    const staleJsonList = (rows: unknown[]) => JSON.stringify({ code: 0, data: { list: rows } });
+    const fullJson = vi.fn(async (argv: string[]) => argv[0] === "show"
+      ? showOut(matchingBv, title, 3600, Math.floor(NOW / 1000))
+      : staleJsonList([{ bvid: matchingBv, title, ctime: Math.floor(NOW / 1000), duration: 3600 }]));
+    expect(await findRecentArchive("c", title, 3600, { run: fullJson, now: () => NOW, trustNo: true, log: quiet })).toBe("yes");
+    expect(fullJson.mock.calls.filter((call) => call[0][0] === "show")).toHaveLength(0);
+  });
+
+  it("list ctime is outside the window and show has no ctime -> unknown (field-wise fallback keeps stale evidence)", async () => {
+    const stale = { bvid: matchingBv, title, ctime: Math.floor((NOW - 400 * 3600_000) / 1000) };
+    const showNoCtime = logLine("show " + matchingBv) + "\n" +
+      JSON.stringify({ archive: { bvid: matchingBv, title, duration: 3600 } });
+    const listNoDuration = JSON.stringify({ code: 0, data: { list: [stale] } });
+    const run = vi.fn(async (argv: string[]) => argv[0] === "show" ? showNoCtime : listNoDuration);
+    expect(await findRecentArchive("c", title, 3600, { run, now: () => NOW, trustNo: true, log: quiet })).toBe("unknown");
   });
 
   it("parses show output with a log prefix and tolerates missing optional fields", () => {
@@ -186,10 +209,13 @@ describe("real biliup output (issue #507)", () => {
     expect(bounded.mock.calls.filter((call) => call[0][0] === "show")).toHaveLength(3);
   });
 
-  it("a title containing an extra tab is never parsed as a three-column archive row", async () => {
-    expect(parseArchiveList(realList([matchingBv + "\t" + title + "\textra\t开放浏览"]))).toBeNull();
-    const run = vi.fn(async () => realList([matchingBv + "\t" + title + "\textra\t开放浏览"]));
-    expect(await findRecentArchive("c", title, 3600, { run, log: quiet })).toBe("unknown");
+  it("a trailing extra column is tolerated; the first three fields are the hit", async () => {
+    const line = matchingBv + "\t" + title + "\t开放浏览\t第四列";
+    expect(parseArchiveList(realList([line]))).toEqual([{ bv: matchingBv, title }]);
+    const run = vi.fn(async (argv: string[]) => argv[0] === "show"
+      ? showOut(matchingBv, title, 3600, Math.floor(NOW / 1000))
+      : realList([line]));
+    expect(await findRecentArchive("c", title, 3600, { run, now: () => NOW })).toBe("yes");
   });
 
   it("empty and log-only output are known empty lists; unrecognizable text is logged", async () => {
