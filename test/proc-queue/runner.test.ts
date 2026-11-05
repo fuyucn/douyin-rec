@@ -9,10 +9,12 @@ import { makeEnv, fakeProcessor, gate, type Env } from "./helpers.js";
 let env: Env;
 let alerts: Array<[number | undefined, string]>;
 const runners: ProcRunner[] = [];
+const retryTasks: Array<{ at: number; run: () => void }> = [];
 
 beforeEach(() => {
   env = makeEnv();
   alerts = [];
+  retryTasks.length = 0;
   _resetProcessors();
 });
 afterEach(async () => {
@@ -22,10 +24,27 @@ afterEach(async () => {
 });
 
 const allowed = (): { allowedRoots: string[] } => ({ allowedRoots: [env.root] });
+function advanceRetryClock(ms: number): void {
+  for (const r of runners) r.heartbeat();
+  env.clock.t += ms;
+  for (const r of runners) r.heartbeat();
+  for (const task of [...retryTasks.filter((t) => t.at <= env.clock.t)]) {
+    retryTasks.splice(retryTasks.indexOf(task), 1);
+    task.run();
+  }
+  for (const r of runners) r.tick();
+}
 function mkRunner(owner: string, over: Partial<ProcRunnerOpts> = {}): ProcRunner {
+  const { store: overrideStore, ...runnerOpts } = over;
   const r = new ProcRunner({
-    store: env.open(), owner, diskMinGB: () => 0, alert: (t, m) => alerts.push([t, m]),
-    timers: false, abortWaitMs: 200, ...over,
+    store: overrideStore ?? env.open(), owner, diskMinGB: () => 0, alert: (t, m) => alerts.push([t, m]),
+    timers: false, abortWaitMs: 200, ...runnerOpts,
+    now: () => env.clock.t,
+    scheduleRetry: (run, delayMs) => {
+      const task = { at: env.clock.t + delayMs, run };
+      retryTasks.push(task);
+      return () => { const i = retryTasks.indexOf(task); if (i >= 0) retryTasks.splice(i, 1); };
+    },
   });
   runners.push(r);
   r.start();
@@ -54,7 +73,7 @@ describe("基本执行", () => {
 
   it("处理器抛错 → failed + 告警(带 owner.taskId);validate 拒绝 → failed 不 run", async () => {
     const run = vi.fn(async () => { throw new Error("boom"); });
-    registerProcessor(fakeProcessor({ run, validate: (j: ProcessJob) => (j.params.bad ? "参数非法" : null) }));
+    registerProcessor(fakeProcessor({ retryable: false, run, validate: (j: ProcessJob) => (j.params.bad ? "参数非法" : null) }));
     const r = mkRunner("A", { limiter: new SimpleSlotLimiter(() => 5) });
     const s = env.open();
     const a = s.enqueue(env.job("a.ts"), allowed()).jobId;
@@ -1072,5 +1091,79 @@ describe("uncertain outcome and pid-bound slot (plan 038 T15)", () => {
     s.enqueue(env.job("b.ts", { kind: "biliup" }), allowed());
     r.tick();
     await vi.waitFor(() => { r.tick(); expect(second).toHaveBeenCalledTimes(1); });
+  });
+});
+
+describe("plan 046 PR4 retry policy", () => {
+  it("a generic retryable failure queues another attempt beyond three and applies the backoff sequence", async () => {
+    const run = vi.fn(async () => { throw new Error("cleanup IO error"); });
+    registerProcessor(fakeProcessor({ run }));
+    env.clock.t = 1_000_000;
+    const r = mkRunner("A", { stuckAlertMs: 60_000 });
+    const s = env.open();
+    const { jobId } = s.enqueue(env.job("a.ts"), allowed());
+    r.tick();
+    await vi.waitFor(() => expect(s.get(jobId)?.state).toBe("pending"));
+
+    const advance = async (minutes: number): Promise<void> => {
+      advanceRetryClock(minutes * 60_000);
+      await vi.waitFor(() => expect(s.get(jobId)?.state).toBe("pending"));
+
+    };
+    await advance(5); await advance(10); await advance(20); await advance(40);
+    expect(run).toHaveBeenCalledTimes(5);
+    expect(s.get(jobId)?.state).toBe("pending");
+    expect(alerts.filter(([, m]) => m.includes("连续失败满"))).toHaveLength(1);
+    expect(alerts.filter(([, m]) => m.includes("任务失败"))).toHaveLength(0);
+  });
+
+  it("a deterministic upload credential error stops once, alerts once and pauses the account", async () => {
+    const run = vi.fn(async () => { throw Object.assign(new Error("login expired"), { code: "login-expired" }); });
+    const pauseUploadAccount = vi.fn();
+    registerProcessor(fakeProcessor({ kind: "biliup", retryable: false, run }));
+    const r = mkRunner("A", { pauseUploadAccount });
+    const s = env.open();
+    const { jobId } = s.enqueue(env.job("a.ts", { kind: "biliup", params: { accountKey: "acct" } }), allowed());
+    r.tick();
+    await vi.waitFor(() => expect(s.get(jobId)?.state).toBe("failed"));
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(pauseUploadAccount).toHaveBeenCalledWith("acct", "login expired");
+    expect(alerts.filter(([, m]) => m.includes("确定性失败"))).toHaveLength(1);
+  });
+
+  it("continuous transient failures alert once and a later success sends one recovery alert", async () => {
+    let fail = true;
+    const run = vi.fn(async () => {
+      if (fail) throw new Error("prep IO error");
+      return { outputs: [] };
+    });
+    registerProcessor(fakeProcessor({ run }));
+    env.clock.t = 1_000_000;
+    mkRunner("A", { stuckAlertMs: 60_000 });
+    const s = env.open();
+    const { jobId } = s.enqueue(env.job("a.ts"), allowed());
+    for (const minutes of [5, 10, 20, 40, 60, 60, 60, 60]) {
+      advanceRetryClock(minutes * 60_000);
+      await vi.waitFor(() => expect(s.get(jobId)?.state).toBe("pending"));
+    }
+    expect(alerts.filter(([, m]) => m.includes("连续失败满"))).toHaveLength(1);
+    fail = false;
+    advanceRetryClock(60 * 60_000);
+    await vi.waitFor(() => expect(s.get(jobId)?.state).toBe("done"));
+    expect(alerts.filter(([, m]) => m.includes("已恢复"))).toHaveLength(1);
+  });
+
+  it("account rate limits are not counted as generic attempts", async () => {
+    const run = vi.fn(async () => { throw new Error("code: 21566 投稿过于频繁"); });
+    registerProcessor(fakeProcessor({ run }));
+    const r = mkRunner("A");
+    const s = env.open();
+    const { jobId } = s.enqueue(env.job("a.ts"), allowed());
+    r.tick();
+    await vi.waitFor(() => expect(s.get(jobId)?.state).toBe("failed"));
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(alerts.filter(([, m]) => m.includes("全局闸门冷却"))).toHaveLength(1);
   });
 });

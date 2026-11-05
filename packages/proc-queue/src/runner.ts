@@ -6,7 +6,7 @@
  */
 import { existsSync, statfsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { freeBytesOf, isSameChild, isUncertainOutcome, listProcessors, probeChild, type ChildFingerprint, type ProcActiveDTO, type ProcessContext, type Processor } from "@drec/core";
+import { classifyRetryableFailure, freeBytesOf, isSameChild, isUncertainOutcome, listProcessors, probeChild, retryBackoffMs, STUCK_ALERT_MS, type ChildFingerprint, type ProcActiveDTO, type ProcessContext, type Processor } from "@drec/core";
 
 import { GC_RETAIN_MS, LEASE_MS, ProcQueueStore, procQueueDbPath, type ProcJobRecord } from "./store.js";
 
@@ -64,6 +64,14 @@ export interface ProcRunnerOpts {
   probeChild?: (pid: number) => ChildFingerprint | null;
   /** How often a finished job's still-alive child is re-checked before its slot is released (default 5s). */
   childPollMs?: number;
+  /** First continuous-failure alert threshold (default 6h). */
+  stuckAlertMs?: number;
+  /** Injectable epoch clock for backoff and continuous-failure alerts (defaults to the store clock). */
+  now?: () => number;
+  /** Injectable retry scheduler; tests can advance the clock without waiting real time. */
+  scheduleRetry?: (fn: () => void, delayMs: number) => () => void;
+  /** Pause every upload task for one account after a deterministic credential/permission error. */
+  pauseUploadAccount?: (accountKey: string, reason: string) => void;
 }
 
 const defaultFreeBytes = (dir: string): number | null => {
@@ -97,6 +105,13 @@ interface Inflight {
   settled: Promise<void>;
 }
 
+interface FailureRun {
+  firstFailedAt: number;
+  failures: number;
+  alerted: boolean;
+  notBefore: number;
+}
+
 export class ProcRunner {
   private readonly o: ProcRunnerOpts;
   private readonly limiter: SlotLimiter;
@@ -108,6 +123,11 @@ export class ProcRunner {
   private readonly yielding = new Set<string>();
   private readonly inflight = new Map<string, Inflight>();
   private readonly diskAlerted = new Set<string>();
+  private readonly failureRuns = new Map<string, FailureRun>();
+  private readonly pausedAccounts = new Set<string>();
+  private readonly now: () => number;
+  private readonly retryTimers = new Set<NodeJS.Timeout>();
+  private readonly cancelRetryTimers = new Set<() => void>();
   /** 正在做孤儿处置(recover + settleOrphan)的 jobId:同一行同一时刻只允许一份处置(D1)。 */
   private readonly settling = new Set<string>();
   private readonly hbFails = new Map<string, number>();
@@ -120,10 +140,99 @@ export class ProcRunner {
     this.limiter = opts.limiter ?? new SimpleSlotLimiter();
     this.freeBytes = opts.freeBytes ?? defaultFreeBytes;
     this.leaseMs = opts.leaseMs ?? LEASE_MS;
+    this.now = opts.now ?? Date.now;
+    if (opts.stuckAlertMs !== undefined && !(opts.stuckAlertMs > 0)) throw new Error("stuckAlertMs must be positive");
   }
 
   private log(m: string): void {
     this.o.log?.(`[proc] ${m}`);
+  }
+
+  private accountKeyOf(job: ProcJobRecord): string {
+    const configured = job.params.accountKey ?? job.params.cookies;
+    return typeof configured === "string" && configured !== "" ? configured : "default";
+  }
+
+  private isUploadTask(job: ProcJobRecord): boolean {
+    return job.kind === "biliup" || job.kind === "upload-part" || job.kind === "upload-prep" || job.kind === "reconcile-part";
+  }
+
+  private alertSafely(job: ProcJobRecord, msg: string): void {
+    try {
+      this.o.alert(job.owner.taskId, msg);
+    } catch (e) {
+      this.log(`${job.jobId}: alert failed: ${e instanceof Error ? e.message : String(e)}`);
+      throw e;
+    }
+  }
+
+  private finishGeneralFailure(job: ProcJobRecord, proc: Processor, e: unknown): void {
+    const msg = e instanceof Error ? e.message : String(e);
+    const classification = classifyRetryableFailure(e);
+    if (classification.kind === "deterministic") {
+      this.failureRuns.delete(job.jobId);
+      const accountKey = this.accountKeyOf(job);
+      if (this.isUploadTask(job) && !this.pausedAccounts.has(accountKey)) {
+        this.pausedAccounts.add(accountKey);
+        this.o.pauseUploadAccount?.(accountKey, msg);
+      }
+      this.o.store.finish(job.jobId, this.o.owner, { state: "failed", error: msg });
+      this.alertSafely(job, `${job.kind} 任务确定性失败,停止重试: ${msg}`);
+      return;
+    }
+    if (classification.kind === "rate-limit") {
+      this.failureRuns.delete(job.jobId);
+      this.o.store.finish(job.jobId, this.o.owner, { state: "failed", error: msg });
+      this.alertSafely(job, `${job.kind} 任务账号限流,交由全局闸门冷却: ${msg}`);
+      return;
+    }
+    if (!proc.retryable) {
+      this.failureRuns.delete(job.jobId);
+      this.o.store.finish(job.jobId, this.o.owner, { state: "failed", error: msg });
+      this.alertSafely(job, `${job.kind} 任务失败: ${msg}`);
+      return;
+    }
+    const now = this.now();
+    const run = this.failureRuns.get(job.jobId) ?? { firstFailedAt: now, failures: 0, alerted: false, notBefore: 0 };
+    run.failures += 1;
+    run.notBefore = now + retryBackoffMs(run.failures);
+    this.o.store.finish(job.jobId, this.o.owner, { state: "failed", error: msg });
+    if (!this.o.store.requeue(job.jobId, { retryable: proc.retryable })) {
+      this.failureRuns.delete(job.jobId);
+      this.alertSafely(job, `${job.kind} 任务重试入队失败,保留 failed 待处置: ${msg}`);
+      return;
+    }
+    const delayMs = Math.max(0, run.notBefore - this.now());
+    if (this.o.scheduleRetry) {
+      const cancel = this.o.scheduleRetry(() => {
+        this.cancelRetryTimers.delete(cancel);
+        this.tick();
+      }, delayMs);
+      this.cancelRetryTimers.add(cancel);
+    } else {
+      const timer = setTimeout(() => {
+        this.retryTimers.delete(timer);
+        this.tick();
+      }, delayMs);
+      timer.unref?.();
+      this.retryTimers.add(timer);
+    }
+    if (!run.alerted && now - run.firstFailedAt >= (this.o.stuckAlertMs ?? STUCK_ALERT_MS)) {
+      run.alerted = true;
+      this.alertSafely(job, `${job.kind} 任务连续失败满 ${Math.round((now - run.firstFailedAt) / 60_000)} 分钟,仍在自动重试: ${msg}`);
+    }
+    this.failureRuns.set(job.jobId, run);
+  }
+
+  private noteGeneralSuccess(job: ProcJobRecord): void {
+    const run = this.failureRuns.get(job.jobId);
+    if (!run) return;
+    this.failureRuns.delete(job.jobId);
+    try {
+      if (run.alerted) this.o.alert(job.owner.taskId, `${job.kind} 任务连续失败后已恢复`);
+    } catch (e) {
+      this.log(`${job.jobId}: recovery alert failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   start(): void {
@@ -273,6 +382,8 @@ export class ProcRunner {
         job = this.o.store.claim({
           kinds: [p.kind], owner: this.o.owner,
           accept: (j) => {
+          const retryAfter = this.failureRuns.get(j.jobId)?.notBefore ?? 0;
+          if (retryAfter > this.now()) return false;
             const msg = this.diskDenied(p, j);
             if (msg !== null) denied ??= { job: j, msg };
             return msg === null;
@@ -419,6 +530,8 @@ export class ProcRunner {
       }
       if (!store.finish(job.jobId, owner, { state: "done", outputs: res.outputs, note: res.note })) {
         this.log(`${job.jobId}: 完成但收尾失败(持有者已换人),忽略`);
+      } else {
+        this.noteGeneralSuccess(job);
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -438,8 +551,7 @@ export class ProcRunner {
         this.o.alert(job.owner.taskId, `${job.kind} 任务结果无法确定,需人工确认: ${msg}`);
         return;
       }
-      store.finish(job.jobId, owner, { state: "failed", error: msg });
-      this.o.alert(job.owner.taskId, `${job.kind} 任务失败: ${msg}`);
+      this.finishGeneralFailure(job, proc, e);
     }
   }
 
@@ -534,6 +646,10 @@ export class ProcRunner {
     this.started = false;
     for (const h of this.timers) clearInterval(h);
     this.timers = [];
+    for (const h of this.retryTimers) clearTimeout(h);
+    this.retryTimers.clear();
+    for (const cancel of this.cancelRetryTimers) cancel();
+    this.cancelRetryTimers.clear();
     const { store, owner } = this.o;
     const all = [...this.inflight.values()];
     for (const f of all) {

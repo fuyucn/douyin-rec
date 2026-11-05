@@ -161,10 +161,13 @@ describe("biliup processor stall handling", () => {
     expect(kill).not.toHaveBeenCalled();
   });
 
-  it("third attempt does not retry again", async () => {
+  it("third and much later attempts still retry with the one-hour cap", async () => {
     const { run, kill } = hangingRun(() => true);
     const p = makeBiliupProcessor(base({ run, kill, lookup: { run: async () => "[]", trustNo: true } }));
-    await expect(p.run(job(files(1), { attempts: 3 }), ctx().c)).rejects.toThrow(/3 attempts used/);
+    const third = await p.run(job(files(1), { attempts: 3 }), ctx().c);
+    expect(third.retry?.reason).toBe("transfer-retry");
+    const late = await p.run(job(files(1), { attempts: 8 }), ctx().c);
+    expect(late.retry?.notBefore - Date.now()).toBeGreaterThanOrEqual(60 * 60_000 - 1_000);
   });
 
   it("stall while appending: a confirmed part count allows retry and keeps the bv", async () => {
