@@ -413,7 +413,7 @@
 
 ## 待办（Next）
 - [~] **T-141 fix(hub): _proc-status 把数据库错误当成「任务不存在」,可致收尾转格式静默终结与重复投稿（issue [#470](https://github.com/fuyucn/douyin-rec/issues/470)，计划 [045](plans/045_codebase_optimization.md) B1，2026-11-04）** — 证据/改法/验收见 issue。
-- [ ] **T-142 fix(hub): 节点输出格式锁手抄「节点侧上传」判定,漏掉全局总开关（issue [#471](https://github.com/fuyucn/douyin-rec/issues/471)，计划 [045](plans/045_codebase_optimization.md) B2，2026-11-04）** — 证据/改法/验收见 issue。
+- [~] **T-142 fix(hub): 节点输出格式锁手抄「节点侧上传」判定,漏掉全局总开关（issue [#471](https://github.com/fuyucn/douyin-rec/issues/471)，计划 [045](plans/045_codebase_optimization.md) B2，2026-11-04）** — 证据/改法/验收见 issue。
 - [ ] **T-143 fix(cli): --danmu no 反而开启弹幕;布尔参数词表有 4 份且不一致（issue [#472](https://github.com/fuyucn/douyin-rec/issues/472)，计划 [045](plans/045_codebase_optimization.md) B3，2026-11-04）** — 证据/改法/验收见 issue。
 - [ ] **T-144 fix(web): GET /api/hub/resources 忽略内联/设置来源的 hub 配置（issue [#473](https://github.com/fuyucn/douyin-rec/issues/473)，计划 [045](plans/045_codebase_optimization.md) B4，2026-11-04）** — 证据/改法/验收见 issue。
 - [ ] **T-145 fix(recorder): mesio 卡死看门狗统计目录内所有 .flv,会被同目录其他写入骗过（issue [#474](https://github.com/fuyucn/douyin-rec/issues/474)，计划 [045](plans/045_codebase_optimization.md) B5，2026-11-04）** — 证据/改法/验收见 issue。
