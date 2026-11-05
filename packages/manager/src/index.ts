@@ -143,6 +143,8 @@ export class RecordingSession {
   private sameBroadcastReconnect = false;
   /** 同场重连标志的过期时刻(epoch ms);超过后 admit 按新一场处理。 */
   private sameBroadcastUntil = 0;
+  /** Issue #477: a sidecar-write failure was already alerted in this session (re-armed by start()). */
+  private sidecarAlerted = false;
   /** 上一次被拒绝的原因(同一原因只告警一次;放行后复位)。 */
   private lastAdmitDenied: string | null = null;
   /** 本会话的边录边传钩子(每次 _startInner 新建)。 */
@@ -271,6 +273,7 @@ export class RecordingSession {
     this.sessionStart = null;
     this.currentLiveSessionId = null;
     this.sessionLiveId = null;
+    this.sidecarAlerted = false;
 
     mkdirSync(opts.outDir, { recursive: true });
     await this._startInner();
@@ -567,9 +570,39 @@ export class RecordingSession {
     // 会话**开始**即写身份 sidecar `{base}.session.json`:roomSlug(web_rid)+ platform = 唯一身份。
     // 从第一秒就有、跨节点一致、不依赖主播名解析。停录时同名覆盖、补上 gaps(见 _writeSession)。
     // 一个 sidecar 同时承载「身份(聚类)」+「缺口(选优)」,不再分 meta/gaps 两个文件。
+    void this._writeSessionSafe(xmlPath.replace(/\.xml$/i, ""));
+  }
+
+  /**
+   * Issue #477: write the session sidecar without ever touching recording. Every failure is logged
+   * with its reason, and the FIRST failure of each session also raises one alert — hub clusters and
+   * selects nodes by this file, so a missing sidecar must be operator-visible.
+   *
+   * Dedup is per session ({@link start}), not per sidecar base: a same-broadcast reconnect builds a
+   * NEW stamped name, so a base-keyed flag re-armed on every flap under a persistent EACCES/ENOSPC.
+   * The stop path awaits the bounded notifier so the alert is not lost when the caller exits the
+   * process right after stop().
+   */
+  private async _writeSessionSafe(base: string, withGaps = false): Promise<void> {
     try {
-      this._writeSession(xmlPath.replace(/\.xml$/i, ""));
-    } catch { /* sidecar 写失败不影响录制 */ }
+      this._writeSession(base, withGaps);
+    } catch (e) {
+      const reason = (e as Error)?.message ?? String(e);
+      log.warn(`会话边车写入失败(${withGaps ? "收尾" : "开录"}):`, reason);
+      if (this.sidecarAlerted) return;
+      this.sidecarAlerted = true;
+      const event: NotifyEvent = {
+        kind: "error",
+        stage: "边车",
+        message:
+          `会话边车 ${basename(base)}.session.json 写入失败:${reason}。hub 可能无法按该场聚类/选优;` +
+          `录制继续进行,不受影响。请检查输出目录权限与磁盘剩余空间。`,
+      };
+      try {
+        if (withGaps) await this.notifyAwait(event);
+        else this.notify(event);
+      } catch { /* a throwing notifier must never touch recording */ }
+    }
   }
 
   /**
@@ -635,11 +668,9 @@ export class RecordingSession {
       catch (e) { log.error("边录边传钩子 onSessionEnd 抛错(忽略):", (e as Error)?.message ?? e); }
     }
     // 停录:同名覆盖 session.json,补上缺口(身份字段不变)。供多节点选优用。
-    try {
-      if (this.currentXmlPath || this.lastXmlPath) {
-        this._writeSession((this.currentXmlPath ?? this.lastXmlPath!).replace(/\.xml$/i, ""), true);
-      }
-    } catch { /* sidecar 失败不影响停止 */ }
+    if (this.currentXmlPath || this.lastXmlPath) {
+      await this._writeSessionSafe((this.currentXmlPath ?? this.lastXmlPath!).replace(/\.xml$/i, ""), true);
+    }
     // await(带 timeout):stop() 后调用方常立刻 process.exit,fire-and-forget 会丢这条 recordEnd。
     // 只有本会话**真开录过**才发 recordEnd —— 整窗口没开播的空等会话收尾静默
     // (否则每晚主播不播,窗口一关照样推「录制结束(窗口结束收播)」,纯属打扰)。
