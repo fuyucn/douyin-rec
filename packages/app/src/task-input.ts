@@ -4,6 +4,7 @@
  * web api 与 cli-task 之前各写一份 schedule/danmu/flag 解析，此处收口成单点，
  * 保证 Web 表单和命令行对同一输入得到同一语义。
  */
+import { parseBoolFlag } from "@drec/core";
 
 /** "HH:MM-HH:MM" → [start, end]; throws on malformed/empty. */
 export function parseSchedule(s: string): [string, string] {
@@ -12,13 +13,11 @@ export function parseSchedule(s: string): [string, string] {
   return [m[1], m[2]];
 }
 
-const FALSE_FLAGS = new Set(["0", "off", "false", "no", "none"]);
-
-/** Parse a 0/1/on/off/true/false flag string → boolean. Defaults to `def`. */
-export function parseBoolFlag(v: string | undefined, def: boolean): boolean {
-  if (v === undefined) return def;
-  return !FALSE_FLAGS.has(v.trim().toLowerCase());
-}
+/**
+ * The flag vocabulary lives in core now (issue #472: four copies with different sets). Re-exported
+ * here so existing callers (`cli-task`) and tests keep their import path.
+ */
+export { parseBoolFlag };
 
 /** Normalise a danmu value (number|boolean|string) to 0/1; defaults to 1. */
 export function toDanmuFlag(v: number | boolean | string | undefined): number {

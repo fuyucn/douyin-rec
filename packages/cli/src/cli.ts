@@ -22,7 +22,8 @@ import { NODE_COMMANDS, localRoomProbes, notifyOutboxArgs, runNodeCommandCli } f
 import { registerRecoverOrderCommands } from "./hub-recover-order-commands.js";
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { ZERO_DISK_DELIVERY_ENV, biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, normalizeSeasonSectionId, parseOutputFormat, resolveSeasonSectionId, stageExt, resolveDiskMinGB, resolveJobLogPath, stageSessionDir, ttlMemoAsync, sanitizePathSegment, zonedStamp } from "@drec/core";
+import { ZERO_DISK_DELIVERY_ENV, biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, normalizeSeasonSectionId, parseBoolFlag, parseOutputFormat, resolveSeasonSectionId, stageExt, resolveDiskMinGB, resolveJobLogPath, stageSessionDir, ttlMemoAsync, sanitizePathSegment, zonedStamp } from "@drec/core";
+import { parseDanmuFlag } from "./cli-flags.js";
 import type { EnqueueRequest, HubResources, OutputFormat, StageFormat } from "@drec/core";
 import { RecordingSession, XmlDanmuWriter } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
@@ -69,15 +70,6 @@ function webhookOf(localCfg?: { discordWebhook?: string }): string | undefined {
 /** 房间号/URL → 规范直播 URL,按平台(URL 命中 / 裸房间号回落默认平台)。 */
 function roomToUrl(room: string): string {
   return platformForRoom(room).roomToUrl(room);
-}
-
-/**
- * 解析 --danmu 开关(布尔):弹幕已收进平台(platform.connectDanmu),不再按 provider 名分派。
- *   0 / off / false / none → false(不抓)；其余(含 undefined/旧 provider 名)→ true(抓)。
- */
-function parseDanmu(v: string | undefined): boolean {
-  if (v === undefined) return true;
-  return !["none", "0", "off", "false"].includes(v.trim().toLowerCase());
 }
 
 interface RecordCliOpts {
@@ -234,7 +226,7 @@ program
     const platform = platformForRoom(o.room);
     const engineId = o.engine || o.recorder || cfg.recorder || platform.defaultEngine;
     // 弹幕退化为开关:on/off(来源由平台 connectDanmu 提供);config.danmu 旧值非 none 即视为开。
-    const danmuEnabled = parseDanmu(o.danmu ?? cfg.danmu);
+    const danmuEnabled = parseDanmuFlag(o.danmu ?? cfg.danmu);
 
     let cookies = o.cookies ?? cfg.cookies;
     if (o.cookiesFile) cookies = readFileSync(o.cookiesFile, "utf-8").trim();
@@ -284,8 +276,7 @@ program
     };
     // 边录边传(T-33,默认关):开启时注入「每会话一个」上传钩子工厂(metadata 读 hub 规则/hub.config);
     // 关闭时 undefined → session 完全不启用,行为与改动前一致。开关 0/1/on/off/true/false(与 task-input 同套假值)。
-    const rollingEnabled = o.rollingUpload !== undefined
-      && !["0", "off", "false", "no", "none"].includes(o.rollingUpload.trim().toLowerCase());
+    const rollingEnabled = parseBoolFlag(o.rollingUpload, false);
     let makeRolling: (() => import("@drec/manager").RollingUploadHook) | undefined;
     if (rollingEnabled) {
       const { makeRollingUploadHookFactory } = await import("@drec/app");
@@ -299,8 +290,7 @@ program
       });
       console.log(`[rec] 边录边传已开启:每封口一段上传后删该段源(room=${slug})`);
     }
-    const streamUploadEnabled = o.streamUpload !== undefined
-      && !["0", "off", "false", "no", "none"].includes(o.streamUpload.trim().toLowerCase());
+    const streamUploadEnabled = parseBoolFlag(o.streamUpload, false);
     // streaming upload replaces the file-based recorder; running both would pull the same
     // stream twice and upload a duplicate archive, so it must be mutually exclusive.
     if (streamUploadEnabled && rollingEnabled) {

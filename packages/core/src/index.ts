@@ -38,6 +38,7 @@ export * from "./redact-log.js";
 // 边录边传生效判定(issue #40):规则 mode=rolling + 旧 task 开关迁移 + 单节点闸门;仅 master 调用。
 export * from "./rolling-policy.js";
 export * from "./node-side-upload-policy.js";
+export * from "./bool-flag.js";
 export * from "./zero-disk-policy.js";
 // Zero-disk on a side node (issue #331): delivery contract, strict parsers, receipts/status shapes.
 export * from "./zero-disk-delivery.js";
