@@ -15,6 +15,7 @@ import { existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   assertJobInvariants, canTransition, cancelOutcome, jobIdOf,
+  PART_KINDS, type PartCtx,
   type EnqueueResult, type JobState, type ProcessJob, type UploadProgress,
 } from "@drec/core";
 import { migrateSchema } from "./schema.js";
@@ -87,8 +88,25 @@ export type FinishOutcome =
   | { state: "done"; outputs: string[]; note?: string }
   | { state: "failed"; error: string }
   | { state: "uncertain"; error: string }
+  | { state: "reconciling"; error: string; reason: "reconcile-start" }
+  | { state: "skipped"; error?: string; reason: "skip-hub-owned" | "skip-source-gone" }
   /** 取消落点经 `cancelOutcome(kind, hasIntent)`;第一期无 intent 概念,hasIntent 缺省 false。 */
   | { state: "cancelled"; hasIntent?: boolean; error?: string };
+
+/** Atomic "finish one row and enqueue its successor" receipt (plan 046 PR1). */
+export interface ChainJob {
+  logicalKey: string;
+  generation: number;
+  ctx: PartCtx;
+  owner: { taskId?: number; streamKey?: string };
+  createdAt: number;
+  /** Optional fault-injection seam for tests; production callers omit it. */
+  beforeInsert?: () => void;
+}
+
+export type CompleteAndChainResult =
+  | { ok: true; nextJobId: string; chained: boolean }
+  | { ok: false; error: string };
 
 export interface ProcQueueStoreOpts {
   now?: () => number;
@@ -310,7 +328,8 @@ export class ProcQueueStore {
     if (existing) {
       switch (existing.state) {
         case "pending": return { jobId, state: "pending" };
-        case "running": return { jobId, state: "running" };
+        case "running":
+        case "reconciling": return { jobId, state: existing.state };
         case "done": {
           const targets = existing.resultOutputs ?? existing.outputs ?? [];
           if (targets.some((p) => !existsSync(p))) {
@@ -319,10 +338,10 @@ export class ProcQueueStore {
           return { jobId, state: "done" };
         }
         default:
-          // failed / uncertain / cancelled: never revive implicitly (requeue / ackUncertain only).
+          // failed / uncertain / cancelled / skipped / reconciling: never revive implicitly.
           return {
             jobId, state: "rejected", error: `已存在且 state=${existing.state}(需人工处理)`,
-            existingState: existing.state as "failed" | "uncertain" | "cancelled",
+            existingState: existing.state as Exclude<JobState, "pending" | "running" | "done">,
           };
       }
     }
@@ -338,6 +357,20 @@ export class ProcQueueStore {
       job.orderKey ?? null, job.seq ?? null, job.notBefore ?? null, job.prepJobId ?? null,
     );
     return { jobId, state: "pending" };
+  }
+
+  private insertPendingTx(job: ProcessJob, jobId: string): void {
+    const t = this.now();
+    this.db.prepare(
+      `INSERT INTO proc_jobs(jobId, kind, logicalKey, generation, state, inputs, outputs, params, replaceInputs,
+         ownerTaskId, ownerStreamKey, createdAt, updatedAt, orderKey, seq, notBefore, prepJobId)
+       VALUES(?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      jobId, job.kind, job.logicalKey, job.generation, JSON.stringify(job.inputs),
+      job.outputs ? JSON.stringify(job.outputs) : null, JSON.stringify(job.params), job.replaceInputs ? 1 : 0,
+      job.owner.taskId ?? null, job.owner.streamKey ?? null, t, t,
+      job.orderKey ?? null, job.seq ?? null, job.notBefore ?? null, job.prepJobId ?? null,
+    );
   }
 
   /** Next generation for one orderKey (shared by the whole session, not per logicalKey). */
@@ -565,18 +598,72 @@ export class ProcQueueStore {
     });
   }
 
+  /**
+   * Finish the current running row and insert its deterministic successor in one transaction.
+   * Re-entry after a crash is idempotent: done + successor is accepted, while done without the
+   * successor is rejected (callers must recover rather than silently lose the chain step).
+   */
+  completeAndChain(
+    jobId: string,
+    owner: string,
+    finish: { state: "done"; outputs: string[]; note?: string },
+    next: ChainJob,
+    opts: { allowedRoots: readonly string[]; attempts?: number },
+  ): CompleteAndChainResult {
+    if (!Number.isSafeInteger(next.generation) || next.generation < 1) return { ok: false, error: "invalid generation" };
+    const nextJobId = jobIdOf(PART_KINDS.cleanup, next.logicalKey, next.generation);
+    const nextJob: ProcessJob = {
+      ...next,
+      jobId: nextJobId, kind: PART_KINDS.cleanup,
+      inputs: [next.ctx.file], params: { ctx: next.ctx }, replaceInputs: false,
+    };
+    return this.tx(() => {
+      const row = this.get(jobId);
+      if (!row || row.claimedBy !== owner) return { ok: false, error: "lease owner mismatch" };
+      if (row.state !== "running" && row.state !== "done") return { ok: false, error: "job is not running or done" };
+      if (opts.attempts !== undefined && row.attempts !== opts.attempts) return { ok: false, error: "generation CAS mismatch" };
+      if (!this.leaseValid(row.kind, owner)) return { ok: false, error: "lease invalid or expired" };
+      const successor = this.get(nextJobId);
+      try {
+        assertJobInvariants(nextJob, { allowedRoots: opts.allowedRoots });
+      } catch (e) {
+        return { ok: false, error: (e as Error).message };
+      }
+      if (row.state === "done") return successor
+        ? { ok: true, nextJobId, chained: false }
+        : { ok: false, error: "done without successor" };
+      if (successor) return { ok: false, error: "successor exists while predecessor is still running" };
+      if (row.kind !== PART_KINDS.upload) return { ok: false, error: "predecessor is not an upload-part" };
+      const ctx = row.params.ctx as PartCtx | undefined;
+      if (!ctx || ctx.file !== next.ctx.file || ctx.index !== next.ctx.index || ctx.orderKey !== next.ctx.orderKey
+        || ctx.fp.size !== next.ctx.fp.size || ctx.fp.mtimeMs !== next.ctx.fp.mtimeMs) {
+        return { ok: false, error: "successor ctx does not match the confirmed upload" };
+      }
+      if (!row.bv) return { ok: false, error: "confirmed upload has no draft identifier" };
+      next.beforeInsert?.();
+      if (!this.applyFinish(row, finish)) return { ok: false, error: "invalid finish transition" };
+      this.insertPendingTx(nextJob, nextJobId);
+      return { ok: true, nextJobId, chained: true };
+    });
+  }
+
   private applyFinish(row: ProcJobRecord, outcome: FinishOutcome): boolean {
     const t = this.now();
     let to: JobState = outcome.state;
     if (outcome.state === "cancelled") to = cancelOutcome(row.kind, outcome.hasIntent ?? false);
-    if (!canTransition("running", to)) return false;
+    if (!canTransition("running", to, { reason: outcome.state === "reconciling" || outcome.state === "skipped" ? outcome.reason : undefined })) return false;
     const error = "error" in outcome ? (outcome.error ?? null) : null;
+    let resultOutputs: string | null = null;
+    let note: string | null = null;
+    if (outcome.state === "done") {
+      resultOutputs = JSON.stringify(outcome.outputs);
+      note = outcome.note ?? null;
+    }
     this.db.prepare(
       `UPDATE proc_jobs SET state=?, resultOutputs=?, note=?, error=?, updatedAt=?, finishedAt=?
        WHERE jobId=? AND state='running'`,
     ).run(
-      to, outcome.state === "done" ? JSON.stringify(outcome.outputs) : null,
-      outcome.state === "done" ? (outcome.note ?? null) : null, error, t, t, row.jobId,
+      to, resultOutputs, note, error, t, t, row.jobId,
     );
     return true;
   }
