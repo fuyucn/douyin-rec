@@ -23,6 +23,11 @@ export interface ManagedState {
   /** 本轮成功应用后的完整期望任务集。 */
   desired: RemoteTaskSpec[];
   /**
+   * Issue #480: specs skipped this round because they failed validation (malformed master item).
+   * Absent on old snapshots and on clean rounds — readers must treat it as optional.
+   */
+  skipped?: Array<{ index: number; room?: string; reason: string }>;
+  /**
    * 应用这份期望的**节点 bundle 版本**（T16）。
    *
    * 为什么记它:master 只能看到「我发了什么」,看不到「节点用什么版本的应用了我发的」。
@@ -46,6 +51,7 @@ export function readManagedState(dir: string): ManagedState | null {
       version: typeof raw.version === "number" ? raw.version : 0,
       savedAt: typeof raw.savedAt === "number" ? raw.savedAt : 0,
       desired: raw.desired,
+      ...(Array.isArray(raw.skipped) ? { skipped: raw.skipped } : {}),
       // Old snapshots have no appVersion: omit the field so readers see "unknown"
       // instead of inventing a value for the bundle that applied them.
       ...(typeof raw.appVersion === "string" ? { appVersion: raw.appVersion } : {}),
@@ -69,6 +75,7 @@ export function writeManagedState(dir: string, state: Omit<ManagedState, "savedA
     savedAt: state.savedAt ?? Date.now(),
     desired: state.desired,
     ...(state.appVersion ? { appVersion: state.appVersion } : {}),
+    ...(state.skipped?.length ? { skipped: state.skipped } : {}),
   };
   writeFileSync(tmp, JSON.stringify(body, null, 2) + "\n", "utf-8");
   renameSync(tmp, path);

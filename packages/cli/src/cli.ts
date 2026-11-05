@@ -2105,6 +2105,12 @@ const hubStarter: HubStarter = {
               opts.log(`[hub] 任务同步 ${w.id}: applied=${r.applied.length} removed=${r.removed.length}`
                 + ` pending=${r.pending.length}${force ? " (forced)" : ""}`);
             }
+            // Issue #480: a node skips malformed specs instead of failing the whole batch — surface the count
+            // so a master bug does not look like a healthy sync. Old nodes never send the field.
+            if (r.skipped && r.skipped.length > 0) {
+              opts.warn(`[hub] 任务同步 ${w.id}: 节点跳过 ${r.skipped.length} 条坏配置`
+                + `(其余照常应用;坏条目对应的本机任务不会被删除): ${r.skipped.map((s) => `#${s.index + 1} ${s.reason}`).join("; ")}`);
+            }
             // 节点侧安全阀命中(T-2):必须让 master 侧看得见,否则「下发被拒」在 UI 上是静默的 ——
             // 用户只会看到任务没变,却不知道是节点在保护自己。
             if (r.rejected) {
