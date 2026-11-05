@@ -8,7 +8,7 @@ import { writeSessionSidecar } from "./session-sidecar.js";
 export { writeSessionSidecar, type SidecarWriteHooks } from "./session-sidecar.js";
 import {
   announceRecorderStatus, createLogger, decorateRecordEvent, platformForRoom, processTimeZone, sessionBaseOf, setRecorderPhase, setRecorderSession,
-  stripVideoExt,
+  SAME_BROADCAST_GAP_MS, stripVideoExt,
 } from "@drec/core";
 
 // 0 落盘流式直传(plans/039)在 record 进程里自己连弹幕,不复用 RecordingSession;
@@ -29,10 +29,12 @@ export const SHORT_LIVED_ALARM = 10;
 
 /**
  * 「同场断流重连」的有效窗口(ms):自断流起算,窗口内的重启才按同一场放行闸门;超窗后按新一场处理。
- * 与 hub 的断流重连合并窗(默认 10 分钟)同口径。必要性:收播那刻判活可能滞后 / 抛错(都落成「仍在播」),
- * 若标志永不过期,几小时后的**下一场**开播会被误当同场而绕过闸门(审计发现)。
+ * 取值 = core 的 `SAME_BROADCAST_GAP_MS`(issue #475):同场口径的唯一真理源是
+ * `packages/core/src/broadcast-window.ts`,本常量只是 manager 侧对它的别名,不再自带一套容差。
+ * 窗口本身存在的必要性:收播那刻判活可能滞后 / 抛错(都落成「仍在播」),若标志永不过期,
+ * 几小时后的**下一场**开播会被误当同场而绕过磁盘准入闸门(审计发现)。
  */
-export const SAME_BROADCAST_WINDOW_MS = 10 * 60_000;
+export const SAME_BROADCAST_WINDOW_MS = SAME_BROADCAST_GAP_MS;
 
 export interface SessionOpts {
   /** Seconds to wait before reconnecting after an unexpected stream drop. Default: 5. */
