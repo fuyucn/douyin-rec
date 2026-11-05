@@ -64,7 +64,18 @@ export interface ProcRunnerOpts {
   probeChild?: (pid: number) => ChildFingerprint | null;
   /** How often a finished job's still-alive child is re-checked before its slot is released (default 5s). */
   childPollMs?: number;
+  /** Explicit PR3 opt-in; default true keeps reconciliation read-only. */
+  reconcileShadowMode?: boolean;
+  /** Time box for a reconciling row (default 24h); only used when shadowMode is explicitly false. */
+  reconcileMaxMs?: number;
+  /** Explicit opt-in after a measured settle window exists; default false. */
+  reconcileAllowResend?: boolean;
+  /** Read-only archive query seam for tests; production may leave undefined. */
+  reconcileQuery?: (job: ProcJobRecord) => Promise<"yes" | "no" | "unknown">;
 }
+
+export const DEFAULT_RECONCILE_MAX_MS = 24 * 3600_000;
+export const RECONCILE_SHADOW_LOG = "@@DREC_RECONCILE_SHADOW@@";
 
 const defaultFreeBytes = (dir: string): number | null => {
   try {
@@ -111,6 +122,8 @@ export class ProcRunner {
   /** 正在做孤儿处置(recover + settleOrphan)的 jobId:同一行同一时刻只允许一份处置(D1)。 */
   private readonly settling = new Set<string>();
   private readonly hbFails = new Map<string, number>();
+  /** One timeout alert per reconciling row; cleared when the row leaves that state. */
+  private readonly reconcileTimeoutAlerted = new Set<string>();
   private timers: NodeJS.Timeout[] = [];
   private started = false;
   private stopping = false;
@@ -258,6 +271,44 @@ export class ProcRunner {
       } catch (e) {
         this.log(`${p.kind}: 认领失败: ${e instanceof Error ? e.message : String(e)}`);
       }
+    }
+    this.reconcileTick();
+  }
+
+  private reconcileTick(): void {
+    const shadowMode = this.o.reconcileShadowMode !== false;
+    const maxMs = this.o.reconcileMaxMs ?? DEFAULT_RECONCILE_MAX_MS;
+    const now = Date.now();
+    let rows: ProcJobRecord[];
+    try { rows = this.o.store.listReconciling(); }
+    catch (e) { this.log("[proc] reconciling scan failed: " + String(e)); return; }
+    for (const row of rows) {
+      const confirmedAt = Number(row.params.confirmedAt ?? row.params.ackedAt ?? row.updatedAt ?? now);
+      const timedOut = Number.isFinite(confirmedAt) && now - confirmedAt >= maxMs;
+      if (!timedOut) this.reconcileTimeoutAlerted.delete(row.jobId);
+      const proof = timedOut ? "unknown" : (this.o.reconcileQuery?.(row) ?? Promise.resolve("unknown" as const));
+      void Promise.resolve(proof).then((value) => {
+        const outcome = timedOut ? "timeout" : value;
+        const wouldBe = timedOut ? "failed" : value === "yes" ? "done"
+          : value === "no" && this.o.reconcileAllowResend === true ? "pending" : "reconciling";
+        this.log(RECONCILE_SHADOW_LOG + " " + JSON.stringify({
+          v: 1, jobId: row.jobId, outcome: outcome === "no" && wouldBe === "reconciling" ? "no(not enabled)" : outcome,
+          wouldBe, shadowMode, at: now,
+        }));
+        if (timedOut && !this.reconcileTimeoutAlerted.has(row.jobId)) {
+          this.reconcileTimeoutAlerted.add(row.jobId);
+          this.o.alert(row.owner.taskId, "reconcile timeout, manual check required: " + row.jobId);
+        }
+        if (shadowMode && !timedOut) return;
+        const settled = timedOut
+          ? this.o.store.settleReconciling(row.jobId, this.o.owner, "timeout")
+          : value === "yes"
+            ? this.o.store.settleReconciling(row.jobId, this.o.owner, "yes")
+            : value === "no"
+              ? this.o.store.settleReconciling(row.jobId, this.o.owner, "no", { allowResend: this.o.reconcileAllowResend === true })
+              : this.o.store.settleReconciling(row.jobId, this.o.owner, "unknown");
+        if (!settled) this.log("[proc] reconcile settle rejected: " + row.jobId);
+      }).catch((e: unknown) => this.log("[proc] reconcile query failed: " + String(e)));
     }
   }
 

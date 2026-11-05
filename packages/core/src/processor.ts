@@ -352,6 +352,8 @@ export interface TransitionContext {
   kind?: string;
   step?: string | null;
   childConfirmedStopped?: boolean;
+  /** Explicit opt-in after a measured settle window exists; default false keeps "no" conservative. */
+  allowReconcileResend?: boolean;
 }
 
 /**
@@ -366,7 +368,9 @@ export function canTransition(from: JobState, to: JobState, ctx: TransitionConte
   if (from === "running" && to === "reconciling") return ctx.reason === "reconcile-start";
   if (from === "reconciling" && to === "reconciling") return ctx.reason === "reconcile-unknown";
   if (from === "reconciling" && to === "done") return ctx.reason === "reconcile-yes";
-  if (from === "reconciling" && to === "pending") return ctx.reason === "reconcile-no-resend";
+  if (from === "reconciling" && to === "pending") {
+    return ctx.reason === "reconcile-no-resend" && ctx.allowReconcileResend === true;
+  }
   if (from === "reconciling" && to === "failed") return ctx.reason === "reconcile-timeout";
   if (from === "running" && to === "skipped") return ctx.reason === "skip-hub-owned" || ctx.reason === "skip-source-gone";
   if (from === "pending" && to === "cancelled") return ctx.neverClaimed === true;
