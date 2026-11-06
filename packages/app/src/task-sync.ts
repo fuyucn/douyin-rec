@@ -203,6 +203,8 @@ export function applyRemoteTasks(
   const adopt = opts.adopt !== false;
   /** One-shot compatibility warning per room key for a legacy no-spool delivery. */
   const warnedNoSpool = opts.noSpoolWarnedKeys ?? new Set<string>();
+  /** 兼容告警随回执 warnings 上抛:短命 _apply-tasks 进程的 logger 不可靠,master 侧打印。 */
+  const warnings: string[] = [];
   const applied: string[] = [];
   const removed: string[] = [];
   const pending: string[] = [];
@@ -281,11 +283,10 @@ export function applyRemoteTasks(
       const s = trySlugOf(t.room);
       return !!s && s.platform === spec.platform && s.roomSlug === spec.roomSlug;
     });
-      // Historical false from an old master must not silently disappear: warn once per room
-      // (dedup across sync rounds via the injected set), without leaking the room identity.
       if ((spec.streamUpload ?? false) && spec.streamUploadSpool === false && !warnedNoSpool.has(key)) {
         warnedNoSpool.add(key);
         log?.(`[task-sync] 任务 ${existing?.id ?? "新建"}(${spec.platform}) 旧 master 下发了已废弃的真 0 落盘,已按保留回退文件运行`);
+        warnings.push(`任务 ${existing?.id ?? "新建"}(${spec.platform}) 旧 master 下发了已废弃的真 0 落盘,已按保留回退文件运行`);
       }
     if (existing) {
       // 远端:收编为受管;master 本地:保持用户可编辑(顺带清掉历史遗留的 hub 标记)。
@@ -449,7 +450,7 @@ export function applyRemoteTasks(
       //  比原来的 bug 更难察觉 —— 任务还在、也不录了)。判定与执行严格按分支隔离。
       log?.(`[task-sync] 拒绝整轮下发:期望为空但本地有 ${guard.totalManaged} 个受管任务(rejected=empty-desired);`
         + `疑似 master 配置不可读;确认要清空请用 force / DREC_ALLOW_SHRINK=1`);
-      return { applied, removed, pending: [], rejected: guard.rejected, ...(skipped.length ? { skipped } : {}) };
+      return { applied, removed, pending: [], rejected: guard.rejected, ...(warnings.length ? { warnings } : {}), ...(skipped.length ? { skipped } : {}) };
     }
     // 骤减:只停用不删除(语义同两阶段删除)—— 下一轮仍然骤减才继续,用户确认后 force 即真删。
     for (const { id, key } of guard.disableOnly) {
@@ -466,7 +467,7 @@ export function applyRemoteTasks(
       upsert(spec, `${spec.platform}:${spec.roomSlug}`);
     }
     writeSnapshot(opts, valid, log, skipped);
-    return { applied, removed, pending, rejected: guard.rejected, ...(skipped.length ? { skipped } : {}) };
+    return { applied, removed, pending, rejected: guard.rejected, ...(warnings.length ? { warnings } : {}), ...(skipped.length ? { skipped } : {}) };
   }
 
   for (const spec of valid) {
@@ -484,7 +485,7 @@ export function applyRemoteTasks(
   if (skipDeletions) {
     log?.(`[task-sync] 本轮有无法解析房间的期望条目,跳过全部删除/停用(保留 ${managedTasks.length} 个受管任务)`);
     writeSnapshot(opts, valid, log, skipped);
-    return { applied, removed, pending, ...(skipped.length ? { skipped } : {}) };
+    return { applied, removed, pending, ...(warnings.length ? { warnings } : {}), ...(skipped.length ? { skipped } : {}) };
   }
 
   for (const t of store.listTasks()) {
@@ -531,7 +532,7 @@ export function applyRemoteTasks(
 
   writeSnapshot(opts, valid, log, skipped);
 
-  return { applied, removed, pending, ...(skipped.length ? { skipped } : {}) };
+  return { applied, removed, pending, ...(warnings.length ? { warnings } : {}), ...(skipped.length ? { skipped } : {}) };
 }
 
 /** 审计快照(T-1)落盘:记录本轮期望。**失败只 warn,绝不影响任务下发结果** ——

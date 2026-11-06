@@ -2024,6 +2024,9 @@ const hubStarter: HubStarter = {
               opts.warn(`[hub] 记录期望版本 ${w.id} 失败(忽略,继续同步): ${(e as Error).message}`);
             }
             const r = await t.applyTasks({ desired, force, ...(expectedVersion !== undefined ? { expectedVersion } : {}) });
+            for (const warning of r.warnings ?? []) {
+              opts.log(`[hub] 节点 ${w.id} 回执: ${warning}`);
+            }
             // A safety-valve rejection means the expected set was NOT fully applied:
             // keep it visible as syncError instead of clearing the receipt.
             try {

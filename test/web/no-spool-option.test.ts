@@ -36,7 +36,12 @@ describe("UI copy describes the mandatory spool", () => {
     expect(dict).toContain("每个分 P 先写临时文件");
     expect(dict).toContain("上传成功后清理");
     expect(dict).toContain("keeps its local fallback file");
+    expect(dict).toContain("未上传完的那一段会保留本地回退文件");
+    expect(dict).toContain("分 P 临时文件仅用于上传与失败回退,不参与留存格式转换");
+    expect(dict).toContain("only serve upload and failure fallback and take no part in archive format conversion");
     expect(dict).not.toContain("不写本地视频");
+    expect(dict).not.toContain("没有本地视频可回退");
+    expect(dict).not.toContain("不产生本地视频文件");
     expect(dict).not.toContain("no local video");
     expect(dict).not.toContain("断流没有回退");
     expect(dict).not.toContain("no local video fallback");
