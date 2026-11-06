@@ -4,6 +4,8 @@ import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path";
 import { registerProcessor, _resetProcessors, UncertainOutcome, type ProcessContext, type ProcessJob } from "@drec/core";
 import { ProcRunner, SimpleSlotLimiter, readProcActive, LEASE_MS, type ProcRunnerOpts } from "@drec/proc-queue";
+import { makeUploadPartProcessor } from "@drec/processors";
+import type { BiliupHooks } from "../../packages/processors/src/run-biliup.js";
 import { makeEnv, fakeProcessor, gate, type Env } from "./helpers.js";
 
 let env: Env;
@@ -1383,5 +1385,67 @@ describe("plan 046 PR5 part-chain runner wiring", () => {
     r.tick();
     await vi.waitFor(() => expect(messages.some((m) => m.includes("任务收尾失败"))).toBe(true));
     expect(messages.some((m) => m.includes("链出失败"))).toBe(false);
+  });
+});
+
+describe("issue #532: unreadable tcp byte sampling never blocks the part chain", () => {
+  const orderKey = "order-532";
+  const BV = "BV1" + "a".repeat(9); // issue-guard: allow (fake BV fixture)
+  const mkPart = (name: string, index: number) => {
+    env.file(name, "x".repeat(10)); // env.job keeps an existing file, so the sealed size is 10 bytes
+    const job = env.job(name, { kind: "upload-part", logicalKey: orderKey + ":part:" + String(index), orderKey, seq: index, params: { partWorkflow: "rolling", cookies: "c", title: "t", tid: 21, tag: "tag" } });
+    const file = job.inputs[0]!;
+    job.params.ctx = { v: 1, orderKey, index, file, fp: { size: statSync(file).size, mtimeMs: statSync(file).mtimeMs } };
+    return job;
+  };
+  const partRun = vi.fn(async (argv: string[], hooks?: BiliupHooks) => {
+    hooks?.onSpawn?.(4242);
+    hooks?.onLine?.("All files uploaded successfully"); // live transfer boundary
+    return argv[2] === "upload" ? "All files uploaded successfully\n" + BV : "All files uploaded successfully\nok";
+  });
+  // The boundary read must use the live child pid (never 0): record what the watchdog was given.
+  const seenPids: number[] = [];
+  const register = (readAcked: (pid: number) => Map<string, number> | null): void => {
+    registerProcessor(makeUploadPartProcessor({
+      run: partRun as never,
+      readAcked: (pid: number) => { seenPids.push(pid); return readAcked(pid); },
+      tickMs: 1, now: () => env.clock.t, probe: () => null,
+    }));
+  };
+
+  it("no readable sample: the part is confirmed and later parts keep running (no order-blocked cascade)", async () => {
+    const one = mkPart("p532-a1.mp4", 1);
+    const two = mkPart("p532-a2.mp4", 2);
+    seenPids.length = 0;
+    register(() => null);
+    const r = mkRunner("A");
+    const s = env.open();
+    s.enqueue(one, allowed());
+    s.enqueue(two, allowed());
+    r.tick();
+    await vi.waitFor(() => { r.tick(); expect(s.get(two.jobId)?.state).toBe("done"); });
+    expect(s.get(one.jobId)).toMatchObject({ state: "done", bv: BV });
+    expect(s.get(two.jobId)?.error ?? "").not.toMatch(/order-blocked/);
+    // Both confirmed parts chained their cleanup in the same transaction.
+    expect(s.list({ kind: "cleanup-part" })).toHaveLength(2);
+    expect(seenPids.length).toBeGreaterThan(0);
+    expect(seenPids.every((pid) => pid > 0)).toBe(true);
+  });
+
+  it("a readable sample short of the file size is a real failure and still cascades", async () => {
+    const one = mkPart("p532-b1.mp4", 1);
+    const two = mkPart("p532-b2.mp4", 2);
+    seenPids.length = 0;
+    register(() => new Map([["local>peer", 5]]));
+    const r = mkRunner("A");
+    const s = env.open();
+    s.enqueue(one, allowed());
+    s.enqueue(two, allowed());
+    r.tick();
+    await vi.waitFor(() => expect(s.get(one.jobId)?.state).toBe("failed"));
+    expect(s.get(one.jobId)?.error).toMatch(/acked bytes 5 < file size 10/);
+    expect(s.get(two.jobId)?.state).toBe("cancelled");
+    expect(s.list({ kind: "cleanup-part" })).toHaveLength(0);
+    expect(seenPids.every((pid) => pid > 0)).toBe(true);
   });
 });

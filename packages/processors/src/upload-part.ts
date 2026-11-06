@@ -6,9 +6,12 @@
  * or part-count query (Bilibili data lags; the local success proof is the upload itself). All of the
  * stall/slot/gate/progress machinery is reused from biliup.ts via supervise(), not reimplemented.
  *
- * Success = explicit bv (create) or an unambiguous append ack, plus the in-queue fp still matching
- * and the child's acked bytes reaching the file size. Anything else throws; the runner records the
- * failure (rate limits re-enter pending through the generic classifier) and never chains cleanup.
+ * Success = explicit bv (create) or an unambiguous append ack, plus the in-queue fp still matching.
+ * The tcp-acked byte check is an extra guard: it only judges when the watchdog could read a sample at
+ * the transfer boundary. No sample means "unknown", not "zero bytes" (issue #532): the part is
+ * confirmed on biliup's explicit signal and the degradation is logged, never silent. Anything else
+ * throws; the runner records the failure (rate limits re-enter pending through the generic classifier)
+ * and never chains cleanup.
  *
  * TODO(?): reconciliation entry point is intentionally not wired here. An interrupted submit still
  * becomes the existing UncertainOutcome -> uncertain path; PR3 wiring of startReconciliation lands
@@ -102,13 +105,11 @@ export async function runOneBiliupPart(
   sup.setPart(0, size, size);
   const plain = { ...meta, video: file, public: meta.public };
   let ackSeen = false;
-  // All-files-uploaded is biliup's explicit transfer-complete boundary. Feed the final tcp-acked
-  // sample then require acked bytes >= file size (plan 046 §5.4(b)); missing evidence never passes.
+  // All-files-uploaded is biliup's explicit transfer-complete boundary. The supervisor samples tcp
+  // acked bytes on that line while the child is still alive (a dead child's sockets are gone), so
+  // sup.ackedAtBoundary() is the plan 046 §5.4(b) proof; null means the sample was unreadable.
   const runWithAck = async (argv: string[]): Promise<string> => sup.run(argv).then((out) => {
-    if (isAllFilesUploadedLine(out)) {
-      ackSeen = true;
-      sup.observeAcked((deps.readAcked ?? (() => new Map<string, number>()))(0));
-    }
+    if (isAllFilesUploadedLine(out)) ackSeen = true;
     return out;
   });
   if (!st.bv) {
@@ -125,7 +126,6 @@ export async function runOneBiliupPart(
     // re-thrown by appendGroup itself. TODO(?): PR5 should confirm biliup append's real completion
     // line; until then the exceptional return is the explicit ack (no archive list is queried).
     ackSeen = true;
-    sup.observeAcked((deps.readAcked ?? (() => new Map<string, number>()))(0));
   }
   if (!st.bv) throw new Error("upload-part missing explicit bv after create");
   const stat = deps.stat ?? ((x: string) => { const s = statSync(x); return { size: s.size, mtimeMs: s.mtimeMs }; });
@@ -134,8 +134,15 @@ export async function runOneBiliupPart(
     throw new Error("upload-part fp changed after transfer; refusing to confirm " + basename(file));
   }
   if (!ackSeen) throw new Error("upload-part missing explicit transfer ack; refusing to confirm " + basename(file));
-  const acked = sup.ackedSinceChild();
-  if (acked < now.size) throw new Error("upload-part acked bytes " + acked + " < file size " + now.size + "; refusing to confirm " + basename(file));
+  const acked = sup.ackedAtBoundary();
+  if (acked !== null && acked < now.size) {
+    throw new Error("upload-part acked bytes " + acked + " < file size " + now.size + "; refusing to confirm " + basename(file));
+  }
+  if (acked === null) {
+    // Unknown must not be reported as success silently: keep the confirmation, record that the guard
+    // could not run. The biliup success signal above remains the authority (§5.4(a)).
+    c.log("upload-part byte check unavailable (no tcp acked sample at the transfer boundary); confirming on biliup's explicit success signal: " + basename(file));
+  }
   // Persist the confirmed evidence back into the rolling sidecar so the master's duplicate guard
   // (rolling.bv short-circuit / scan) still sees an uploaded session (plan 046 PR6 addendum 2).
   // The path is DERIVED from the part file: a caller-supplied params.sidecarPath is never trusted
