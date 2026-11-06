@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 import {
-  addArchiveToSeasonIfConfigured, seasonCheckpointState, APPEND_AMBIGUOUS_MARKER, BILIUP_QUEUE_CAPABILITY, BILIUP_SLOT_CAPABILITY, isSlotBusy, SLOT_BUSY_MARKER, normalizeSeasonSectionId, UncertainOutcome, formatPartTitle, linkOrCopy, partTitleToFilename, probeChild,
+  addArchiveToSeasonIfConfigured, seasonCheckpointState, APPEND_AMBIGUOUS_MARKER, BILIUP_QUEUE_CAPABILITY, BILIUP_SLOT_CAPABILITY, isSlotBusy, SLOT_BUSY_MARKER, normalizeSeasonSectionId, UncertainOutcome, formatPartTitle, linkOrCopy, partTitleToFilename, probeChild, retryBackoffMs, RETRY_BACKOFF_MS,
   type ProcessContext, type ProcessJob, type ProcessResult, type Processor, type TitleContext, type UploadProgress, type UploadSlot,
 } from "@drec/core";
 import { appendGroup, countVideoParts, isAllFilesUploadedLine, runBiliup, uploadPlain, type BiliupHooks } from "./run-biliup.js";
@@ -124,9 +124,6 @@ export function aliasPartFiles(files: readonly string[], template?: string, ctx?
 }
 
 /** Transfer retries are counted by claims (plan 038 §4.3): 1 claim + 2 retries. */
-const MAX_ATTEMPTS = 3;
-const RETRY_BACKOFF_MS = 5 * 60_000;
-const MAX_BACKOFF_MS = 3600_000;
 
 /** The watchdog killed a stalled child; the processor decides retry vs manual. */
 class StallError extends Error {}
@@ -356,7 +353,6 @@ async function afterStall(job: ProcessJob, deps: BiliupDeps, sup: Supervisor, st
   const p = params(job);
   const attempts = (job as { attempts?: number }).attempts ?? 1;
   if (sup.wallHit()) throw new Error(`${e.message}; past maxWallMs, not retrying`);
-  if (attempts >= MAX_ATTEMPTS) throw new Error(`${e.message}; ${attempts} attempts used, not retrying`);
   if (!st.bv) {
     const proof = await findRecentArchive(cookiesOf(p, deps), p.title, expectedDuration(job, deps), deps.lookup);
     if (proof !== "no") throw new Error(`${APPEND_AMBIGUOUS_MARKER} ${e.message}; cannot prove no draft was created (${proof})`);
@@ -366,7 +362,7 @@ async function afterStall(job: ProcessJob, deps: BiliupDeps, sup: Supervisor, st
     const n = countParts ? await countParts(st.bv, cookiesOf(p, deps)).catch(() => null) : null;
     if (n == null || n < 1 || n > job.inputs.length) throw new Error(`${APPEND_AMBIGUOUS_MARKER} ${e.message}; part count unknown (${n ?? "unknown"})`);
   }
-  const backoff = Math.min(MAX_BACKOFF_MS, RETRY_BACKOFF_MS * 2 ** (attempts - 1));
+  const backoff = retryBackoffMs(attempts);
   return { outputs: [], ...(st.bv ? { bv: st.bv } : {}), retry: { notBefore: (deps.now ?? Date.now)() + backoff, reason: "transfer-retry" } };
 }
 

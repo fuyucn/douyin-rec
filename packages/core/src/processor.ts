@@ -12,6 +12,7 @@
 import { isAbsolute, relative, resolve } from "node:path";
 import type { UploadProgressDTO } from "./api-types.js";
 import { isVideoFileName } from "./output-format.js";
+import { isUploadRateLimited } from "./upload-contract.js";
 
 export type ResourceClass = "cpu" | "net" | "upload";
 
@@ -173,6 +174,65 @@ export class UncertainOutcome extends Error {
 
 export function isUncertainOutcome(e: unknown): boolean {
   return (e as { uncertain?: unknown } | null)?.uncertain === true;
+}
+
+export const RETRY_BACKOFF_MS = 5 * 60_000;
+export const MAX_BACKOFF_MS = 60 * 60_000;
+export const STUCK_ALERT_MS = 6 * 60 * 60_000;
+
+export type RetryFailureKind = "transient" | "deterministic" | "rate-limit";
+export type RetryFailureCode =
+  | "unknown" | "rate-limit" | "login-expired" | "credentials-invalid" | "forbidden" | "not-found";
+
+export interface RetryFailureClassification {
+  kind: RetryFailureKind;
+  code: RetryFailureCode;
+  retry: boolean;
+  /** Whether this failure belongs in the stuck-counter / backoff sequence (rate-limit does not). */
+  countsAsFailure: boolean;
+}
+
+const DETERMINISTIC_CODES: Readonly<Record<Exclude<RetryFailureCode, "unknown" | "rate-limit">, readonly string[]>> = Object.freeze({
+  "login-expired": Object.freeze(["login-expired"]),
+  "credentials-invalid": Object.freeze(["credentials-invalid", "invalid-cookies", "cookie-expired", "cookie-invalid"]),
+  forbidden: Object.freeze(["permission-denied"]),
+  "not-found": Object.freeze(["missing-cookies", "missing-cookies-path"]),
+});
+
+function failureMessage(err: unknown): string {
+  return String((err as Error)?.message ?? err);
+}
+
+function explicitCode(err: unknown): string | null {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === "string" ? code.toLowerCase() : null;
+}
+
+/** One enumerable classification gate; callers must not duplicate string heuristics.
+ *  Rate limits retry without consuming an attempt (`countsAsFailure=false`). */
+export function classifyRetryableFailure(err: unknown): RetryFailureClassification {
+  if (isUploadRateLimited(err)) return { kind: "rate-limit", code: "rate-limit", retry: true, countsAsFailure: false };
+  const code = explicitCode(err);
+  if (code) {
+    if (code === "unknown" || code === "rate-limit") return { kind: "transient", code: "unknown", retry: true, countsAsFailure: true };
+    if (code in DETERMINISTIC_CODES) {
+      return { kind: "deterministic", code: code as Exclude<RetryFailureCode, "unknown" | "rate-limit">, retry: false, countsAsFailure: false };
+    }
+    return { kind: "transient", code: "unknown", retry: true, countsAsFailure: true };
+  }
+  const message = failureMessage(err).toLowerCase();
+  for (const [deterministicCode, patterns] of Object.entries(DETERMINISTIC_CODES) as Array<[Exclude<RetryFailureCode, "unknown" | "rate-limit">, readonly string[]]>) {
+    if (patterns.some((pattern) => message.includes(pattern))) {
+      return { kind: "deterministic", code: deterministicCode, retry: false, countsAsFailure: false };
+    }
+  }
+  return { kind: "transient", code: "unknown", retry: true, countsAsFailure: true };
+}
+
+/** Five minutes, doubling to a one-hour cap; repeated failures never terminate by count. */
+export function retryBackoffMs(consecutiveFailures: number): number {
+  const exponent = Math.max(0, Math.floor(consecutiveFailures) - 1);
+  return Math.min(MAX_BACKOFF_MS, RETRY_BACKOFF_MS * 2 ** exponent);
 }
 
 // ───────────────────────── 注册表 ─────────────────────────
