@@ -16,6 +16,9 @@
  * the current source. Sharing dist/ with other test files was rejected: deleting it broke their
  * `describe.skipIf(existsSync(dist))` guards, and keeping it let a reverted wiring fix pass against
  * a stale artifact. A per-run path has neither problem and needs no lock.
+ *
+ * The build invokes esbuild.config.mjs directly instead of `pnpm bundle`, whose trailing
+ * `chmod +x dist/douyin-rec.mjs` would fail on a clean checkout and would touch shared state.
  */
 import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
