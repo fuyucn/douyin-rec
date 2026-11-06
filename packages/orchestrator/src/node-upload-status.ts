@@ -27,5 +27,18 @@ export function uploadStatusOf(plan: Pick<UploadPlan, "nodeId">, d: UploadDispat
     case "blocked": return { ...base, ...EMPTY, phase: "blocked", error: d.reason };
     case "biliup-enqueued": return { ...base, ...EMPTY, phase: "biliup", state: d.result.state, error: d.result.error ?? null };
     case "biliup": return { ...base, phase: "biliup", ...fromReceipt(d.receipt) };
+    case "part-chain-enqueued": {
+      const first = d.results[0];
+      return { ...base, ...EMPTY, phase: "part-chain", state: first?.state ?? null, error: first?.error ?? null };
+    }
+    case "part-chain-waiting": {
+      const last = d.receipts[d.receipts.length - 1];
+      return last ? { ...base, phase: "part-chain", ...fromReceipt(last) } : { ...base, ...EMPTY, phase: "part-chain" };
+    }
+    case "part-chain-failed": return { ...base, ...EMPTY, phase: "part-chain", state: d.state, error: d.error ?? null };
+    case "part-chain": {
+      const last = d.receipts[d.receipts.length - 1];
+      return last ? { ...base, phase: "part-chain", ...fromReceipt(last) } : { ...base, ...EMPTY, phase: "part-chain" };
+    }
   }
 }

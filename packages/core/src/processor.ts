@@ -463,6 +463,8 @@ export function cancelOutcome(kind: string, hasIntent: boolean): "cancelled" | "
 export interface EnqueueRequest {
   v: 1;
   jobs: ProcessJob[];
+  /** All-or-nothing enqueue for an ordered part chain. */
+  batch?: boolean;
 }
 
 export type EnqueueState = "pending" | "running" | "reconciling" | "done" | "stale" | "rejected";
@@ -595,5 +597,5 @@ export function decodeEnqueue(b64: string): EnqueueRequest {
     if (seen.has(j.jobId)) throw new Error(`[processor] EnqueueRequest 含重复 jobId: ${j.jobId}`);
     seen.add(j.jobId);
   }
-  return { v: 1, jobs };
+  return { v: 1, jobs, ...(parsed.batch === true ? { batch: true } : {}) };
 }

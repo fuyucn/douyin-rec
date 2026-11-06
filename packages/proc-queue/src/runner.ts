@@ -7,7 +7,7 @@
 import { existsSync, statfsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import {
-  classifyRetryableFailure, freeBytesOf, isSameChild, isUncertainOutcome, listProcessors, PART_KINDS,
+  classifyRetryableFailure, freeBytesOf, isSameChild, isUncertainOutcome, jobIdOf, listProcessors, PART_KINDS,
   PART_WORKFLOW_TEMPLATES, probeChild, retryBackoffMs, STUCK_ALERT_MS,
   type ChildFingerprint, type PartCtx, type ProcActiveDTO, type ProcessContext, type Processor,
 } from "@drec/core";
@@ -184,6 +184,29 @@ export class ProcRunner {
     return job.kind === "biliup" || job.kind === "upload-part" || job.kind === "upload-prep" || job.kind === "reconcile-part";
   }
 
+  /** Fill seq>1 upload-part ctx.bv from the latest done predecessor row in this order. */
+  private inheritPartBv(job: ProcJobRecord): void {
+    if (job.kind !== PART_KINDS.upload || !job.orderKey) return;
+    const ctx = job.params.ctx as PartCtx | undefined;
+    if (!ctx || ctx.index <= 1 || ctx.bv) return;
+    for (let seq = ctx.index - 1; seq >= 1; seq -= 1) {
+      const prior = this.o.store.get(jobIdOf(PART_KINDS.upload, `${job.orderKey}:part:${seq}`, job.generation));
+      if (!prior || prior.state !== "done") break;
+      if (prior.bv) {
+        job.params = { ...job.params, ctx: { ...ctx, bv: prior.bv } };
+        return;
+      }
+    }
+    throw new Error("upload-part cannot inherit a draft id from a done predecessor");
+  }
+
+  /** A terminal part failure blocks every later pending part in the same order. */
+  private cascadePartBlocked(job: ProcJobRecord): void {
+    if (job.kind !== PART_KINDS.upload || !job.orderKey || job.seq == null) return;
+    try { this.o.store.cascadeOrderBlocked(job.orderKey, job.generation, job.seq); }
+    catch (e) { this.log(`${job.jobId}: cascade order-blocked failed: ${e instanceof Error ? e.message : String(e)}`); }
+  }
+
   private alertSafely(job: ProcJobRecord, msg: string): boolean {
     try {
       this.o.alert(job.owner.taskId, msg);
@@ -208,6 +231,7 @@ export class ProcRunner {
         this.log(`${job.jobId}: deterministic finish rejected (holder moved)`);
         return;
       }
+      this.cascadePartBlocked(job);
       this.alertSafely(job, `${job.kind} 任务确定性失败,停止重试: ${msg}`);
       return;
     }
@@ -217,6 +241,7 @@ export class ProcRunner {
         this.log(`${job.jobId}: finish rejected (holder moved)`);
         return;
       }
+      this.cascadePartBlocked(job);
       this.alertSafely(job, `${job.kind} 任务失败: ${msg}`);
       return;
     }
@@ -577,6 +602,7 @@ export class ProcRunner {
     const { store, owner } = this.o;
     const ctx = this.ctxFor(job, ac);
     try {
+      if (job.kind === PART_KINDS.upload) this.inheritPartBv(job);
       const bad = proc.validate(job);
       if (bad !== null) {
         store.finish(job.jobId, owner, { state: "failed", error: `validate: ${bad}` });
@@ -595,7 +621,10 @@ export class ProcRunner {
           if (proc.interruptible) store.updateStep(job.jobId, "transfer");
           ok = store.retryTransfer(job.jobId, owner, res.retry.notBefore, await this.childStopped(store.get(job.jobId)));
         }
-        if (!ok) store.finish(job.jobId, owner, { state: "failed", error: "retry requested but not allowed" });
+        if (!ok) {
+          store.finish(job.jobId, owner, { state: "failed", error: "retry requested but not allowed" });
+          this.cascadePartBlocked(job);
+        }
         return;
       }
       if (job.kind === PART_KINDS.upload) {
@@ -621,11 +650,13 @@ export class ProcRunner {
       }
       if (f.reason === "cancel") {
         store.finish(job.jobId, owner, { state: "cancelled", error: "已取消" });
+        this.cascadePartBlocked(job);
         return;
       }
       if (isUncertainOutcome(e)) {
         // Outcome unknown (e.g. submit past maxWallMs): cancelled-with-intent → uncertain for biliup, never retried.
         store.finish(job.jobId, owner, { state: "cancelled", hasIntent: true, error: msg });
+        this.cascadePartBlocked(job);
         this.o.alert(job.owner.taskId, `${job.kind} 任务结果无法确定,需人工确认: ${msg}`);
         return;
       }

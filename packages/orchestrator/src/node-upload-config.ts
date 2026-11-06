@@ -20,6 +20,8 @@ export interface NodeUploadConfig {
   unreachableAlertMs: number;
   /** Default biliup concurrency per node; the node's own setting wins. */
   concurrency: number;
+  /** Opt-in per-part upload chain (default false; old prep -> biliup path stays byte-identical). */
+  partChain: boolean;
 }
 
 export const DEFAULT_NODE_UPLOAD: Readonly<NodeUploadConfig> = {
@@ -27,6 +29,7 @@ export const DEFAULT_NODE_UPLOAD: Readonly<NodeUploadConfig> = {
   pollMs: 60_000,
   unreachableAlertMs: 10 * 60_000,
   concurrency: 1,
+  partChain: false,
 };
 
 const posInt = (v: unknown, fallback: number, min = 1): number =>
@@ -41,6 +44,7 @@ export function parseNodeUploadConfig(raw: unknown): NodeUploadConfig {
     pollMs: posInt(o.pollMs, DEFAULT_NODE_UPLOAD.pollMs, 5_000),
     unreachableAlertMs: posInt(o.unreachableAlertMs, DEFAULT_NODE_UPLOAD.unreachableAlertMs, 1_000),
     concurrency: posInt(o.concurrency, DEFAULT_NODE_UPLOAD.concurrency),
+    partChain: o.partChain === true,
   };
 }
 

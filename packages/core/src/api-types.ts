@@ -520,7 +520,7 @@ export interface UploadProgressDTO {
 export interface NodeUploadStatusDTO {
   nodeId: string;
   /** prep = the upload-prep job; biliup = the upload job; blocked = the order cannot advance. */
-  phase: "prep" | "biliup" | "blocked";
+  phase: "prep" | "biliup" | "part-chain" | "blocked";
   /** proc-queue job state (pending/running/done/failed/uncertain/cancelled) or enqueue result. */
   state: string | null;
   /** biliup step: gate_wait / transfer / submit. */

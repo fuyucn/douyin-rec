@@ -5,7 +5,7 @@
  * wins), take one advance step, and leave the rest to the upload poller. Anything not confirmed safe keeps
  * the existing blocking path. Never uploads directly, never deletes anything.
  */
-import { processTimeZone, resolveOutputStem, resolveSubmissionTitle, sanitizeStreamKey, type TitleContext } from "@drec/core";
+import { PART_KINDS, processTimeZone, resolveOutputStem, resolveSubmissionTitle, sanitizeStreamKey, type TitleContext } from "@drec/core";
 import type { JobState } from "./ledger.js";
 import type { NodeSideUploadArgs } from "./node-side-upload.js";
 import { completeFromDispatch } from "./node-upload-complete.js";
@@ -73,13 +73,15 @@ export async function tryQueueUpload(o: NodeSideUploadArgs, capabilities?: reado
     jlog(`队列模式不可用:本场时长未知,节点无法做无稿证明 → blocking`);
     return null;
   }
-  const plan = ensureUploadPlan(ledger, streamKey, winner.workerId, input);
+  const partChain = cfg.partChain === true && capabilities?.includes(PART_KINDS.upload) === true;
+  if (cfg.partChain === true && !partChain) jlog("partChain 已开启但节点未广播 upload-part 能力 → 回落旧 prep→biliup 队列路径");
+  const plan = ensureUploadPlan(ledger, streamKey, winner.workerId, input, 1, { partChain });
   // State stays where the blocking node path leaves it (syncing); the step row shows the queue progress.
   ledger.logStep(streamKey, "node_upload", "start", `queued on ${plan.nodeId}`);
   ledger.syncNodeState(streamKey, "node_upload", "running");
-  jlog(`节点侧上传进入队列: node=${plan.nodeId} prep=${plan.prepJobId} biliup=${plan.biliupJobId}`);
+  jlog(`节点侧上传进入队列: node=${plan.nodeId} prep=${plan.prepJobId} mode=${plan.v === 2 ? "part-chain" : "whole-order"}${plan.v === 1 ? ` biliup=${plan.biliupJobId}` : ""}`);
   try {
-    const d = await advanceUpload(transport, plan);
+    const d = await advanceUpload(transport, plan, { persist: (p) => ledger.setUploadPlan(streamKey, JSON.stringify(p)) });
     try { ledger.setUploadStatus(streamKey, JSON.stringify(uploadStatusOf(plan, d, Date.now()))); } catch { /* display only */ }
     completeFromDispatch(ledger, streamKey, d, o.notify);
   } catch (e) {
