@@ -253,4 +253,27 @@ describe("upload-part runner chain", () => {
     expect(s.get(id2)?.error).toMatch(/inherit/i);
   });
 
+
+  it("A3-9: an old-key hub skip row at a lower seq is skipped, not treated as missing", async () => {
+    const file1 = env.file("a_000.ts");
+    const file2 = env.file("a_001.ts");
+    const s = env.open();
+    const oldKey = "same-broadcast:part-1@";
+    const skip = {
+      jobId: jobIdOf(PART_KINDS.upload, oldKey, 1), kind: PART_KINDS.upload, logicalKey: oldKey, generation: 1,
+      inputs: [file1], params: { ctx: ctxOf(file1, undefined, 1), partWorkflow: "rolling" },
+      replaceInputs: false, owner: { taskId: 1 }, createdAt: 1, orderKey: "same-broadcast", seq: 1,
+    };
+    expect(s.enqueueSourceGone(skip as never, { allowedRoots: [env.root] }).state).toBe("skipped");
+    const j2 = partJob(file2, "rolling", "same-broadcast:part:2", "same-broadcast", 2);
+    const id2 = s.enqueue({ ...j2, jobId: jobIdOf(PART_KINDS.upload, "same-broadcast:part:2", 1) }, allowed()).jobId;
+    const c2 = ctxOf(file2, undefined, 2);
+    registerProcessor(proc({ run: async () => ({ outputs: [], bv: "NEWDRAFT02", confirmed: { size: c2.fp.size, mtimeMs: c2.fp.mtimeMs, ackedBytes: c2.fp.size } }) }));
+    const r = mkRunner();
+    s.acquireLease(PART_KINDS.upload, "A", { pid: process.pid });
+    r.tick();
+    await vi.waitFor(() => expect(s.get(id2)?.state).toBe("done"));
+    expect(s.get(id2)?.bv).toBe("NEWDRAFT02");
+  });
+
 });

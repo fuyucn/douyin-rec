@@ -279,7 +279,7 @@ program
     const rollingEnabled = parseBoolFlag(o.rollingUpload, false);
     let makeRolling: (() => import("@drec/manager").RollingUploadHook) | undefined;
     if (rollingEnabled) {
-      const { makeRollingUploadHookFactory, uploadOwnerForTask, enqueueHubOwnedSkip, rootHubDir, drecRoot, TaskStore } = await import("@drec/app");
+      const { makeRollingUploadHookFactory, uploadOwnerForTask, enqueueHubOwnedSkip, rootHubDir, resolveDbPath, TaskStore } = await import("@drec/app");
       const { rollingQueueModeEnabled } = await import("@drec/app");
       const slug = platform.extractRoomSlug(roomToUrl(o.room));
       // Production record is spawned by TaskManager; wire the same hub-owner decision as task run,
@@ -287,7 +287,7 @@ program
       let uploadOwner: (() => ReturnType<typeof uploadOwnerForTask>) | undefined;
       let enqueueHubSkipped: ((input: { file: string; index: number; seq?: number; streamKey: string; title?: string; expectedDurationSec?: number; confirmedAt?: number }) => boolean) | undefined;
       if (o.taskId !== undefined && /^\d+$/.test(o.taskId)) {
-        const db = new TaskStore(dbPathForDataRoot(drecRoot()));
+        const db = new TaskStore(resolveDbPath());
         try {
           const task = db.listTasks().find((t) => t.id === Number(o.taskId));
           if (task) {

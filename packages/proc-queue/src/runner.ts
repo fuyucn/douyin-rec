@@ -7,7 +7,7 @@
 import { existsSync, statfsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import {
-  classifyRetryableFailure, freeBytesOf, isSameChild, isUncertainOutcome, jobIdOf, listProcessors, PART_KINDS, partLogicalKey,
+  classifyRetryableFailure, freeBytesOf, isSameChild, isUncertainOutcome, listProcessors, PART_KINDS,
   PART_WORKFLOW_TEMPLATES, probeChild, retryBackoffMs, STUCK_ALERT_MS,
   type ChildFingerprint, type PartCtx, type ProcActiveDTO, type ProcessContext, type Processor,
 } from "@drec/core";
@@ -190,14 +190,18 @@ export class ProcRunner {
     const ctx = job.params.ctx as PartCtx | undefined;
     if (!ctx || ctx.index <= 1 || ctx.bv) return;
     for (let seq = ctx.index - 1; seq >= 1; seq -= 1) {
-      const prior = this.o.store.get(jobIdOf(PART_KINDS.upload, partLogicalKey(job.orderKey, seq), job.generation));
+      // Kind-filtered (orderKey, seq) covers rows written by an older logical-key spelling (PR7) too.
+      const rows = this.o.store.rowsForOrderSeq(job.orderKey, seq, PART_KINDS.upload);
       // Missing / non-done predecessor: fail closed (creating a draft here would duplicate the archive).
-      if (!prior) throw new Error("upload-part cannot inherit: lower-seq row " + seq + " is missing");
+      if (rows.length === 0) throw new Error("upload-part cannot inherit: lower-seq row " + seq + " is missing");
       // A skipped placeholder carries no draft: keep looking backwards.
-      if (prior.state === "skipped") continue;
-      if (prior.state !== "done") throw new Error("upload-part cannot inherit: lower-seq row " + seq + " is " + prior.state);
-      if (prior.bv) {
-        job.params = { ...job.params, ctx: { ...ctx, bv: prior.bv } };
+      if (rows.every((r) => r.state === "skipped")) continue;
+      const done = rows.find((r) => r.state === "done");
+      if (!done) {
+        throw new Error("upload-part cannot inherit: lower-seq row " + seq + " is " + rows.map((r) => r.state).join(","));
+      }
+      if (done.bv) {
+        job.params = { ...job.params, ctx: { ...ctx, bv: done.bv } };
         return;
       }
     }

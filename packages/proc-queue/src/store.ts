@@ -376,7 +376,17 @@ export class ProcQueueStore {
     return this.tx(() => {
       const existing = this.get(job.jobId);
       if (existing) {
-        if (existing.state === "done") return { jobId: job.jobId, state: "done" };
+        if (existing.state === "done") {
+          // A row written by an earlier build may have no cleanup successor: still enqueue it (idempotent).
+          if (opts.cleanupJob) {
+            assertJobInvariants(opts.cleanupJob, { allowedRoots: opts.allowedRoots });
+            const c = this.enqueueTx(opts.cleanupJob, opts.cleanupJob.logicalKey);
+            if (c.state === "rejected" || c.state === "stale") {
+              throw new Error("cleanup enqueue rejected: " + (c.error ?? c.state));
+            }
+          }
+          return { jobId: job.jobId, state: "done" };
+        }
         return {
           jobId: job.jobId, state: "rejected", error: "已存在且 state=" + existing.state,
           existingState: existing.state as Exclude<JobState, "pending" | "running" | "done">,
@@ -512,9 +522,10 @@ export class ProcQueueStore {
     return r.s == null ? 0 : Number(r.s);
   }
 
-  /** Any row already recorded for one (orderKey, seq), regardless of logical key spelling (PR7 back-compat). */
-  rowsForOrderSeq(orderKey: string, seq: number): ProcJobRecord[] {
-    return (this.db.prepare("SELECT * FROM proc_jobs WHERE orderKey=? AND seq=?").all(orderKey, seq) as Row[]).map(toRecord);
+  /** Rows of one kind already recorded for (orderKey, seq), regardless of logical-key spelling (PR7 back-compat). */
+  rowsForOrderSeq(orderKey: string, seq: number, kind: string = PART_KINDS.upload): ProcJobRecord[] {
+    return (this.db.prepare("SELECT * FROM proc_jobs WHERE kind=? AND orderKey=? AND seq=?")
+      .all(kind, orderKey, seq) as Row[]).map(toRecord);
   }
 
   /**

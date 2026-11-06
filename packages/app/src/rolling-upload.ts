@@ -411,6 +411,12 @@ export class RollingUploader {
   private readonly queuedIndices = new Set<number>();
   /** Pending queue-enqueue retry timer (PR6 MEDIUM 7: session-end flush is one-shot). */
   private queueRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** recordingActive of the latest failed queue flush (retry must not force false). */
+  private queueRetryActive = false;
+  /** Confirmed legacy segments blocked by a failed import/proof (never enqueue them as fresh uploads). */
+  private readonly queueBlocked = new Set<number>();
+  /** Cached archive proof for the legacy sidecar import (one query per session). */
+  private queueImportProof: number | null = null;
   /** Alerts already sent for this session (one per reason/index, not per flush). */
   private readonly queueNotified = new Set<string>();
   /** True when this session loaded an existing sidecar from disk (the only safe trigger for legacy import). */
@@ -559,6 +565,9 @@ export class RollingUploader {
     if (!this.state.sessionBase || !this.segDir) return true;
     const target = statePathFor(this.segDir, this.state.sessionBase);
     try {
+      // Queue mode: the runner may have written bv/confirmed into the sidecar. Merge before writing so
+      // the recorder's in-memory state cannot erase them (two writers, one file).
+      if (this.o.queueMode === true) this.state = this.mergeSidecarState(this.state);
       writeStateFile(this.segDir, this.state, this.pid, this.now());
       return true;
     } catch (e) {
@@ -569,6 +578,20 @@ export class RollingUploader {
       );
       return false;
     }
+  }
+
+  /** Merge durable bv/confirmed/queueOrderKey written by the queue runner into this in-memory state. */
+  private mergeSidecarState(state: RollingState): RollingState {
+    const disk = readState(this.segDir, state.sessionBase);
+    if (!disk) return state;
+    const confirmed = [...new Set([...(state.confirmed ?? []), ...(disk.confirmed ?? [])])].sort((a, b) => a - b);
+    return {
+      ...state,
+      ...(state.bv ? {} : disk.bv ? { bv: disk.bv } : {}),
+      ...(state.queueOrderKey ? {} : disk.queueOrderKey ? { queueOrderKey: disk.queueOrderKey } : {}),
+      confirmed,
+      updatedAt: state.updatedAt,
+    };
   }
 
   /** 查询 BV 当前分 P 数(append 幂等核对 / 崩溃恢复)。 */
@@ -615,7 +638,10 @@ export class RollingUploader {
       const cookies = this.o.cookies ?? process.env.BILIUP_COOKIE ?? rootBiliupCookies();
       let parts: number | null = null;
       try {
-        parts = await this.gate!.run(this.accountKey, () => this.countPartsInner(s.bv!, cookies));
+        // Queue mode has no gate; the read-only part-count is the same evidence either way.
+        parts = this.gate
+          ? await this.gate.run(this.accountKey, () => this.countPartsInner(s.bv!, cookies))
+          : await this.countPartsInner(s.bv!, cookies);
       } catch { parts = null; }
       // Parts inherited from predecessor sessions of the same broadcast are already in the submission.
       const expected = (s.inheritedParts ?? 0) + s.confirmed.length;
@@ -804,10 +830,15 @@ export class RollingUploader {
     // archive proof (a sidecar alone must not authorize a delete).
     if (this.state.bv && this.loadedExistingSidecar && !hubOwned) {
       const cookies = this.o.cookies ?? process.env.BILIUP_COOKIE ?? rootBiliupCookies();
-      let proof = 0;
-      try { proof = await this.countPartsInner(this.state.bv, cookies) ?? 0; } catch { proof = 0; }
+      let proof = this.queueImportProof;
+      if (proof === null) {
+        try { proof = await this.countPartsInner(this.state.bv, cookies) ?? 0; } catch { proof = 0; }
+        this.queueImportProof = proof;
+      }
       if (proof <= 0) {
         this.notifyOnce("import-proof", "边录边传队列模式:老 sidecar 的已确认段无法在稿件侧核对,保留源待人工");
+        // Never fall through to a fresh upload of an already-confirmed legacy part.
+        for (const seg of rolling) if (confirmed.has(seg.index)) this.queueBlocked.add(seg.index);
       } else {
         for (const seg of rolling) {
           if (!confirmed.has(seg.index)) continue;
@@ -818,8 +849,12 @@ export class RollingUploader {
               withCleanup: true,
               ...(this.o.taskId !== undefined ? { taskId: this.o.taskId } : {}), meta,
             });
-            if (r === "failed" || r === "terminal") this.queueFailed(seg.index, "兼容导入失败", recordingActive, r === "terminal");
+            if (r === "failed" || r === "terminal") {
+              this.queueBlocked.add(seg.index);
+              this.queueFailed(seg.index, "兼容导入失败", recordingActive, r === "terminal");
+            }
           } catch (e) {
+            this.queueBlocked.add(seg.index);
             this.queueFailed(seg.index, "兼容导入异常: " + String((e as Error)?.message ?? e).slice(0, 160), recordingActive);
           }
         }
@@ -828,6 +863,7 @@ export class RollingUploader {
     const queued: number[] = [];
     for (const seg of rolling) {
       if (this.queuedIndices.has(seg.index)) continue;
+      if (this.queueBlocked.has(seg.index)) continue;
       if (!sealed.has(seg.index)) continue;
       if (this.state.hubSkipped?.includes(seg.index)) continue;
       // Ambiguous head-of-line: this segment and everything after it stays out of the queue (risk 7).
@@ -899,6 +935,20 @@ export class RollingUploader {
     }
     if (found.kind === "found") {
       const prev = found.prev;
+      // Keep the legacy uncertainty gate: an interrupted upload in the predecessor is not a safe
+      // continuation base (missing part / duplicate append would go unnoticed).
+      if (prev.s.uploading) {
+        this.notifyOnce("pred-intent", "边录边传队列模式:前序会话有未结算的上传意图,本会话暂不入队,保留源");
+        return null;
+      }
+      if ((prev.s.ambiguous?.length ?? 0) > 0) {
+        this.notifyOnce("pred-ambiguous", "边录边传队列模式:前序会话有结果不确定的段,本会话暂不入队,保留源");
+        return null;
+      }
+      if (this.ownerMayBeAlive(prev.s, prev.last)) {
+        this.notifyOnce("pred-owner", "边录边传队列模式:前序会话的录制进程可能仍存活,本会话暂不入队,保留源");
+        return null;
+      }
       const startMs = this.state.startMs ?? (this.firstSegMtimeMs || this.now());
       const prevLiveId = readSessionLiveId(this.segDir, prev.base);
       const ownLiveId = readSessionLiveId(this.segDir, this.state.sessionBase);
@@ -915,7 +965,9 @@ export class RollingUploader {
         this.state = {
           ...this.state,
           queueOrderKey: key,
-          ...(prev.s.bv && !this.state.bv ? { bv: prev.s.bv } : {}),
+          // Hub-owned rooms never upload on this node: inheriting a bv would make the master's
+          // short-circuit skip an upload whose sources are all still retained.
+          ...(this.o.uploadOwner?.() !== "master" && prev.s.bv && !this.state.bv ? { bv: prev.s.bv } : {}),
           ...(typeof parts === "number" && parts > 0 ? { inheritedParts: parts } : {}),
           updatedAt: this.now(),
         };
@@ -978,11 +1030,13 @@ export class RollingUploader {
   private queueFailed(index: number, what: string, recordingActive: boolean, terminal = false): void {
     this.notifyOnce("fail:" + index, "边录边传队列模式:段 " + index + " " + what + ",保留源" + (terminal ? "待人工" : "并稍后重试"));
     if (terminal) return;
+    // A later failure may know that recording has finished; the retry must use the latest state.
+    this.queueRetryActive = this.queueRetryActive || recordingActive;
     if (this.queueRetryTimer) return;
     const timer = setTimeout(() => {
       this.queueRetryTimer = null;
       // Never force recordingActive=false: that would seal the still-growing newest segment.
-      void this.flush({ recordingActive }).catch(() => undefined);
+      void this.flush({ recordingActive: this.queueRetryActive }).catch(() => undefined);
     }, this.o.queueRetryMs ?? 60_000);
     timer.unref?.();
     this.queueRetryTimer = timer;

@@ -13,6 +13,7 @@ import {
 } from "./rolling-queue.js";
 import { makeUploadPartProcessor } from "@drec/processors";
 import { enqueueHubOwnedSkip } from "./hub-owner.js";
+import { uploadOwnerForTask } from "./hub-rule-match.js";
 
 // Fake draft ids are built from parts: the privacy gate rejects bare BV-shaped literals.
 const FAKE_BV1 = ["B", "V", "legacy", "0001"].join("");
@@ -531,6 +532,7 @@ describe("rework round 2", () => {
     const src = readFileSync(path.join(import.meta.dirname, "..", "..", "cli", "src", "cli.ts"), "utf-8");
     expect(src).toContain("uploadOwnerForTask");
     expect(src).toContain("enqueueHubOwnedSkip");
+    expect(src).toContain("new TaskStore(resolveDbPath())");
   });
 });
 
@@ -579,6 +581,134 @@ describe("rework round 2", () => {
     await u.flush({ recordingActive: false });
     expect(notify).toHaveBeenCalled();
     expect(seen(u, "__enq")).toEqual([]);
+  });
+
+
+describe("rework addendum 3", () => {
+  const meta = { cookies: "c", title: "t", tid: 21, tag: "tag", public: false };
+
+  it("A3-1: a hub-managed task is master-owned even with no local hub rules", () => {
+    const task = { id: 7, room: "https://live.douyin.com/123", managedBy: "hub" };
+    expect(uploadOwnerForTask(task, root + "/config/hub")).toBe("master");
+  });
+
+  it("A3-2: recorder persist merges runner-written bv/confirmed instead of erasing them", async () => {
+    const paths = segs(2);
+    const u = queueUploader();
+    u.noteSegment(paths[0]!);
+    // The runner writes its confirmation between two recorder persists.
+    const st = JSON.parse(readFileSync(sidecar(), "utf-8")) as Record<string, unknown>;
+    writeFileSync(sidecar(), JSON.stringify({ ...st, bv: FAKE_BV1, confirmed: [0] }));
+    u.noteSegment(paths[1]!); // triggers persist()
+    const merged = readFileSync(sidecar(), "utf-8");
+    expect(merged).toContain(FAKE_BV1);
+    expect((JSON.parse(merged) as { confirmed: number[] }).confirmed).toContain(0);
+  });
+
+  it("A3-3: failed import proof blocks those parts (never re-enqueued as fresh uploads)", async () => {
+    const paths = segs(1);
+    writeFileSync(sidecar(), JSON.stringify({
+      streamKey: orderKeyOf(), sessionBase: SESSION_BASE,
+      segments: paths.map((p, i) => ({ index: i, path: p })), confirmed: [0], bv: FAKE_BV1, updatedAt: BASE_MS,
+    }));
+    const u = queueUploader({ countPartsRaw: async () => 0 });
+    paths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(seen(u, "__enq")).toEqual([]);
+  });
+
+  it("A3-4: a predecessor with an interrupted intent or ambiguous part is not a continuation base", async () => {
+    const prevBase = "主播_2026-06-27_04-00-00";
+    const prevFile = path.join(rec, prevBase + "_000.ts");
+    writeFileSync(prevFile, "abcdefgh");
+    utimesSync(prevFile, new Date(BASE_MS - 15 * 60_000), new Date(BASE_MS - 15 * 60_000));
+    writeFileSync(path.join(rec, prevBase + ".rolling.json"), JSON.stringify({
+      streamKey: "douyin:123:" + prevBase, sessionBase: prevBase,
+      segments: [{ index: 0, path: prevFile }], confirmed: [], uploading: { index: 0, kind: "append" }, bv: FAKE_BV1,
+      room, startMs: BASE_MS - 15 * 60_000, updatedAt: BASE_MS - 15 * 60_000,
+    }));
+    const notify = vi.fn();
+    const paths = segs(1);
+    const u = queueUploader({ notify });
+    u.noteSegment(paths[0]!);
+    await u.flush({ recordingActive: false });
+    expect(seen(u, "__enq")).toEqual([]);
+    expect(notify).toHaveBeenCalled();
+  });
+
+  it("A3-6: the legacy import proof is queried once per session", async () => {
+    const paths = segs(1);
+    writeFileSync(sidecar(), JSON.stringify({
+      streamKey: orderKeyOf(), sessionBase: SESSION_BASE,
+      segments: paths.map((p, i) => ({ index: i, path: p })), confirmed: [0], bv: FAKE_BV1, updatedAt: BASE_MS,
+    }));
+    const count = vi.fn(async () => 3);
+    const u = queueUploader({ countPartsRaw: count });
+    paths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    await u.flush({ recordingActive: false });
+    expect(count).toHaveBeenCalledTimes(1);
+  });
+
+  it("A3-8: a hub-owned successor does not inherit the predecessor bv", async () => {
+    const prevBase = "主播_2026-06-27_03-00-00";
+    const prevFile = path.join(rec, prevBase + "_000.ts");
+    writeFileSync(prevFile, "abcdefgh");
+    utimesSync(prevFile, new Date(BASE_MS - 12 * 60_000), new Date(BASE_MS - 12 * 60_000));
+    writeFileSync(path.join(rec, prevBase + ".rolling.json"), JSON.stringify({
+      streamKey: "douyin:123:" + prevBase, sessionBase: prevBase,
+      segments: [{ index: 0, path: prevFile }], confirmed: [0], bv: FAKE_BV1,
+      room, startMs: BASE_MS - 12 * 60_000, updatedAt: BASE_MS - 12 * 60_000,
+    }));
+    const paths = segs(1);
+    const u = queueUploader({ uploadOwner: () => "master", enqueueHubSkipped: () => true });
+    u.noteSegment(paths[0]!);
+    await u.flush({ recordingActive: false });
+    const sc = JSON.parse(readFileSync(sidecar(), "utf-8")) as { bv?: string };
+    expect(sc.bv).toBeUndefined();
+  });
+
+  it("A3-10: a non-upload row with the same order/seq does not count as the part", () => {
+    const p = segs(1)[0]!;
+    const s = openQueue();
+    try {
+      const row = {
+        jobId: jobIdOf("biliup", orderKeyOf() + ":part:1", 1), kind: "biliup", logicalKey: orderKeyOf() + ":part:1",
+        generation: 1, inputs: [p], params: {}, replaceInputs: false, owner: {}, createdAt: 1, orderKey: orderKeyOf(), seq: 1,
+      };
+      s.enqueue(row as never, { allowedRoots: [root] });
+    } finally { s.close(); }
+    expect(enqueueRollingUploadPart({ file: p, index: 0, orderKey: orderKeyOf(), meta })).toBe("queued");
+  });
+});
+
+
+  it("A3-5: queue mode settles a legacy append intent by part count without a gate", async () => {
+    const paths = segs(1);
+    writeFileSync(sidecar(), JSON.stringify({
+      streamKey: orderKeyOf(), sessionBase: SESSION_BASE,
+      segments: paths.map((p, i) => ({ index: i, path: p })), confirmed: [],
+      uploading: { index: 0, kind: "append" }, bv: FAKE_BV1, updatedAt: BASE_MS,
+    }));
+    const u = queueUploader({ countPartsRaw: async () => 1 });
+    paths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    const sc = JSON.parse(readFileSync(sidecar(), "utf-8")) as { confirmed?: number[]; uploading?: unknown };
+    expect(sc.uploading).toBeUndefined();
+    expect(sc.confirmed).toContain(0);
+  });
+
+  it("A3-12: a later inactive failure does not downgrade the retry to inactive", async () => {
+    const paths = segs(1);
+    const calls: boolean[] = [];
+    const u = queueUploader({ queueRetryMs: 40, enqueueQueuePart: () => "failed" });
+    const retry = vi.spyOn(u, "flush");
+    paths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: true });
+    await u.flush({ recordingActive: false });
+    await new Promise((r) => setTimeout(r, 70));
+    expect(retry.mock.calls.some(([arg]) => arg.recordingActive === true)).toBe(true);
+    expect(calls).toEqual([]);
   });
 
 });
