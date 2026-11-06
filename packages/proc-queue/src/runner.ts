@@ -6,7 +6,11 @@
  */
 import { existsSync, statfsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { classifyRetryableFailure, freeBytesOf, isSameChild, isUncertainOutcome, listProcessors, probeChild, retryBackoffMs, STUCK_ALERT_MS, type ChildFingerprint, type ProcActiveDTO, type ProcessContext, type Processor } from "@drec/core";
+import {
+  classifyRetryableFailure, freeBytesOf, isSameChild, isUncertainOutcome, listProcessors, PART_KINDS,
+  PART_WORKFLOW_TEMPLATES, probeChild, retryBackoffMs, STUCK_ALERT_MS,
+  type ChildFingerprint, type PartCtx, type ProcActiveDTO, type ProcessContext, type Processor,
+} from "@drec/core";
 
 import { GC_RETAIN_MS, LEASE_MS, ProcQueueStore, procQueueDbPath, type ProcJobRecord } from "./store.js";
 
@@ -79,6 +83,8 @@ export interface ProcRunnerOpts {
   reconcileMaxMs?: number;
   /** Explicit opt-in after a measured settle window exists; default false. */
   reconcileAllowResend?: boolean;
+  /** Roots for the atomic cleanup successor's contract check (defaults to the data root of the store). */
+  chainAllowedRoots?: readonly string[];
   /** Read-only archive query seam for tests; production may leave undefined. */
   reconcileQuery?: (job: ProcJobRecord) => Promise<"yes" | "no" | "unknown">;
 }
@@ -592,11 +598,19 @@ export class ProcRunner {
         if (!ok) store.finish(job.jobId, owner, { state: "failed", error: "retry requested but not allowed" });
         return;
       }
-      if (!store.finish(job.jobId, owner, { state: "done", outputs: res.outputs, note: res.note })) {
+      if (job.kind === PART_KINDS.upload) {
+        const chained = this.finishWithChain(job, { ...res, bv: res.bv });
+        if (!chained.ok) {
+          // Chain failure must not leave a done row without its successor and must not be silent.
+          this.log(`${job.jobId}: ${chained.error}`);
+          this.o.alert(job.owner.taskId, `${job.kind} 任务确认后链出失败: ${chained.error}`);
+          return;
+        }
+      } else if (!store.finish(job.jobId, owner, { state: "done", outputs: res.outputs, note: res.note })) {
         this.log(`${job.jobId}: 完成但收尾失败(持有者已换人),忽略`);
-      } else {
-        this.noteGeneralSuccess(job);
+        return;
       }
+      this.noteGeneralSuccess(job);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (f.reason === "fenced") return;
@@ -620,6 +634,31 @@ export class ProcRunner {
   }
 
   // ───────────────────────── 接管 recover ─────────────────────────
+
+  /** Single write path for upload-part success: done + cleanup successor in one transaction. */
+  private finishWithChain(job: ProcJobRecord, res: { outputs: string[]; note?: string; bv?: string; confirmed?: { size: number; mtimeMs: number; ackedBytes: number } }): { ok: boolean; error?: string } {
+    const finish = { state: "done" as const, outputs: res.outputs, ...(res.note ? { note: res.note } : {}) };
+    const mode: unknown = job.params.partWorkflow;
+    const template = mode === "live-pump" || mode === "rolling" || mode === "whole-order"
+      ? PART_WORKFLOW_TEMPLATES[mode]
+      : null;
+    // Missing/invalid mode and whole-order are deliberately conservative: no successor row.
+    if (!template || template.cleanupAt !== "part-confirmed" || !res.confirmed || !res.bv) {
+      return { ok: this.o.store.finish(job.jobId, this.o.owner, finish), error: "完成但收尾失败(持有者已换人)" };
+    }
+    const ctx = job.params.ctx as PartCtx | undefined;
+    if (!ctx || res.confirmed.size !== ctx.fp.size || res.confirmed.mtimeMs !== ctx.fp.mtimeMs
+      || res.confirmed.ackedBytes < res.confirmed.size || !res.bv) {
+      return { ok: false, error: "确认证据不足,拒绝链出清理" };
+    }
+    const current = this.o.store.get(job.jobId);
+    const attempts = current?.attempts ?? job.attempts;
+    const r = this.o.store.completeAndChain(job.jobId, this.o.owner, finish, {
+      logicalKey: job.logicalKey, generation: job.generation,
+      ctx: { ...ctx, bv: res.bv }, owner: job.owner,
+    }, { allowedRoots: this.o.chainAllowedRoots ?? [dirname(dirname(this.o.store.dbPath))], attempts });
+    return r.ok ? { ok: true } : { ok: false, error: r.error };
+  }
 
   /** 刚取得租约:对该 kind 非本进程在跑的 running 行逐个 `recover()`(只碰该行列出的路径)。 */
   private async recoverKind(p: Processor): Promise<void> {

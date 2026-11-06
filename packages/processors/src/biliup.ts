@@ -28,7 +28,7 @@ export interface BiliupParams {
 }
 
 /** BV persisted on the queue row by an earlier attempt of this same job (P1 created by us, inputs[0] is P1). */
-function persistedBv(job: ProcessJob): string | undefined {
+export function persistedBv(job: ProcessJob): string | undefined {
   const v = (job as { bv?: string | null }).bv;
   return typeof v === "string" && v ? v : undefined;
 }
@@ -38,7 +38,7 @@ function persistedSeasonState(job: ProcessJob): "pending" | "done" | "failed" | 
   return s === "pending" || s === "done" || s === "failed" ? s : undefined;
 }
 
-function params(job: ProcessJob): BiliupParams {
+export function params(job: ProcessJob): BiliupParams {
   const p = job.params as Partial<BiliupParams>;
   const persisted = persistedBv(job);
   return {
@@ -93,7 +93,7 @@ export interface BiliupDeps {
 const ALIAS_DIR = ".upload";
 
 /** biliup is always run with the node's own cookies when it has them (the master path rarely exists here). */
-const cookiesOf = (p: BiliupParams, deps: BiliupDeps): string => deps.localCookies?.() ?? p.cookies;
+export const cookiesOf = (p: BiliupParams, deps: BiliupDeps): string => deps.localCookies?.() ?? p.cookies;
 
 /**
  * biliup names a part after its file stem, so each part is hard-linked under its rendered part title
@@ -126,7 +126,7 @@ export function aliasPartFiles(files: readonly string[], template?: string, ctx?
 /** Transfer retries are counted by claims (plan 038 §4.3): 1 claim + 2 retries. */
 
 /** The watchdog killed a stalled child; the processor decides retry vs manual. */
-class StallError extends Error {}
+export class StallError extends Error {}
 
 /** Expected duration comes from the job (master/prep), never silently defaulted to "safe". */
 function expectedDuration(job: ProcessJob, deps: BiliupDeps): number {
@@ -134,11 +134,15 @@ function expectedDuration(job: ProcessJob, deps: BiliupDeps): number {
   return Number.isFinite(fromJob) && fromJob > 0 ? fromJob : (deps.expectedDurationSec ?? 0);
 }
 
-interface Supervisor {
+export interface Supervisor {
   run: (argv: string[]) => Promise<string>;
   setStep: (step: string) => void;
   /** The next run uploads one part: bytes already uploaded by earlier parts, this part's size, job total. */
   setPart: (baseBytes: number, partBytes: number, totalBytes: number) => void;
+  /** Bytes acked by the last child (the plan 046 §5.4 transfer byte proof). */
+  ackedSinceChild: () => number;
+  /** Feed one tcp-acked sample into the watchdog while still in transfer step. */
+  observeAcked: (sample: AckSample) => void;
   /** Rejects with UncertainOutcome once submit passes maxWallMs; never resolves. */
   abandoned: Promise<never>;
   wallHit: () => boolean;
@@ -146,7 +150,7 @@ interface Supervisor {
 }
 
 /** Wrap biliup runs with the transfer watchdog: stall kills the child, submit is never killed. */
-function supervise(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps): Supervisor {
+export function supervise(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps): Supervisor {
   const watch = new TransferWatch(watchConfigOf(job.params), deps.now ?? Date.now, (m) => ctx.alert(m));
   const kill = deps.kill ?? ((pid: number, sig: NodeJS.Signals) => { try { process.kill(pid, sig); } catch { /* already gone */ } });
   let child: { pid: number; stalled: boolean; exited: boolean } | null = null;
@@ -221,11 +225,16 @@ function supervise(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps): Supe
       me.exited = true;
     }
   };
-  return { run, setStep, setPart, abandoned, wallHit: () => wall, stop: () => clearInterval(timer) };
+  return {
+    run, setStep, setPart,
+    ackedSinceChild: () => watch.ackedSinceChild,
+    observeAcked: (sample) => { watch.setStep("transfer"); watch.observe(sample); },
+    abandoned, wallHit: () => wall, stop: () => clearInterval(timer),
+  };
 }
 
 /** Mutable progress of one run, read by the stall handler. */
-interface RunState { bv?: string }
+export interface RunState { bv?: string }
 
 async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps, sup: Supervisor, st: RunState): Promise<ProcessResult> {
   const p = params(job);
@@ -342,14 +351,14 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
   return { outputs: [], bv, note: `${basename(job.inputs[0] ?? "")} +${Math.max(0, files.length - 1)} parts` };
 }
 
-const countPartsOf = (deps: BiliupDeps) => deps.countParts ?? (deps.run ? undefined : countVideoParts);
+export const countPartsOf = (deps: BiliupDeps) => deps.countParts ?? (deps.run ? undefined : countVideoParts);
 
 /**
  * After a stall kill: retry only with proof that resuming cannot duplicate anything (plan 038 §4.3).
  * Create: no archive with this title+duration. Append: a confirmed part count (the resume path continues
  * from it). Anything unconfirmed fails as ambiguous for manual handling.
  */
-async function afterStall(job: ProcessJob, deps: BiliupDeps, sup: Supervisor, st: RunState, e: StallError): Promise<ProcessResult> {
+export async function afterStall(job: ProcessJob, deps: BiliupDeps, sup: Supervisor, st: RunState, e: StallError): Promise<ProcessResult> {
   const p = params(job);
   const attempts = (job as { attempts?: number }).attempts ?? 1;
   if (sup.wallHit()) throw new Error(`${e.message}; past maxWallMs, not retrying`);
