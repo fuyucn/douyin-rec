@@ -19,6 +19,7 @@ const REFUSAL_KEYS: Record<string, string> = {
   account_mismatch: "room.zeroDisk.refusedAccountMismatch",
   account_unknown: "room.zeroDisk.refusedAccountUnknown",
   credential_missing: "room.zeroDisk.refusedCredential",
+  credential_unreadable: "room.zeroDisk.refusedCredentialUnreadable",
   delivery_missing: "room.zeroDisk.refusedDelivery",
 };
 

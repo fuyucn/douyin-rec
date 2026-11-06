@@ -132,11 +132,25 @@ describe("zeroDiskNodePreflight — refuse loudly, never default", () => {
     writeCookies(root, null);
     expect(zeroDiskNodePreflight(json(GOOD))).toMatchObject({ ok: false, refusal: { code: "account_unknown" } });
   });
-  it("an unreadable login file is a credential_missing refusal, not a crash", () => {
+  it("an unreadable login file (and no readable alternate) is a credential_unreadable refusal, not a crash", () => {
     const root = useRoot("node");
     writeCookies(root, "42");
     const r = zeroDiskNodePreflight(json(GOOD), { readFile: () => { throw new Error("EACCES"); } });
-    expect(r).toMatchObject({ ok: false, refusal: { code: "credential_missing" } });
+    expect(r).toMatchObject({ ok: false, refusal: { code: "credential_unreadable" } });
+    if (!r.ok) expect(r.refusal.message).not.toContain(root);
+  });
+  it("an unreadable node login falls back to a readable delivered path (permission on one file must not block)", () => {
+    const root = useRoot("node");
+    writeCookies(root, "42"); // node default: unreadable in this test
+    const other = join(base, "other.json");
+    writeFileSync(other, cookiesFor("42")); // delivered path: readable
+    const r = zeroDiskNodePreflight(json({ ...GOOD, credentialPath: other }), {
+      readFile: (p: string) => {
+        if (p === other) return cookiesFor("42");
+        throw new Error("EACCES");
+      },
+    });
+    expect(r).toMatchObject({ ok: true, cookiesPath: other, credentialSource: "delivered-path" });
   });
   it("matching account passes and returns the verified credential path", () => {
     const root = useRoot("node");

@@ -121,6 +121,7 @@ export function parseZeroDiskDelivery(raw: unknown): ZeroDiskDeliveryParse {
 export type ZeroDiskRefusalCode =
   | "delivery_missing"      // managed node task without (valid) delivered metadata
   | "credential_missing"    // no upload login file found on the node
+  | "credential_unreadable" // a login file exists but the node's service user cannot read/parse it (e.g. root-owned)
   | "account_unknown"       // node or master account cannot be identified
   | "account_mismatch";     // node account differs from the master-configured one
 
@@ -206,7 +207,7 @@ export interface ZeroDiskReport {
 }
 
 const RUN_STATES: readonly string[] = ["running", "finished", "failed", "refused", "stopped"];
-const REFUSALS: readonly string[] = ["delivery_missing", "credential_missing", "account_unknown", "account_mismatch"];
+const REFUSALS: readonly string[] = ["delivery_missing", "credential_missing", "credential_unreadable", "account_unknown", "account_mismatch"];
 
 export function normalizeZeroDiskReceipt(x: unknown): ZeroDiskReceipt | null {
   if (!isRecord(x) || x.v !== 1) return null;
