@@ -12,11 +12,13 @@ import { api, type RoomDTO, type WorkerStatus } from "../api/client";
 import { Button, IconButton } from "../components/Button";
 import { ConnStatus } from "../components/ConnStatus";
 import { HubStreamBanner } from "../components/HubStreamBanner";
+import { ModeLogo, type ModeLogoKind } from "../components/ModeLogo";
 import { WorkersPanel } from "../components/WorkersPanel";
 import { AddRoomDialog } from "../modals/AddRoomDialog";
 import { useTicker } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { roomDisplayId, scheduleText } from "../lib/labels";
+import { roomMethodKind } from "../lib/room-method";
 import { sortByStatus, type RoomStatusKind } from "../lib/room-status";
 import { DeliveryCell, deliverText, nodesText, roomName, RoomBadge, statusDetail, useRoomActions, useRoomsData } from "./rooms/shared";
 
@@ -172,11 +174,7 @@ export function RoomsPage(): ReactNode {
                     </Link>
                   </td>
                   <td>
-                    {(() => { const m = uploadMethod(t, r); return (
-                      <span className="badge badge-muted text-[10.5px] whitespace-nowrap" title={m.title} style={m.tone ? { color: m.tone, borderColor: "var(--border)" } : undefined}>
-                        {m.label}
-                      </span>
-                    ); })()}
+                    <MethodChip room={r} />
                   </td>
                   <td><DeliveryCell s={statusOf(r)} now={now} /></td>
                   <td className="font-mono text-[11px] text-muted truncate max-w-0" title={nodesText(r, data.workers, t("room.allNodes"))}>{nodesText(r, data.workers, t("room.allNodes"))}</td>
@@ -227,16 +225,28 @@ export function RoomsPage(): ReactNode {
 
 
 /** 上传方式 chip:直播直传 > 边录边传 > 收播后上传 > 存档。私有/公开作为 title 悬浮提示。 */
-function uploadMethod(t: ReturnType<typeof useT>, r: RoomDTO): { label: string; title: string; tone?: string } {
-  const rec = r.recording ?? null;
-  if (rec?.streamUpload === true) return { label: t("room.methodLiveStream"), title: t("room.methodLiveStream") + " · " + (rec.streamUploadSpool ? "spool" : "0-disk"), tone: "var(--status-fg)" };
-  const mode = r.processing?.pipeline?.upload?.mode;
+function uploadMethod(t: ReturnType<typeof useT>, r: RoomDTO): { label: string; title: string; tone?: string; kind: ModeLogoKind } {
+  const kind = roomMethodKind(r);
   const privateFlag = r.processing?.pipeline?.upload?.private;
   const priv = privateFlag === false ? t("room.publicShort") : t("room.privateShort");
-  if (mode === "rolling") return { label: t("room.methodRolling"), title: `${t("room.methodRolling")} · ${priv}`, tone: "var(--status-fg)" };
-  if (mode === "upload") return { label: t("room.methodUpload"), title: `${t("room.methodUpload")} · ${priv}`, tone: "var(--status-fg)" };
-  if (mode === "stage") return { label: t("room.methodStage"), title: t("room.archiveMode") };
-  return r.processing ? { label: mode ?? "—", title: String(mode) } : { label: "—", title: t("room.noTask") };
+  if (kind === "live") return { label: t("room.methodLiveStream"), title: t("room.methodLiveStream") + " · " + (r.recording?.streamUploadSpool ? "spool" : "0-disk"), tone: "var(--status-fg)", kind: "zero-disk" };
+  if (kind === "rolling") return { label: t("room.methodRolling"), title: `${t("room.methodRolling")} · ${priv}`, tone: "var(--status-fg)", kind: "segment" };
+  if (kind === "upload") return { label: t("room.methodUpload"), title: `${t("room.methodUpload")} · ${priv}`, tone: "var(--status-fg)", kind: "bilibili" };
+  if (kind === "archive") return { label: t("room.methodStage"), title: t("room.archiveMode"), kind: "archive" };
+  return r.processing ? { label: r.processing.pipeline?.upload?.mode ?? "—", title: String(r.processing.pipeline?.upload?.mode), kind: "merge" } : { label: "—", title: t("room.noTask"), kind: "archive" };
+}
+
+/** Delivery method in one compact badge: the mark makes live/rolling/upload/archive scannable at a glance. */
+function MethodChip({ room }: { room: RoomDTO }): ReactNode {
+  const t = useT();
+  const m = uploadMethod(t, room);
+  return (
+    <span className="badge badge-muted text-[10.5px] whitespace-nowrap inline-flex items-center gap-1" title={m.title}
+          style={m.tone ? { color: m.tone, borderColor: "var(--hairline)" } : undefined}>
+      <ModeLogo kind={m.kind} className="mode-chip-icon" />
+      {m.label}
+    </span>
+  );
 }
 
 /** Recording half may be missing (rule-only room); scheduleText wants both endpoints. */
@@ -313,8 +323,7 @@ function RoomCompactRow({ room, data, actions, now }: {
       </div>
       <div className="mt-2"><DeliveryCell s={s} now={now} /></div>
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
-        <span className="chip">{deliverText(t, room)}</span>
-        <span className="chip" title={uploadMethod(t, room).title}>{uploadMethod(t, room).label}</span>
+        <MethodChip room={room} />
         {scheduleText(scheduleOf(room)) && <span className="font-mono text-[11px] text-muted-soft tabular-nums">{scheduleText(scheduleOf(room))}</span>}
         <span className="font-mono text-[11px] text-muted-soft truncate">{nodesText(room, data.workers, t("room.allNodes"))}</span>
       </div>

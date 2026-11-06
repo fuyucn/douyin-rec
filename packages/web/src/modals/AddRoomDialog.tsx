@@ -6,9 +6,9 @@ import { Dialog } from "../components/Dialog";
 import { errMessage, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { pickPlatform } from "../lib/labels";
-import { findCreatedRoom, findExistingRoom, newRoomTaskPayload, planNewRoomRule } from "../lib/room-create";
+import { findCreatedRoom, findExistingRoom, newRoomTaskPayload, planNewRoomFinish, planNewRoomRule } from "../lib/room-create";
 import { OUTPUT_FORMATS, stageExt, type OutputFormat } from "@drec/output-format";
-import { Seg } from "./RoomEditor";
+import { ModeChoices } from "../components/ModeChoices";
 
 interface Props {
   open: boolean;
@@ -109,16 +109,11 @@ export function AddRoomDialog({ open, onClose, onSaved, hubEnabled, workers }: P
           partial = true;
         }
       }
-      // A new room should just run (listen → record → deliver). The task API creates it stopped, so start it
-      // here, but only when the rule half is in place: a half-configured room stays paused for the user to fix.
-      if (!partial) {
-        try {
-          await api.startTask(task.id);
-          toast(t("room.added"), "success");
-        } catch (err) {
-          toast(t("room.addStartFailed", { msg: errMessage(err) }), "error");
-        }
-      }
+      // A new room is created paused (task enabled=false). Starting to record is an explicit later
+      // action, not a side effect of creating the room. The rule half can still be written at create
+      // time, so the room is fully configured when the user starts it.
+      const finish = planNewRoomFinish({ partial });
+      if (finish.successToast) toast(t(finish.successToast), "success");
       onSaved();
     } catch (e) {
       toast(errMessage(e), "error");
@@ -133,8 +128,14 @@ export function AddRoomDialog({ open, onClose, onSaved, hubEnabled, workers }: P
         <div className="rm-editor-body">
           <div>
             <span className="field-label">{t("room.addAfter")}</span>
-            <Seg value={mode} onChange={setMode}
-                 items={[{ id: "archive", label: t("room.archiveMode") }, { id: "upload", label: t("room.uploadMode") }]} />
+            <ModeChoices
+              value={mode}
+              onChange={setMode}
+              items={[
+                { id: "archive", label: t("room.archiveMode"), hint: t("room.editor.archiveHint"), icon: "archive" },
+                { id: "upload", label: t("room.uploadMode"), hint: t("room.editor.uploadHint"), icon: "bilibili" },
+              ]}
+            />
           </div>
 
           <label className="rm-ctx">
