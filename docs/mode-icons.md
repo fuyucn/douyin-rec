@@ -8,7 +8,7 @@ The standalone files in packages/web/src/assets/modes are the geometry source:
 | --- | --- |
 | archive.svg | Local archive |
 | bilibili.svg | Upload enabled, not upload success |
-| zero-disk.svg | Live-direct upload; its explanation distinguishes local fallback from no local video |
+| zero-disk.svg | Live-direct upload with a temporary local fallback file, including legacy no-spool settings |
 | segment.svg | Batch upload |
 | merge.svg | Merge processing |
 | node.svg | Node-side upload |
@@ -21,7 +21,7 @@ Room rows show icon-only buttons. Hover, keyboard focus, and touch activation ex
 
 The pure roomModeIndicators projection uses recording.danmu rather than burn-output settings. Paused processing rules do not advertise upload enablement; pausing only the recorder does not hide an enabled upload rule, it adds the paused explanation. Legacy rolling follows the authoritative `recording.rollingEffective` flag even when the rule's upload mode is missing, set to upload, or the rule is absent; an explicit stage or unknown mode in the rule always wins over a stale effective field, and unknown future modes receive no guessed mark.
 
-The delivery mark is independent of the Bilibili mark. A rule with after-close upload shows merge (whole video) or split (per segment, `mergeSegments: false`), or node when node-side upload is configured with burning off (canonical `pipelineBurns`, never a local burn-flag copy). The Bilibili mark still means upload is enabled.
+The delivery mark is independent of the Bilibili mark. A rule with after-close upload shows merge (whole video) or split (per segment, `mergeSegments: false`), or node when node-side upload is configured with burning off (canonical `pipelineBurns`, never a local burn-flag copy). Node delivery may fall back to the master; its merge setting can group segments, while split mode keeps eligible segments separate and may filter short fragments. The Bilibili mark still means upload is enabled.
 
 ## Validation
 
@@ -35,6 +35,8 @@ The browser regression uses the installed Playwright package and a local Vite de
 Install Playwright's Chromium beforehand, or set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH to an existing Chromium-family executable. The test opens isolated headless pages; it does not attach to a user's browser. It covers accessible names, hover, Tab, Escape, touch toggling, outside dismissal, and a 320-pixel viewport.
 
 Chromium desktop and touch emulation are covered. Real iPhone Safari and WebKit remain manual verification targets.
+
+The CI workflow installs Playwright Chromium and its Linux dependencies, starts an isolated Vite process with a readiness check, runs this browser regression, and stops Vite on success or failure. The browser step runs after the unit tests rather than starting another Vitest process.
 
 The browser regression also mounts all eight marks and waits (no sleeps) until every `use` element resolves its referenced `mode-<kind>` group with nonempty width and height, so a broken fragment reference (for example a renamed group id) fails instead of silently passing.
 

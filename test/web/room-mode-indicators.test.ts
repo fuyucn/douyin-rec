@@ -22,6 +22,7 @@ describe("compact room indicator facts", () => {
       source(null, { enabled: false, pipeline: { upload: { mode: "stage" } } }),
       source(null, { pipeline: { upload: { mode: "upload" } } }),
       source(null, { pipeline: { upload: { mode: "upload" }, steps: { nodeSideUpload: true, burnDanmu: false, burnLivechat: false } } }),
+      source(null, { pipeline: { upload: { mode: "upload" }, steps: { nodeSideUpload: true, mergeSegments: false, burnDanmu: false, burnLivechat: false } } }),
       source(null, { pipeline: { upload: { mode: "upload" }, steps: { mergeSegments: false } } }),
     ];
     const keys = fixtures.flatMap(room => roomModeIndicators(room).flatMap(indicator => [indicator.labelKey, ...(indicator.detailKeys ?? [])]));
@@ -84,6 +85,30 @@ describe("compact room indicator facts", () => {
     expect(paused.find(indicator => indicator.kind === "node")?.detailKeys).toContain("room.pausedRule");
   });
 
+  it("explains merged output for default and explicit merge, without mislabeling split or node delivery", () => {
+    for (const steps of [undefined, { mergeSegments: true }, { nodeSideUpload: true, burnDanmu: true, burnLivechat: false }]) {
+      const delivery = roomModeIndicators(source(null, { pipeline: { upload: { mode: "upload" }, steps } }))
+        .find(indicator => indicator.id === "delivery");
+      expect(delivery?.kind).toBe("merge");
+      expect(delivery?.detailKeys).toContain("roomForm.mergeOneHint");
+    }
+    const split = roomModeIndicators(source(null, { pipeline: { upload: { mode: "upload" }, steps: { mergeSegments: false } } }))
+      .find(indicator => indicator.id === "delivery");
+    expect(split?.detailKeys).toContain("roomForm.mergeSplitHint");
+    expect(split?.detailKeys).not.toContain("roomForm.mergeOneHint");
+    const node = roomModeIndicators(source(null, { pipeline: { upload: { mode: "upload" }, steps: { nodeSideUpload: true, burnDanmu: false, burnLivechat: false } } }))
+      .find(indicator => indicator.id === "delivery");
+    expect(node?.detailKeys).toContain("room.editor.timingNodeHint");
+    expect(node?.detailKeys).toContain("room.editor.timingNodeMergeHint");
+    expect(node?.detailKeys).not.toContain("roomForm.mergeOneHint");
+    const nodeSplit = roomModeIndicators(source(null, { pipeline: { upload: { mode: "upload" }, steps: { nodeSideUpload: true, mergeSegments: false, burnDanmu: false, burnLivechat: false } } }))
+      .find(indicator => indicator.id === "delivery");
+    expect(nodeSplit?.kind).toBe("node");
+    expect(nodeSplit?.detailKeys).toContain("room.editor.timingNodeHint");
+    expect(nodeSplit?.detailKeys).toContain("room.editor.timingNodeSplitHint");
+    expect(nodeSplit?.detailKeys).not.toContain("room.editor.timingNodeMergeHint");
+  });
+
   it("keeps the Bilibili mark when only recording is paused, and deduplicates the paused hint", () => {
     const both = roomModeIndicators(source({ danmu: 0, enabled: false, rollingEffective: true } as Record<string, unknown>,
       { enabled: false, pipeline: { upload: { mode: "rolling" } } }));
@@ -113,7 +138,7 @@ describe("compact room indicator facts", () => {
     expect(indicators.find(indicator => indicator.kind === "bilibili")?.detailKeys)
       .toEqual(["room.publicShort", "room.pausedRule"]);
     expect(indicators.find(indicator => indicator.kind === "zero-disk")?.detailKeys)
-      .toEqual(["room.editor.zeroDisk", "room.pausedRule"]);
+      .toEqual(["room.editor.zeroDiskSpool", "room.pausedRule"]);
 
     const standalone = roomModeIndicators(source(recording, null));
     expect(standalone.map(indicator => indicator.kind)).toEqual(["zero-disk", "bilibili"]);
@@ -122,6 +147,15 @@ describe("compact room indicator facts", () => {
 
     for (const enabled of [true, false]) {
       expect(kinds({ ...recording, enabled }, { ...processing, enabled: false })).toEqual(["zero-disk"]);
+    }
+  });
+
+  it("shows the effective local fallback for legacy, current and missing spool settings", () => {
+    for (const streamUploadSpool of [false, true, undefined]) {
+      const indicators = roomModeIndicators(source({ streamUpload: true, streamUploadSpool }, null));
+      const delivery = indicators.find(indicator => indicator.kind === "zero-disk");
+      expect(delivery?.detailKeys).toEqual(["room.editor.zeroDiskSpool"]);
+      expect(delivery?.detailKeys).not.toContain("room.editor.zeroDisk");
     }
   });
 

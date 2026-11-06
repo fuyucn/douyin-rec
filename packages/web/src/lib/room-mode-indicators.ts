@@ -44,7 +44,6 @@ export function roomModeIndicators(room: RoomIndicatorSource): RoomIndicator[] {
   const privacyDetailKeys = room.processing?.pipeline?.upload
     ? [room.processing.pipeline.upload.private === false ? "room.publicShort" : "room.privateShort"]
     : [];
-  const spoolDetailKey = room.recording?.streamUploadSpool !== false ? "room.editor.zeroDiskSpool" : "room.editor.zeroDisk";
   const pausedKeys = (): string[] =>
     [...new Set([...(recordingPaused ? ["room.pausedRule"] : []), ...(processingPaused ? ["room.pausedRule"] : [])])];
   const uploadEnabled = !processingPaused && (method === "live" || method === "rolling" || method === "upload");
@@ -63,7 +62,7 @@ export function roomModeIndicators(room: RoomIndicatorSource): RoomIndicator[] {
       id: "delivery",
       kind: "zero-disk",
       labelKey: "room.methodLiveStream",
-      detailKeys: [spoolDetailKey, ...pausedKeys()],
+      detailKeys: ["room.editor.zeroDiskSpool", ...pausedKeys()],
     });
     addUpload();
   } else if (method === "rolling") {
@@ -82,7 +81,7 @@ export function roomModeIndicators(room: RoomIndicatorSource): RoomIndicator[] {
       kind: nodeRoute ? "node" : steps?.mergeSegments === false ? "split" : "merge",
       labelKey: nodeRoute ? "room.editor.timingNode" : "room.methodUpload",
       detailKeys: [...privacyDetailKeys, ...pausedKeys(),
-        ...(nodeRoute ? ["room.editor.timingNodeHint"] : steps?.mergeSegments === false ? ["roomForm.mergeSplitHint"] : [])],
+        ...(nodeRoute ? ["room.editor.timingNodeHint", steps?.mergeSegments === false ? "room.editor.timingNodeSplitHint" : "room.editor.timingNodeMergeHint"] : steps?.mergeSegments === false ? ["roomForm.mergeSplitHint"] : ["roomForm.mergeOneHint"])],
     });
     addUpload();
   } else if (method === "archive") {
