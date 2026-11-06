@@ -364,7 +364,10 @@ export class ProcQueueStore {
    * Plan 046 PR6 sidecar import: a segment the legacy rolling uploader already confirmed becomes a done
    * row so later parts can inherit its bv. Idempotent: an existing row is reported, never rewritten.
    */
-  importConfirmedPart(job: ProcessJob, opts: { allowedRoots: readonly string[]; bv: string }): EnqueueResult {
+  importConfirmedPart(
+    job: ProcessJob,
+    opts: { allowedRoots: readonly string[]; bv: string; cleanupJob?: ProcessJob },
+  ): EnqueueResult {
     try {
       assertJobInvariants(job, { allowedRoots: opts.allowedRoots });
     } catch (e) {
@@ -390,6 +393,13 @@ export class ProcQueueStore {
         job.owner.taskId ?? null, job.owner.streamKey ?? null, t, t, t, opts.bv,
         job.orderKey ?? null, job.seq ?? null, job.prepJobId ?? null,
       );
+      if (opts.cleanupJob) {
+        assertJobInvariants(opts.cleanupJob, { allowedRoots: opts.allowedRoots });
+        const c = this.enqueueTx(opts.cleanupJob, opts.cleanupJob.logicalKey);
+        if (c.state === "rejected" || c.state === "stale") {
+          throw new Error("cleanup enqueue rejected: " + (c.error ?? c.state));
+        }
+      }
       return { jobId: job.jobId, state: "done" };
     });
   }
@@ -492,6 +502,19 @@ export class ProcQueueStore {
       .prepare("SELECT MAX(generation) AS g FROM proc_jobs WHERE orderKey=?")
       .get(orderKey) as Row;
     return (r.g == null ? 0 : Number(r.g)) + 1;
+  }
+
+  /** Highest upload-part seq for one order key (restart/same-broadcast continuation; SQL, not a truncated list). */
+  maxPartSeq(orderKey: string): number {
+    const r = this.db
+      .prepare("SELECT MAX(seq) AS s FROM proc_jobs WHERE kind=? AND orderKey=?")
+      .get(PART_KINDS.upload, orderKey) as Row;
+    return r.s == null ? 0 : Number(r.s);
+  }
+
+  /** Any row already recorded for one (orderKey, seq), regardless of logical key spelling (PR7 back-compat). */
+  rowsForOrderSeq(orderKey: string, seq: number): ProcJobRecord[] {
+    return (this.db.prepare("SELECT * FROM proc_jobs WHERE orderKey=? AND seq=?").all(orderKey, seq) as Row[]).map(toRecord);
   }
 
   /**

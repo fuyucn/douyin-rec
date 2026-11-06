@@ -191,9 +191,11 @@ export class ProcRunner {
     if (!ctx || ctx.index <= 1 || ctx.bv) return;
     for (let seq = ctx.index - 1; seq >= 1; seq -= 1) {
       const prior = this.o.store.get(jobIdOf(PART_KINDS.upload, partLogicalKey(job.orderKey, seq), job.generation));
-      // A skipped placeholder carries no draft: treat it as absent and keep looking backwards (PR6 rework).
-      if (!prior || prior.state === "skipped" || prior.state === "cancelled") continue;
-      if (prior.state !== "done") break;
+      // Missing / non-done predecessor: fail closed (creating a draft here would duplicate the archive).
+      if (!prior) throw new Error("upload-part cannot inherit: lower-seq row " + seq + " is missing");
+      // A skipped placeholder carries no draft: keep looking backwards.
+      if (prior.state === "skipped") continue;
+      if (prior.state !== "done") throw new Error("upload-part cannot inherit: lower-seq row " + seq + " is " + prior.state);
       if (prior.bv) {
         job.params = { ...job.params, ctx: { ...ctx, bv: prior.bv } };
         return;

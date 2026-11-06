@@ -279,9 +279,23 @@ program
     const rollingEnabled = parseBoolFlag(o.rollingUpload, false);
     let makeRolling: (() => import("@drec/manager").RollingUploadHook) | undefined;
     if (rollingEnabled) {
-      const { makeRollingUploadHookFactory } = await import("@drec/app");
+      const { makeRollingUploadHookFactory, uploadOwnerForTask, enqueueHubOwnedSkip, rootHubDir, drecRoot, TaskStore } = await import("@drec/app");
       const { rollingQueueModeEnabled } = await import("@drec/app");
       const slug = platform.extractRoomSlug(roomToUrl(o.room));
+      // Production record is spawned by TaskManager; wire the same hub-owner decision as task run,
+      // otherwise hub-bound rooms would upload on the node AND on the master (double archive).
+      let uploadOwner: (() => ReturnType<typeof uploadOwnerForTask>) | undefined;
+      let enqueueHubSkipped: ((input: { file: string; index: number; seq?: number; streamKey: string; title?: string; expectedDurationSec?: number; confirmedAt?: number }) => boolean) | undefined;
+      if (o.taskId !== undefined && /^\d+$/.test(o.taskId)) {
+        const db = new TaskStore(dbPathForDataRoot(drecRoot()));
+        try {
+          const task = db.listTasks().find((t) => t.id === Number(o.taskId));
+          if (task) {
+            uploadOwner = () => uploadOwnerForTask(task, rootHubDir());
+            enqueueHubSkipped = (info) => enqueueHubOwnedSkip({ ...info, taskId: task.id });
+          }
+        } finally { db.close(); }
+      }
       makeRolling = makeRollingUploadHookFactory({
         enabled: true,
         platform: platform.id,
@@ -289,6 +303,8 @@ program
         // Plan 046 PR6 (方案 A): settings switch, default off => this path stays unchanged.
         queueMode: rollingQueueModeEnabled(),
         ...(o.taskId !== undefined && /^\d+$/.test(o.taskId) ? { taskId: Number(o.taskId) } : {}),
+        ...(uploadOwner ? { uploadOwner } : {}),
+        ...(enqueueHubSkipped ? { enqueueHubSkipped } : {}),
         log: (m: string) => console.log(m),
         notify: (message: string) => { void notifier.notify({ kind: "error", stage: "边录边传", message }).catch(() => {}); },
       });

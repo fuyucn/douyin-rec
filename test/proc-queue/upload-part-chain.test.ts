@@ -228,4 +228,29 @@ describe("upload-part runner chain", () => {
     expect(s.get(id2)?.bv).toBe("NEWDRAFT01");
   });
 
+
+  it("GC gap: a missing lower-seq row fails closed (no second draft)", async () => {
+    const file1 = env.file("a_000.ts");
+    const file2 = env.file("a_001.ts");
+    const s = env.open();
+    const j1 = partJob(file1, "rolling", "same-broadcast:part:1", "same-broadcast", 1);
+    const id1 = s.enqueue({ ...j1, jobId: jobIdOf(PART_KINDS.upload, "same-broadcast:part:1", 1) }, allowed()).jobId;
+    s.acquireLease(PART_KINDS.upload, "A", { pid: process.pid });
+    s.claim({ kinds: [PART_KINDS.upload], owner: "A", accept: (j) => j.jobId === id1 });
+    s.finish(id1, "A", { state: "done", outputs: [] });
+    // Simulate GC removing the done row.
+    const raw = new DatabaseSync(env.dbPath);
+    raw.prepare("DELETE FROM proc_jobs WHERE jobId=?").run(id1);
+    raw.close();
+    const j2 = partJob(file2, "rolling", "same-broadcast:part:2", "same-broadcast", 2);
+    const id2 = s.enqueue({ ...j2, jobId: jobIdOf(PART_KINDS.upload, "same-broadcast:part:2", 1) }, allowed()).jobId;
+    const run = vi.fn(async () => ({ outputs: [] }));
+    registerProcessor(proc({ run }));
+    const r = mkRunner();
+    r.tick();
+    await vi.waitFor(() => expect(s.get(id2)?.state).toBe("failed"));
+    expect(run).not.toHaveBeenCalled();
+    expect(s.get(id2)?.error).toMatch(/inherit/i);
+  });
+
 });

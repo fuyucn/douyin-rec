@@ -14,16 +14,17 @@
  * becomes the existing UncertainOutcome -> uncertain path; PR3 wiring of startReconciliation lands
  * later, after the settle-window measurement. No trustNo and no automatic resend are enabled.
  */
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, isAbsolute } from "node:path";
 import {
   APPEND_AMBIGUOUS_MARKER, PART_KINDS, PART_WORKFLOW_TEMPLATES, isAppendAmbiguous,
   isSlotBusy, SLOT_BUSY_MARKER, RETRY_BACKOFF_MS, isVideoFileName, assertJobInvariants,
+  addArchiveToSeasonIfConfigured, seasonCheckpointState, writeFileAtomicSync,
   type PartCtx, type ProcessContext, type ProcessJob, type ProcessResult, type Processor,
 } from "@drec/core";
 import { appendGroup, isAllFilesUploadedLine, uploadPlain } from "./run-biliup.js";
 import {
-  afterStall, BiliupDeps, StallError, supervise, countPartsOf, params,
+  afterStall, BiliupDeps, StallError, supervise, countPartsOf, params, cookiesOf,
   type RunState, type Supervisor,
 } from "./biliup.js";
 
@@ -34,6 +35,8 @@ export interface UploadPartDeps extends BiliupDeps {
   /** File fingerprint seam (tests). Defaults to statSync size+mtimeMs. */
   stat?: (path: string) => { size: number; mtimeMs: number };
   now?: () => number;
+  /** Season association seam (tests). Defaults to core addArchiveToSeasonIfConfigured. */
+  addSeason?: typeof addArchiveToSeasonIfConfigured;
 }
 
 function ctxOf(job: ProcessJob): PartCtx {
@@ -75,7 +78,7 @@ export async function runOneBiliupPart(
 ): Promise<ProcessResult> {
   const ctx = ctxOf(job);
   const p = params(job);
-  const cookies = p.cookies;
+  const cookies = cookiesOf(p, deps);
   const file = ctx.file;
   if (!existsSync(file)) throw new Error("upload-part source missing: " + basename(file));
   const st: RunState = { bv: ctx.bv };
@@ -132,11 +135,45 @@ export async function runOneBiliupPart(
   if (!ackSeen) throw new Error("upload-part missing explicit transfer ack; refusing to confirm " + basename(file));
   const acked = sup.ackedSinceChild();
   if (acked < now.size) throw new Error("upload-part acked bytes " + acked + " < file size " + now.size + "; refusing to confirm " + basename(file));
+  // Persist the confirmed evidence back into the rolling sidecar so the master's duplicate guard
+  // (rolling.bv short-circuit / scan) still sees an uploaded session (plan 046 PR6 addendum 2).
+  const sidecarPath = typeof job.params.sidecarPath === "string" ? job.params.sidecarPath : null;
+  if (sidecarPath) {
+    try { mergeRollingSidecar(sidecarPath, c, st.bv, job); }
+    catch (e) { c.alert("upload-part could not update the rolling sidecar (master may re-upload): " + String((e as Error)?.message ?? e).slice(0, 200)); }
+  }
+  // Season association for the create branch, same helper/checkpoint as the biliup processor.
+  if (!ctx.bv && p.seasonSectionId && st.bv) {
+    try {
+      c.setState?.({ bv: st.bv, seasonState: "pending" });
+      const outcome = await (deps.addSeason ?? addArchiveToSeasonIfConfigured)({
+        cookiesPath: cookies, sectionId: p.seasonSectionId, bvid: st.bv,
+        reconcileFirst: false, note: (m) => c.log(m),
+      });
+      c.setState?.({ seasonState: seasonCheckpointState(outcome) });
+    } catch (e) {
+      c.log("season association failed (left pending): " + String((e as Error)?.message ?? e).slice(0, 200));
+    }
+  }
   return {
     outputs: [], bv: st.bv,
     confirmed: { size: now.size, mtimeMs: now.mtimeMs, ackedBytes: acked },
     note: (ctx.bv ? "append " : "create ") + basename(file),
   };
+}
+
+/** Merge one confirmed part into the session sidecar atomically (legacy-compatible fields only). */
+function mergeRollingSidecar(sidecarPath: string, ctx: ProcessContext, bv: string, job: ProcessJob): void {
+  let state: Record<string, unknown> = {};
+  try { state = JSON.parse(readFileSync(sidecarPath, "utf-8")) as Record<string, unknown>; } catch { state = {}; }
+  const index = typeof job.params.sidecarIndex === "number" ? job.params.sidecarIndex : null;
+  const confirmed = Array.isArray(state.confirmed) ? state.confirmed.filter((n): n is number => typeof n === "number") : [];
+  if (index !== null && !confirmed.includes(index)) confirmed.push(index);
+  writeFileAtomicSync(sidecarPath, JSON.stringify({
+    ...state, ...(bv ? { bv } : {}), confirmed, updatedAt: Date.now(),
+    ...(typeof job.params.queueOrderKey === "string" ? { queueOrderKey: job.params.queueOrderKey } : {}),
+  }));
+  ctx.log("rolling sidecar updated with the confirmed part (" + (index ?? "?") + ")");
 }
 
 export function makeUploadPartProcessor(deps: UploadPartDeps = {}): Processor {

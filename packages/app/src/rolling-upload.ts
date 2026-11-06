@@ -333,7 +333,7 @@ export interface RollingUploaderOpts {
   /** Test/production seam for the queue skip write; omitted = no queue write (tests/back-compat). */
   enqueueHubSkipped?: (input: {
     file: string; index: number; seq?: number; streamKey: string; title?: string; expectedDurationSec?: number; confirmedAt?: number;
-  }) => void;
+  }) => boolean | void;
   /**
    * Plan 046 PR6 (方案 A): when on, the recorder only enqueues upload-part rows; the serve runner uploads and
    * cleanup-part deletes. Default off => the legacy path is used unchanged (byte-identical behaviour).
@@ -343,17 +343,18 @@ export interface RollingUploaderOpts {
   enqueueQueuePart?: (input: {
     file: string; index: number; seq?: number; orderKey: string; bv?: string; expectedDurationSec?: number; taskId?: number;
     meta: { cookies: string; title: string; tid: number; tag: string; desc?: string; public: boolean; seasonSectionId?: number };
-  }) => "queued" | "already" | "failed";
+  }) => "queued" | "already" | "failed" | "terminal";
   /** Test seam for the skipped placeholder (empty/fragment parts). */
   enqueueQueueSkip?: (input: {
     file: string; index: number; seq?: number; orderKey: string; expectedDurationSec?: number; taskId?: number;
     meta: { cookies: string; title: string; tid: number; tag: string; desc?: string; public: boolean; seasonSectionId?: number };
-  }) => "queued" | "already" | "failed";
+  }) => "queued" | "already" | "failed" | "terminal";
   /** Test seam for the legacy-sidecar import (confirmed part => done row). */
   importQueueConfirmed?: (input: {
     file: string; index: number; seq?: number; orderKey: string; bv: string; expectedDurationSec?: number; taskId?: number;
+    withCleanup?: boolean;
     meta: { cookies: string; title: string; tid: number; tag: string; desc?: string; public: boolean; seasonSectionId?: number };
-  }) => "queued" | "already" | "failed";
+  }) => "queued" | "already" | "failed" | "terminal";
   /** Highest seq already present for one order key (restart/same-broadcast continuation). */
   queueMaxSeq?: (orderKey: string) => number;
   /** Delay before retrying a failed queue enqueue (tests pass 0). */
@@ -374,7 +375,7 @@ export class RollingUploader {
   private seasonWriteFails = false;
   private readonly o: RollingUploaderOpts;
   private readonly log: (m: string) => void;
-  private readonly gate: UploadGate;
+  private readonly gate: UploadGate | null;
   private readonly slot: UploadSlot | null;
   private readonly accountKey: string;
   private readonly now: () => number;
@@ -410,6 +411,10 @@ export class RollingUploader {
   private readonly queuedIndices = new Set<number>();
   /** Pending queue-enqueue retry timer (PR6 MEDIUM 7: session-end flush is one-shot). */
   private queueRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Alerts already sent for this session (one per reason/index, not per flush). */
+  private readonly queueNotified = new Set<string>();
+  /** True when this session loaded an existing sidecar from disk (the only safe trigger for legacy import). */
+  private loadedExistingSidecar = false;
 
   constructor(o: RollingUploaderOpts) {
     this.o = o;
@@ -419,10 +424,12 @@ export class RollingUploader {
     this.pid = o.pid ?? process.pid;
     this.pidAlive = o.isPidAlive ?? ((pid: number): boolean => isPidAlive(pid, o.procCmdline));
     const cookiesPath = o.cookies ?? process.env.BILIUP_COOKIE ?? rootBiliupCookies();
-    this.gate = o.gate ?? openNodeUploadGate({ warn: this.log });
+    // Queue mode never uploads from the recorder: do not open the account gate (a second sqlite handle)
+    // and do not resolve the account key at all.
+    this.gate = o.queueMode === true ? null : (o.gate ?? openNodeUploadGate({ warn: this.log }));
     // Plan 046 PR6 (方案 A): in queue mode the runner owns the only uploader; never take the node slot.
     this.slot = o.queueMode === true ? null : (o.slot ?? null);
-    this.accountKey = resolveUploadAccountKey(cookiesPath);
+    this.accountKey = o.queueMode === true ? "" : resolveUploadAccountKey(cookiesPath);
     this.segDir = "";
     // 初始 state 占位;真正的 sessionBase 由首个段确定(见 noteSegment)。
     this.state = { streamKey: "", sessionBase: "", segments: [], confirmed: [], updatedAt: this.now() };
@@ -461,6 +468,7 @@ export class RollingUploader {
   /** Load (or initialise) the sidecar of session `base` in `dir`; rebuilds the path → index map. */
   private loadSession(dir: string, base: string): void {
     const loaded = readState(dir, base);
+    this.loadedExistingSidecar = loaded !== null;
     this.state = loaded ?? {
       streamKey: this.o.streamKeyOf?.(base) ?? `${this.o.room.platform}:${this.o.room.roomSlug}:${base}`,
       sessionBase: base,
@@ -607,7 +615,7 @@ export class RollingUploader {
       const cookies = this.o.cookies ?? process.env.BILIUP_COOKIE ?? rootBiliupCookies();
       let parts: number | null = null;
       try {
-        parts = await this.gate.run(this.accountKey, () => this.countPartsInner(s.bv!, cookies));
+        parts = await this.gate!.run(this.accountKey, () => this.countPartsInner(s.bv!, cookies));
       } catch { parts = null; }
       // Parts inherited from predecessor sessions of the same broadcast are already in the submission.
       const expected = (s.inheritedParts ?? 0) + s.confirmed.length;
@@ -770,27 +778,51 @@ export class RollingUploader {
    */
   private async _flushQueue(recordingActive: boolean): Promise<{ uploaded: number[]; deleted: string[]; ambiguous: number[] }> {
     if (this.stateUntrusted) return { uploaded: [], deleted: [], ambiguous: this.ambiguousIndices };
+    // Same recovery as the legacy path: settle any dangling legacy intent before touching the queue.
+    await this.recoverDanglingUpload();
+    if (this.stateUntrusted) return { uploaded: [], deleted: [], ambiguous: this.ambiguousIndices };
+    if (this.state.uploading) {
+      // Fail closed: a legacy create/append was interrupted. Never re-enqueue it (a create could duplicate the draft).
+      this.notifyOnce("intent:" + String(this.state.uploading.index),
+        "边录边传队列模式:上电发现未结算的上传意图(" + this.state.uploading.kind + "),该段保留源待人工核对");
+      return { uploaded: [], deleted: [], ambiguous: this.ambiguousIndices };
+    }
     const confirmed = new Set(this.state.confirmed);
     const ambiguous = new Set(this.state.ambiguous ?? []);
-    const { rolling, sealed } = this.planPendingFrom(recordingActive, this.now(), confirmed, ambiguous);
+    const plan = this.planPendingFrom(recordingActive, this.now(), confirmed, ambiguous);
+    const rolling = plan.rolling;
+    const sealed = plan.sealed;
     const orderKey = this.queueOrderKey();
-    if (orderKey === null) {
-      // Unreadable same-broadcast predecessor: fail closed (no upload / no delete), keep sources for a human.
-      this.o.notify?.("边录边传队列模式:无法确认同场前序会话,本会话暂不上传,保留源");
-      return { uploaded: [], deleted: [], ambiguous: [...ambiguous] };
-    }
+    if (orderKey === null) return { uploaded: [], deleted: [], ambiguous: [...ambiguous] };
     const seqBase = this.queueSeqBase(orderKey);
     const hubOwned = this.o.uploadOwner?.() === "master";
-    // Legacy sidecar import: parts confirmed by the old path become done rows so later parts inherit their bv,
-    // and a still-present source gets a cleanup-part row (normal deletion path; never delete here).
-    if (this.state.bv) {
-      for (const seg of rolling) {
-        if (!confirmed.has(seg.index)) continue;
-        const r = this.o.importQueueConfirmed?.({
-          file: seg.path, index: seg.index, seq: seqBase + seg.index + 1, orderKey, bv: this.state.bv,
-          ...(this.o.taskId !== undefined ? { taskId: this.o.taskId } : {}), meta: this.queueMetaFor(seg),
-        });
-        if (r === "failed") this.queueFailed(seg.index, "兼容导入失败");
+    if (ambiguous.size > 0) {
+      // Ambiguous legacy segments are never retried automatically (duplicate append risk).
+      this.notifyOnce("ambiguous", "边录边传队列模式:存在结果不确定的段,该段及之后不入队,保留源待人工");
+    }
+    // Legacy sidecar import: only on a same-base reload, never for hub-owned rooms, and only with independent
+    // archive proof (a sidecar alone must not authorize a delete).
+    if (this.state.bv && this.loadedExistingSidecar && !hubOwned) {
+      const cookies = this.o.cookies ?? process.env.BILIUP_COOKIE ?? rootBiliupCookies();
+      let proof = 0;
+      try { proof = await this.countPartsInner(this.state.bv, cookies) ?? 0; } catch { proof = 0; }
+      if (proof <= 0) {
+        this.notifyOnce("import-proof", "边录边传队列模式:老 sidecar 的已确认段无法在稿件侧核对,保留源待人工");
+      } else {
+        for (const seg of rolling) {
+          if (!confirmed.has(seg.index)) continue;
+          try {
+            const meta = this.queueMetaFor(seg);
+            const r = this.o.importQueueConfirmed?.({
+              file: seg.path, index: seg.index, seq: seqBase + seg.index + 1, orderKey, bv: this.state.bv,
+              withCleanup: true,
+              ...(this.o.taskId !== undefined ? { taskId: this.o.taskId } : {}), meta,
+            });
+            if (r === "failed" || r === "terminal") this.queueFailed(seg.index, "兼容导入失败", recordingActive, r === "terminal");
+          } catch (e) {
+            this.queueFailed(seg.index, "兼容导入异常: " + String((e as Error)?.message ?? e).slice(0, 160), recordingActive);
+          }
+        }
       }
     }
     const queued: number[] = [];
@@ -798,15 +830,27 @@ export class RollingUploader {
       if (this.queuedIndices.has(seg.index)) continue;
       if (!sealed.has(seg.index)) continue;
       if (this.state.hubSkipped?.includes(seg.index)) continue;
+      // Ambiguous head-of-line: this segment and everything after it stays out of the queue (risk 7).
+      if (ambiguous.size > 0 && [...ambiguous].some((a) => a <= seg.index)) break;
       const seq = seqBase + seg.index + 1;
-      const meta = this.queueMetaFor(seg);
+      let meta: ReturnType<RollingUploader["queueMetaFor"]>;
+      try {
+        meta = this.queueMetaFor(seg);
+      } catch (e) {
+        this.queueFailed(seg.index, "元数据渲染失败: " + String((e as Error)?.message ?? e).slice(0, 160), recordingActive);
+        break;
+      }
       if (hubOwned) {
         // PR7 single owner decision: hub-owned parts write only skipped(hub-owned), never an upload row.
-        this.o.enqueueHubSkipped?.({
+        const ok = this.o.enqueueHubSkipped?.({
           file: seg.path, index: seg.index, seq, streamKey: orderKey,
           ...(this.o.taskId !== undefined ? { taskId: this.o.taskId } : {}),
           ...(this.state.startMs !== undefined ? { confirmedAt: this.state.startMs } : {}),
         });
+        if (ok === false) {
+          this.queueFailed(seg.index, "hub-owned 占位写入失败", recordingActive);
+          break;
+        }
         this.queuedIndices.add(seg.index);
         queued.push(seg.index);
         continue;
@@ -816,11 +860,17 @@ export class RollingUploader {
         ? this.o.enqueueQueueSkip?.({ file: seg.path, index: seg.index, seq, orderKey, ...(this.o.taskId !== undefined ? { taskId: this.o.taskId } : {}), meta })
         : this.o.enqueueQueuePart?.({
           file: seg.path, index: seg.index, seq, orderKey,
-          ...(seg.index > 0 && this.state.bv ? { bv: this.state.bv } : {}),
+          ...(this.state.bv ? { bv: this.state.bv } : {}),
           ...(this.o.taskId !== undefined ? { taskId: this.o.taskId } : {}), meta,
         });
+      if (r === "terminal") {
+        // Already failed/cancelled: keep the source, stop retrying (notify once), let a human decide.
+        this.notifyOnce("terminal:" + seg.index, "边录边传队列模式:段 " + seg.index + " 已有失败/取消记录,保留源待人工");
+        this.queuedIndices.add(seg.index);
+        break;
+      }
       if (r === "failed") {
-        this.queueFailed(seg.index, skip ? "空/碎片段占位失败" : "入队失败");
+        this.queueFailed(seg.index, skip ? "空/碎片段占位失败" : "入队失败", recordingActive);
         break; // head-of-line: later parts wait so seq stays gapless
       }
       if (r !== undefined) {
@@ -835,35 +885,71 @@ export class RollingUploader {
     return { uploaded: queued, deleted: [], ambiguous: [...ambiguous] };
   }
 
-  /** Same-broadcast order key; null = a predecessor exists but cannot be judged safely (fail closed). */
+  /**
+   * Same-broadcast order key. Queue-mode predecessors have no bv, so this deliberately uses
+   * locatePredecessor (gap/live-id rule) instead of findPredecessor (which demands a bv). Null = fail closed.
+   */
   private queueOrderKey(): string | null {
     if (this.state.queueOrderKey) return this.state.queueOrderKey;
-    const link = this.findPredecessor();
+    const found = this.locatePredecessor();
     let key = this.state.streamKey || this.state.sessionBase;
-    if (link.kind === "uncertain") {
-      this.log("[rolling-queue] 同场前序无法判定,保留源且不入队: " + link.reason);
+    if (found.kind === "uncertain") {
+      this.notifyOnce("predecessor", "边录边传队列模式:无法确认同场前序会话,本会话暂不入队,保留源: " + found.reason);
       return null;
     }
-    if (link.kind === "inherit") {
-      const prev = readState(this.segDir, link.from);
-      // Old sidecars carry no queueOrderKey: their streamKey is the shared same-broadcast key.
-      key = (prev?.queueOrderKey && prev.queueOrderKey) || prev?.streamKey || key;
+    if (found.kind === "found") {
+      const prev = found.prev;
+      const startMs = this.state.startMs ?? (this.firstSegMtimeMs || this.now());
+      const prevLiveId = readSessionLiveId(this.segDir, prev.base);
+      const ownLiveId = readSessionLiveId(this.segDir, this.state.sessionBase);
+      const same = prev.s.bv
+        ? isSameBroadcast({ aLiveId: prevLiveId, bLiveId: ownLiveId, gapMs: startMs - prev.last })
+        : (() => {
+          if (prevLiveId && ownLiveId && prevLiveId !== ownLiveId) return false;
+          const ref = prev.lastMedia > 0 ? prev.lastMedia : prev.last;
+          return isSameBroadcastGap(startMs - ref);
+        })();
+      if (same) {
+        key = (prev.s.queueOrderKey && prev.s.queueOrderKey) || prev.s.streamKey || key;
+        const parts = (prev.s.inheritedParts ?? 0) + prev.s.confirmed.length;
+        this.state = {
+          ...this.state,
+          queueOrderKey: key,
+          ...(prev.s.bv && !this.state.bv ? { bv: prev.s.bv } : {}),
+          ...(typeof parts === "number" && parts > 0 ? { inheritedParts: parts } : {}),
+          updatedAt: this.now(),
+        };
+        if (!this.persist()) {
+          this.stateUntrusted = true;
+          this.notifyOnce("persist-key", "边录边传队列模式:场键落盘失败,停止入队并保留源");
+          return null;
+        }
+        return key;
+      }
     }
     this.state = { ...this.state, queueOrderKey: key, updatedAt: this.now() };
-    this.persist();
+    if (!this.persist()) {
+      this.stateUntrusted = true;
+      this.notifyOnce("persist-key", "边录边传队列模式:场键落盘失败,停止入队并保留源");
+      return null;
+    }
     return key;
   }
 
-  /** First queue seq for this session: continues after the parts already present in the same order. */
+  /** First queue seq for this session: continues after queue rows and inherited predecessor parts. */
   private queueSeqBase(orderKey: string): number {
-    if (typeof this.state.queueSeqBase === "number" && this.state.queueSeqBase >= 0) return this.state.queueSeqBase;
-    let base = 0;
-    try { base = Math.max(0, this.o.queueMaxSeq?.(orderKey) ?? 0); } catch { base = 0; }
+    let queueMax = 0;
+    try { queueMax = Math.max(0, this.o.queueMaxSeq?.(orderKey) ?? 0); } catch { queueMax = 0; }
+    const inherited = Math.max(0, this.state.inheritedParts ?? 0);
+    const base = Math.max(queueMax, inherited);
+    if (typeof this.state.queueSeqBase === "number" && this.state.queueSeqBase >= base) return this.state.queueSeqBase;
     this.state = { ...this.state, queueSeqBase: base, updatedAt: this.now() };
-    this.persist();
+    if (!this.persist()) {
+      this.stateUntrusted = true;
+      this.notifyOnce("persist-base", "边录边传队列模式:seq 基线落盘失败,停止入队并保留源");
+    }
     return base;
   }
-
   /** Fully resolved biliup metadata for one part (same values the legacy path sends). */
   private queueMetaFor(seg: RollingSegment): {
     cookies: string; title: string; tid: number; tag: string; desc?: string; public: boolean; seasonSectionId?: number;
@@ -889,17 +975,25 @@ export class RollingUploader {
   }
 
   /** Enqueue failure must be visible and retried: session-end flush is one-shot (TODO(?): no orphan scan yet). */
-  private queueFailed(index: number, what: string): void {
-    const msg = "边录边传队列模式:段 " + index + " " + what + ",保留源并稍后重试(孤儿文件扫描尚未实现)";
-    this.log("[rolling-queue] " + msg);
-    try { this.o.notify?.(msg); } catch { /* alert is best-effort */ }
+  private queueFailed(index: number, what: string, recordingActive: boolean, terminal = false): void {
+    this.notifyOnce("fail:" + index, "边录边传队列模式:段 " + index + " " + what + ",保留源" + (terminal ? "待人工" : "并稍后重试"));
+    if (terminal) return;
     if (this.queueRetryTimer) return;
     const timer = setTimeout(() => {
       this.queueRetryTimer = null;
-      void this.flush({ recordingActive: false }).catch(() => undefined);
+      // Never force recordingActive=false: that would seal the still-growing newest segment.
+      void this.flush({ recordingActive }).catch(() => undefined);
     }, this.o.queueRetryMs ?? 60_000);
     timer.unref?.();
     this.queueRetryTimer = timer;
+  }
+
+  /** One alert per reason for this session (flush runs on every seal). */
+  private notifyOnce(key: string, msg: string): void {
+    if (this.queueNotified.has(key)) return;
+    this.queueNotified.add(key);
+    this.log("[rolling-queue] " + msg);
+    try { this.o.notify?.(msg); } catch { /* alert is best-effort */ }
   }
 
   private planPendingFrom(
@@ -1000,7 +1094,7 @@ export class RollingUploader {
       // WAL:先落「建稿中」意图,再真正建稿。崩溃后据此转人工,绝不自动重建稿(重复投稿不可逆)。
       // Issue #309: written only once the slot and the gate let biliup start, so a wait never leaves an intent.
       const up = this.o.uploadPlainRaw ?? uploadPlain;
-      const bv = await this.withUploadProgress((hooks) => this.withSlot(() => this.gate.run(this.accountKey, () => {
+      const bv = await this.withUploadProgress((hooks) => this.withSlot(() => this.gate!.run(this.accountKey, () => {
         this.writeIntent(seg.index, "create");
         return up({ plain: { ...meta, video: seg.path, title }, hooks });
       })));
@@ -1022,7 +1116,7 @@ export class RollingUploader {
     // WAL:先落「追加第 index 段中」意图。崩溃后凭分 P 数核对是否已提交(见 recoverDanglingUpload)。
     // Written right before biliup starts (issue #309), same as the create intent.
     const ap = this.o.appendGroupRaw ?? appendGroup;
-    await this.withUploadProgress((hooks) => this.withSlot(() => this.gate.run(this.accountKey, () => {
+    await this.withUploadProgress((hooks) => this.withSlot(() => this.gate!.run(this.accountKey, () => {
       this.writeIntent(seg.index, "append");
       return ap({
         ...meta,
@@ -1244,7 +1338,7 @@ export class RollingUploader {
       await new Promise((r) => setTimeout(r, this.o.stableCheckMs ?? DEFAULT_STABLE_CHECK_MS));
       if (before < 0 || before !== size()) return this.waitForPredecessor(`${prev.base} 的末段仍在变化或已消失`);
     }
-    const peer = new RollingUploader({ ...this.o, gate: this.gate, slot: this.slot });
+    const peer = new RollingUploader({ ...this.o, ...(this.gate ? { gate: this.gate } : {}), slot: this.slot });
     peer.loadSession(this.segDir, prev.base);
     // Claim: stamps this process as the sidecar owner so a racing successor sees a live owner and waits.
     if (!peer.persist()) return this.waitForPredecessor(`${prev.base} 的 sidecar 无法写入`);

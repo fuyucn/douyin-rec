@@ -1,6 +1,7 @@
 // plan 046 PR6 (方案 A): queue mode only enqueues; the legacy path stays byte-identical when off.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync, existsSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { RollingUploader, makeRollingUploadHookFactory } from "./rolling-upload.js";
@@ -124,6 +125,7 @@ describe("rolling queue mode (方案 A)", () => {
     }));
     const imports: Array<Record<string, unknown>> = [];
     const u = queueUploader({
+      countPartsRaw: async () => 3,
       importQueueConfirmed: (i) => {
         imports.push({ ...i });
         // Real adapter is idempotent; here we exercise the store import directly once per index.
@@ -336,7 +338,7 @@ describe("rework findings (PR6 round 1)", () => {
 
   it("MEDIUM 8: sidecar import of a still-present source also enqueues cleanup-part", () => {
     const paths = segs(1);
-    expect(importRollingConfirmedPart({ file: paths[0]!, index: 0, orderKey: orderKeyOf(), bv: FAKE_BV1, meta })).toBe("already");
+    expect(importRollingConfirmedPart({ file: paths[0]!, index: 0, orderKey: orderKeyOf(), bv: FAKE_BV1, withCleanup: true, meta })).toBe("already");
     const rows = openQueue().list({ kind: PART_KINDS.cleanup });
     expect(rows).toHaveLength(1);
     expect(rows[0]!.state).toBe("pending");
@@ -370,6 +372,213 @@ describe("rework findings (PR6 round 1)", () => {
     expect(src).toContain("accountKey: resolveUploadAccountKey");
     expect(src).toContain("nodeUploadSlot");
     expect(src).not.toContain("registerProcessor(uploadPartProcessor)");
+  });
+
+
+describe("rework round 2", () => {
+  const meta = { cookies: "c", title: "t", tid: 21, tag: "tag", public: false };
+
+  it("P1-A: a legacy predecessor with bv+parts is inherited (first part appends, seq continues)", async () => {
+    const prevBase = "主播_2026-06-27_06-00-00";
+    const prevFile = path.join(rec, prevBase + "_000.ts");
+    writeFileSync(prevFile, "abcdefgh");
+    utimesSync(prevFile, new Date(BASE_MS - 20 * 60_000), new Date(BASE_MS - 20 * 60_000));
+    writeFileSync(path.join(rec, prevBase + ".rolling.json"), JSON.stringify({
+      streamKey: "douyin:123:" + prevBase, sessionBase: prevBase,
+      segments: [{ index: 0, path: prevFile }], confirmed: [0], bv: FAKE_BV1,
+      room, startMs: BASE_MS - 20 * 60_000, updatedAt: BASE_MS - 20 * 60_000,
+    }));
+    const paths = segs(1);
+    const u = queueUploader({ queueMaxSeq: () => 0 });
+    u.noteSegment(paths[0]!);
+    await u.flush({ recordingActive: false });
+    const first = seen(u, "__enq")[0]!;
+    expect(first.orderKey).toBe("douyin:123:" + prevBase);
+    expect(first.bv).toBe(FAKE_BV1); // first segment of the successor carries the inherited draft
+    expect(first.seq).toBe(2); // after the predecessor's confirmed part
+  });
+
+  it("P1-B: legacy uploading intent and ambiguous segments fail closed (no enqueue)", async () => {
+    const paths = segs(3);
+    writeFileSync(sidecar(), JSON.stringify({
+      streamKey: orderKeyOf(), sessionBase: SESSION_BASE,
+      segments: paths.map((p, i) => ({ index: i, path: p })), confirmed: [],
+      uploading: { index: 0, kind: "create" }, updatedAt: BASE_MS,
+    }));
+    const notify = vi.fn();
+    const u = queueUploader({ notify, countPartsRaw: async () => 1 });
+    paths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(seen(u, "__enq")).toEqual([]);
+    expect(notify).toHaveBeenCalledTimes(1);
+    await u.flush({ recordingActive: false });
+    expect(notify).toHaveBeenCalledTimes(1); // one alert, not per flush
+
+    // Ambiguous segment 1 blocks it and everything after it.
+    writeFileSync(sidecar(), JSON.stringify({
+      streamKey: orderKeyOf(), sessionBase: SESSION_BASE,
+      segments: paths.map((p, i) => ({ index: i, path: p })), confirmed: [], ambiguous: [1], updatedAt: BASE_MS,
+    }));
+    const u2 = queueUploader();
+    paths.forEach((p) => u2.noteSegment(p));
+    await u2.flush({ recordingActive: false });
+    expect(seen(u2, "__enq").map((i) => i.index)).toEqual([0]);
+  });
+
+  it("B1: a segment already deleted by cleanup (done row) is 'already', never retried", () => {
+    const p = segs(1)[0]!;
+    expect(enqueueRollingUploadPart({ file: p, index: 0, orderKey: orderKeyOf(), meta })).toBe("queued");
+    const s = openQueue();
+    const id = s.list({ kind: PART_KINDS.upload })[0]!.jobId;
+    s.acquireLease("upload-part", "A", { pid: process.pid });
+    s.claim({ kinds: ["upload-part"], owner: "A" });
+    s.finish(id, "A", { state: "done", outputs: [] });
+    s.releaseLease("upload-part", "A");
+    s.close();
+    rmSync(p);
+    expect(enqueueRollingUploadPart({ file: p, index: 0, orderKey: orderKeyOf(), meta })).toBe("already");
+    expect(enqueueRollingSkipPart({ file: p, index: 0, orderKey: orderKeyOf(), meta })).toBe("already");
+  });
+
+  it("A1: a queue-mode predecessor without bv still shares its order key (no second draft)", async () => {
+    const prevBase = "主播_2026-06-27_05-30-00";
+    const prevFile = path.join(rec, prevBase + "_000.ts");
+    writeFileSync(prevFile, "abcdefgh");
+    utimesSync(prevFile, new Date(BASE_MS - 10 * 60_000), new Date(BASE_MS - 10 * 60_000));
+    writeFileSync(path.join(rec, prevBase + ".rolling.json"), JSON.stringify({
+      streamKey: "douyin:123:" + prevBase, sessionBase: prevBase, queueOrderKey: "douyin:123:" + prevBase,
+      segments: [{ index: 0, path: prevFile }], confirmed: [], room,
+      startMs: BASE_MS - 10 * 60_000, updatedAt: BASE_MS - 10 * 60_000,
+    }));
+    const notify = vi.fn();
+    const paths = segs(1);
+    const u = queueUploader({ notify });
+    u.noteSegment(paths[0]!);
+    await u.flush({ recordingActive: false });
+    expect(notify).not.toHaveBeenCalled();
+    expect(seen(u, "__enq")[0]!.orderKey).toBe("douyin:123:" + prevBase);
+  });
+
+  it("A3: import + cleanup are one transaction (cleanup contract failure rolls the done row back)", () => {
+    const p = segs(1)[0]!;
+    const s = openQueue();
+    try {
+      const job = {
+        jobId: jobIdOf(PART_KINDS.upload, orderKeyOf() + ":part:1", 1), kind: PART_KINDS.upload,
+        logicalKey: orderKeyOf() + ":part:1", generation: 1, inputs: [p],
+        params: { ctx: { v: 1, orderKey: orderKeyOf(), index: 1, file: p, fp: { size: 8, mtimeMs: 1 } } },
+        replaceInputs: false, owner: { taskId: 1 }, createdAt: 1, orderKey: orderKeyOf(), seq: 1,
+      };
+      const badCleanup = {
+        ...job, jobId: jobIdOf(PART_KINDS.cleanup, orderKeyOf() + ":part:1", 1), kind: PART_KINDS.cleanup,
+        inputs: ["/outside/root/x.ts"], params: { ctx: { v: 1, orderKey: orderKeyOf(), index: 1, file: "/outside/root/x.ts", fp: { size: 1, mtimeMs: 1 }, bv: "X" } },
+      };
+      expect(() => s.importConfirmedPart(job as never, { allowedRoots: [root], bv: "X", cleanupJob: badCleanup as never }))
+        .toThrow();
+      expect(s.list({ kind: PART_KINDS.upload, state: "done" })).toHaveLength(0);
+      expect(s.list({ kind: PART_KINDS.cleanup })).toHaveLength(0);
+    } finally { s.close(); }
+  });
+
+  it("A4: hub-owned rooms never import/cleanup from a legacy sidecar", async () => {
+    const paths = segs(1);
+    writeFileSync(sidecar(), JSON.stringify({
+      streamKey: orderKeyOf(), sessionBase: SESSION_BASE,
+      segments: paths.map((p, i) => ({ index: i, path: p })), confirmed: [0], bv: FAKE_BV1, updatedAt: BASE_MS,
+    }));
+    const imports: unknown[] = [];
+    const u = queueUploader({
+      uploadOwner: () => "master",
+      countPartsRaw: async () => 3,
+      importQueueConfirmed: (i) => { imports.push(i); return "already"; },
+      enqueueHubSkipped: () => true,
+    });
+    paths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(imports).toEqual([]);
+  });
+
+  it("A5: maxPartSeq uses SQL MAX (no 10k list truncation)", () => {
+    const s = openQueue();
+    try {
+      const raw = new DatabaseSync(dbPath);
+      raw.exec("BEGIN");
+      const stmt = raw.prepare("INSERT INTO proc_jobs(jobId,kind,logicalKey,generation,state,inputs,params,replaceInputs,createdAt,updatedAt,orderKey,seq) VALUES(?,?,?,1,'done','[]','{}',0,1,1,?,?)");
+      for (let i = 1; i <= 10_050; i += 1) stmt.run("u" + i, PART_KINDS.upload, "k" + i, orderKeyOf(), i);
+      raw.exec("COMMIT");
+      raw.close();
+      expect(s.maxPartSeq(orderKeyOf())).toBe(10_050);
+    } finally { s.close(); }
+  });
+
+  it("A11: an old PR7 skip row (different logical key) is deduped by (orderKey, seq)", () => {
+    const p = segs(1)[0]!;
+    const s = openQueue();
+    try {
+      const old = {
+        jobId: jobIdOf(PART_KINDS.upload, orderKeyOf() + ":part-1@", 1), kind: PART_KINDS.upload,
+        logicalKey: orderKeyOf() + ":part-1@", generation: 1, inputs: [p],
+        params: { ctx: { v: 1, orderKey: orderKeyOf(), index: 1, file: p, fp: { size: 8, mtimeMs: 1 } } }, replaceInputs: false,
+        owner: {}, createdAt: 1, orderKey: orderKeyOf(), seq: 1,
+      };
+      expect(s.enqueueSkipped(old as never, { allowedRoots: [root], reason: "skip-hub-owned" }).state).toBe("skipped");
+    } finally { s.close(); }
+    expect(enqueueHubOwnedSkip({ file: p, index: 0, streamKey: orderKeyOf(), taskId: 1 })).toBe(true);
+    expect(openQueue().list({ kind: PART_KINDS.upload })).toHaveLength(1);
+  });
+
+  it("B2: production record wires the hub-owner decision (static)", () => {
+    const src = readFileSync(path.join(import.meta.dirname, "..", "..", "cli", "src", "cli.ts"), "utf-8");
+    expect(src).toContain("uploadOwnerForTask");
+    expect(src).toContain("enqueueHubOwnedSkip");
+  });
+});
+
+
+  it("A2: a retry never forces recordingActive=false (growing segment stays unsealed)", async () => {
+    const paths = segs(2);
+    const calls: boolean[] = [];
+    const u = queueUploader({
+      queueRetryMs: 5,
+      enqueueQueuePart: (i) => {
+        calls.push(i.index === 0);
+        return i.index === 0 ? "failed" : "queued";
+      },
+    });
+    paths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: true });
+    const retry = vi.spyOn(u, "flush");
+    await new Promise((r) => setTimeout(r, 30));
+    // The retry must preserve recordingActive=true; a false would seal (and enqueue) the growing segment.
+    expect(retry).toHaveBeenCalledWith({ recordingActive: true });
+    expect(calls.every(Boolean)).toBe(true);
+  });
+
+  it("P3.2: a failed/cancelled row is terminal (notify once, no retry)", async () => {
+    const p = segs(1)[0]!;
+    expect(enqueueRollingUploadPart({ file: p, index: 0, orderKey: orderKeyOf(), meta })).toBe("queued");
+    const s = openQueue();
+    const id = s.list({ kind: PART_KINDS.upload })[0]!.jobId;
+    s.acquireLease("upload-part", "A", { pid: process.pid });
+    s.claim({ kinds: ["upload-part"], owner: "A" });
+    s.finish(id, "A", { state: "failed", error: "x" });
+    s.releaseLease("upload-part", "A");
+    s.close();
+    expect(enqueueRollingUploadPart({ file: p, index: 0, orderKey: orderKeyOf(), meta })).toBe("terminal");
+  });
+
+  it("P3.3: a failed hub skip write is not marked handled (notify + retry)", async () => {
+    const paths = segs(2);
+    const notify = vi.fn();
+    const u = queueUploader({
+      uploadOwner: () => "master",
+      notify,
+      enqueueHubSkipped: () => false,
+    });
+    paths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(notify).toHaveBeenCalled();
+    expect(seen(u, "__enq")).toEqual([]);
   });
 
 });

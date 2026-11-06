@@ -42,6 +42,14 @@ export function enqueueHubOwnedSkip(input: HubOwnedSkipInput): boolean {
   const store = new ProcQueueStore(procQueueDbPath(drecRoot()));
   try {
     const generation = store.currentOrderGeneration(orderKey);
+    // PR7 wrote skip rows under an older logical-key spelling; dedupe by (orderKey, seq) so an
+    // upgraded node cannot append a second skip row for the same segment.
+    const existing = store.rowsForOrderSeq(orderKey, seq);
+    if (existing.length > 0) {
+      const done = existing.some((r) => r.state === "done" || r.state === "skipped");
+      if (!done) input.log?.("[hub-owner] segment already has a row in state " + existing.map((r) => r.state).join(","));
+      return done;
+    }
     const ctx: PartCtx = {
       v: 1, orderKey, index: seq, file: input.file, fp: { size, mtimeMs },
     };

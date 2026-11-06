@@ -1,6 +1,6 @@
 // plan 046 §5.4: upload-part — one part, explicit bv/ack + byte/fp proof; no B 站查询、无目录扫描。
 import { describe, it, expect, vi } from "vitest";
-import { mkdtempSync, writeFileSync, statSync, rmSync, utimesSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, statSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -167,4 +167,36 @@ describe("upload-part processor", () => {
       await expect(p.run(job(f), pc())).rejects.toThrow(/fp changed/);
     } finally { teardown(); }
   });
+
+  it("P2: create associates the season with the same helper/checkpoints", async () => {
+    setup();
+    try {
+      const f = put();
+      const addSeason = vi.fn(async () => ({ status: "added" as const, sectionId: 9, aid: 1, cid: 2, title: "t" }));
+      const c = pc();
+      const p = makeUploadPartProcessor({ run: seams().run as never, readAcked: seams().readAcked, addSeason: addSeason as never });
+      await p.run(job(f, { params: { seasonSectionId: 9 } }), c);
+      expect(addSeason).toHaveBeenCalledTimes(1);
+      expect(addSeason.mock.calls[0]![0]).toMatchObject({ sectionId: 9, bvid: BV });
+      const setState = (c as unknown as { setState: ReturnType<typeof vi.fn> }).setState;
+      expect(setState).toHaveBeenCalledWith({ bv: BV, seasonState: "pending" });
+      expect(setState).toHaveBeenCalledWith({ seasonState: "done" });
+    } finally { teardown(); }
+  });
+
+  it("B3: the confirmed part is written back to the rolling sidecar", async () => {
+    setup();
+    try {
+      const f = put();
+      const sidecar = join(dir, "主播_2026-06-27_08-00-00.rolling.json");
+      writeFileSync(sidecar, JSON.stringify({ streamKey: "k", sessionBase: "b", segments: [{ index: 0, path: f }], confirmed: [], updatedAt: 1 }));
+      const p = makeUploadPartProcessor({ run: seams().run as never, readAcked: seams().readAcked });
+      await p.run(job(f, { params: { sidecarPath: sidecar, sidecarIndex: 0, queueOrderKey: "k" } }), pc());
+      const st = JSON.parse(readFileSync(sidecar, "utf-8")) as { bv?: string; confirmed?: number[]; queueOrderKey?: string };
+      expect(st.bv).toBe(BV);
+      expect(st.confirmed).toEqual([0]);
+      expect(st.queueOrderKey).toBe("k");
+    } finally { teardown(); }
+  });
+
 });
