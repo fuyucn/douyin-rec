@@ -8,10 +8,11 @@
  */
 import type { RoomDTO } from "../api/client";
 import type { ModeLogoKind } from "../components/ModeLogo";
+import { pipelineBurns } from "@drec/rolling-policy";
 import { roomMethodKind } from "./room-method";
 
 export type RoomIndicatorId = "danmu" | "delivery" | "upload";
-export type RoomIndicatorKind = ModeLogoKind | "danmu";
+export type RoomIndicatorKind = ModeLogoKind;
 
 export interface RoomIndicator {
   /** Stable key for React and for the one-at-a-time explanation popover. */
@@ -40,23 +41,24 @@ export function roomModeIndicators(room: RoomIndicatorSource): RoomIndicator[] {
   }
 
   const method = roomMethodKind(room);
-  const privacy = room.processing?.pipeline?.upload
+  const privacyDetailKeys = room.processing?.pipeline?.upload
     ? [room.processing.pipeline.upload.private === false ? "room.publicShort" : "room.privateShort"]
     : [];
-  const spool = room.recording?.streamUploadSpool !== false ? "room.editor.zeroDiskSpool" : "room.editor.zeroDisk";
-  const uploadReady = (() => {
+  const spoolDetailKey = room.recording?.streamUploadSpool !== false ? "room.editor.zeroDiskSpool" : "room.editor.zeroDisk";
+  const pausedKeys = (): string[] =>
+    [...new Set([...(recordingPaused ? ["room.pausedRule"] : []), ...(processingPaused ? ["room.pausedRule"] : [])])];
+  const uploadEnabled = (() => {
     if (processingPaused) return false;
     if (room.recording?.streamUpload === true) return !recordingPaused;
-    const mode = room.processing?.pipeline?.upload?.mode;
-    return mode === "rolling" || mode === "upload";
+    return method === "rolling" || method === "upload";
   })();
   const addUpload = (): void => {
-    if (!uploadReady) return;
+    if (!uploadEnabled) return;
     out.push({
       id: "upload",
       kind: "bilibili",
       labelKey: "room.uploadMode",
-      detailKeys: privacy.length > 0 ? privacy : undefined,
+      detailKeys: [...privacyDetailKeys, ...(method === "live" ? [] : pausedKeys())],
     });
   };
 
@@ -65,7 +67,7 @@ export function roomModeIndicators(room: RoomIndicatorSource): RoomIndicator[] {
       id: "delivery",
       kind: "zero-disk",
       labelKey: "room.methodLiveStream",
-      detailKeys: [spool, ...(recordingPaused || processingPaused ? ["room.pausedRule"] : [])],
+      detailKeys: [spoolDetailKey, ...pausedKeys()],
     });
     addUpload();
   } else if (method === "rolling") {
@@ -73,10 +75,19 @@ export function roomModeIndicators(room: RoomIndicatorSource): RoomIndicator[] {
       id: "delivery",
       kind: "segment",
       labelKey: "room.methodRolling",
-      detailKeys: [...privacy, ...(processingPaused ? ["room.pausedRule"] : [])],
+      detailKeys: [...privacyDetailKeys, ...pausedKeys()],
     });
     addUpload();
   } else if (method === "upload") {
+    const steps = room.processing?.pipeline?.steps;
+    const nodeRoute = steps?.nodeSideUpload === true && !pipelineBurns(steps);
+    out.push({
+      id: "delivery",
+      kind: nodeRoute ? "node" : steps?.mergeSegments === false ? "split" : "merge",
+      labelKey: nodeRoute ? "room.editor.timingNode" : "room.methodUpload",
+      detailKeys: [...privacyDetailKeys, ...pausedKeys(),
+        ...(nodeRoute ? ["room.editor.timingNodeHint"] : steps?.mergeSegments === false ? ["roomForm.mergeSplitHint"] : [])],
+    });
     addUpload();
   } else if (method === "archive") {
     out.push({

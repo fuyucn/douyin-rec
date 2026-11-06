@@ -32,9 +32,45 @@ async function mountIndicators(page) {
   await page.locator("#indicators button").last().waitFor();
 }
 
+async function assertAllMarkGeometry(page) {
+  await page.evaluate(async () => {
+    const kinds = ["archive", "bilibili", "zero-disk", "segment", "merge", "node", "split", "danmu"];
+    const { ModeLogo } = await import("/src/components/ModeLogo.tsx");
+    const reactModule = await import("/node_modules/.vite/deps/react.js");
+    const React = reactModule.default ?? reactModule;
+    const domModule = await import("/node_modules/.vite/deps/react-dom_client.js");
+    const { createRoot } = domModule.default ?? domModule;
+    const host = document.createElement("div");
+    host.id = "mark-geometry";
+    host.style.cssText = "position:fixed;left:0;top:0;width:200px;pointer-events:none";
+    document.body.append(host);
+    const root = createRoot(host);
+    root.render(React.createElement(React.Fragment, null,
+      kinds.map((kind) => React.createElement(ModeLogo, { key: kind, kind, className: "mode-chip-icon" }))));
+  });
+  await page.waitForFunction(() => {
+    const uses = document.querySelectorAll("#mark-geometry svg use");
+    if (uses.length !== 8) return false;
+    for (const use of uses) {
+      try {
+        const bbox = use.getBBox();
+        if (!(bbox.width > 0 && bbox.height > 0)) return false;
+      } catch { return false; }
+    }
+    return true;
+  }, undefined, { timeout: 5000 }).catch(() => {});
+  const sizes = await page.locator("#mark-geometry svg use").evaluateAll((uses) =>
+    uses.map((use) => {
+      try { return use.getBBox().width; } catch { return 0; }
+    }));
+  assert.equal(sizes.length, 8);
+  assert(sizes.every((width) => width > 0), `every mark must render nonempty geometry: ${sizes.join(",")}`);
+}
+
 try {
   const desktop = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   await mountIndicators(desktop);
+  await assertAllMarkGeometry(desktop);
   const buttons = desktop.locator("#indicators button");
   assert.equal(await buttons.count(), 3);
   assert.equal(await desktop.locator("#indicators").textContent(), "");
@@ -84,7 +120,7 @@ try {
   await mobile.locator("#indicators button").nth(2).waitFor();
   await mobile.getByRole("dialog").waitFor({ state: "hidden" });
   assert.equal(await mobile.evaluate(() => document.documentElement.scrollWidth), 320);
-  console.log("PASS: accessible names; hover; Tab; Escape; drag-out keyboard recovery; touch toggle/dismissal; disappearing indicator reset; 320px layout");
+  console.log("PASS: SVG geometry all 8 marks; accessible names; hover; Tab; Escape; drag-out keyboard recovery; touch toggle/dismissal; disappearing indicator reset; 320px layout");
 } finally {
   await browser.close();
 }

@@ -19,6 +19,13 @@ describe("final mode SVG assets", () => {
     });
   }
 
+  it("pins the referenced mode-<kind> group id in every asset", () => {
+    for (const kind of kinds) {
+      const source = readFileSync(join(assets, kind + ".svg"), "utf8");
+      expect(source).toContain(`id="mode-${kind}"`);
+    }
+  });
+
   it("keeps all eight marks distinct", () => {
     const artwork = kinds.map(kind => readFileSync(join(assets, kind + ".svg"), "utf8").replace(/id="[^"]*"/g, ""));
     expect(new Set(artwork).size).toBe(kinds.length);
