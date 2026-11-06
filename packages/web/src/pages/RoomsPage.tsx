@@ -242,7 +242,7 @@ function MethodChip({ room }: { room: RoomDTO }): ReactNode {
   const m = uploadMethod(t, room);
   return (
     <span className="badge badge-muted text-[10.5px] whitespace-nowrap inline-flex items-center gap-1" title={m.title}
-          style={m.tone ? { color: m.tone, borderColor: "var(--border)" } : undefined}>
+          style={m.tone ? { color: m.tone, borderColor: "var(--hairline)" } : undefined}>
       <ModeLogo kind={m.kind} className="mode-chip-icon" />
       {m.label}
     </span>
