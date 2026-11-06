@@ -47,18 +47,14 @@ export function roomModeIndicators(room: RoomIndicatorSource): RoomIndicator[] {
   const spoolDetailKey = room.recording?.streamUploadSpool !== false ? "room.editor.zeroDiskSpool" : "room.editor.zeroDisk";
   const pausedKeys = (): string[] =>
     [...new Set([...(recordingPaused ? ["room.pausedRule"] : []), ...(processingPaused ? ["room.pausedRule"] : [])])];
-  const uploadEnabled = (() => {
-    if (processingPaused) return false;
-    if (room.recording?.streamUpload === true) return !recordingPaused;
-    return method === "rolling" || method === "upload";
-  })();
+  const uploadEnabled = !processingPaused && (method === "live" || method === "rolling" || method === "upload");
   const addUpload = (): void => {
     if (!uploadEnabled) return;
     out.push({
       id: "upload",
       kind: "bilibili",
       labelKey: "room.uploadMode",
-      detailKeys: [...privacyDetailKeys, ...(method === "live" ? [] : pausedKeys())],
+      detailKeys: [...privacyDetailKeys, ...pausedKeys()],
     });
   };
 

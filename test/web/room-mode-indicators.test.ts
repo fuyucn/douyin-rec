@@ -101,6 +101,30 @@ describe("compact room indicator facts", () => {
     expect(paused.find(indicator => indicator.kind === "bilibili")?.detailKeys).toContain("room.pausedRule");
   });
 
+  it("keeps direct upload configured when only the recorder is paused", () => {
+    const processing = {
+      enabled: true,
+      workers: ["local"],
+      pipeline: { upload: { mode: "rolling", private: false }, steps: { burnDanmu: false, burnLivechat: false } },
+    };
+    const recording = { enabled: false, streamUpload: true, streamUploadSpool: false };
+    const indicators = roomModeIndicators(source(recording, processing));
+    expect(indicators.map(indicator => indicator.kind)).toEqual(["zero-disk", "bilibili"]);
+    expect(indicators.find(indicator => indicator.kind === "bilibili")?.detailKeys)
+      .toEqual(["room.publicShort", "room.pausedRule"]);
+    expect(indicators.find(indicator => indicator.kind === "zero-disk")?.detailKeys)
+      .toEqual(["room.editor.zeroDisk", "room.pausedRule"]);
+
+    const standalone = roomModeIndicators(source(recording, null));
+    expect(standalone.map(indicator => indicator.kind)).toEqual(["zero-disk", "bilibili"]);
+    expect(standalone.find(indicator => indicator.kind === "bilibili")?.detailKeys).toEqual(["room.pausedRule"]);
+    expect(kinds({ enabled: false, streamUpload: false }, null)).toEqual([]);
+
+    for (const enabled of [true, false]) {
+      expect(kinds({ ...recording, enabled }, { ...processing, enabled: false })).toEqual(["zero-disk"]);
+    }
+  });
+
   it("does not mark a paused rule as upload enabled", () => {
     const pausedDirect = roomModeIndicators(source({ streamUpload: true }, { enabled: false, pipeline: { upload: { mode: "rolling" } } }));
     expect(pausedDirect.map(indicator => indicator.kind)).not.toContain("bilibili");
