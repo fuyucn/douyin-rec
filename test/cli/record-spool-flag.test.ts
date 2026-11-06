@@ -1,7 +1,21 @@
-import { execSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync } from "node:fs";
+/**
+ * Real dist entry coverage for the retired --stream-upload-spool none flag.
+ *
+ * This file only guards the rejection paths. We initially wanted to prove that full / absent
+ * is not rejected, but any argv that passes the gate starts a real recorder: blank room,
+ * unknown URL, invalid engine and missing config either fall back or fail before the gate.
+ * Spawning that path would reach platform/network code, so it belongs to production validation,
+ * not a unit test. The safe half is covered elsewhere:
+ *   - test/app/record-args.test.ts: buildRecordArgs never emits --stream-upload-spool,
+ *     including legacy streamUploadSpool=false rows;
+ *   - test/cli/cli-flags.test.ts: rejectsNoSpoolFlag(full/FULL/empty/undefined) is false.
+ * Rejection happens after loadConfig and before platformForRoom/getStream, so the fake room
+ * never reaches the network. `dist/` is built once from the current source by test/global-setup.ts,
+ * so this always exercises today's cli.ts wiring rather than a leftover artifact.
+ */
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { join } from "node:path";
-import { beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 const ROOT = join(__dirname, "..", "..");
 const ENTRY = join(ROOT, "dist", "douyin-rec.mjs");
@@ -12,11 +26,6 @@ interface Result {
   stdout: string;
   stderr: string;
 }
-
-beforeAll(() => {
-  // CI runs pnpm test before pnpm bundle, so dist is absent there. Bundling is ~200ms locally.
-  if (!existsSync(ENTRY)) execSync("pnpm bundle", { cwd: ROOT, stdio: "pipe", timeout: 120_000 });
-}, 120_000);
 
 function record(args: string[], timeoutMs = 8_000): Promise<Result> {
   return new Promise((resolve) => {
@@ -37,31 +46,10 @@ function record(args: string[], timeoutMs = 8_000): Promise<Result> {
 }
 
 async function rejected(args: string[]): Promise<void> {
-  // The gate sits after loadConfig and before platformForRoom / getStream, so the fake room
-  // never reaches the network. dist is required to exercise the real cli.ts wiring.
   const r = await record(args);
   expect(r.code, r.stderr).toBe(2);
   expect(r.stderr).toContain("已禁用");
   expect(r.stderr).toContain("本地回退文件");
-}
-
-async function allowed(args: string[]): Promise<void> {
-  // A live recorder may keep waiting / polling; wait about 2s, then kill it. The point is
-  // that it did not take the explicit exit-2 no-spool gate and did not print its message.
-  const child: ChildProcessWithoutNullStreams = spawn(process.execPath, [ENTRY, "record", "--room", ROOM, ...args], {
-    cwd: ROOT,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let output = "";
-  child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
-  child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
-  const exit = new Promise<number | null>((resolve) => child.once("close", resolve));
-  await new Promise((resolve) => setTimeout(resolve, 2_000));
-  const finishedEarly = child.exitCode !== null;
-  child.kill("SIGKILL");
-  const code = await exit;
-  expect(finishedEarly ? child.exitCode : code).not.toBe(2);
-  expect(output).not.toContain("已禁用");
 }
 
 describe("record --stream-upload-spool (real dist entry)", () => {
@@ -77,10 +65,5 @@ describe("record --stream-upload-spool (real dist entry)", () => {
     await rejected(["--stream-upload-spool", "NONE"]);
     await rejected(["--stream-upload-spool", " none "]);
   }, 20_000);
-
-  it("full and the default keep running (no exit-2 gate)", async () => {
-    await allowed(["--stream-upload-spool", "full"]);
-    await allowed([]);
-  }, 15_000);
 });
 
