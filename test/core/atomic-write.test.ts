@@ -85,16 +85,54 @@ describe("withFileLockSync (two sidecar writers: the recorder and the queue proc
     expect(existsSync(lock)).toBe(false);
   });
 
-  it("takes over an AGED lock even when its pid looks alive (pid reuse / leaked lock)", () => {
+  it("NEVER steals a live holder, even when the lock is older than the stale window", () => {
     const f = file();
     const lock = f + ".lock";
-    // Our own pid is definitely alive; the lock is old, so it must be treated as abandoned (a real
-    // holder only keeps it for milliseconds, and the OS reuses pids).
+    // Our own pid is alive: two writers on one sidecar would lose bv/confirmed, so a timeout is the
+    // only acceptable outcome even though the lock looks old.
     writeFileSync(lock, String(process.pid) + ".deadbeef");
     const old = Date.now() - 600_000;
     utimesSync(lock, new Date(old), new Date(old));
-    expect(withFileLockSync(f, () => 1, { timeoutMs: 200, staleMs: 1_000 })).toBe(1);
-    expect(existsSync(lock)).toBe(false);
+    expect(() => withFileLockSync(f, () => 1, { timeoutMs: 60, staleMs: 10 })).toThrow(/lock busy/);
+    expect(readFileSync(lock, "utf-8")).toBe(String(process.pid) + ".deadbeef"); // untouched
+    unlinkSync(lock);
+  });
+
+  it("a leaked lock whose pid was reused (alive but unrelated) fails closed instead of stealing", () => {
+    const f = file();
+    const lock = f + ".lock";
+    writeFileSync(lock, "424242.deadbeef"); // "reused" pid: alive by injection
+    utimesSync(lock, new Date(Date.now() - 600_000), new Date(Date.now() - 600_000));
+    expect(() => withFileLockSync(f, () => 1, { timeoutMs: 40, staleMs: 10, isHolderAlive: () => true }))
+      .toThrow(/lock busy/);
+    expect(readFileSync(lock, "utf-8")).toBe("424242.deadbeef");
+    unlinkSync(lock);
+  });
+
+  it("a slow write in a LIVE process longer than staleMs is not taken over (second waiter fails)", async () => {
+    const f = file();
+    const lock = f + ".lock";
+    // The child holds the lock with its own live pid for ~500ms, well beyond staleMs.
+    const script =
+      "const fs=require('fs');" +
+      "fs.writeFileSync(process.argv[1], process.pid + '.abcdef012345');" +
+      "process.stdout.write('ready');" +
+      "setTimeout(function(){}, 5000);";
+    const child = spawn(process.execPath, ["-e", script, lock], { stdio: ["ignore", "pipe", "ignore"] });
+    await new Promise<void>((resolve, reject) => {
+      child.stdout!.once("data", () => resolve());
+      child.once("error", reject);
+    });
+    try {
+      const started = Date.now();
+      expect(() => withFileLockSync(f, () => 1, { timeoutMs: 300, staleMs: 50 })).toThrow(/lock busy/);
+      expect(Date.now() - started).toBeLessThan(2_000);
+      expect(readFileSync(lock, "utf-8")).toContain(String(child.pid)); // untouched: no second writer
+    } finally {
+      child.kill();
+      await new Promise((resolve) => child.on("exit", resolve));
+      try { unlinkSync(lock); } catch { /* already gone */ }
+    }
   });
 
   it("a FRESH lock is never stolen, and the lock file records pid + instance token", () => {

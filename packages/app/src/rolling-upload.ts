@@ -557,6 +557,10 @@ export class RollingUploader {
     let openRows: boolean;
     try { openRows = this.o.queueOrderHasRows?.(key) ?? false; } catch { openRows = true; } // unknown: keep holding
     if (openRows) return;
+    // Race note (addendum 14): nothing can enqueue a NEW upload-part row for this order between the
+    // check and this clear. A hub-owned session only writes skipped rows (enqueueHubSkipped), the legacy
+    // import path is gated on !hubOwned, and the runner never inserts rows - it only drives existing
+    // ones. So an empty open-row set stays empty here unless an operator requeues manually.
     const next: RollingState = { ...this.state };
     delete next.queueOrderKey;
     delete next.queueSeqBase;

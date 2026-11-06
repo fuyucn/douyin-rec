@@ -1118,7 +1118,8 @@ describe("rework addenda 11-13", () => {
     const skips: Array<Record<string, unknown>> = [];
     const u = queueUploader({
       uploadOwner: () => "master",
-      enqueueHubSkipped: (i) => { skips.push({ ...i }); return true; },
+      // Real adapter: the row must exist in the store for the guard assertions below.
+      enqueueHubSkipped: (i) => { skips.push({ ...i }); return enqueueHubOwnedSkip({ ...i, taskId: 1 }); },
       queueOrderHasRows, queueMaxSeq: rollingQueueMaxSeq,
     });
     u.noteSegment(p);
@@ -1130,6 +1131,12 @@ describe("rework addenda 11-13", () => {
     expect(skips).toHaveLength(1);              // the node still writes its timeline row
     // What scan would hand the master: no queueOrderKey => no hold, normal pipeline uploads.
     expect(skips[0]!.streamKey).toBe(orderKeyOf());
+    // The flip never injects an upload-part row (hub-owned writes only skip rows): the clear cannot race
+    // a fresh open row into existence.
+    const rows = rowsOf(PART_KINDS.upload);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.state).toBe("skipped");
+    expect(queueOrderHasRows(orderKeyOf())).toBe(false);
   });
 
   it("A11-1: a briefly held sidecar lock is waited out, not treated as a write failure", async () => {

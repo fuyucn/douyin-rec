@@ -65,9 +65,12 @@ function lockState(lock: string, staleMs: number, alive: (pid: number) => boolea
   }
   const pid = lockHolderPid(text);
   const aged = Date.now() - mtimeMs > staleMs;
-  // Dead holder => abandoned at once. A live pid with an aged lock is either a leaked lock or a reused
-  // pid: the real holder only ever holds for milliseconds, so age wins over "pid looks alive".
-  if (pid > 0 && !alive(pid)) return "stale";
+  // A KNOWN LIVE holder is never stolen, whatever the age: taking the lock away from a slow writer
+  // (fsync stall, loaded disk, network FS) would put two writers on the same sidecar and lose
+  // bv/confirmed. A leaked lock whose pid was reused by an unrelated process therefore ends in a
+  // timeout -> the caller alerts and stops writing (fail-closed, no data loss).
+  if (pid > 0) return alive(pid) ? "live" : "stale";
+  // Unknown owner (empty / unreadable lock, old builds): only the stale window decides.
   return aged ? "stale" : "live";
 }
 
@@ -82,7 +85,8 @@ function takeOverStaleLock(lock: string, staleMs: number, alive: (pid: number) =
   try {
     const text = readFileSync(grab, "utf-8").trim();
     const pid = lockHolderPid(text);
-    const abandoned = (pid > 0 && !alive(pid)) || Date.now() - statSync(grab).mtimeMs > staleMs;
+    // Known holder: only a dead one counts as abandoned (a live holder is never stolen, see lockState).
+    const abandoned = pid > 0 ? !alive(pid) : Date.now() - statSync(grab).mtimeMs > staleMs;
     if (abandoned) { unlinkSync(grab); return true; }
     try { if (!existsSync(lock)) renameSync(grab, lock); } catch { /* stray file, harmless */ }
     return false;
@@ -100,11 +104,12 @@ function takeOverStaleLock(lock: string, staleMs: number, alive: (pid: number) =
  * atomic rename. Both writers therefore wrap their read+write in this lock.
  *
  * Waiting is bounded by timeoutMs and then throws: callers treat a lock failure like any other
- * sidecar write failure (alert, keep sources). An abandoned lock is taken over after staleMs, or
- * immediately when the recorded holder pid is dead. A live pid alone never protects a lock forever:
- * the holder only holds for milliseconds, so age is the authoritative signal (covers pid reuse and
- * locks leaked by a crash). staleMs < timeoutMs so a waiter that is still inside its budget always
- * gets its turn, and the deadline is checked in every retry branch (a persistent stat error cannot spin).
+ * sidecar write failure (alert, keep sources). Takeover rules:
+ *   - holder pid dead  -> abandoned now;
+ *   - holder pid alive -> NEVER stolen (a slow writer must not get a second writer beside it);
+ *   - unknown holder   -> abandoned after staleMs.
+ * staleMs < timeoutMs only matters for the unknown-holder case, so a waiter inside its budget always
+ * gets its turn there. The deadline is checked in every retry branch (a persistent stat error cannot spin).
  */
 export function withFileLockSync<T>(
   file: string, fn: () => T,
