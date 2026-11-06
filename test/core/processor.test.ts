@@ -234,6 +234,11 @@ describe("EnqueueRequest 编解码", () => {
     expect(decodeEnqueue(encodeEnqueue(req))).toEqual(req);
   });
 
+  it("batch flag survives the wire for atomic upload-part groups", () => {
+    expect(decodeEnqueue(encodeEnqueue({ v: 1, jobs: [mkJob()], batch: true })).batch).toBe(true);
+    expect(decodeEnqueue(encodeEnqueue({ v: 1, jobs: [mkJob()] }))).not.toHaveProperty("batch");
+  });
+
   it("拒 v≠1 / 缺 v", () => {
     const enc = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64");
     expect(() => decodeEnqueue(enc({ v: 2, jobs: [] }))).toThrow(/版本/);

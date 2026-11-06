@@ -144,6 +144,7 @@ function biliupJob(plan: UploadPlan, meta: BiliupMeta, parts: string[], owner: P
 function uploadPartJob(plan: UploadPlan, meta: BiliupMeta, file: string, index: number, owner: ProcessJob["owner"], now: number): ProcessJob {
   const logicalKey = `${plan.orderKey}:part:${index}`;
   const jobId = jobIdOf(PART_KINDS.upload, logicalKey, plan.generation);
+  // The stage file lives on the node, so the master cannot stat it. The node fills the exact fp at enqueue.
   const ctx: PartCtx = { v: 1, orderKey: plan.orderKey, index, file, fp: { size: 0, mtimeMs: 0 } };
   return {
     jobId, kind: PART_KINDS.upload, logicalKey, generation: plan.generation, inputs: [file],
