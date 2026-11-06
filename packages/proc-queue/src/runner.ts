@@ -7,7 +7,7 @@
 import { existsSync, statfsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import {
-  classifyRetryableFailure, freeBytesOf, isSameChild, isUncertainOutcome, jobIdOf, listProcessors, PART_KINDS,
+  classifyRetryableFailure, freeBytesOf, isSameChild, isUncertainOutcome, listProcessors, PART_KINDS,
   PART_WORKFLOW_TEMPLATES, probeChild, retryBackoffMs, STUCK_ALERT_MS,
   type ChildFingerprint, type PartCtx, type ProcActiveDTO, type ProcessContext, type Processor,
 } from "@drec/core";
@@ -190,14 +190,23 @@ export class ProcRunner {
     const ctx = job.params.ctx as PartCtx | undefined;
     if (!ctx || ctx.index <= 1 || ctx.bv) return;
     for (let seq = ctx.index - 1; seq >= 1; seq -= 1) {
-      const prior = this.o.store.get(jobIdOf(PART_KINDS.upload, `${job.orderKey}:part:${seq}`, job.generation));
-      if (!prior || prior.state !== "done") break;
-      if (prior.bv) {
-        job.params = { ...job.params, ctx: { ...ctx, bv: prior.bv } };
+      // Kind+generation filtered (orderKey, seq) covers rows written by an older logical-key spelling
+      // (PR7) but never a row from another generation: an old generation's bv would be wrong here.
+      const rows = this.o.store.rowsForOrderSeq(job.orderKey, seq, PART_KINDS.upload, job.generation);
+      // Missing / non-done predecessor: fail closed (creating a draft here would duplicate the archive).
+      if (rows.length === 0) throw new Error("upload-part cannot inherit: lower-seq row " + seq + " is missing");
+      // A skipped placeholder carries no draft: keep looking backwards.
+      if (rows.every((r) => r.state === "skipped")) continue;
+      const done = rows.find((r) => r.state === "done");
+      if (!done) {
+        throw new Error("upload-part cannot inherit: lower-seq row " + seq + " is " + rows.map((r) => r.state).join(","));
+      }
+      if (done.bv) {
+        job.params = { ...job.params, ctx: { ...ctx, bv: done.bv } };
         return;
       }
     }
-    throw new Error("upload-part cannot inherit a draft id from a done predecessor");
+    // No confirmed predecessor: this part creates the draft (e.g. earlier parts were empty placeholders).
   }
 
   /** A terminal part failure blocks every later pending part in the same order. */

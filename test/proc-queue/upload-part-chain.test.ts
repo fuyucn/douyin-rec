@@ -48,14 +48,14 @@ async function advanceRetryClock(ms: number): Promise<void> {
     if (due.length === 0) break;
   }
 }
-const ctxOf = (file: string, bv?: string): PartCtx => {
+const ctxOf = (file: string, bv?: string, index = 1): PartCtx => {
   const s = statSync(file);
-  return { v: 1, orderKey: "same-broadcast", index: 1, file, fp: { size: s.size, mtimeMs: s.mtimeMs }, ...(bv ? { bv } : {}) };
+  return { v: 1, orderKey: "same-broadcast", index, file, fp: { size: s.size, mtimeMs: s.mtimeMs }, ...(bv ? { bv } : {}) };
 };
 const partJob = (file: string, mode?: string, logicalKey = "same-broadcast:part-1", orderKey = "same-broadcast", seq = 1) => ({
   jobId: jobIdOf(PART_KINDS.upload, logicalKey, 1), kind: PART_KINDS.upload, logicalKey, generation: 1,
   inputs: [file], params: {
-    ctx: ctxOf(file), partWorkflow: mode, cookies: "c", title: "t", tid: 21, tag: "tag",
+    ctx: ctxOf(file, undefined, seq), partWorkflow: mode, cookies: "c", title: "t", tid: 21, tag: "tag",
   }, replaceInputs: false, owner: { taskId: 1 }, createdAt: env.clock.t,
   orderKey, seq,
 });
@@ -204,4 +204,76 @@ describe("upload-part runner chain", () => {
     expect(run).toHaveBeenCalledTimes(2);
     expect(existsSync(upFile)).toBe(true);
   });
+
+  it("HIGH 5: a skipped placeholder predecessor does not block the next part (create is allowed)", async () => {
+    const file1 = env.file("a_000.ts");
+    const file2 = env.file("a_001.ts");
+    const s = env.open();
+    const j1 = partJob(file1, "rolling", "same-broadcast:part:1", "same-broadcast", 1);
+    const skipped = { ...j1, params: { ...j1.params, partWorkflow: "rolling" } };
+    expect(s.enqueueSourceGone(skipped, { allowedRoots: [env.root] }).state).toBe("skipped");
+    const j2 = partJob(file2, "rolling", "same-broadcast:part:2", "same-broadcast", 2);
+    const id2 = s.enqueue({ ...j2, jobId: jobIdOf(PART_KINDS.upload, "same-broadcast:part:2", 1) }, allowed()).jobId;
+    const seenBv: Array<string | undefined> = [];
+    const c2 = ctxOf(file2);
+    registerProcessor(proc({ run: async (j) => {
+      seenBv.push((j.params.ctx as PartCtx).bv);
+      return { outputs: [], bv: "NEWDRAFT01", confirmed: { size: c2.fp.size, mtimeMs: c2.fp.mtimeMs, ackedBytes: c2.fp.size } };
+    } }));
+    const r = mkRunner();
+    s.acquireLease(PART_KINDS.upload, "A", { pid: process.pid });
+    r.tick();
+    await vi.waitFor(() => expect(s.get(id2)?.state).toBe("done"));
+    expect(seenBv).toEqual([undefined]); // no confirmed predecessor => create, not a thrown failure
+    expect(s.get(id2)?.bv).toBe("NEWDRAFT01");
+  });
+
+
+  it("GC gap: a missing lower-seq row fails closed (no second draft)", async () => {
+    const file1 = env.file("a_000.ts");
+    const file2 = env.file("a_001.ts");
+    const s = env.open();
+    const j1 = partJob(file1, "rolling", "same-broadcast:part:1", "same-broadcast", 1);
+    const id1 = s.enqueue({ ...j1, jobId: jobIdOf(PART_KINDS.upload, "same-broadcast:part:1", 1) }, allowed()).jobId;
+    s.acquireLease(PART_KINDS.upload, "A", { pid: process.pid });
+    s.claim({ kinds: [PART_KINDS.upload], owner: "A", accept: (j) => j.jobId === id1 });
+    s.finish(id1, "A", { state: "done", outputs: [] });
+    // Simulate GC removing the done row.
+    const raw = new DatabaseSync(env.dbPath);
+    raw.prepare("DELETE FROM proc_jobs WHERE jobId=?").run(id1);
+    raw.close();
+    const j2 = partJob(file2, "rolling", "same-broadcast:part:2", "same-broadcast", 2);
+    const id2 = s.enqueue({ ...j2, jobId: jobIdOf(PART_KINDS.upload, "same-broadcast:part:2", 1) }, allowed()).jobId;
+    const run = vi.fn(async () => ({ outputs: [] }));
+    registerProcessor(proc({ run }));
+    const r = mkRunner();
+    r.tick();
+    await vi.waitFor(() => expect(s.get(id2)?.state).toBe("failed"));
+    expect(run).not.toHaveBeenCalled();
+    expect(s.get(id2)?.error).toMatch(/inherit/i);
+  });
+
+
+  it("A3-9: an old-key hub skip row at a lower seq is skipped, not treated as missing", async () => {
+    const file1 = env.file("a_000.ts");
+    const file2 = env.file("a_001.ts");
+    const s = env.open();
+    const oldKey = "same-broadcast:part-1@";
+    const skip = {
+      jobId: jobIdOf(PART_KINDS.upload, oldKey, 1), kind: PART_KINDS.upload, logicalKey: oldKey, generation: 1,
+      inputs: [file1], params: { ctx: ctxOf(file1, undefined, 1), partWorkflow: "rolling" },
+      replaceInputs: false, owner: { taskId: 1 }, createdAt: 1, orderKey: "same-broadcast", seq: 1,
+    };
+    expect(s.enqueueSourceGone(skip as never, { allowedRoots: [env.root] }).state).toBe("skipped");
+    const j2 = partJob(file2, "rolling", "same-broadcast:part:2", "same-broadcast", 2);
+    const id2 = s.enqueue({ ...j2, jobId: jobIdOf(PART_KINDS.upload, "same-broadcast:part:2", 1) }, allowed()).jobId;
+    const c2 = ctxOf(file2, undefined, 2);
+    registerProcessor(proc({ run: async () => ({ outputs: [], bv: "NEWDRAFT02", confirmed: { size: c2.fp.size, mtimeMs: c2.fp.mtimeMs, ackedBytes: c2.fp.size } }) }));
+    const r = mkRunner();
+    s.acquireLease(PART_KINDS.upload, "A", { pid: process.pid });
+    r.tick();
+    await vi.waitFor(() => expect(s.get(id2)?.state).toBe("done"));
+    expect(s.get(id2)?.bv).toBe("NEWDRAFT02");
+  });
+
 });
