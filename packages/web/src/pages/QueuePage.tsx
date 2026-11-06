@@ -11,7 +11,7 @@ import {
 import { useAtomValue } from "jotai";
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { api, type HubQueueDTO, type QueueItemDTO, type Task, type WorkerStatus } from "../api/client";
+import { api, type HubQueueDTO, type NodeUploadStatusDTO, type QueueItemDTO, type Task, type WorkerStatus } from "../api/client";
 import { hubEnabledAtom, serverTimezoneAtom } from "../atoms";
 import { humanSec, humanSecFull, stateColor, JobLogDialog } from "../components/HubJobs";
 import { platformLabel, roomId } from "../lib/labels";
@@ -20,6 +20,7 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import {
   baseVersion,
   deriveNodeHealthProbe,
+  fmtBytes,
   INITIAL_NODE_HEALTH_LOAD_STATE,
   loadNodeHealthSnapshot,
   summarizeNodes,
@@ -27,9 +28,9 @@ import {
 } from "../lib/nodes-summary";
 import { HubStreamBanner } from "../components/HubStreamBanner";
 import { AttentionCard, FleetPulse, LiveLane, LivePool, LiveUploadLanes, StageReadyRow } from "../components/QueueLive";
-import { QueueStateBadges } from "../components/QueueBadges";
+import { PartChainLine } from "../components/QueueBadges";
 import { liveUploadLanes, queueSummary, splitQueue } from "../lib/queue-live";
-import { stepLabel } from "../lib/queue-chain";
+import { nodeUploadPhaseLabel, nodeUploadStateLabel, queueText, stepLabel } from "../lib/queue-chain";
 import { useT } from "../lib/i18n";
 import { fmtTimeInTz } from "../lib/tz";
 
@@ -207,6 +208,32 @@ function FilterBar({
   );
 }
 
+/**
+ * Table row node-upload telemetry; phase/state/step labels all go through the dictionary.
+ * Polled time is stated as a fact; the frontend does not infer that a snapshot is stale.
+ */
+function NodeUploadLine({ s, now, t }: { s: NodeUploadStatusDTO; now: number; t: TFunc }): ReactNode {
+  const ago = (at: number): string => humanSec(Math.max(0, Math.round((now - at) / 1000)));
+  const stepKey = s.step === "gate_wait" || s.step === "transfer" || s.step === "submit" ? s.step : null;
+  const parts: string[] = [
+    s.nodeId,
+    nodeUploadPhaseLabel(t, s.phase),
+  ];
+  if (s.phase === "biliup" && s.state === "running" && stepKey) parts.push(queueText(t, `queue.nodeUpload.step.${stepKey}`, stepKey));
+  else if (s.state) parts.push(nodeUploadStateLabel(t, s.state));
+  if (s.progress && s.progress.totalBytes > 0) parts.push(`${fmtBytes(s.progress.doneBytes)} / ${fmtBytes(s.progress.totalBytes)}`);
+  if (s.progress?.bps) parts.push(`${fmtBytes(s.progress.bps)}/s`);
+  if (s.heartbeatAt) parts.push(queueText(t, "queue.nodeUpload.heartbeat", `heartbeat ${ago(s.heartbeatAt)} ago`, { time: ago(s.heartbeatAt) }));
+  if (s.attempts != null && s.attempts > 1) parts.push(queueText(t, "queue.nodeUpload.attempt", `attempt ${s.attempts}`, { n: s.attempts }));
+  if (s.notBefore && s.notBefore > now) parts.push(`retry in ${humanSec(Math.round((s.notBefore - now) / 1000))}`);
+  return (
+    <div className="text-[11px] mt-0.5 font-mono text-muted-soft" title={s.error ?? undefined}>
+      {parts.join(" · ")}
+      <span> · {queueText(t, "queue.nodeUpload.polledAgo", `status updated ${ago(s.polledAt)} ago`, { time: ago(s.polledAt) })}</span>
+    </div>
+  );
+}
+
 /** 相位派生(行与卡片共用,避免两份漂移):返回展示文案 key、图标种类、是否终态/需人工。 */
 function phaseInfo(item: QueueItemDTO): {
   textKey: string;
@@ -261,7 +288,6 @@ function QueueCard({ item, index, tz, onOpenLog, onAck }: { item: QueueItemDTO; 
         <span className="inline-flex items-center gap-1.5 text-[13px] font-medium shrink-0" style={{ color: phaseColor(info.kind, item.state) }}>
           <PhaseGlyph kind={info.kind} />
           {t(info.textKey)}
-          <QueueStateBadges item={item} t={t} />
         </span>
       </div>
       <div className="mt-2 text-[12px] text-muted-soft break-words">
@@ -347,12 +373,18 @@ function QueueRow({ item, index, tz, now, dataAt, onOpenLog, onAck }: { item: Qu
         <span className="inline-flex items-center gap-1.5 text-[13px] font-medium" style={{ color: phaseColor(info.kind, item.state) }}>
           <PhaseGlyph kind={info.kind} />
           {t(info.textKey)}
-          <QueueStateBadges item={item} t={t} />
         </span>
         <div className="text-[11px] text-muted-soft mt-0.5">
           {rowTiming(item, now, dataAt, t)}
           {finished && item.winnerWorker && <span> · {t("hub.jobs.selected", { worker: item.winnerWorker })}</span>}
         </div>
+        {item.nodeUpload && (
+          <div className="mt-0.5">
+            {item.nodeUpload.phase === "part-chain"
+              ? <PartChainLine upload={item.nodeUpload} now={now} tz={tz} t={t} />
+              : <NodeUploadLine s={item.nodeUpload} now={now} t={t} />}
+          </div>
+        )}
         {/* 真故障/已停止:把台账里的 error 亮出来(否则只看到「待人工」不知为何)。
             两行截断 + 完整内容进 title:错误文本可能很长,不截断会把整行撑成小作文、挤掉同屏其它场次。 */}
         {((manual || stopped) && item.error) && (

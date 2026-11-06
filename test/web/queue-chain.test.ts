@@ -78,7 +78,6 @@ const USED_KEYS = [
   "queue.nodeUpload.polledAgo",
   "queue.phase.reconciling",
   "queue.phase.reconcilingTip",
-  "room.runtime.stageState.skipped",
   "hub.jobs.stepNode.upload_part",
   "hub.jobs.stepNode.cleanup_part",
   "hub.jobs.stepNode.reconcile_part",
@@ -99,29 +98,22 @@ describe("queue chain i18n keys", () => {
 describe("queue chain presentation facts", () => {
   it("adds no badge without a node-upload status", () => {
     expect(queueBadges({ nodeUpload: null }, t)).toEqual([]);
-    expect(queueBadges({ state: "uploading", nodeUpload: { phase: "biliup", state: "running" } }, t)).toEqual([]);
+    expect(queueBadges({ nodeUpload: { phase: "biliup", state: "running" } }, t)).toEqual([]);
   });
 
   it("shows the part-chain badge from the node-upload phase", () => {
-    expect(queueBadges({ state: "uploading", nodeUpload: { phase: "part-chain", state: "running" } }, t))
+    expect(queueBadges({ nodeUpload: { phase: "part-chain", state: "running" } }, t))
       .toEqual([{ kind: "part-chain", label: "分 P 链" }]);
   });
 
   it("shows reconciling from NodeUploadStatusDTO.state, not the hub job state", () => {
-    expect(queueBadges({ state: "uploading", nodeUpload: { phase: "part-chain", state: "reconciling" } }, t)).toEqual([
+    expect(queueBadges({ nodeUpload: { phase: "part-chain", state: "reconciling" } }, t)).toEqual([
       { kind: "part-chain", label: "分 P 链" },
       {
         kind: "reconciling",
         label: "自动对账中",
         title: valueAt(dict.zh, "queue.phase.reconcilingTip"),
       },
-    ]);
-  });
-
-  it("shows skipped from the real proc-queue state on a non-terminal hub job", () => {
-    expect(queueBadges({ state: "uploading", nodeUpload: { phase: "part-chain", state: "skipped" } }, t)).toEqual([
-      { kind: "part-chain", label: "分 P 链" },
-      { kind: "skipped", label: "跳过" },
     ]);
   });
 

@@ -37,6 +37,9 @@ const missing = new Map();
 const expSrc = readFileSync(pjoin(WEB, "..", "..", "core", "src", "experimental.ts"), "utf-8");
 for (const mm of expSrc.matchAll(/\b\w+Key:\s*"([^"]+)"/g))
   if (!known.has(mm[1])) { if (!missing.has(mm[1])) missing.set(mm[1], []); missing.get(mm[1]).push("core/src/experimental.ts"); }
+// Phase labels are stored in an object literal, not as queueText calls; keep them guarded explicitly.
+const PHASE_LABEL_KEYS = ["queue.nodeUpload.partChain"];
+for (const key of PHASE_LABEL_KEYS) if (!known.has(key)) missing.set(key, ["packages/web/src/lib/queue-chain.ts"]);
 const KEY_CALL_RES = [
   /\bt\(\s*"([^"]+)"\s*[,)]/g,
   // queueText(t, "key", fallback) is the fallback-aware wrapper introduced for queue display.

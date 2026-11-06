@@ -589,11 +589,11 @@ const DICT = {
       doneNoStepRecord: "（无步骤记录）",
       queuedAt: "等锁 · 第 {n} 位",
         nodeUpload: {
-        node: "节点 {node}", prep: "预处理", biliup: "上传", blocked: "无法推进", partChain: "分 P 链", notBefore: "最早重试 {time}",
+        prep: "预处理", biliup: "上传", blocked: "无法推进", partChain: "分 P 链", notBefore: "最早重试 {time}",
         polledAgo: "状态更新于 {time} 秒前",
         state: { pending: "待执行", running: "执行中", reconciling: "自动对账中", skipped: "跳过", done: "已完成", failed: "失败", uncertain: "待确认", cancelled: "已取消" },
         step: { gate_wait: "等配额", transfer: "传输中", submit: "提交中" },
-        rate: "{rate}/s", heartbeat: "心跳 {time}前", attempt: "第 {n} 次", retryIn: "{time}后重试", stale: "状态停在 {time}前",
+        heartbeat: "心跳 {time}前", attempt: "第 {n} 次",
       },
       doing: { preparing: "准备中" },
       phase: {
@@ -1182,11 +1182,11 @@ const DICT = {
       doneNoStepRecord: "(no step record)",
       queuedAt: "waiting · #{n}",
         nodeUpload: {
-        node: "node {node}", prep: "prep", biliup: "upload", blocked: "cannot advance", partChain: "Part chain", notBefore: "not before {time}",
+        prep: "prep", biliup: "upload", blocked: "cannot advance", partChain: "Part chain", notBefore: "not before {time}",
         polledAgo: "status updated {time}s ago",
         state: { pending: "Pending", running: "Running", reconciling: "Reconciling", skipped: "Skipped", done: "Done", failed: "Failed", uncertain: "Uncertain", cancelled: "Cancelled" },
         step: { gate_wait: "waiting for quota", transfer: "transferring", submit: "submitting" },
-        rate: "{rate}/s", heartbeat: "heartbeat {time} ago", attempt: "attempt {n}", retryIn: "retry in {time}", stale: "status from {time} ago",
+        heartbeat: "heartbeat {time} ago", attempt: "attempt {n}",
       },
       doing: { preparing: "Preparing" },
       phase: {

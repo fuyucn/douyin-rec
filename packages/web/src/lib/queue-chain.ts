@@ -8,6 +8,11 @@
  * TODO(?): NodeUploadStatusDTO only carries the last part receipt, so the UI can show the
  * current/last part and its chain phase, not a per-part upload -> cleanup list. Exposing every
  * part needs a backend DTO field; this PR intentionally does not claim that view.
+ *
+ * TODO(?): proc-queue skipped rows are not surfaced in NodeUploadStatusDTO (hub-owned skip
+ * uses a different logical key and terminal jobs clear nodeUpload). No skipped badge is drawn
+ * until a backend DTO exposes those rows. Running -> reconciling also has no production writer
+ * yet, so its badge only activates once that state reaches NodeUploadStatusDTO.state.
  */
 
 export type TFunc = (key: string, vars?: Record<string, string | number>) => string;
@@ -66,12 +71,10 @@ export interface PartChainUpload {
 }
 
 export interface QueueChainItem {
-  /** Hub job state; badges never derive from it (proc-queue state lives in nodeUpload.state). */
-  state?: string;
   nodeUpload?: { phase: string; state: string | null } | null;
 }
 
-export type QueueBadgeKind = "part-chain" | "reconciling" | "skipped";
+export type QueueBadgeKind = "part-chain" | "reconciling";
 
 export interface QueueBadge {
   kind: QueueBadgeKind;
@@ -92,11 +95,6 @@ export function queueBadges(item: QueueChainItem, t: TFunc): QueueBadge[] {
       label: queueText(t, "queue.phase.reconciling", "reconciling"),
       title: queueText(t, "queue.phase.reconcilingTip", "Automatic reconciliation in progress; this is not a failure. Time box: 24 hours."),
     });
-  }
-  if (upload?.state === "skipped") {
-    // Reachable from the enqueue result and from a part-chain-failed receipt: uploadStatusOf
-    // copies the proc-queue state. Hub job state itself never carries "skipped".
-    out.push({ kind: "skipped", label: queueText(t, "room.runtime.stageState.skipped", "skipped") });
   }
   return out;
 }

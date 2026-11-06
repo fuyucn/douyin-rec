@@ -34,7 +34,7 @@ function uploadLine(item: QueueItemDTO, now: number, tz: string, t: TFunc): Reac
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-muted">
         <span className="inline-flex items-center gap-1"><Gauge className="w-3 h-3" />{t("queue.live.upload")}</span>
         <span>{u.nodeId}</span>
-        <span>{nodeUploadPhaseLabel(t, u.phase)}{u.step ? ` · ${u.step}` : ""}</span>
+        <span>{nodeUploadPhaseLabel(t, u.phase)}{u.step ? ` · ${queueText(t, `queue.nodeUpload.step.${u.step}`, u.step)}` : ""}</span>
         {p && <span>{fmtBytes(p.doneBytes)} / {fmtBytes(p.totalBytes)}</span>}
         {p?.bps != null && p.bps > 0 && <span>{fmtBytes(p.bps)}/s</span>}
         {u.attempts != null && u.attempts > 1 && <span>{queueText(t, "queue.nodeUpload.attempt", `attempt ${u.attempts}`, { n: u.attempts })}</span>}
