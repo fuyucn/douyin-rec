@@ -147,7 +147,10 @@ export function desiredSpecsForWorker(workerId: string, ctx: HubDesiredCtx): Rem
       assigned,
       ...rollingFields,
       streamUpload: src.streamUpload,
-      streamUploadSpool: src.streamUploadSpool,
+      // Historical false rows are upgraded at the master boundary; workers never receive none.
+      // Deliberately derived here (not a shared constant): hub-desired is app-layer and this is
+      // the single projection point for remote task specs.
+      streamUploadSpool: src.streamUploadSpool !== false,
       ...(zd.delivery ? { zeroDiskDelivery: zd.delivery } : {}),
     });
   }

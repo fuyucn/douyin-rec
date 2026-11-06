@@ -45,9 +45,9 @@ describe("buildRecordArgs", () => {
     expect(buildRecordArgs(mkTask({ streamUpload: false, name: null, anchorName: "缓存名字" }))).not.toContain("--name");
   });
 
-  it("passes --stream-upload-spool none only when the spool is explicitly disabled", () => {
+  it("never passes --stream-upload-spool none, including a legacy false row", () => {
     expect(buildRecordArgs(mkTask({ streamUpload: true, streamUploadSpool: true }))).not.toContain("--stream-upload-spool");
-    expect(buildRecordArgs(mkTask({ streamUpload: true, streamUploadSpool: false }))).toContain("--stream-upload-spool");
+    expect(buildRecordArgs(mkTask({ streamUpload: true, streamUploadSpool: false }))).not.toContain("--stream-upload-spool");
   });
 
   it("never passes both --rolling-upload and --stream-upload (mutually exclusive)", () => {

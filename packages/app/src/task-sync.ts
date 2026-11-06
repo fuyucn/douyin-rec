@@ -298,7 +298,7 @@ export function applyRemoteTasks(
         rollingEffective: spec.rollingEffective ?? spec.rollingUpload,
         // 0 落盘边录边传(plans/039):普通用户开关,旧 master 不带 → false(行为不变)。
         streamUpload: spec.streamUpload ?? false,
-        streamUploadSpool: spec.streamUploadSpool ?? true,
+        streamUploadSpool: true,
         // Zero-disk metadata (issue #331): store what the master ships as-is (raw JSON, parsed strictly at the use
         // site); not shipped -> null. Overwritten every round, so a rule change (visibility / title template)
         // reaches the node on the next sync.
@@ -336,7 +336,7 @@ export function applyRemoteTasks(
         anchorName: spec.anchorName ?? null,
         rollingUpload: spec.rollingUpload,
         streamUpload: spec.streamUpload ?? false,
-        streamUploadSpool: spec.streamUploadSpool ?? true,
+        streamUploadSpool: true,
         zeroDiskDelivery: deliveryJson(spec),
         outputFormat: readOutputFormat(spec.outputFormat),
       });

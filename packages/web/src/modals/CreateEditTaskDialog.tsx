@@ -42,7 +42,7 @@ interface FormState {
   webhookClear: boolean;
   /** 0 落盘流式直传(plans/039):源录像不落盘,边录边传 B 站。 */
   streamUpload: boolean;
-  /** 真 0 落盘 = 连 spool 都不写;代价是分 P 上传失败时没有本地回退源。 */
+  /** Always true: no-spool mode is forbidden; historical false rows are upgraded on launch. */
   streamUploadSpool: boolean;
 }
 
@@ -79,7 +79,7 @@ function fromTask(t: Task): FormState {
     webhookClear: false,
     // 旧后端不下发该字段 → undefined → false(行为同改前)。
     streamUpload: t.streamUpload === true,
-    streamUploadSpool: t.streamUploadSpool !== false,
+    streamUploadSpool: true,
   };
 }
 
@@ -162,7 +162,7 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
       schedule: form.schedule.trim() || null,
       ...webhookPatch(form.webhook, form.webhookClear),
       // Preserve the stored zero-disk fields; the room editor is the only writer.
-      ...(zeroDiskManaged ? { streamUpload: form.streamUpload, streamUploadSpool: form.streamUploadSpool } : {}),
+      ...(zeroDiskManaged ? { streamUpload: form.streamUpload, streamUploadSpool: true } : {}),
       ...(formatLock.locked ? {} : { outputFormat: form.outputFormat }),
     };
     setBusy(true);

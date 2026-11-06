@@ -11,7 +11,7 @@
  * tests run synchronously.
  */
 import { type Task, type TaskStore } from "./store.js";
-import { platformForRoom, sanitizeNotifyContext, type NotifyContext, type OutputFormat } from "@drec/core";
+import { platformForRoom, sanitizeNotifyContext, STREAM_UPLOAD_SPOOL_REQUIRED, type NotifyContext, type OutputFormat } from "@drec/core";
 import { resolveTaskStreamCookies } from "./stream-cookies.js";
 import type { Spawner } from "./process/spawner.js";
 import type { RecorderProcess, ExitInfo } from "./process/recorder-process.js";
@@ -143,6 +143,8 @@ export class TaskManager {
   private readonly probeLiving: (task: Task) => Promise<boolean>;
   private readonly hasUnconfirmedZeroDisk: (task: Task) => boolean;
   private readonly random: () => number;
+  /** taskIds whose legacy no-spool value has already produced a one-shot alert. */
+  private readonly noSpoolAlerted = new Set<number>();
 
   /** taskId → live RecorderProcess. */
   private readonly procs = new Map<number, RecorderProcess>();
@@ -304,6 +306,7 @@ export class TaskManager {
       this.log(`[task_manager] start: 未找到任务 id=${taskId}`);
       return false;
     }
+    this.warnLegacyNoSpool(task);
     // 0 落盘直传会为**每个启动的进程**建一个稿件(状态文件按 outDir 隔离,彼此不知道对方存在)。
     // 同一房间被两个任务同时录 → 两个内容重复的稿件,而 B 站没有删稿 API,代价不可逆。
     // 这是配置错误,必须在启动前挡掉,而不是等用户看到两个稿件。
@@ -635,6 +638,16 @@ export class TaskManager {
     }
   }
 
+  /** Alert once for a historical no-spool row; the spawn seam below always runs with spool. */
+  private warnLegacyNoSpool(task: Task): void {
+    if (!task.streamUpload || task.streamUploadSpool !== false || this.noSpoolAlerted.has(task.id)) return;
+    const message = "历史任务关闭了直播直传本地回退文件，该配置已禁止；本次按保留回退文件启动，请重新保存任务。";
+    this.noSpoolAlerted.add(task.id);
+    this.logTask(task.id, `[task_manager] ⚠ 任务 id=${task.id} ${message}`);
+    this.onAlert?.(task.id, "直播直传", message);
+    this.onTaskDown?.(task.id, message);
+  }
+
   /** Spawn a fresh process for the task and wire its exit handling. */
   private spawnFor(taskId: number): void {
     try {
@@ -643,6 +656,7 @@ export class TaskManager {
       this.logTask(taskId, `[task_manager] beforeSpawn 失败(忽略,按库内现值起录): ${(e as Error)?.message ?? e}`);
     }
     const task = this.store.getTask(taskId)!;
+    this.warnLegacyNoSpool(task);
     // A hub-managed node must never start a zero-disk upload from defaults: the master-delivered
     // metadata and the account check are mandatory. Throwing routes through trySpawn, which marks the
     // task `error`, logs the reason and alerts once (no restart loop, nothing is uploaded).
@@ -650,6 +664,7 @@ export class TaskManager {
     // Platform-aware cookie resolution, shared with buildSessionForTask.
     const effective = {
       ...task,
+      streamUploadSpool: STREAM_UPLOAD_SPOOL_REQUIRED,
       cookies: resolveTaskStreamCookies(task, this.store),
       // 交给 buildRecordArgs 的是判定后的生效值,不是库里所选值(有规则 / 受管 / rolling 时被压回 original)。
       outputFormat: this.nodeOutputFormat?.(task) ?? "original",

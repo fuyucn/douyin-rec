@@ -407,6 +407,13 @@ describe("startTask 磁盘水位准入(issue #96)", () => {
 });
 
 describe("createTask", () => {
+  it("rejects streamUploadSpool=false and creates no task", () => {
+    const r = api.createTask({ room: "222", streamUploadSpool: false });
+    expect(r.status).toBe(400);
+    expect((r.body as { error: string }).error).toContain("必须保留本地回退文件");
+    expect(store.listTasks()).toHaveLength(0);
+  });
+
   it("creates a task and returns it (201)", () => {
     const res = api.createTask({ room: "333", name: "tester", quality: "hd", danmu: 0 });
     expect(res.status).toBe(201);
@@ -461,6 +468,23 @@ describe("createTask", () => {
 });
 
 describe("updateTask", () => {
+  it("rejects streamUploadSpool=false without changing the stored value", () => {
+    const a = store.addTask({ room: "111", streamUploadSpool: true });
+    const r = api.updateTask(a.id, { streamUploadSpool: false });
+    expect(r.status).toBe(400);
+    expect((r.body as { error: string }).error).toContain("必须保留本地回退文件");
+    expect(store.getTask(a.id)!.streamUploadSpool).toBe(true);
+  });
+
+  it("accepts streamUploadSpool=true and defaults it when omitted", () => {
+    const explicit = api.createTask({ room: "true-case", streamUploadSpool: true });
+    expect(explicit.status).toBe(201);
+    expect((explicit.body as { streamUploadSpool: boolean }).streamUploadSpool).toBe(true);
+    const omitted = api.createTask({ room: "omitted-case" });
+    expect(omitted.status).toBe(201);
+    expect(store.listTasks().find((t) => t.room.includes("omitted-case"))!.streamUploadSpool).toBe(true);
+  });
+
   it("partial update: only provided fields change, others untouched", () => {
     const a = store.addTask({ room: "111", name: "old", quality: "origin", danmu: 1 });
     const res = api.updateTask(a.id, { name: "new" });
@@ -1961,6 +1985,17 @@ describe("rooms 域(T9 统一房间视图)", () => {
     const { a } = setup();
     bindRoom(a, "123456");
     expect(a.updateRoom("douyin.123456", {}).status).toBe(400);
+  });
+
+  it("PUT rejects streamUploadSpool=false before touching the recording half", () => {
+    const { s, a } = setup();
+    const id = bindRoom(a, "123456");
+    const before = s.getTask(id)!;
+    const r = a.updateRoom("douyin.123456", { recording: { streamUploadSpool: false } });
+    expect(r.status).toBe(400);
+    expect((r.body as { error: string }).error).toContain("必须保留本地回退文件");
+    expect(s.getTask(id)!.name).toBe(before.name);
+    expect(s.getTask(id)!.streamUploadSpool).toBe(true);
   });
 
   // Regression (#196): the editor sends `workers: []` for "all nodes"; the API rejected it AFTER the

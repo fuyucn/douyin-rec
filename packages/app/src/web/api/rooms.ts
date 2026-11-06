@@ -14,7 +14,7 @@
  * 然后返回 500 + 原因。代价是:若回滚本身也失败,仍可能留下半成功 —— 这种情况下
  * 错误信息必须**明说哪半边可能已改**,让用户能自己核对(静默留半成功是不可接受的)。
  */
-import { parseOutputFormat, platformForRoom, redactTaskSecrets, streamUploadConflicts, type RoomDTO, type RoomPayload, type RoomRecordingDTO, type HubRulePayload } from "@drec/core";
+import { forbidsStreamUploadSpool, parseOutputFormat, platformForRoom, redactTaskSecrets, STREAM_UPLOAD_NO_SPOOL_ERROR, streamUploadConflicts, type RoomDTO, type RoomPayload, type RoomRecordingDTO, type HubRulePayload } from "@drec/core";
 import type { ApiCtx } from "./context.js";
 import type { ApiResult } from "./types.js";
 import { refreshLocalRollingEffective } from "../../rolling-effective.js";
@@ -185,6 +185,9 @@ export function buildRooms(ctx: ApiCtx) {
       if (input.recording === undefined && input.processing === undefined) {
         return err(400, "recording 与 processing 至少传一个");
       }
+      if (forbidsStreamUploadSpool(input.recording?.streamUploadSpool)) {
+        return err(400, STREAM_UPLOAD_NO_SPOOL_ERROR);
+      }
 
       const before = view(key);
       if (!before) return err(404, `未找到房间 ${key}`);
@@ -338,7 +341,7 @@ export function buildRooms(ctx: ApiCtx) {
         if ("webhook" in rec) patch.webhook = normWebhook(rec.webhook);
         if ("rollingUpload" in rec) patch.rollingUpload = rec.rollingUpload === true;
         if ("streamUpload" in rec) patch.streamUpload = rec.streamUpload === true;
-        if ("streamUploadSpool" in rec) patch.streamUploadSpool = rec.streamUploadSpool !== false;
+        if ("streamUploadSpool" in rec) patch.streamUploadSpool = true;
         // 互斥(单一判定 = core.streamUploadConflicts):用 patch 后生效值比,只改一边也挡另一边的存量。
         if (streamUploadConflicts(
           patch.streamUpload ?? before.recording?.streamUpload,

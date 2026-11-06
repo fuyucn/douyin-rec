@@ -165,10 +165,9 @@ export interface RoomRecordingDTO {
    */
   streamUpload: boolean;
   /**
-   * 0 落盘流式直传是否保留本地 spool(plans/039):
-   *   - true(默认)= 每个分 P 仍写盘,失败可整文件回退、可本地 ffprobe 自检;
-   *   - false = 真 0 落盘,视频字节完全不落盘;代价是该分 P 上传失败时没有本地回退源。
-   * 仅 `streamUpload=true` 时有意义。
+   * 0 落盘流式直传的本地 spool(plans/039)。固定为 true(缺省亦按 true):每个分 P
+   * 仍写盘,失败可整文件回退、可本地 ffprobe 自检。false(真 0 落盘)已禁止写入;
+   * 历史 false 行启动时按 true 运行并告警一次。仅 `streamUpload=true` 时有意义。
    */
   streamUploadSpool: boolean;
   /** 输出格式(issue #137,缺省 original);投稿形态下后处理产物恒 mp4(见 core `effectiveStageFormat`)。 */
@@ -731,7 +730,7 @@ export interface RemoteTaskSpec {
    * 旧节点包不认识该字段会忽略。录制端把它翻译成 `record --stream-upload`。
    */
   streamUpload?: boolean;
-  /** 0 落盘是否保留 spool(可选;旧 master 不下发 → 默认保留,行为不变)。 */
+  /** 0 落盘是否保留 spool(可选;固定 true,旧 master 不下发 → 默认保留)。 */
   streamUploadSpool?: boolean;
   /**
    * Upload metadata + account key + fallback credential path a zero-disk run needs on a SIDE node (issue #331).
@@ -970,7 +969,7 @@ export interface TaskPayload {
    * 缺省 false = 走现有录制路径。
    */
   streamUpload?: boolean;
-  /** 0 落盘是否保留本地 spool(默认 true);false = 真 0 落盘、失败无本地回退。 */
+  /** 0 落盘是否保留本地 spool(固定 true);false = 已禁止写入。 */
   streamUploadSpool?: boolean;
   /** 输出格式(issue #137);服务端本就接受该字段,此前只是没写进 DTO 类型。 */
   outputFormat?: OutputFormat;
@@ -1099,7 +1098,7 @@ export interface TaskDTO {
   rollingEffective: boolean;
   /** 流式直传(零落盘)开关;与边录边传互斥。 */
   streamUpload: boolean;
-  /** 0 落盘是否保留本地 spool(默认 true);false = 真 0 落盘、失败无本地回退。 */
+  /** 0 落盘是否保留本地 spool(固定 true);false = 已禁止写入。 */
   streamUploadSpool: boolean;
   /** 输出格式(issue #137,缺省 original)。 */
   outputFormat: OutputFormat;
