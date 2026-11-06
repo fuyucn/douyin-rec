@@ -8,6 +8,7 @@ import {
 } from "@drec/core";
 import { makeUploadPartProcessor, shouldChainCleanup, PART_WORKFLOW_PARAM, uploadPartProcessor } from "@drec/processors";
 import type { BiliupHooks } from "../../packages/processors/src/run-biliup.js";
+import { parseSsAcked } from "../../packages/processors/src/biliup-progress.js";
 
 let dir: string;
 const setup = (): void => { dir = mkdtempSync(join(tmpdir(), "upload-part-")); };
@@ -42,12 +43,18 @@ const ackedRun = () => vi.fn(async (argv: string[], hooks?: BiliupHooks) => {
 
 interface Seam {
   run: ReturnType<typeof ackedRun>;
-  readAcked: () => Map<string, number> | null;
+  readAcked: (pid: number) => Map<string, number> | null;
+  /** Every pid the watchdog sampled; the boundary read must use the live child pid, never 0. */
+  pids?: number[];
 }
-const seams = (ackedBytes = 20): Seam => ({
-  run: ackedRun(),
-  readAcked: () => new Map([["local>peer", ackedBytes]]),
-});
+const seams = (ackedBytes = 20): Seam => {
+  const pids: number[] = [];
+  return {
+    run: ackedRun(),
+    pids,
+    readAcked: (pid: number) => { pids.push(pid); return new Map([["local>peer", ackedBytes]]); },
+  };
+};
 const processor = (s: Seam, extra: Record<string, unknown> = {}) => makeUploadPartProcessor({
   run: s.run as never, readAcked: s.readAcked, tickMs: 1, now: () => 1_000_000,
   expectedDurationSec: 60, lookup: { run: async () => "[]", trustNo: true }, probe: () => null,
@@ -77,6 +84,8 @@ describe("upload-part processor", () => {
       expect(r.bv).toBe(BV);
       expect(r.confirmed).toMatchObject({ size: fp(f).size });
       expect(r.confirmed!.ackedBytes).toBeGreaterThanOrEqual(r.confirmed!.size);
+      expect(s.pids!.length).toBeGreaterThan(0);
+      expect(s.pids!.every((pid) => pid > 0)).toBe(true);
       expect(s.run.mock.calls[0]![0]).toContain("upload");
       teardown();
 
@@ -123,35 +132,92 @@ describe("upload-part processor", () => {
     try {
       const f = put("a_000.ts", "x".repeat(100));
       await expect(processor(seams(99)).run(job(f), pc())).rejects.toThrow(/acked bytes 99 < file size 100/);
-      await expect(processor(seams(0)).run(job(f), pc())).rejects.toThrow(/acked bytes 0 < file size 100/);
     } finally { teardown(); }
   });
 
-  it("no readable sample (null) is unknown, not a failure: explicit signal wins and the gap is logged", async () => {
+  it("no usable sample (null / empty listing / all-zero listing) is unknown: confirm + log, never fail", async () => {
     setup();
     try {
       const f = put("a_000.ts", "x".repeat(100));
-      const s: Seam = { run: ackedRun(), readAcked: () => null };
-      const logs: string[] = [];
-      const r = await processor(s).run(job(f), pc(logs));
-      expect(r.bv).toBe(BV);
-      expect(r.confirmed).toMatchObject({ ackedBytes: null, size: 100 });
-      expect(logs.join(" ")).toMatch(/byte check unavailable/);
-      expect(logs.join(" ")).toMatch(/no tcp acked sample/);
-      // Nothing is deleted or refused: the confirmed part still flows to the cleanup chain.
+      const listings: Array<[string, (pid: number) => Map<string, number> | null]> = [
+        ["ss unavailable (null)", () => null],
+        ["ss listed nothing for the pid", () => new Map()],
+        ["all acked numbers are 0", () => new Map([["local>peer", 0]])],
+      ];
+      for (const [label, readAcked] of listings) {
+        const logs: string[] = [];
+        const r = await processor({ run: ackedRun(), readAcked }).run(job(f), pc(logs));
+        expect(r.confirmed, label).toMatchObject({ ackedBytes: null, size: 100 });
+        expect(logs.join(" "), label).toMatch(/byte check unavailable/);
+      }
+      // Nothing is deleted or refused: a confirmed part still flows to the cleanup chain.
       expect(existsSync(f)).toBe(true);
     } finally { teardown(); }
   });
 
-  it("an ss listing without the child's sockets is unknown, not zero bytes", async () => {
+  it("a boundary listing whose sockets carry no bytes_acked token is unknown, not 0 bytes (ss fixture)", async () => {
     setup();
     try {
       const f = put("a_000.ts", "x".repeat(100));
-      const s: Seam = { run: ackedRun(), readAcked: () => new Map() };
+      const fixture = [
+        'ESTAB 0      0         local:53844 peer-a:443   users:(("biliup",pid=4242,fd=9))',
+        "\t cubic bytes_sent:904 segs_out:3",
+      ].join("\n");
       const logs: string[] = [];
-      const r = await processor(s).run(job(f), pc(logs));
+      const r = await processor({ run: ackedRun(), readAcked: () => parseSsAcked(fixture, 4242) }).run(job(f), pc(logs));
       expect(r.confirmed).toMatchObject({ ackedBytes: null });
       expect(logs.join(" ")).toMatch(/byte check unavailable/);
+    } finally { teardown(); }
+  });
+
+  it("a socket that closed before the boundary never fails a legitimately confirmed part", async () => {
+    setup();
+    try {
+      const f = put("a_000.ts", "x".repeat(100));
+      let phase: "early" | "late" = "early";
+      let reads = 0;
+      const readAcked = (pid: number) => {
+        reads += 1;
+        // b disappears before the boundary read: the remaining total (70) is a lower bound, not a count.
+        return phase === "early" ? new Map([["a", 40], ["b", 60]]) : new Map([["a", 70]]);
+      };
+      const run = vi.fn(async (argv: string[], hooks?: BiliupHooks) => {
+        hooks?.onSpawn?.(4242);
+        await vi.waitFor(() => expect(reads).toBeGreaterThan(0));
+        phase = "late";
+        hooks?.onLine?.("All files uploaded successfully");
+        return argv[2] === "upload" ? "All files uploaded successfully\n" + BV : "All files uploaded successfully\nok";
+      });
+      const logs: string[] = [];
+      const r = await processor({ run, readAcked }).run(job(f), pc(logs));
+      expect(r.confirmed).toMatchObject({ ackedBytes: null });
+      expect(logs.join(" ")).toMatch(/byte check unavailable/);
+    } finally { teardown(); }
+  });
+
+  it("the boundary reading uses the live child pid while the run is still unresolved (pid=0 root cause)", async () => {
+    setup();
+    try {
+      const f = put("a_000.ts", "x".repeat(100));
+      let resolved = false;
+      const reads: Array<{ pid: number; alive: boolean }> = [];
+      const readAcked = (pid: number) => {
+        reads.push({ pid, alive: !resolved });
+        // The pid=0 root cause: an unusable pid could only ever read an empty listing.
+        return pid > 0 ? new Map([["local>peer", 200]]) : new Map();
+      };
+      const run = vi.fn(async (argv: string[], hooks?: BiliupHooks) => {
+        hooks?.onSpawn?.(4242);
+        hooks?.onLine?.("All files uploaded successfully");
+        await new Promise((r) => setTimeout(r, 5));
+        resolved = true;
+        return argv[2] === "upload" ? "All files uploaded successfully\n" + BV : "All files uploaded successfully\nok";
+      });
+      const r = await processor({ run, readAcked }).run(job(f), pc());
+      expect(reads.length).toBeGreaterThan(0);
+      expect(reads.every((x) => x.pid > 0)).toBe(true);
+      expect(reads.some((x) => x.alive)).toBe(true);
+      expect(r.confirmed).toMatchObject({ ackedBytes: 200 });
     } finally { teardown(); }
   });
 

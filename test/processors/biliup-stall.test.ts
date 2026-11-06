@@ -279,18 +279,39 @@ describe("TransferWatch.ackedSinceChild", () => {
     expect(w.ackedSinceChild).toBeNull();
     expect(w.observe(new Map()).kind).toBe("ok");
     expect(w.ackedSinceChild).toBeNull();
-    expect(w.markBoundary(false)).toBeNull();
-    expect(w.markBoundary(true)).toBeNull(); // readable but zero samples read: still unknown
+    expect(w.markBoundary(null)).toBeNull();
+    expect(w.markBoundary(new Map())).toBeNull(); // listed nothing: still unknown
   });
 
-  it("a boundary read without sockets is unknown even after mid-transfer samples", () => {
+  it("a boundary listing whose socket carries no bytes_acked token is unknown, not 0 bytes (ss fixture)", () => {
+    const fixture = [
+      'ESTAB 0      0         local:53844 peer-a:443   users:(("biliup",pid=4242,fd=9))',
+      "\t cubic wscale:9,7 bytes_sent:904 segs_out:3",
+    ].join("\n");
+    const listing = parseSsAcked(fixture, 4242);
+    expect([...listing.values()]).toEqual([0]); // the socket is listed, no acked number was parsed
+    const { w } = mkWatch();
+    w.setStep("transfer");
+    w.observe(listing);
+    expect(w.markBoundary(listing)).toBeNull();
+    expect(w.ackedAtBoundary).toBeNull();
+  });
+
+  it("a socket seen earlier but missing at the boundary keeps the proof unknown (a lower bound is not a count)", () => {
     const { w, clock } = mkWatch();
     w.setStep("transfer");
-    clock.t = 1; w.observe(new Map([["a", 900]])); // mid-transfer totals are short by nature
-    expect(w.markBoundary(false)).toBeNull();
-    w.childStarted();
-    clock.t = 2; w.observe(new Map([["a", 400]]));
-    expect(w.markBoundary(true)).toBe(400);
+    clock.t = 1; w.observe(new Map([["a", 400], ["b", 100]]));
+    clock.t = 2; w.observe(new Map([["a", 500]])); // b closed: bytes after its last read were never seen
+    expect(w.markBoundary(new Map([["a", 500]]))).toBeNull();
+    expect(w.ackedAtBoundary).toBeNull();
+  });
+
+  it("a complete boundary read uses the exact acked total", () => {
+    const { w, clock } = mkWatch();
+    w.setStep("transfer");
+    clock.t = 1; w.observe(new Map([["a", 400], ["b", 100]]));
+    clock.t = 2; w.observe(new Map([["a", 500], ["b", 200]]));
+    expect(w.markBoundary(new Map([["a", 500], ["b", 200]]))).toBe(700);
   });
 
   it("a reused socket tuple counts from its own zero, keeping the closed socket's share", () => {
@@ -320,14 +341,14 @@ describe("TransferWatch.ackedSinceChild", () => {
   it("ackedAtBoundary snapshots the proof at the boundary and resets per child", () => {
     const { w, clock } = mkWatch();
     w.setStep("transfer");
-    expect(w.markBoundary(true)).toBeNull();
+    expect(w.markBoundary(null)).toBeNull();
     clock.t = 1; w.observe(new Map([["a", 900]]));
     clock.t = 2; w.observe(new Map([["a", 1000]]));
-    expect(w.markBoundary(true)).toBe(1000);
+    expect(w.markBoundary(new Map([["a", 1000]]))).toBe(1000);
     expect(w.ackedAtBoundary).toBe(1000);
     clock.t = 3; w.observe(new Map([["a", 1500]]));
     expect(w.ackedAtBoundary).toBe(1000); // late samples never rewrite the proof
-    expect(w.markBoundary(false)).toBe(1000); // an unreadable repeat never erases the proof
+    expect(w.markBoundary(new Map())).toBe(1000); // an unusable repeat never erases the proof
     w.childStarted();
     expect(w.ackedAtBoundary).toBeNull();
   });

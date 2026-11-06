@@ -1403,15 +1403,20 @@ describe("issue #532: unreadable tcp byte sampling never blocks the part chain",
     hooks?.onLine?.("All files uploaded successfully"); // live transfer boundary
     return argv[2] === "upload" ? "All files uploaded successfully\n" + BV : "All files uploaded successfully\nok";
   });
-  const register = (readAcked: () => Map<string, number> | null): void => {
+  // The boundary read must use the live child pid (never 0): record what the watchdog was given.
+  const seenPids: number[] = [];
+  const register = (readAcked: (pid: number) => Map<string, number> | null): void => {
     registerProcessor(makeUploadPartProcessor({
-      run: partRun as never, readAcked, tickMs: 1, now: () => env.clock.t, probe: () => null,
+      run: partRun as never,
+      readAcked: (pid: number) => { seenPids.push(pid); return readAcked(pid); },
+      tickMs: 1, now: () => env.clock.t, probe: () => null,
     }));
   };
 
   it("no readable sample: the part is confirmed and later parts keep running (no order-blocked cascade)", async () => {
     const one = mkPart("p532-a1.mp4", 1);
     const two = mkPart("p532-a2.mp4", 2);
+    seenPids.length = 0;
     register(() => null);
     const r = mkRunner("A");
     const s = env.open();
@@ -1423,11 +1428,14 @@ describe("issue #532: unreadable tcp byte sampling never blocks the part chain",
     expect(s.get(two.jobId)?.error ?? "").not.toMatch(/order-blocked/);
     // Both confirmed parts chained their cleanup in the same transaction.
     expect(s.list({ kind: "cleanup-part" })).toHaveLength(2);
+    expect(seenPids.length).toBeGreaterThan(0);
+    expect(seenPids.every((pid) => pid > 0)).toBe(true);
   });
 
   it("a readable sample short of the file size is a real failure and still cascades", async () => {
     const one = mkPart("p532-b1.mp4", 1);
     const two = mkPart("p532-b2.mp4", 2);
+    seenPids.length = 0;
     register(() => new Map([["local>peer", 5]]));
     const r = mkRunner("A");
     const s = env.open();
@@ -1438,5 +1446,6 @@ describe("issue #532: unreadable tcp byte sampling never blocks the part chain",
     expect(s.get(one.jobId)?.error).toMatch(/acked bytes 5 < file size 10/);
     expect(s.get(two.jobId)?.state).toBe("cancelled");
     expect(s.list({ kind: "cleanup-part" })).toHaveLength(0);
+    expect(seenPids.every((pid) => pid > 0)).toBe(true);
   });
 });

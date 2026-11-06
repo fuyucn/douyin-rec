@@ -180,18 +180,18 @@ export function supervise(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps
     try { ctx.setState?.({ progress: lastWrite }); } catch (e) { ctx.log(`progress not saved: ${(e as Error)?.message ?? e}`); }
     slot?.touch();
   };
-  // Read the child's sockets while it is still alive. The final sample must happen at the transfer
-  // boundary: once the child exits its sockets are gone and ss cannot report them (issue #532).
-  // Returns true only when a sample was actually read (ss worked and listed this child's sockets).
-  const sampleNow = (): boolean => {
+  // Read the child's sockets while it is still alive. The final reading must happen at the transfer
+  // boundary: once the child exits its sockets are gone and ss cannot report them (issue #532). Always
+  // sampled with the live child pid; a pid of 0 could never match a socket and must stay unreachable.
+  const sampleNow = (): AckSample => {
     const c = child;
-    if (!c || c.exited || c.pid <= 0 || watch.currentStep !== "transfer") return false;
+    if (!c || c.exited || c.pid <= 0 || watch.currentStep !== "transfer") return null;
     try {
       const sample = (deps.readAcked ?? readTcpAcked)(c.pid);
-      if (sample === null || sample.size === 0) return false;
+      if (sample === null || sample.size === 0) return null;
       watch.observe(sample);
-      return true;
-    } catch { return false; }
+      return sample;
+    } catch { return null; }
   };
   const timer = setInterval(() => {
     const c = child;
