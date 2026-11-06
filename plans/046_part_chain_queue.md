@@ -110,6 +110,16 @@
 | 边录边传（rolling） | 每个 P **封口时** | 每个 P **确认后** | 该 P 的视频源 |
 | 整场上传（含 master 管线） | **下播确认后**一次创建整场（受同场口径 `SAME_BROADCAST_GAP_MS` 约束） | **最后一个 P 确认后**（整场全部 done） | 整场源与 stage，沿用 `survivingArtifacts` |
 
+**交付状态（2026-11-06 核对，避免把模板当成已实现）**：
+
+| 模式 | `cleanup-part` 实际是否由队列执行 |
+|---|---|
+| 边录边传（rolling） | ✅ 已交付：`upload-part` 确认后同事务链出 `cleanup-part`（`rolling-queue.ts`） |
+| 0 落盘直传（live-pump） | ❌ **未交付**：spool 仍由录制进程在确认后 `rmSync` 删除。队列化方案见 `plans/048_cleanup_spool.md`（评审后暂缓） |
+| 整场上传（含 master 管线） | ❌ **未交付**：`whole-order` 明确不链 `cleanup-part`（`runner.ts:687`），源与 stage 由 master 的 `cleanupSourcesShared` / `transport.cleanup` 清理 |
+
+另：崩溃接管（孤儿扫描补入队）也仍是设计意图，未交付（`plans/047` §8）。
+
 两点说明：
 
 - **清理粒度**用 `scope = part | order` 表达：`part` 由单个 P 的 done 触发；`order` 由「同 `orderKey` 同 `generation` 下全部 P 都 done 或 skipped」触发。两者共用同一套校验（§5.4），不另写第二份。

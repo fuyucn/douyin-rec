@@ -148,3 +148,29 @@ spool 文件：录制期间的临时中间扩展名（视频容器）           
 - **无跨进程锁**：残留 TOCTOU 窗口，靠 §3 的条件组合收窄；A 阶段量化、B 阶段 canary 验证。
 - **state 归档后的证据**：只在归档 state 里匹配；找不到即留存（不猜）。
 - **旧版本节点**：不认识 `cleanup-spool` → 该 kind 的行在旧节点上不会被认领；上线顺序必须是「先升级节点，再开 shadow，再开真删」。
+
+## §10 决策记录（2026-11-06）：暂缓实施
+
+两轮独立设计评审（`group/review`、`claude-opus-5.5`）逐条对照源码后都给出「仍需修正」，共 10 条阻断项。核实下来，本设计（v2）自身还有三处硬伤：
+
+1. **「会话已结束」前置是错的且自相矛盾**。`seal()` 先 `closeSpool()` 再写 `parts`（`live-pump.ts:1410-1415`），所以「parts 行存在 ⇒ fd 已关」已经足够；按 v2 的字面实现，活跃直播里 confirmed 分 P 会一直 deferred，**整场都不清 spool** —— 相对现状（确认即删）是磁盘回归。
+2. 引用不存在的函数：`finalize()`（只有模块级 `finalizeRecordedPart`）、`recordNodeRemux`（只有 `recoverNodeRemux`）。
+3. `recover()` 在无 `pending` 时直接 return（`:845-846`），所以「重启时重放 outbox」对干净重启不成立。
+
+评审同时指出，`plans/046 §4.2` 与 core 的 `PART_WORKFLOW_TEMPLATES["live-pump"].cleanupAt = "part-confirmed"` **已经把直传清理定成 `cleanup-part`**，而删除守卫断言「唯一的 SANCTIONED_DELETER 恰有 3 个钉点」（`test/arch/processors-deletion-guard.test.ts:14-26,52-56`）—— 新增 `cleanup-spool` 必然要改这个不变量。
+
+### 结论
+
+**维持现状**：0 落盘 spool 继续由录制进程在确认持久化后 `rmSync`（`live-pump.ts:1173-1186`）。这条路径今天就是安全的，依据是「confirmed 行不可变 + 确认后 live-pump 不再读该 spool」，而且 `parts` 里的条目是封口后才写入的。
+
+### 要做的话，走简化路径（不要新 kind）
+
+- **复用 `cleanup-part`**：`ctx.file = spoolPath`、`ctx.orderKey = room:createdAt`、`ctx.index = partIndex + 1`、`ctx.fp`、`ctx.bv`（state 已有 `bvid`；只有 `aid` 的稿件需单独定规）。这样不改 core 模板、不改删除守卫、不加 lane、不加能力位。
+- **A 阶段用 in-band 差分 shadow**：在现有 `rmSync` **之前**用同一份内存 state 算出 B 的判定，记录 agree / retain-reason。旧删除逻辑不变，不新增扫描器，覆盖的是真实人群。
+- **补偿用隐式 outbox**：`confirmed && spool 仍在` 本身就是要交付的集合，`cleanupConfirmed` 每次都会遍历；确定性 jobId 保证幂等。最后一段与子进程崩溃由 serve 按任务补入队，**不写 state**（写 state 会触发 `stateUntrusted` 并 bump `updatedAt`，改变 30 分钟同场判定）。
+- **低水位**：`cleanup-part` 同样有饿死问题，应做成 Processor 能力位 + 独立 lane，两个 kind 共用。
+- **指纹加 `ino`**，并把 spool 创建改成 `openSync(path, "wx")`，让「命名不复用」成为结构保证而不是约定。
+
+### 触发条件（重新开做）
+
+只有在出现以下任一情况时才值得重新启动 B 阶段：0 落盘任务的 spool 清理因 SIGKILL/崩溃实际泄漏过（有 sweep 之外的残留）、或磁盘水位告警可归因到 spool 积压、或需要「清理与上传同一状态机」来做审计。
