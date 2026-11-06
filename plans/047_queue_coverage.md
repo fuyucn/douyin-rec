@@ -50,13 +50,13 @@
 | 每节点持久队列（租约/fencing/保序/notBefore/场间游标/原子批量） | ✅ 036+038 | 是 | 是（serve 启动即持有租约） |
 | `upload-part`（单 P 上传 + 确认后同事务链出 cleanup） | ✅ 046 PR1/PR5 | 否 | **未核验**：需 `rollingQueueMode=on` **或** `nodeUpload.mode=queue && partChain`（两条生产来源，`rolling-queue.ts:54`、`node-upload-queue.ts:144`） |
 | `cleanup-part`（唯一队列删除者 + 架构守护） | ✅ PR2 #515 | 否（无行则空转） | 条件生效（仅作为 upload-part 的下一环；2026-11-06 手动开 rolling 测试时观测到 `done` 行） |
-| `reconcile-part`（对账，**影子模式**） | ✅ PR3 #516 | 否 | **否**（`startReconciliation` 无调用方、`reconcileQuery` 生产未注入） |
+| `reconcile-part`（对账，**影子模式**） | ✅ PR3 #516 | 否 | **未核验**：代码路径上缺 `startReconciliation` 调用方且 `reconcileQuery` 生产未注入；未抽样确认现场是否曾有该 kind 执行 |
 | 重试策略统一（去 3 次即停/确定性即停/告警去重） | ✅ PR4 #514 | 是 | 直接生效（无开关） |
 | 对账解析器适配真实 `biliup list` | ✅ PR0 #513 | 是 | 是（默认 `trustNo=false`，保守） |
-| 边录边传只入队模式 | ✅ PR6 #529 | **否**（默认 off） | 否 |
+| 边录边传只入队模式 | ✅ PR6 #529 | **否**（代码缺省 off，`rolling-queue.ts:54`） | **未核验**：源码只能证明缺省 off；现场是否曾开启未抽样（本次测试期为手动开启、现已回 off） |
 | hub 托管写 `skipped(hub-owned)` + `uploadOwner` 单点 | ✅ PR7 #520 | 是 | 是 |
 | 前端队列页（链式/状态徽标） | ✅ PR8 #523 | 是 | 是（但**只显示最后一条 part receipt**，`queue-chain.ts:8`） |
-| `upload-part` 字节采样误判修复 | ✅ #533 | 是 | 是 |
+| `upload-part` 字节采样误判修复 | ✅ #533 | 是 | **条件生效**：仅在 `upload-part` 执行路径内生效（`upload-part.ts:130,141`）；2026-11-06 手动开 rolling 测试时观测到上传 `done`，默认 off 下无执行样本 |
 | 禁 `streamUploadSpool=false` | ⏳ #537 | — | — |
 | 统一「P 确认」口径 + spool 清理队列化 | ⏳ #538 | — | — |
 
