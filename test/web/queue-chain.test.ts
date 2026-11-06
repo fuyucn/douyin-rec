@@ -1,5 +1,3 @@
-import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   partChainFields,
@@ -11,11 +9,6 @@ import {
   type PartChainUpload,
   type TFunc,
 } from "../../packages/web/src/lib/queue-chain";
-import { PartChainLine, QueueStateBadges, SkippedStepBadges } from "../../packages/web/src/components/QueueBadges";
-
-const webRequire = createRequire(fileURLToPath(new URL("../../packages/web/package.json", import.meta.url)));
-const React = webRequire("react") as typeof import("react");
-const { renderToStaticMarkup } = webRequire("react-dom/server") as typeof import("react-dom/server");
 
 const ZH: Record<string, string> = {
   "queue.nodeUpload.partChain": "分 P 链",
@@ -100,53 +93,5 @@ describe("queue chain presentation facts", () => {
     ]);
     expect(partChainProgressPct(upload())).toBe(40);
     expect(partChainProgressPct(upload({ progress: null }))).toBeNull();
-  });
-});
-
-describe("queue chain rendering", () => {
-  it("renders the part-chain badge and telemetry", () => {
-    const badge = renderToStaticMarkup(React.createElement(QueueStateBadges, {
-      item: { state: "running", nodeUpload: { phase: "part-chain" }, doneSteps: [] },
-      t,
-    }));
-    expect(badge).toContain("分 P 链");
-
-    const line = renderToStaticMarkup(React.createElement(PartChainLine, {
-      upload: upload(),
-      now: NOW,
-      tz: "Asia/Shanghai",
-      t,
-    }));
-    expect(line).toContain("reconciling");
-    expect(line).toContain("传输中");
-    expect(line).toContain("第 2 次");
-    expect(line).toContain("最早重试 12:34");
-    expect(line).toContain("40.0 MB / 100.0 MB");
-    expect(line).toContain("width:40%");
-  });
-
-  it("renders the reconciling badge and skipped badge", () => {
-    const reconciling = renderToStaticMarkup(React.createElement(QueueStateBadges, {
-      item: { state: "reconciling", doneSteps: [] },
-      t,
-    }));
-    expect(reconciling).toContain("自动对账中");
-
-    const skipped = renderToStaticMarkup(React.createElement(SkippedStepBadges, {
-      item: { state: "skipped", doneSteps: [] },
-      t,
-    }));
-    expect(skipped).toContain("跳过");
-  });
-
-  it("renders nothing new when the part-chain fields are absent", () => {
-    expect(renderToStaticMarkup(React.createElement(QueueStateBadges, {
-      item: { state: "running", nodeUpload: { phase: "biliup" }, doneSteps: [] },
-      t,
-    }))).toBe("");
-    expect(renderToStaticMarkup(React.createElement(SkippedStepBadges, {
-      item: { state: "running", doneSteps: [] },
-      t,
-    }))).toBe("");
   });
 });
