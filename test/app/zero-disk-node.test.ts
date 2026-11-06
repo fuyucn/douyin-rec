@@ -180,6 +180,24 @@ describe("zeroDiskNodePreflight — refuse loudly, never default", () => {
     expect(r).toMatchObject({ ok: true, cookiesPath: delivered, credentialSource: "delivered-path" });
     expect(nodeDefault).not.toBe(delivered);
   });
+  it("the first known-account alternate wins even when it mismatches (no hunting for a matching login)", () => {
+    // Pins the documented policy: alternates are a recovery for an unreadable primary, not a search
+    // for whichever file happens to match. A mismatching alternate stays a loud refusal.
+    const root = useRoot("node");
+    writeCookies(root, "7"); // readable, wrong account = first known alternate
+    const envPath = join(base, "env.json");
+    writeFileSync(envPath, cookiesFor("42")); // primary: unreadable in this test
+    const delivered = join(base, "delivered.json");
+    writeFileSync(delivered, cookiesFor("42")); // matches, but must never be reached
+    const r = zeroDiskNodePreflight(json({ ...GOOD, credentialPath: delivered }), {
+      env: { BILIUP_COOKIE: envPath },
+      readFile: (p: string) => {
+        if (p === envPath) throw new Error("EACCES");
+        return readFileSync(p, "utf-8");
+      },
+    });
+    expect(r).toMatchObject({ ok: false, refusal: { code: "account_mismatch" } });
+  });
   it("an unreadable env login falls back to the node default", () => {
     const root = useRoot("node");
     const nodeDefault = writeCookies(root, "42");

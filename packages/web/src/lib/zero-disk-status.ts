@@ -2,7 +2,7 @@
  * zero-disk-status.ts — how a side node's zero-disk state is shown in the master console (issue #331).
  * Pure and tested: the backend sends a state + a stable refusal code, the UI picks the wording.
  */
-import type { LiveUploadSummary, ZeroDiskNodeStatusDTO } from "@drec/contracts";
+import type { LiveUploadSummary, ZeroDiskNodeStatusDTO, ZeroDiskRefusalCode } from "@drec/contracts";
 
 export type ZeroDiskTone = "ok" | "warn" | "error" | "muted";
 
@@ -15,7 +15,8 @@ export interface ZeroDiskView {
   detail?: string;
 }
 
-const REFUSAL_KEYS: Record<string, string> = {
+/** Exhaustive on purpose: adding a refusal code in core must break this file (never fall back silently). */
+const REFUSAL_KEYS: Record<ZeroDiskRefusalCode, string> = {
   account_mismatch: "room.zeroDisk.refusedAccountMismatch",
   account_unknown: "room.zeroDisk.refusedAccountUnknown",
   credential_missing: "room.zeroDisk.refusedCredential",
