@@ -81,7 +81,7 @@ const DICT = {
       },
       streamUpload: {
         name: "直播直传",
-        desc: "直播数据边录边直接传给 B 站,不写本地视频文件;按字节上限或时长上限先到者结算一个分 P,后续分 P 续到同一稿件。",
+        desc: "直播数据边录边直接传给 B 站,每个分 P 先写临时文件、上传成功后清理;按字节上限或时长上限先到者结算一个分 P,后续分 P 续到同一稿件。",
         risk: "未上传完的那一段一旦断流就没有本地视频可回退;上传结果不确定时会停下并保留临时文件转人工。与「边录边传」互斥。",
         where: "在任务的「直播直传」开关里切换。",
         graduation: "跟踪票关闭且线上观察满 168 小时无新增 incident 后摘除徽标。",
@@ -139,7 +139,7 @@ const DICT = {
     dialog: {
       createTitle: "新建录制任务", editTitle: "编辑任务", desc: "填写直播间与录制参数，全局 Cookie 在右上角统一管理。",
       streamUpload: "直播直传",
-      streamUploadHint: "开 = 直播数据边录边直接传 B 站,不写本地视频文件;按字节上限或时长上限先到者结算一个分 P,后续分 P 续到同一稿件。关 = 照旧录制视频文件。",
+      streamUploadHint: "开 = 直播数据边录边直接传 B 站,每个分 P 先写临时文件、上传成功后清理;按字节上限或时长上限先到者结算一个分 P,后续分 P 续到同一稿件。关 = 照旧录制视频文件。",
       streamUploadLockRolling: "该任务已启用「边录边传」,两者互斥(边录边传靠源文件上传);请先在 hub 规则里改上传模式。",
       streamUploadMoved: "直播直传已迁到房间编辑的「边录边传」子选项;此处仅显示存量任务状态,请到房间页修改。",
       platform: "平台: {id}",
@@ -677,8 +677,8 @@ const DICT = {
       },
       streamUpload: {
         name: "Live upload",
-        desc: "Live data is uploaded to Bilibili while it is still being recorded, so no local video file is written. A part is sealed when either the byte cap or the duration cap is reached first, and later parts append to the same archive.",
-        risk: "A part that has not finished uploading has no local video fallback if the stream drops. When the upload outcome is uncertain the run stops and keeps the temporary file for manual handling. Mutually exclusive with rolling upload.",
+        desc: "Live data is uploaded to Bilibili while it is still being recorded. Each part is written to a temporary file first and cleaned after the upload succeeds; a part is sealed when either the byte cap or the duration cap is reached first, and later parts append to the same archive.",
+        risk: "A part that has not finished uploading keeps its local fallback file, so it can be re-uploaded after the stream drops. When the upload outcome is uncertain the run stops and keeps the temporary file for manual handling. Mutually exclusive with rolling upload.",
         where: "Toggle it with the \"Live upload\" switch on a task.",
         graduation: "The badge is removed once the tracking issue is closed and production has run 168 hours without a new incident.",
       },
@@ -735,7 +735,7 @@ const DICT = {
     dialog: {
       createTitle: "New recording task", editTitle: "Edit task", desc: "Set the room and recording options. The global cookie is managed at the top-right.",
       streamUpload: "Live upload",
-      streamUploadHint: "On = live data is uploaded to Bilibili while recording, with no local video file; a part is sealed when the byte cap or the duration cap is reached first, and later parts append to the same archive. Off = record a video file as before.",
+      streamUploadHint: "On = live data is uploaded to Bilibili while recording; each part is written to a temporary file first and cleaned after the upload succeeds. A part is sealed when the byte cap or the duration cap is reached first, and later parts append to the same archive. Off = record a video file as before.",
       streamUploadLockRolling: "This task has rolling upload enabled; the two are mutually exclusive (rolling upload needs the source file). Change the upload mode in the hub rule first.",
       streamUploadMoved: "Live upload moved to the room editor's rolling sub-option. This shows the stored state only; change it from the room page.",
       platform: "Platform: {id}",
@@ -821,7 +821,7 @@ const DICT = {
       mergeOne: "Merge into one video", mergeSplit: "Per recorded segment", mergeOneHint: "Join the whole broadcast into one file before upload or archive", mergeSplitHint: "One part per recorded segment; burn each segment when burning is on",
       outputHint: "Merge = all segments become one video before upload (default); per segment = each recorded segment is its own part, burned per segment when burning is on", moreUpload: "More: submission / part titles, description", flowLabel: "Processing flow",
       method: { label: "Upload method", after: "Upload after broadcast", afterHint: "After the broadcast, master merges / burns, then uploads (default)", rollingHint: "Upload while recording, segment by segment; optional 0-disk", nodeHint: "The recording node merges and uploads locally; no copy back" },
-      lock: { needDanmu: "Turn on \"Record danmu\" first", needNodeSide: "Only applies to node-side upload", needMerge: "No merge step when output is per segment", needUploadForCleanArchive: "Without upload the archive is the final output and is never cleaned; locked to keep", outputFormatUpload: "Uploads always use mp4 (Bilibili requirement); locked", outputFormatHub: "This task is managed by the master Hub; its output format is set on the master, so it can't be set here", outputFormatHubRule: "A Hub rule matches this room but this task is not the rule's source task; the output format is taken from the source task only, so it can't be set here", outputFormatRolling: "Rolling upload is on (source deleted after upload), which excludes in-place container replacement, so it can't be set here", outputFormatStreamUpload: "Live upload is on, so no local video file is produced and there is nothing to convert; it can't be set here", outputFormatNoSurvivors: "The task's Hub rule deletes every local source recording after it finishes, so there is nothing to convert; it can't be set here", zeroDiskNeedsRolling: "Live upload requires rolling upload, burning off, and exactly one node (local or a single worker)" },
+        lock: { needDanmu: "Turn on \"Record danmu\" first", needNodeSide: "Only applies to node-side upload", needMerge: "No merge step when output is per segment", needUploadForCleanArchive: "Without upload the archive is the final output and is never cleaned; locked to keep", outputFormatUpload: "Uploads always use mp4 (Bilibili requirement); locked", outputFormatHub: "This task is managed by the master Hub; its output format is set on the master, so it can't be set here", outputFormatHubRule: "A Hub rule matches this room but this task is not the rule's source task; the output format is taken from the source task only, so it can't be set here", outputFormatRolling: "Rolling upload is on (source deleted after upload), which excludes in-place container replacement, so it can't be set here", outputFormatStreamUpload: "Live upload is on: parts are uploaded directly and cleaned after the upload succeeds, so there is nothing to convert; it can't be set here", outputFormatNoSurvivors: "The task's Hub rule deletes every local source recording after it finishes, so there is nothing to convert; it can't be set here", zeroDiskNeedsRolling: "Live upload requires rolling upload, burning off, and exactly one node (local or a single worker)" },
       flow: {
         record: "Record", noProcess: "Paused", rolling: "Rolling upload", merge: "Merge", split: "Per segment",
         burnDanmu: "Burn danmu", burnLivechat: "Burn livechat", upload: "Upload to Bilibili", nodeSide: "Node-side upload", stageOnly: "Archive only", format: "Format {fmt}",

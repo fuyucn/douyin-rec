@@ -1518,6 +1518,9 @@ const hubStarter: HubStarter = {
       }
       return map;
     };
+    // Lives for the whole serve process: repeated master sync rounds dedupe the legacy
+    // no-spool compatibility warning through this set (see task-sync ApplyTasksOptions).
+    const noSpoolWarnedKeys = new Set<string>();
     // Local worker: same judgement as ssh / fleet nodes (state files + /proc fallback), NOT the serve-side
     // `[状态]` flag, which flips to "not recording" on `录制停滞` while the tail part is still uploading.
     // Hosts without /proc (macOS) cannot verify state files: there the serve-side flag is the only signal.
@@ -1550,6 +1553,7 @@ const hubStarter: HubStarter = {
       // adopt=false:本机源任务保持用户可编辑(managedBy 不置 hub),只有远端节点的同步任务才锁编辑。
       applyTasks: (input) => applyRemoteTasks(opts.store, input.desired, opts.log, {
         adopt: false,
+        noSpoolWarnedKeys,
         force: input.force === true,
         // 审计快照落 <数据根>/config/managed/(显式传目录,不从 DOUYIN_REC_ROOT 推导)。
         managedStateDir: join(rootConfigDir(), "managed"),

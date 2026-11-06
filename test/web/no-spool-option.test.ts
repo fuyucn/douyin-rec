@@ -33,7 +33,12 @@ describe("UI copy describes the mandatory spool", () => {
     const dict = readFileSync(join(ROOT, "packages", "web", "src", "lib", "i18n.tsx"), "utf-8");
     expect(dict).toContain('zeroDisk: "直播直传（临时落盘分 P，上传成功后清理）"');
     expect(dict).toContain('zeroDisk: "Live upload (temporary local parts, cleaned after upload)"');
-    expect(dict).not.toContain('zeroDisk: "直播直传（不写本地视频）"');
-    expect(dict).not.toContain('zeroDisk: "Live upload (no local video)"');
+    expect(dict).toContain("每个分 P 先写临时文件");
+    expect(dict).toContain("上传成功后清理");
+    expect(dict).toContain("keeps its local fallback file");
+    expect(dict).not.toContain("不写本地视频");
+    expect(dict).not.toContain("no local video");
+    expect(dict).not.toContain("断流没有回退");
+    expect(dict).not.toContain("no local video fallback");
   });
 });

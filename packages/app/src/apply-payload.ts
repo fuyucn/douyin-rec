@@ -5,6 +5,7 @@
  * without importing platform vendor bundles.
  */
 import type { RemoteTaskSpec } from "@drec/core";
+import { STREAM_UPLOAD_SPOOL_REQUIRED } from "@drec/core";
 import { applyRemoteTasks, type ApplyTasksOptions } from "./task-sync.js";
 import type { TaskStore } from "./store.js";
 
@@ -38,11 +39,16 @@ export function applyTasksPayload(
   store: TaskStore,
   b64: string,
   log: ((msg: string) => void) | undefined,
-  opts: Pick<ApplyTasksOptions, "managedStateDir">,
+  opts: Pick<ApplyTasksOptions, "managedStateDir" | "noSpoolWarnedKeys">,
 ) {
   const input = parseApplyTasksPayload(b64);
+  // _apply-tasks is a short-lived process per invocation, so dedup via the injected set only
+  // works for in-process callers (serve local worker). Cross-process ssh calls accept one
+  // warning per invocation; a persistent marker was deliberately not added (no DB column).
+  const warned = opts.noSpoolWarnedKeys ?? new Set<string>();
   return applyRemoteTasks(store, input.desired, log, {
     ...opts,
+    noSpoolWarnedKeys: warned,
     force: input.force === true,
     ...(input.expectedVersion !== undefined ? { expectedVersion: input.expectedVersion } : {}),
   });

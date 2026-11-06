@@ -331,6 +331,8 @@ export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freez
     const { applyTasksPayload } = await import("@drec/app");
     return withTaskStore(dataRoot, async (store) => {
       // T16: expectedVersion travels in the payload; an old master without it → version 0.
+      // Cross-process: each _apply-tasks invocation is a fresh process, so a legacy no-spool
+      // warning is emitted once per invocation (accepted semantics; no persistent marker).
       const result = applyTasksPayload(store, b64, undefined, {
         // Audit snapshot dir is derived from dataRoot explicitly (no DOUYIN_REC_ROOT here; see managed-state.ts).
         managedStateDir: join(dataRoot, "config", "managed"),
