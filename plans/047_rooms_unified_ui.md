@@ -99,7 +99,7 @@ export function nodeCaps(hubEnabled: boolean | null): NodeCaps;
 | 1 录制·附加（直播直传 / 边录边传 / 存档格式） | ✅（在 process/upload 内） | 存档格式 ✅ 可写；直传/边录边传 **只读提示「由主控配置」**（见下方偏离记录） |
 | 2 处理（合并/烧录版本/节点直传/能力要求） | ✅ | ❌ 隐藏 |
 | 3 上传（上传方式=存档/投稿、时机、公开、tid/tag/描述/模板/分 P 大小） | ✅ | ❌ 隐藏 |
-| 4 收尾（清理规则 / webhook） | ✅ | 只留 webhook（清理是 master 的 stage/源文件动作） |
+| 4 收尾（清理规则 / 专属推送地址） | ✅ | 只留专属推送地址（清理是 master 的 stage/源文件动作） |
 
 > 若用户希望 worker 也保留"上传时机（节点直传）"等 hub 规则字段，那它们必须走 master 的规则文件，本节点无法生效 —— 这正是要禁的部分。因此 worker 只保留 task 字段级的能力。
 
@@ -213,7 +213,7 @@ export function nodeCaps(hubEnabled: boolean | null): NodeCaps;
 
 - **F1 `/hub` 页仍存在**：它按规则维度编辑 master 的规则（含拖拽排序）。本计划不动它，但要在 `HubPage` 的规则编辑入口加一句"房间的整体配置在「房间」页"，避免两处配置互相覆盖。若确认要退役，见 §9 后续项。
 - **F2 未分配任务的过滤**：worker 上原 TaskList 默认隐藏 `isUnassignedHidden` 的受管任务，Rooms 列表必须承接，否则节点页面会突然多出一堆隐藏房间。
-- **F3 受管只读与"本地 override"**：现有受管任务在 worker 上有 per-node override（cookies/useCookie/outDir/webhook）。用户口径是"不可 edit"，本计划按**整体只读**执行；若之后要保留 override，需要单独开票（会与"只有一个弹窗"冲突）。
+- **F3 受管只读与"本地 override"**：现有受管任务在 worker 上有 per-node override（凭证/账号开关/输出目录/推送地址）。用户口径是"不可 edit"，本计划按**整体只读**执行；若之后要保留 override，需要单独开票（会与"只有一个弹窗"冲突）。
 - **F4 创建即写规则的回滚**：任务回滚失败必须显式说明，不能静默半成功（沿用 `updateRoom` 的错误口径）。worker 上不写规则，故无此风险。
 - **F5 `hubEnabled === null` 抖动**：首屏探测未完成时若渲染 worker 版，可能闪一下；`homeTarget` 返回 null 已等待，页面内部按 worker 保守渲染（不显示写操作），探测完成后再展开 master 能力。
 - **F6 旧链接**：通知、队列页、hub 页存在 `/rooms/:key` 与 `/task/:id` 链接（`ui-consistency` 有守护），跳转必须保参数（`?logs=1`）。
