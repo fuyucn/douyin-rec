@@ -15,8 +15,8 @@ export type RoomMethodKind = "live" | "rolling" | "upload" | "archive" | "none";
  * master-computed truth for legacy rolling: an unconfigured mode (missing/null/empty per core
  * `normalizeUploadMode`) or an upload mode or a missing rule keeps rolling, while an explicit
  * stage or unknown mode in the rule always wins over a stale effective field. Core folds unknown
- * future strings into "stage", so this projection compares the raw configured value: only the
- * literal stage is archive, and a future mode receives no guessed mark.
+ * future strings into "stage", so this projection compares the raw configured value: stage and
+ * the supported legacy stage-only alias are archive, and a future mode receives no guessed mark.
  */
 export function roomMethodKind(r: Pick<RoomDTO, "recording" | "processing">): RoomMethodKind {
   if (r.recording?.streamUpload === true) return "live";
@@ -26,6 +26,6 @@ export function roomMethodKind(r: Pick<RoomDTO, "recording" | "processing">): Ro
   const mode = normalizeUploadMode(raw);
   if (mode === "upload") return r.recording?.rollingEffective === true ? "rolling" : "upload";
   if (mode === "rolling") return "rolling";
-  if (mode === "stage") return configured === "stage" ? "archive" : "none";
+  if (mode === "stage") return configured === "stage" || configured === "stage-only" ? "archive" : "none";
   return "none";
 }

@@ -52,6 +52,7 @@ describe("roomMethodKind — the one delivery-mode projection used by the rooms 
   it("prefers authoritative legacy rolling over an upload-mode rule, and never overrides explicit stage or unknown modes", () => {
     expect(roomMethodKind(room({ recording: { rollingEffective: true } as RoomDTO["recording"], processing: { pipeline: { upload: { mode: "upload" } } } as RoomDTO["processing"] }))).toBe("rolling");
     expect(roomMethodKind(room({ recording: { rollingEffective: true } as RoomDTO["recording"], processing: { pipeline: { upload: { mode: "stage" } } } as RoomDTO["processing"] }))).toBe("archive");
+    expect(roomMethodKind(room({ recording: { rollingEffective: true } as RoomDTO["recording"], processing: { pipeline: { upload: { mode: "stage-only" } } } as unknown as RoomDTO["processing"] }))).toBe("archive");
     expect(roomMethodKind(room({ recording: { rollingEffective: true } as RoomDTO["recording"], processing: { pipeline: { upload: { mode: "future" } } } as unknown as RoomDTO["processing"] }))).toBe("none");
   });
 
