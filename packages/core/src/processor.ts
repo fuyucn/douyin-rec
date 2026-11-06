@@ -92,6 +92,12 @@ function assertPartCtx(ctx: unknown, kind: string, bad: (why: string) => never):
  */
 function assertSidecarPath(params: Record<string, unknown>, ctx: unknown, bad: (why: string) => never): void {
   const raw = params.sidecarPath;
+  // The recorder-side index written into `confirmed` is caller data too: a bogus value would corrupt
+  // the session's upload ledger (rework addendum 9).
+  const index = params.sidecarIndex;
+  if (index !== undefined && (!Number.isSafeInteger(index) || (index as number) < 0)) {
+    bad("params.sidecarIndex must be a non-negative safe integer");
+  }
   if (raw === undefined) return;
   if (typeof raw !== "string" || raw === "" || raw.includes("\0") || !isAbsolute(raw)) {
     bad("params.sidecarPath must be a non-empty absolute path");

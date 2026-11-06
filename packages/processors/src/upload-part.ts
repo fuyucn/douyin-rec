@@ -175,7 +175,8 @@ export async function runOneBiliupPart(
  * between the read and the rename and lose this confirmation.
  */
 function mergeRollingSidecar(sidecarPath: string, ctx: ProcessContext, bv: string, job: ProcessJob): void {
-  const index = typeof job.params.sidecarIndex === "number" ? job.params.sidecarIndex : null;
+  const rawIndex: unknown = job.params.sidecarIndex;
+  const index = Number.isSafeInteger(rawIndex) && (rawIndex as number) >= 0 ? (rawIndex as number) : null;
   const orderKey = typeof job.params.queueOrderKey === "string" ? job.params.queueOrderKey : null;
   withFileLockSync(sidecarPath, () => {
     let state: Record<string, unknown> = {};

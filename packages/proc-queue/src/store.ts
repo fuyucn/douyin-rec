@@ -538,10 +538,25 @@ export class ProcQueueStore {
       .all(kind, orderKey, seq, generation) as Row[]).map(toRecord);
   }
 
-  /** How many rows of one kind exist for an order key (rollback guard: any row means the queue owns it). */
+  /** How many rows of one kind exist for an order key (any state). */
   countOrderRows(orderKey: string, kind: string = PART_KINDS.upload): number {
     const r = this.db.prepare("SELECT COUNT(*) AS n FROM proc_jobs WHERE kind=? AND orderKey=?")
       .get(kind, orderKey) as Row;
+    return r.n == null ? 0 : Number(r.n);
+  }
+
+  /**
+   * Rows of one order that the queue still owns: everything except the success/discard terminals
+   * (done / cancelled / skipped). The PR6 rollback guard counts THESE, not every row: once an order is
+   * fully drained, the legacy path may continue without racing the runner, and waiting for the 7-day GC
+   * would block a new session of the same broadcast for no reason (rework addendum 9).
+   * failed / uncertain are included because they can still be requeued (runner or a human) and would
+   * then upload the same part twice.
+   */
+  countOpenOrderRows(orderKey: string, kind: string = PART_KINDS.upload): number {
+    const r = this.db.prepare(
+      "SELECT COUNT(*) AS n FROM proc_jobs WHERE kind=? AND orderKey=? AND state NOT IN ('done','cancelled','skipped')",
+    ).get(kind, orderKey) as Row;
     return r.n == null ? 0 : Number(r.n);
   }
 

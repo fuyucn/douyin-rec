@@ -236,12 +236,16 @@ export function importRollingConfirmedPart(
   } finally { store.close(); }
 }
 
-/** Rollback guard: does this order key already have upload-part rows (any state / generation)? */
+/**
+ * Rollback guard: does the node queue still own parts of this order?
+ * Only open rows count (pending/running/reconciling/failed/uncertain): a fully drained order (every row
+ * done/skipped/cancelled) must NOT block the legacy path until the 7-day GC (rework addendum 9).
+ */
 export function queueOrderHasRows(orderKey: string): boolean {
   const store = openQueue();
   if (!store) throw new Error("proc-queue unavailable"); // unreadable queue must not look empty
   try {
-    return store.countOrderRows(orderKey, PART_KINDS.upload) > 0;
+    return store.countOpenOrderRows(orderKey, PART_KINDS.upload) > 0;
   } finally { store.close(); }
 }
 

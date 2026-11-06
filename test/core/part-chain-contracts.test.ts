@@ -75,6 +75,13 @@ describe("part-chain contract", () => {
     for (const [label, value] of bad) {
       expect(() => assertJobInvariants(withPath(value), allowed), label).toThrow(/sidecarPath/);
     }
+    // sidecarIndex is caller data written into the session ledger: only a non-negative integer passes.
+    const withIndex = (sidecarIndex: unknown): ProcessJob =>
+      partJob(PART_KINDS.upload, { params: { ctx: ctx(), sidecarIndex } });
+    expect(() => assertJobInvariants(withIndex(0), allowed)).not.toThrow();
+    expect(() => assertJobInvariants(withIndex(-1), allowed)).toThrow(/sidecarIndex/);
+    expect(() => assertJobInvariants(withIndex(1.5), allowed)).toThrow(/sidecarIndex/);
+    expect(() => assertJobInvariants(withIndex("0"), allowed)).toThrow(/sidecarIndex/);
     // The path must follow the part file, not the job's inputs.
     const otherFile = ROOT + "/b_001.ts";
     const job = partJob(PART_KINDS.upload, {

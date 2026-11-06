@@ -1,13 +1,13 @@
 // plan 046 PR6 (方案 A): queue mode only enqueues; the legacy path stays byte-identical when off.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync, existsSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync, existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { RollingUploader, makeRollingUploadHookFactory } from "./rolling-upload.js";
 import { ProcQueueStore, procQueueDbPath } from "@drec/proc-queue";
 import { TaskStore } from "./store.js";
-import { PART_KINDS, jobIdOf, partLogicalKey, type PartCtx } from "@drec/core";
+import { PART_KINDS, jobIdOf, partLogicalKey, type PartCtx, type ProcessJob } from "@drec/core";
 import {
   enqueueRollingUploadPart, enqueueRollingSkipPart, importRollingConfirmedPart, rollingQueueModeEnabled,
   queueOrderHasRows,
@@ -61,6 +61,16 @@ const rowsOf = (kind: string): Array<Record<string, unknown>> => {
   try { return s.list({ kind }).map((r) => ({ jobId: r.jobId, state: r.state, params: r.params, orderKey: r.orderKey, seq: r.seq, bv: r.bv })); }
   finally { s.close(); }
 };
+
+/** Rebuild a queue job (same jobId/logicalKey) with overridden params, for processor-level checks. */
+function jobFrom(file: string, params: Record<string, unknown>): ProcessJob {
+  const logicalKey = orderKeyOf() + ":part:1";
+  return {
+    jobId: jobIdOf(PART_KINDS.upload, logicalKey, 1), kind: PART_KINDS.upload, logicalKey, generation: 1,
+    inputs: [file], params: { ...params, cookies: "c", title: "t", tid: 21, tag: "tag" },
+    replaceInputs: false, owner: { taskId: 1 }, createdAt: 1, orderKey: orderKeyOf(), seq: 1,
+  };
+}
 
 function queueUploader(over: Partial<ConstructorParameters<typeof RollingUploader>[0]> = {}): RollingUploader {
   const enq: Array<Record<string, unknown>> = [];
@@ -890,5 +900,121 @@ describe("rework addendum 8", () => {
     await u.flush({ recordingActive: false });
     expect(count).toHaveBeenCalledTimes(2);
     expect(seen(u, "__imports")).toHaveLength(1); // the later good proof wins
+  });
+});
+
+describe("rework addendum 9", () => {
+  const meta = { cookies: "c", title: "rendered title", tid: 21, tag: "tag", public: false };
+
+  it("A9-1: a queue-mode predecessor whose sources are already cleaned shares its order key (no second draft)", async () => {
+    const prevBase = "主播_2026-06-27_07-30-00";
+    const prevKey = "douyin:123:prev-order";
+    const prevFile = path.join(rec, prevBase + "_000.ts");
+    writeFileSync(prevFile, "abcdefgh");
+    writeFileSync(path.join(rec, prevBase + ".rolling.json"), JSON.stringify({
+      streamKey: "douyin:123:" + prevBase, sessionBase: prevBase, room,
+      segments: [{ index: 0, path: prevFile }], confirmed: [0], queueOrderKey: prevKey,
+      startMs: BASE_MS - 300_000, updatedAt: BASE_MS - 300_000,
+    }));
+    rmSync(prevFile); // cleanup-part already deleted it; the bv never reached the sidecar
+    const u = queueUploader();
+    u.noteSegment(segs(1)[0]!);
+    await u.flush({ recordingActive: false });
+    const enq = seen(u, "__enq");
+    expect(enq).toHaveLength(1);
+    expect(enq[0]!.orderKey).toBe(prevKey);
+    expect(enq[0]!.seq).toBe(2); // continues after the predecessor's one confirmed part
+  });
+
+  it("A9-1b: with the switch off the legacy predecessor rule is untouched (byte-identical)", async () => {
+    const prevBase = "主播_2026-06-27_07-30-00";
+    const prevFile = path.join(rec, prevBase + "_000.ts");
+    writeFileSync(prevFile, "abcdefgh");
+    writeFileSync(path.join(rec, prevBase + ".rolling.json"), JSON.stringify({
+      streamKey: "douyin:123:" + prevBase, sessionBase: prevBase, room,
+      segments: [{ index: 0, path: prevFile }], confirmed: [0], queueOrderKey: "douyin:123:prev-order",
+      startMs: BASE_MS - 300_000, updatedAt: BASE_MS - 300_000,
+    }));
+    rmSync(prevFile);
+    const up = vi.fn(async () => FAKE_BV2);
+    const u = new RollingUploader({
+      room, uploadMeta, minSegmentSec: 0, now: () => NOW_MS,
+      gate: { run: async (_k: string, fn: () => Promise<unknown>) => fn() } as never,
+      uploadPlainRaw: up as never, appendGroupRaw: (async () => {}) as never,
+    });
+    u.noteSegment(segs(1)[0]!);
+    const r = await u.flush({ recordingActive: false });
+    expect(r.uploaded).toEqual([0]); // legacy: a bv-less, content-less predecessor is simply "none"
+    expect(up).toHaveBeenCalledTimes(1);
+  });
+
+  it("A9-2: a sidecar write failure in queue mode is alerted, not only logged", async () => {
+    const paths = segs(2);
+    const notify = vi.fn();
+    const u = queueUploader({ notify });
+    u.noteSegment(paths[0]!);
+    chmodSync(rec, 0o500); // read-only directory: every further atomic write fails
+    try {
+      u.noteSegment(paths[1]!);
+      await u.flush({ recordingActive: false });
+      expect(seen(u, "__enq")).toEqual([]);
+    } finally {
+      chmodSync(rec, 0o755);
+    }
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining("队列模式"));
+  });
+
+  it("A9-3: a fully drained queue no longer blocks the legacy path", async () => {
+    const paths = segs(2);
+    writeFileSync(sidecar(), JSON.stringify({
+      streamKey: orderKeyOf(), sessionBase: SESSION_BASE, room,
+      segments: paths.map((p, i) => ({ index: i, path: p })), confirmed: [0], bv: FAKE_BV1,
+      queueOrderKey: orderKeyOf(), startMs: BASE_MS, updatedAt: NOW_MS,
+    }));
+    expect(importRollingConfirmedPart({ file: paths[0]!, index: 0, orderKey: orderKeyOf(), bv: FAKE_BV1, meta })).toBe("already");
+    const up = vi.fn(async () => FAKE_BV2);
+    const remove = vi.fn(() => true);
+    const notes: string[] = [];
+    const u = new RollingUploader({
+      room, uploadMeta, minSegmentSec: 0, now: () => NOW_MS,
+      gate: { run: async (_k: string, fn: () => Promise<unknown>) => fn() } as never,
+      uploadPlainRaw: up as never, appendGroupRaw: (async () => {}) as never, removeFile: remove,
+      notify: (m) => notes.push(m), queueOrderHasRows,
+    });
+    paths.forEach((p) => u.noteSegment(p));
+    const r = await u.flush({ recordingActive: false });
+    expect(r.uploaded).toEqual([1]); // the unconfirmed tail continues on the legacy path
+    expect(notes.join(" ")).not.toMatch(/队列/);
+  });
+
+  it("A9-4: a permanently failing archive proof is retried a bounded number of times", async () => {
+    const paths = segs(1);
+    writeFileSync(sidecar(), JSON.stringify({
+      streamKey: orderKeyOf(), sessionBase: SESSION_BASE,
+      segments: paths.map((p, i) => ({ index: i, path: p })), confirmed: [0], bv: FAKE_BV1, updatedAt: BASE_MS,
+    }));
+    let clock = NOW_MS;
+    const count = vi.fn(async () => { throw new Error("archive lookup unavailable"); });
+    const u = queueUploader({ countPartsRaw: count, queueProofRetryMs: 1_000, queueProofMaxAttempts: 3, now: () => clock });
+    paths.forEach((p) => u.noteSegment(p));
+    for (let i = 0; i < 5; i += 1) {
+      clock += 10_000;
+      await u.flush({ recordingActive: false });
+    }
+    expect(count).toHaveBeenCalledTimes(3);
+  });
+
+  it("A9-5: a bogus params.sidecarIndex is refused by the real processor validate", () => {
+    const f = segs(1)[0]!;
+    expect(enqueueRollingUploadPart({ file: f, index: 0, orderKey: orderKeyOf(), meta })).toBe("queued");
+    const s = openQueue();
+    let params: Record<string, unknown> = {};
+    try {
+      params = s.list({ kind: PART_KINDS.upload })[0]!.params as Record<string, unknown>;
+    } finally { s.close(); }
+    expect(typeof params.sidecarIndex).toBe("number");
+    const proc = makeUploadPartProcessor();
+    expect(proc.validate(jobFrom(f, { ...params, sidecarIndex: -1 }))).toMatch(/sidecarIndex/);
+    expect(proc.validate(jobFrom(f, params))).toBeNull();
   });
 });

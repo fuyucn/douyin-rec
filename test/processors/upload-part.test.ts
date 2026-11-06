@@ -237,4 +237,20 @@ describe("upload-part processor", () => {
     } finally { teardown(); }
   });
 
+
+  it("B3d: a bogus sidecarIndex is refused by validate and never written by run", async () => {
+    setup();
+    try {
+      const f = put("主播_2026-06-27_08-00-00_000.ts");
+      const sidecar = join(dir, "主播_2026-06-27_08-00-00.rolling.json");
+      writeFileSync(sidecar, JSON.stringify({ streamKey: "k", sessionBase: "b", segments: [], confirmed: [], updatedAt: 1 }));
+      const s = seams();
+      const p = makeUploadPartProcessor({ run: s.run as never, readAcked: s.readAcked });
+      expect(p.validate(job(f, { params: { sidecarPath: sidecar, sidecarIndex: -1 } }))).toMatch(/sidecarIndex/);
+      await p.run(job(f, { params: { sidecarIndex: -1 } }), pc()); // run guards it too
+      const st = JSON.parse(readFileSync(sidecar, "utf-8")) as { confirmed?: number[]; bv?: string };
+      expect(st.confirmed).toEqual([]);
+      expect(st.bv).toBe(BV);
+    } finally { teardown(); }
+  });
 });

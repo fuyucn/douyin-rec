@@ -171,6 +171,8 @@ const LEGACY_OWNER_QUIET_MS = 10 * 60_000;
 const DEFAULT_OWNER_WAIT_MS = 30 * 60_000;
 /** How long a failed legacy-import archive proof is cached before the next flush measures it again. */
 const DEFAULT_PROOF_RETRY_MS = 60_000;
+/** Bounded archive-proof retries per session: a dead lookup must not poll forever (rework addendum 9). */
+const DEFAULT_PROOF_MAX_ATTEMPTS = 3;
 /** The predecessor's last segment must keep the same size across this pause before it counts as sealed. */
 const DEFAULT_STABLE_CHECK_MS = 2_000;
 
@@ -373,7 +375,7 @@ export interface RollingUploaderOpts {
   /** Highest seq already present for one order key (restart/same-broadcast continuation). */
   queueMaxSeq?: (orderKey: string) => number;
   /**
-   * Plan 046 PR6 rollback guard: does this order key already have upload-part rows (any state)?
+   * Plan 046 PR6 rollback guard: does the node queue still own parts of this order (open rows only)?
    * Production wires the proc-queue lookup; missing = no guard (legacy callers unchanged).
    */
   queueOrderHasRows?: (orderKey: string) => boolean;
@@ -381,6 +383,8 @@ export interface RollingUploaderOpts {
   queueRetryMs?: number;
   /** How long a failed legacy-import archive proof is cached before it is measured again (default 60s). */
   queueProofRetryMs?: number;
+  /** How many archive-proof measurements a session makes before giving up (default 3). */
+  queueProofMaxAttempts?: number;
   /** Task id stamped onto queue rows (owner routing for alerts). */
   taskId?: number;
 }
@@ -441,6 +445,8 @@ export class RollingUploader {
   private queueImportProof: number | null = null;
   /** When queueImportProof was measured (0 = never); a failed proof is re-measured after a bounded window. */
   private queueImportProofAt = 0;
+  /** Failed archive-proof measurements this session (bounded, exponential backoff). */
+  private queueProofAttempts = 0;
   /** Indices blocked only because the archive proof failed; released once a later proof succeeds. */
   private readonly queueBlockedByProof = new Set<number>();
   /** Alerts already sent for this session (one per reason/index, not per flush). */
@@ -872,10 +878,10 @@ export class RollingUploader {
    * Nothing is uploaded or deleted here: no biliup spawn, no slot, no gate, no unlink.
    */
   private async _flushQueue(recordingActive: boolean): Promise<{ uploaded: number[]; deleted: string[]; ambiguous: number[] }> {
-    if (this.stateUntrusted) return { uploaded: [], deleted: [], ambiguous: this.ambiguousIndices };
+    if (this.stopQueueUntrusted()) return { uploaded: [], deleted: [], ambiguous: this.ambiguousIndices };
     // Same recovery as the legacy path: settle any dangling legacy intent before touching the queue.
     await this.recoverDanglingUpload();
-    if (this.stateUntrusted) return { uploaded: [], deleted: [], ambiguous: this.ambiguousIndices };
+    if (this.stopQueueUntrusted()) return { uploaded: [], deleted: [], ambiguous: this.ambiguousIndices };
     if (this.state.uploading) {
       // Fail closed: a legacy create/append was interrupted. Never re-enqueue it (a create could duplicate the draft).
       this.notifyOnce("intent:" + String(this.state.uploading.index),
@@ -905,12 +911,19 @@ export class RollingUploader {
       // A failed lookup (0) is only cached for a bounded window: a transient archive error must not
       // block every confirmed legacy part for the rest of the session, and a later good proof must win.
       const proofRetryMs = this.o.queueProofRetryMs ?? DEFAULT_PROOF_RETRY_MS;
-      const proofDue = this.queueImportProofAt > 0 && this.now() - this.queueImportProofAt >= proofRetryMs;
+      const maxAttempts = this.o.queueProofMaxAttempts ?? DEFAULT_PROOF_MAX_ATTEMPTS;
+      // Bounded, with exponential backoff: a permanently failing lookup must not re-query biliup and
+      // re-arm the retry once a minute for the whole session (rework addendum 9). After the cap the
+      // confirmed parts stay blocked (sources kept) under the single alert already sent.
+      const backoffMs = proofRetryMs * 2 ** Math.max(0, this.queueProofAttempts - 1);
+      const proofDue = this.queueImportProofAt > 0 && this.now() - this.queueImportProofAt >= backoffMs
+        && this.queueProofAttempts < maxAttempts;
       let proof = this.queueImportProof;
       if (proof === null || ((proof ?? 0) <= 0 && proofDue)) {
         try { proof = await this.countPartsInner(this.state.bv, cookies) ?? 0; } catch { proof = 0; }
         this.queueImportProof = proof;
         this.queueImportProofAt = this.now();
+        if (proof <= 0) this.queueProofAttempts += 1;
       }
       if (proof <= 0) {
         this.notifyOnce("import-proof", "边录边传队列模式:老 sidecar 的已确认段无法在稿件侧核对,保留源待人工");
@@ -921,8 +934,9 @@ export class RollingUploader {
           this.queueBlockedByProof.add(seg.index);
         }
         // A transient archive failure must be re-checked: the session-end flush is one-shot, so
-        // schedule the ordinary queue retry instead of waiting for the next seal.
-        this.scheduleQueueRetry(recordingActive);
+        // schedule the ordinary queue retry instead of waiting for the next seal - but only while the
+        // attempt budget lasts.
+        if (this.queueProofAttempts < maxAttempts) this.scheduleQueueRetry(recordingActive);
       } else {
         // The proof recovered: parts blocked only by it may be imported now.
         for (const i of this.queueBlockedByProof) this.queueBlocked.delete(i);
@@ -1141,6 +1155,16 @@ export class RollingUploader {
     }, this.o.queueRetryMs ?? 60_000);
     timer.unref?.();
     this.queueRetryTimer = timer;
+  }
+
+  /**
+   * Queue mode: a failed sidecar write stops every enqueue, which must never be only a log line
+   * (rework addendum 9). Returns true when this flush must stop.
+   */
+  private stopQueueUntrusted(): boolean {
+    if (!this.stateUntrusted) return false;
+    this.notifyOnce("untrusted", "边录边传队列模式:sidecar 落盘失败,状态不可信 → 已停止入队并保留源(转人工)");
+    return true;
   }
 
   /** One alert per reason for this session (flush runs on every seal). */
@@ -1394,7 +1418,12 @@ export class RollingUploader {
     // Sessions that never created or intended a submission have nothing to continue, unless they still hold
     // non-empty unconfirmed segments: a slot-starved session that never got to create (issue #309 review). Its
     // content would have to lead the submission; this session fails closed instead of creating one without it.
-    const meaningful = cands.filter((c) => c.s.bv || c.s.uploading || (c.s.ambiguous?.length ?? 0) > 0 || hasUnsentContent(c.s));
+    // A queue-mode predecessor is meaningful even with no bv/intent/unsent content: its parts may already
+    // be uploaded and their sources deleted (cleanup-part is the only deleter), and its bv never reached
+    // the sidecar. Without this the successor takes a fresh key and creates a SECOND draft.
+    // Scoped to queue mode so the legacy path (switch off) stays byte-identical (rework addendum 9).
+    const meaningful = cands.filter((c) => c.s.bv || c.s.uploading || (c.s.ambiguous?.length ?? 0) > 0
+      || hasUnsentContent(c.s) || (this.o.queueMode === true && !!c.s.queueOrderKey));
     if (meaningful.length === 0) return { kind: "none" };
     const prev = meaningful.reduce((a, b) => (b.start > a.start ? b : a));
     const prevLiveId = readSessionLiveId(this.segDir, prev.base);
