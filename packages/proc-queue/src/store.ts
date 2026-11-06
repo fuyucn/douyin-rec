@@ -352,72 +352,6 @@ export class ProcQueueStore {
    * untouched (a real upload row must not be converted into a skip).
    */
   enqueueSkipped(job: ProcessJob, opts: { allowedRoots: readonly string[]; reason?: "skip-hub-owned" }): EnqueueResult {
-    return this.enqueueTerminalSkip(job, opts);
-  }
-
-  /** Plan 046 PR6: empty/discarded sealed parts keep a skipped placeholder so seq never gaps. */
-  enqueueSourceGone(job: ProcessJob, opts: { allowedRoots: readonly string[] }): EnqueueResult {
-    return this.enqueueTerminalSkip(job, { ...opts, reason: "skip-source-gone" });
-  }
-
-  /**
-   * Plan 046 PR6 sidecar import: a segment the legacy rolling uploader already confirmed becomes a done
-   * row so later parts can inherit its bv. Idempotent: an existing row is reported, never rewritten.
-   */
-  importConfirmedPart(
-    job: ProcessJob,
-    opts: { allowedRoots: readonly string[]; bv: string; cleanupJob?: ProcessJob },
-  ): EnqueueResult {
-    try {
-      assertJobInvariants(job, { allowedRoots: opts.allowedRoots });
-    } catch (e) {
-      return { jobId: job.jobId, state: "rejected", error: (e as Error).message };
-    }
-    return this.tx(() => {
-      const existing = this.get(job.jobId);
-      if (existing) {
-        if (existing.state === "done") {
-          // A row written by an earlier build may have no cleanup successor: still enqueue it (idempotent).
-          if (opts.cleanupJob) {
-            assertJobInvariants(opts.cleanupJob, { allowedRoots: opts.allowedRoots });
-            const c = this.enqueueTx(opts.cleanupJob, opts.cleanupJob.logicalKey);
-            if (c.state === "rejected" || c.state === "stale") {
-              throw new Error("cleanup enqueue rejected: " + (c.error ?? c.state));
-            }
-          }
-          return { jobId: job.jobId, state: "done" };
-        }
-        return {
-          jobId: job.jobId, state: "rejected", error: "已存在且 state=" + existing.state,
-          existingState: existing.state as Exclude<JobState, "pending" | "running" | "done">,
-        };
-      }
-      const t = this.now();
-      this.db.prepare(
-        "INSERT INTO proc_jobs(jobId, kind, logicalKey, generation, state, inputs, outputs, params, replaceInputs, " +
-        "ownerTaskId, ownerStreamKey, createdAt, updatedAt, finishedAt, resultOutputs, bv, orderKey, seq, prepJobId) " +
-        "VALUES(?, ?, ?, ?, 'done', ?, '[]', ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?)",
-      ).run(
-        job.jobId, job.kind, job.logicalKey, job.generation, JSON.stringify(job.inputs),
-        JSON.stringify(job.params), job.replaceInputs ? 1 : 0,
-        job.owner.taskId ?? null, job.owner.streamKey ?? null, t, t, t, opts.bv,
-        job.orderKey ?? null, job.seq ?? null, job.prepJobId ?? null,
-      );
-      if (opts.cleanupJob) {
-        assertJobInvariants(opts.cleanupJob, { allowedRoots: opts.allowedRoots });
-        const c = this.enqueueTx(opts.cleanupJob, opts.cleanupJob.logicalKey);
-        if (c.state === "rejected" || c.state === "stale") {
-          throw new Error("cleanup enqueue rejected: " + (c.error ?? c.state));
-        }
-      }
-      return { jobId: job.jobId, state: "done" };
-    });
-  }
-
-  private enqueueTerminalSkip(
-    job: ProcessJob,
-    opts: { allowedRoots: readonly string[]; reason?: "skip-hub-owned" | "skip-source-gone" },
-  ): EnqueueResult {
     try {
       assertJobInvariants(job, { allowedRoots: opts.allowedRoots });
     } catch (e) {
@@ -512,52 +446,6 @@ export class ProcQueueStore {
       .prepare("SELECT MAX(generation) AS g FROM proc_jobs WHERE orderKey=?")
       .get(orderKey) as Row;
     return (r.g == null ? 0 : Number(r.g)) + 1;
-  }
-
-  /** Highest upload-part seq for one order key (restart/same-broadcast continuation; SQL, not a truncated list). */
-  maxPartSeq(orderKey: string): number {
-    const r = this.db
-      .prepare("SELECT MAX(seq) AS s FROM proc_jobs WHERE kind=? AND orderKey=?")
-      .get(PART_KINDS.upload, orderKey) as Row;
-    return r.s == null ? 0 : Number(r.s);
-  }
-
-  /**
-   * Rows of one kind already recorded for (orderKey, seq), regardless of logical-key spelling (PR7 back-compat).
-   *
-   * `generation` narrows the answer to the live generation of the order. Without it a done row from an
-   * older generation makes a fresh part look handled (never uploaded), and an old-generation pending
-   * row makes a caller enqueue a second job id for the same part (claimable twice).
-   */
-  rowsForOrderSeq(orderKey: string, seq: number, kind: string = PART_KINDS.upload, generation?: number): ProcJobRecord[] {
-    if (generation === undefined) {
-      return (this.db.prepare("SELECT * FROM proc_jobs WHERE kind=? AND orderKey=? AND seq=?")
-        .all(kind, orderKey, seq) as Row[]).map(toRecord);
-    }
-    return (this.db.prepare("SELECT * FROM proc_jobs WHERE kind=? AND orderKey=? AND seq=? AND generation=?")
-      .all(kind, orderKey, seq, generation) as Row[]).map(toRecord);
-  }
-
-  /** How many rows of one kind exist for an order key (any state). */
-  countOrderRows(orderKey: string, kind: string = PART_KINDS.upload): number {
-    const r = this.db.prepare("SELECT COUNT(*) AS n FROM proc_jobs WHERE kind=? AND orderKey=?")
-      .get(kind, orderKey) as Row;
-    return r.n == null ? 0 : Number(r.n);
-  }
-
-  /**
-   * Rows of one order that the queue still owns: everything except the success/discard terminals
-   * (done / cancelled / skipped). The PR6 rollback guard counts THESE, not every row: once an order is
-   * fully drained, the legacy path may continue without racing the runner, and waiting for the 7-day GC
-   * would block a new session of the same broadcast for no reason (rework addendum 9).
-   * failed / uncertain are included because they can still be requeued (runner or a human) and would
-   * then upload the same part twice.
-   */
-  countOpenOrderRows(orderKey: string, kind: string = PART_KINDS.upload): number {
-    const r = this.db.prepare(
-      "SELECT COUNT(*) AS n FROM proc_jobs WHERE kind=? AND orderKey=? AND state NOT IN ('done','cancelled','skipped')",
-    ).get(kind, orderKey) as Row;
-    return r.n == null ? 0 : Number(r.n);
   }
 
   /**

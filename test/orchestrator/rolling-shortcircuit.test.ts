@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SyncLedger } from "../../packages/orchestrator/src/ledger.js";
-import { QUEUE_HOLD_MAX_WAIT_MS, tryRollingShortCircuit } from "../../packages/orchestrator/src/pipeline.js";
+import { tryRollingShortCircuit } from "../../packages/orchestrator/src/pipeline.js";
 
 const KEY = "douyin:123:2026-10-13";
 let dir: string;
@@ -23,12 +23,10 @@ afterEach(() => {
 const member = (rolling: { bv: string; confirmed?: string[]; ambiguous?: string[] }, tsFiles: string[] = []) =>
   ({ workerId: "w1", rec: { tsFiles, rolling: { confirmed: [], ambiguous: [], ...rolling } } }) as never;
 
-function run(steps: { burnDanmu?: boolean; burnLivechat?: boolean } | undefined, members: never[], nowMs?: () => number) {
+function run(steps: { burnDanmu?: boolean; burnLivechat?: boolean } | undefined, members: never[]) {
   const notify = vi.fn();
   const jlog = vi.fn();
-  const r = tryRollingShortCircuit({
-    streamKey: KEY, cfg: { steps }, members, ledger, transports: new Map(), notify, jlog, ...(nowMs ? { nowMs } : {}),
-  });
+  const r = tryRollingShortCircuit({ streamKey: KEY, cfg: { steps }, members, ledger, transports: new Map(), notify, jlog });
   return { r, notify, jlog };
 }
 
@@ -70,116 +68,5 @@ describe("tryRollingShortCircuit records the broadcast span (issue #292)", () =>
     const c = ledger.getCandidates(KEY);
     expect(c).toHaveLength(1);
     expect([c[0]!.startMs, c[0]!.endMs, c[0]!.durationSec]).toEqual([500, 2000, 20]);
-  });
-});
-
-describe("plan 046 PR6: a queue-mode session without a bv holds the whole-order pipeline", () => {
-  const queued = (queueOrderKey: string, bv?: string, tsFiles: string[] = ["/r/s1_000.ts"], updatedAt?: number) => ({
-    workerId: "w1", rec: {
-      sessionBase: "s1", tsFiles,
-      rolling: { confirmed: [0], ambiguous: [], queueOrderKey, ...(bv ? { bv } : {}), ...(updatedAt ? { updatedAt } : {}) },
-    },
-  }) as never;
-
-  it("sidecar queue-pending, no bv -> retryable hold, nothing is merged or uploaded", () => {
-    const { r, notify, jlog } = run(undefined, [queued("same-broadcast")]);
-    expect(r).toEqual({ state: "pending" });
-    // Retryable on purpose: the reconciler only re-enters pending/failed (needs_manual is skipped),
-    // so a terminal state here would strand a healthy queue session.
-    expect(ledger.get(KEY)?.state).toBe("pending");
-    expect(ledger.get(KEY)?.error).toContain("队列");
-    expect(ledger.get(KEY)?.bv).toBeFalsy();
-    expect(jlog).toHaveBeenCalledWith(expect.stringContaining("队列"));
-    expect(notify).toHaveBeenCalledWith(expect.objectContaining({ kind: "error", message: expect.stringContaining("队列") }));
-    // No uploadDone: the master never uploaded anything for this broadcast.
-    expect(notify.mock.calls.some(([e]) => (e as { kind: string }).kind === "uploadDone")).toBe(false);
-    // A second pass without new information repeats the hold but does not re-alert.
-    const again = run(undefined, [queued("same-broadcast")]);
-    expect(again.r).toEqual({ state: "pending" });
-    expect(again.notify.mock.calls.some(([e]) => (e as { kind: string }).kind === "error")).toBe(false);
-  });
-
-  it("queue completes after the hold -> the next pass uploads nothing but closes the job", () => {
-    // Pass 1: node queue still uploading => hold (retryable, job stays pending).
-    expect(run(undefined, [queued("same-broadcast")]).r).toEqual({ state: "pending" });
-    // Pass 2 (next reconcile tick): the runner wrote the bv and cleanup deleted every source.
-    const done = run(undefined, [queued("same-broadcast", "BV1", [])]);
-    expect(done.r).toEqual({ state: "done", bv: "BV1" });
-    expect(ledger.get(KEY)?.state).toBe("done");
-    expect(ledger.get(KEY)?.bv).toBe("BV1");
-  });
-
-  it("once the node queue confirmed a bv the hold is gone (normal rolling short-circuit)", () => {
-    // Every confirmed segment was already deleted by cleanup-part: the residual check passes too.
-    const { r } = run(undefined, [queued("same-broadcast", "BV1", [])]);
-    expect(r).toEqual({ state: "done", bv: "BV1" });
-  });
-
-  it("bv confirmed but segments still on disk -> hold, never needs_manual (parts 2..N still uploading)", () => {
-    const { r } = run(undefined, [queued("same-broadcast", "BV1", ["/r/s1_001.ts"])]);
-    expect(r).toEqual({ state: "pending" });
-    expect(ledger.get(KEY)?.state).toBe("pending");
-    // Once the queue deleted the last source the same pass closes the job.
-    expect(run(undefined, [queued("same-broadcast", "BV1", [])]).r).toEqual({ state: "done", bv: "BV1" });
-  });
-
-  it("a hold with no sidecar write for the whole window hands the case to a human", () => {
-    const staleAt = 1_000_000;
-    const { r, notify } = run(undefined, [queued("same-broadcast", "BV1", ["/r/s1_001.ts"], staleAt)],
-      () => staleAt + QUEUE_HOLD_MAX_WAIT_MS + 60_000);
-    expect(r).toEqual({ state: "needs_manual" });
-    expect(ledger.get(KEY)?.state).toBe("needs_manual");
-    expect(ledger.get(KEY)?.error).toContain("无进展");
-    expect(notify).toHaveBeenCalledWith(expect.objectContaining({ kind: "error", message: expect.stringContaining("无进展") }));
-  });
-
-  it("an unsettled create/ambiguous queue session is NOT masked by the hold (needs_manual)", () => {
-    const unsettled = {
-      workerId: "w1", rec: {
-        sessionBase: "s1", tsFiles: ["/r/s1_000.ts"],
-        rolling: { confirmed: [], ambiguous: [], queueOrderKey: "same-broadcast", uploading: { index: 0, kind: "create" } },
-      },
-    } as never;
-    const { r } = run(undefined, [unsettled]);
-    expect(r).toEqual({ state: "needs_manual" });
-    expect(ledger.get(KEY)?.state).toBe("needs_manual");
-  });
-
-  it("H1c: after a rebind to hub-owned the sidecar carries hubOrderKey only -> no hold (master uploads)", () => {
-    const flipped = {
-      workerId: "w1", rec: {
-        sessionBase: "s1", tsFiles: ["/r/s1_000.ts"],
-        rolling: { confirmed: [], ambiguous: [], hubOrderKey: "douyin:123:b" },
-      },
-    } as never;
-    // null = not short-circuited: the normal master pipeline runs (select/pull/merge/upload).
-    expect(run(undefined, [flipped]).r).toBeNull();
-  });
-
-  it("a hold never reopens a done or needs_manual row", () => {
-    const queuedMember = () => queued("same-broadcast");
-    // needs_manual from another cause must keep its verdict and message.
-    ledger.setState(KEY, "needs_manual", { error: "人工决定:保持现状" });
-    const manualRun = run(undefined, [queuedMember()]);
-    expect(manualRun.r).toEqual({ state: "needs_manual" });
-    expect(ledger.get(KEY)?.state).toBe("needs_manual");
-    expect(ledger.get(KEY)?.error).toBe("人工决定:保持现状");
-    // done (no bv) must stay done (done has no out-edges; a hold must not reopen it).
-    ledger.setState(KEY, "done");
-    const doneRun = run(undefined, [queuedMember()]);
-    expect(doneRun.r).toEqual({ state: "done" });
-    expect(ledger.get(KEY)?.state).toBe("done");
-  });
-
-  it("a repeated identical hold appends no further state events", () => {
-    expect(run(undefined, [queued("same-broadcast")]).r).toEqual({ state: "pending" });
-    const before = ledger.getEvents(KEY).length;
-    expect(run(undefined, [queued("same-broadcast")]).r).toEqual({ state: "pending" });
-    expect(ledger.getEvents(KEY).length).toBe(before);
-  });
-
-  it("a legacy session without queueOrderKey is untouched", () => {
-    const { r } = run(undefined, [member({ bv: "BV1", confirmed: ["a"] })]);
-    expect(r).toEqual({ state: "done", bv: "BV1" });
   });
 });

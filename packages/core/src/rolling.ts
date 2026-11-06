@@ -17,7 +17,7 @@
  * 但 app 不能 import orchestrator(test/arch/layering.test.ts 守护)。判定下沉到 core 即两侧可共用。
  */
 
-import { isVideoFileName, stripVideoExt } from "./output-format.js";
+import { isVideoFileName } from "./output-format.js";
 import { stampedSessionBaseOf } from "./session-name.js";
 
 /** 一个录制分段(节点本地文件)在「边录边传」里的最小投影。 */
@@ -206,21 +206,4 @@ export function segmentSessionBase(fileName: string): string | undefined {
 /** 是否视频源分段(可删/可传);`.xml`/`.ass` 恒为 false(弹幕源不可再生,绝不随分段删)。 */
 export function isVideoSegment(fileName: string): boolean {
   return isVideoFileName(fileName);
-}
-
-/**
- * The one canonical sidecar path of a part file: same directory, session base + `.rolling.json`.
- *
- * Both writers (the recorder and the queue processor) and the job contract derive it here, so a
- * caller can never point a job at an unrelated file: `params.sidecarPath` is only accepted when it
- * equals this value (assertJobInvariants), and the processor derives its own path regardless.
- */
-export function rollingSidecarPathOf(file: string): string {
-  // Plain string ops (no node:path): this module is also bundled into the web build (rank 0, browser safe).
-  // Recorder/processor paths are absolute POSIX paths on Linux/macOS; a trailing "\\" is accepted for Windows-style input.
-  const cut = Math.max(file.lastIndexOf("/"), file.lastIndexOf("\\"));
-  const name = cut >= 0 ? file.slice(cut + 1) : file;
-  const dir = cut >= 0 ? file.slice(0, cut) : "";
-  const base = segmentSessionBase(name) ?? stripVideoExt(name);
-  return (dir === "" ? "" : dir + "/") + base + ".rolling.json";
 }

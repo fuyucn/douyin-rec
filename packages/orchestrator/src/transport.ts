@@ -61,15 +61,6 @@ export interface NodeRollingProgress {
    * old bundles / legacy sidecars = unknown, handled exactly as before.
    */
   active?: boolean;
-  /**
-   * plan 046 PR6: this session was handed to the node's upload queue (queue mode). With a queueOrderKey and no
-   * bv (or with segments still on disk) the queue is still uploading parts, so the master must not run the
-   * whole-order pipeline (duplicate archive).
-   */
-  queueOrderKey?: string;
-  /** Last sidecar write (epoch ms): the node writes it on every seal and every part confirmation, so it doubles
-   * as the queue's liveness signal that bounds the master hold. Absent on old bundles = unknown. */
-  updatedAt?: number;
 }
 export interface NodeInventory {
   workerId: string;

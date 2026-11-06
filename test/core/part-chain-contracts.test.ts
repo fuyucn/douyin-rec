@@ -57,39 +57,6 @@ describe("part-chain contract", () => {
     expect(() => assertJobInvariants(partJob("remux", { params: {} }), allowed)).not.toThrow();
   });
 
-  it("params.sidecarPath must be the canonical sidecar of ctx.file (no caller-chosen path)", () => {
-    const okPath = ROOT + "/a_000.rolling.json";
-    const withPath = (sidecarPath: unknown): ProcessJob =>
-      partJob(PART_KINDS.upload, { params: { ctx: ctx(), sidecarPath } });
-    expect(() => assertJobInvariants(withPath(okPath), allowed)).not.toThrow();
-    // A caller (a remote _enqueue payload) must not be able to name any other file on the node.
-    const bad: Array<[string, unknown]> = [
-      ["traversal", ROOT + "/../etc/x.rolling.json"],
-      ["other dir", "/other/a_000.rolling.json"],
-      ["wrong suffix", ROOT + "/a_000.session.json"],
-      ["plain video name", ROOT + "/a_000.ts"],
-      ["relative", "a_000.rolling.json"],
-      ["empty", ""],
-      ["non-string", 42],
-    ];
-    for (const [label, value] of bad) {
-      expect(() => assertJobInvariants(withPath(value), allowed), label).toThrow(/sidecarPath/);
-    }
-    // sidecarIndex is caller data written into the session ledger: only a non-negative integer passes.
-    const withIndex = (sidecarIndex: unknown): ProcessJob =>
-      partJob(PART_KINDS.upload, { params: { ctx: ctx(), sidecarIndex } });
-    expect(() => assertJobInvariants(withIndex(0), allowed)).not.toThrow();
-    expect(() => assertJobInvariants(withIndex(-1), allowed)).toThrow(/sidecarIndex/);
-    expect(() => assertJobInvariants(withIndex(1.5), allowed)).toThrow(/sidecarIndex/);
-    expect(() => assertJobInvariants(withIndex("0"), allowed)).toThrow(/sidecarIndex/);
-    // The path must follow the part file, not the job's inputs.
-    const otherFile = ROOT + "/b_001.ts";
-    const job = partJob(PART_KINDS.upload, {
-      inputs: [otherFile], params: { ctx: ctx({ file: otherFile }), sidecarPath: okPath },
-    });
-    expect(() => assertJobInvariants(job, allowed)).toThrow(/sidecarPath/);
-  });
-
   it("rejects orderKey/seq on cleanup rows so cleanup can run beside later uploads", () => {
     expect(() => assertJobInvariants(partJob(PART_KINDS.cleanup, { orderKey: "same-broadcast", seq: 1 }), allowed))
       .toThrow(/orderKey\/seq/);

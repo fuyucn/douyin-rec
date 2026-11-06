@@ -108,8 +108,6 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     // ONE manager drives both the web (manual start/stop) and, if requested,
     // the scheduler (automatic start/stop). They share the same subprocess
     // lifecycle + crash auto-restart.
-    // Serve-level hub flag, known only after the config resolves below: the spawner reads it per spawn.
-    const spawnerFlags = { hubMaster: false };
     const spawner = new NodeRecordSpawner({
       // getter:每次 spawn 读「全局 --discord-webhook/env ?? settings 表 discordWebhook」(与下方
       // EventCenter 的 globalHook 一致),否则 UI 里设的 webhook 进不了子进程(子进程无 DB)。
@@ -125,7 +123,6 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
         ? { live: false, recordEnd: false, merge: false, hub: false, error: false }
         : resolveWebhookToggles(store.getSetting("notifWebhookToggles")),
       onLog: (m) => console.log(m),
-      hubMaster: () => spawnerFlags.hubMaster,
     });
     // Per-task log ring buffer shared with the manager so the Web 详情/日志
     // 页面 can tail each recorder subprocess's captured output.
@@ -210,8 +207,6 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     // hub 是否在本节点启用(master)?= --hub + 有 hubStarter + 能解析出 hub 配置。
     // slave(无 --hub)= false → 前端据此隐藏 Hub 页 / 显示 child node 提示。
     const hubEnabled = !!(o.hub && hubStarter && resolveHubConfigJson(o.hubConfig, store));
-    // Children spawned from here on may take upload ownership for rule-bound rooms (plan 046 PR6).
-    spawnerFlags.hubMaster = hubEnabled;
     // 边录边传生效值(issue #40):首轮 hub 同步前,先用唯一判定刷新绑定了规则的本机任务,
     // 堵住「同步未跑完、daemon 已起录」窗口里按旧开关放行而绕过多节点重复投稿闸门。失败只告警(回落旧开关迁移)。
     rollingGuardOn = hubEnabled;

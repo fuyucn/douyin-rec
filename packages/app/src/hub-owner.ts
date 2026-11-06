@@ -5,7 +5,7 @@
  * until then rolling-upload calls it through an injected seam. It never uploads or deletes anything.
  */
 import { statSync } from "node:fs";
-import { jobIdOf, PART_KINDS, partLogicalKey, type PartCtx, type ProcessJob } from "@drec/core";
+import { jobIdOf, PART_KINDS, type PartCtx, type ProcessJob } from "@drec/core";
 import { ProcQueueStore, procQueueDbPath } from "@drec/proc-queue";
 import { drecRoot } from "./paths.js";
 import { nodeAllowedRoots } from "./node-enqueue.js";
@@ -13,8 +13,6 @@ import { nodeAllowedRoots } from "./node-enqueue.js";
 export interface HubOwnedSkipInput {
   file: string;
   index: number;
-  /** Explicit queue seq across sessions of the same broadcast (defaults to index + 1). */
-  seq?: number;
   streamKey: string;
   title?: string;
   expectedDurationSec?: number;
@@ -36,20 +34,11 @@ export function enqueueHubOwnedSkip(input: HubOwnedSkipInput): boolean {
     return false;
   }
   const orderKey = input.streamKey;
-  const seq = input.seq ?? input.index + 1;
-  // Same logical key as the upload-part producer: one segment can never have two job ids (PR6 rework).
-  const logicalKey = partLogicalKey(orderKey, seq);
+  const seq = input.index + 1;
+  const logicalKey = orderKey + ":part-" + String(seq) + "@";
   const store = new ProcQueueStore(procQueueDbPath(drecRoot()));
   try {
     const generation = store.currentOrderGeneration(orderKey);
-    // PR7 wrote skip rows under an older logical-key spelling; dedupe by (orderKey, seq) so an
-    // upgraded node cannot append a second skip row for the same segment.
-    const existing = store.rowsForOrderSeq(orderKey, seq);
-    if (existing.length > 0) {
-      const done = existing.some((r) => r.state === "done" || r.state === "skipped");
-      if (!done) input.log?.("[hub-owner] segment already has a row in state " + existing.map((r) => r.state).join(","));
-      return done;
-    }
     const ctx: PartCtx = {
       v: 1, orderKey, index: seq, file: input.file, fp: { size, mtimeMs },
     };

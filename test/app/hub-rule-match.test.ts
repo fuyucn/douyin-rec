@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { upsertHubRule } from "../../packages/app/src/hub-store.js";
-import { masterOwnedWithoutRule, shouldDecideUploadOwner, uploadOwnerForTask } from "../../packages/app/src/hub-rule-match.js";
+import { uploadOwnerForTask } from "../../packages/app/src/hub-rule-match.js";
 
 let dir: string;
 let hubDir: string;
@@ -37,21 +37,3 @@ describe("uploadOwnerForTask (plan 046 PR7 single decision)", () => {
     expect(uploadOwnerForTask(task(7), hubDir)).toBe("node");
   });
 });
-
-describe("upload-owner wiring gates (rework addenda 6-7)", () => {
-  it("only a hub master (or a hub-managed task) may decide ownership", () => {
-    expect(shouldDecideUploadOwner({ managedBy: "hub" }, false)).toBe(true);   // worker: the master exists
-    expect(shouldDecideUploadOwner({ managedBy: null }, false)).toBe(false);   // rule files but no orchestrator
-    expect(shouldDecideUploadOwner({}, false)).toBe(false);
-    expect(shouldDecideUploadOwner({ managedBy: null }, true)).toBe(true);     // serve --hub
-  });
-
-  it("master ownership without an enabled rule is reported (the node would keep sources forever)", () => {
-    expect(masterOwnedWithoutRule("master", false, true)).toBe(true);
-    expect(masterOwnedWithoutRule("master", true, true)).toBe(false);
-    expect(masterOwnedWithoutRule("node", false, true)).toBe(false);
-    // On a worker the absence of local rules is expected: no alert.
-    expect(masterOwnedWithoutRule("master", false, false)).toBe(false);
-  });
-});
-

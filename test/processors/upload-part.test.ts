@@ -1,6 +1,6 @@
 // plan 046 §5.4: upload-part — one part, explicit bv/ack + byte/fp proof; no B 站查询、无目录扫描。
 import { describe, it, expect, vi } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync, statSync, rmSync, symlinkSync, utimesSync } from "node:fs";
+import { mkdtempSync, writeFileSync, statSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -96,10 +96,6 @@ describe("upload-part processor", () => {
       expect(p.validate(job(f, { inputs: [put("a.xml")] }))).toMatch(/video/);
       expect(p.validate(job(f, { params: { ctx: { ...ctxOf(f), file: "a_000.ts" } } }))).toMatch(/ctx/);
       expect(p.validate(job(f, { params: { cookies: "" } }))).toMatch(/metadata/);
-      // A caller-supplied sidecar path is validated against the canonical one (path traversal guard).
-      expect(p.validate(job(f, { params: { sidecarPath: join(dir, "a_000.rolling.json") } }))).toBeNull();
-      expect(p.validate(job(f, { params: { sidecarPath: "/etc/passwd" } }))).toMatch(/sidecarPath/);
-      expect(p.validate(job(f, { params: { sidecarPath: join(dir, "..", "x.rolling.json") } }))).toMatch(/sidecarPath/);
       expect(p.validate(job(f, { params: { ctx: { ...ctxOf(f), fp: { size: 0, mtimeMs: 0 } } } }))).toBeNull(); // fp shape ok; run compares
     } finally { teardown(); }
   });
@@ -169,88 +165,6 @@ describe("upload-part processor", () => {
         run: async (argv: string[]) => { utimesSync(f, new Date(1_700_000_000), new Date(1_700_000_000)); return argv[2] === "upload" ? "All files uploaded successfully\n" + BV : "All files uploaded successfully\nok"; },
       });
       await expect(p.run(job(f), pc())).rejects.toThrow(/fp changed/);
-    } finally { teardown(); }
-  });
-
-  it("P2: create associates the season with the same helper/checkpoints", async () => {
-    setup();
-    try {
-      const f = put();
-      const addSeason = vi.fn(async () => ({ status: "added" as const, sectionId: 9, aid: 1, cid: 2, title: "t" }));
-      const c = pc();
-      const p = makeUploadPartProcessor({ run: seams().run as never, readAcked: seams().readAcked, addSeason: addSeason as never });
-      await p.run(job(f, { params: { seasonSectionId: 9 } }), c);
-      expect(addSeason).toHaveBeenCalledTimes(1);
-      expect(addSeason.mock.calls[0]![0]).toMatchObject({ sectionId: 9, bvid: BV });
-      const setState = (c as unknown as { setState: ReturnType<typeof vi.fn> }).setState;
-      expect(setState).toHaveBeenCalledWith({ bv: BV, seasonState: "pending" });
-      expect(setState).toHaveBeenCalledWith({ seasonState: "done" });
-    } finally { teardown(); }
-  });
-
-  it("B3: the confirmed part is written back to the canonical sidecar next to the part file", async () => {
-    setup();
-    try {
-      const f = put("主播_2026-06-27_08-00-00_000.ts");
-      const sidecar = join(dir, "主播_2026-06-27_08-00-00.rolling.json");
-      writeFileSync(sidecar, JSON.stringify({ streamKey: "k", sessionBase: "b", segments: [{ index: 0, path: f }], confirmed: [], updatedAt: 1 }));
-      const p = makeUploadPartProcessor({ run: seams().run as never, readAcked: seams().readAcked });
-      // The job names the canonical path; the processor derives the same one from ctx.file.
-      await p.run(job(f, { params: { sidecarPath: sidecar, sidecarIndex: 0, queueOrderKey: "k" } }), pc());
-      const st = JSON.parse(readFileSync(sidecar, "utf-8")) as { bv?: string; confirmed?: number[]; queueOrderKey?: string };
-      expect(st.bv).toBe(BV);
-      expect(st.confirmed).toEqual([0]);
-      expect(st.queueOrderKey).toBe("k");
-    } finally { teardown(); }
-  });
-
-  it("B3b: a sidecar path that is a symlink to an outside file is never followed", async () => {
-    setup();
-    try {
-      const f = put();
-      const outside = join(dir, "..", "outside-" + String(Date.now()) + ".json");
-      writeFileSync(outside, JSON.stringify({ keep: true }));
-      const sidecar = join(dir, "a_000.rolling.json");
-      // The canonical path itself is a symlink: writeFileAtomicSync renames over the link, so the
-      // target outside the part directory keeps its bytes.
-      try { symlinkSync(outside, sidecar); }
-      catch { rmSync(outside, { force: true }); return; } // symlinks unavailable (permissions): skip
-      const p = makeUploadPartProcessor({ run: seams().run as never, readAcked: seams().readAcked });
-      await p.run(job(f, { params: { sidecarIndex: 0, queueOrderKey: "k" } }), pc());
-      expect(JSON.parse(readFileSync(outside, "utf-8"))).toEqual({ keep: true });
-      expect(JSON.parse(readFileSync(sidecar, "utf-8"))).toMatchObject({ bv: BV });
-      rmSync(outside, { force: true });
-    } finally { teardown(); }
-  });
-
-  it("B3c: a missing rolling sidecar is alerted (master may re-upload), never created", async () => {
-    setup();
-    try {
-      const f = put();
-      const alerts: string[] = [];
-      const c = { ...pc(), alert: (m: string) => { alerts.push(m); } };
-      const p = makeUploadPartProcessor({ run: seams().run as never, readAcked: seams().readAcked });
-      // The producer declared a sidecar path (the queue always does); the file never appeared.
-      await p.run(job(f, { params: { sidecarIndex: 0, sidecarPath: join(dir, "a_000.rolling.json") } }), c as never);
-      expect(existsSync(join(dir, "a_000.rolling.json"))).toBe(false);
-      expect(alerts.join(" ")).toMatch(/sidecar is missing/);
-    } finally { teardown(); }
-  });
-
-
-  it("B3d: a bogus sidecarIndex is refused by validate and never written by run", async () => {
-    setup();
-    try {
-      const f = put("主播_2026-06-27_08-00-00_000.ts");
-      const sidecar = join(dir, "主播_2026-06-27_08-00-00.rolling.json");
-      writeFileSync(sidecar, JSON.stringify({ streamKey: "k", sessionBase: "b", segments: [], confirmed: [], updatedAt: 1 }));
-      const s = seams();
-      const p = makeUploadPartProcessor({ run: s.run as never, readAcked: s.readAcked });
-      expect(p.validate(job(f, { params: { sidecarPath: sidecar, sidecarIndex: -1 } }))).toMatch(/sidecarIndex/);
-      await p.run(job(f, { params: { sidecarIndex: -1 } }), pc()); // run guards it too
-      const st = JSON.parse(readFileSync(sidecar, "utf-8")) as { confirmed?: number[]; bv?: string };
-      expect(st.confirmed).toEqual([]);
-      expect(st.bv).toBe(BV);
     } finally { teardown(); }
   });
 });

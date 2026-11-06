@@ -3,7 +3,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { dirname, join } from "node:path";
-import { jobIdOf, parseJobId } from "@drec/core";
+import { parseJobId } from "@drec/core";
 import { ProcQueueStore, BatchRejected, procQueueDbPath, fileTagOf, GC_RETAIN_MS, LEASE_MS } from "@drec/proc-queue";
 import { SCHEMA_VERSION } from "../../packages/proc-queue/src/schema.js";
 import { makeEnv, type Env } from "./helpers.js";
@@ -891,87 +891,6 @@ describe("prep-failed cascade (plan 038 T03b)", () => {
     expect(s.get(rows[0]!.jobId)?.state).toBe("cancelled");
     expect(s.get(rows[1]!.jobId)?.state).toBe("pending");
     expect(s.get(rows[2]!.jobId)?.state).toBe("pending");
-    s.close();
-  });
-});
-
-describe("A3 store helpers", () => {
-  it("rowsForOrderSeq filters by kind (a biliup row does not mask the part)", () => {
-    const s = env.open();
-    const p = env.file("a.ts");
-    const job = (kind: string) => ({
-      jobId: jobIdOf(kind, "same-broadcast:part:1", 1), kind, logicalKey: "same-broadcast:part:1",
-      generation: 1, inputs: [p], params: kind === "upload-part" ? { ctx: { v: 1, orderKey: "same-broadcast", index: 1, file: p, fp: { size: 1, mtimeMs: 1 } } } : {},
-      replaceInputs: false, owner: {}, createdAt: 1, orderKey: "same-broadcast", seq: 1,
-    });
-    s.enqueue(job("biliup") as never, roots());
-    expect(s.rowsForOrderSeq("same-broadcast", 1)).toHaveLength(0);
-    expect(s.rowsForOrderSeq("same-broadcast", 1, "biliup")).toHaveLength(1);
-    s.close();
-  });
-
-  it("rowsForOrderSeq is scoped to the live generation; an old generation never masks the part", () => {
-    const s = env.open();
-    const p = env.file("a.ts");
-    const job = (generation: number) => ({
-      jobId: jobIdOf("upload-part", "same-broadcast:part:1", generation), kind: "upload-part",
-      logicalKey: "same-broadcast:part:1", generation, inputs: [p],
-      params: { ctx: { v: 1, orderKey: "same-broadcast", index: 1, file: p, fp: { size: 1, mtimeMs: 1 } } },
-      replaceInputs: false, owner: {}, createdAt: 1, orderKey: "same-broadcast", seq: 1,
-    });
-    s.enqueue(job(1) as never, roots());
-    s.enqueue(job(2) as never, roots());
-    expect(s.rowsForOrderSeq("same-broadcast", 1, "upload-part", 2).map((r) => r.generation)).toEqual([2]);
-    expect(s.rowsForOrderSeq("same-broadcast", 1, "upload-part", 1)).toHaveLength(1);
-    // No generation = every row of the pair (hub-owned dedupe).
-    expect(s.rowsForOrderSeq("same-broadcast", 1, "upload-part")).toHaveLength(2);
-    expect(s.countOrderRows("same-broadcast")).toBe(2);
-    expect(s.countOrderRows("same-broadcast", "biliup")).toBe(0);
-    // A9-3: the rollback guard counts only rows the queue still owns (open states), not history.
-    expect(s.countOpenOrderRows("same-broadcast")).toBe(2);
-    const other = { ...job(1), jobId: jobIdOf("upload-part", "same-broadcast:part:2", 1), logicalKey: "same-broadcast:part:2", seq: 2 };
-    s.enqueue(other as never, roots());
-    expect(s.countOpenOrderRows("same-broadcast")).toBe(3);
-    s.close();
-  });
-
-  it("countOpenOrderRows ignores drained rows (done/skipped/cancelled) only", () => {
-    const s = env.open();
-    const p = env.file("a.ts");
-    const mk = (seq: number, logicalKey: string) => ({
-      jobId: jobIdOf("upload-part", logicalKey, 1), kind: "upload-part", logicalKey, generation: 1, inputs: [p],
-      params: { ctx: { v: 1, orderKey: "same-broadcast", index: seq, file: p, fp: { size: 1, mtimeMs: 1 } } },
-      replaceInputs: false, owner: {}, createdAt: 1, orderKey: "same-broadcast", seq,
-    });
-    s.enqueue(mk(1, "same-broadcast:part:1") as never, roots());
-    s.enqueue(mk(2, "same-broadcast:part:2") as never, roots());
-    s.enqueue(mk(3, "same-broadcast:part:3") as never, roots());
-    const raw = new DatabaseSync(env.dbPath);
-    raw.prepare("UPDATE proc_jobs SET state='done' WHERE seq=1").run();
-    raw.prepare("UPDATE proc_jobs SET state='skipped' WHERE seq=2").run();
-    raw.prepare("UPDATE proc_jobs SET state='cancelled' WHERE seq=3").run();
-    raw.close();
-    expect(s.countOrderRows("same-broadcast")).toBe(3);
-    expect(s.countOpenOrderRows("same-broadcast")).toBe(0);
-    s.close();
-  });
-
-  it("importConfirmedPart on an existing done row still enqueues the cleanup successor", () => {
-    const s = env.open();
-    const p = env.file("a.ts");
-    const base = {
-      logicalKey: "same-broadcast:part:1", generation: 1, inputs: [p],
-      params: { ctx: { v: 1, orderKey: "same-broadcast", index: 1, file: p, fp: { size: 1, mtimeMs: 1 } } },
-      replaceInputs: false, owner: {}, createdAt: 1, orderKey: "same-broadcast", seq: 1,
-    };
-    const upload = { ...base, jobId: jobIdOf("upload-part", base.logicalKey, 1), kind: "upload-part" };
-    const cleanup = {
-      ...base, jobId: jobIdOf("cleanup-part", base.logicalKey, 1), kind: "cleanup-part", orderKey: undefined, seq: undefined,
-      params: { ctx: { ...(base.params.ctx as object), bv: "X" } },
-    };
-    expect(s.importConfirmedPart(upload as never, { allowedRoots: [env.root], bv: "X" }).state).toBe("done");
-    expect(s.importConfirmedPart(upload as never, { allowedRoots: [env.root], bv: "X", cleanupJob: cleanup as never }).state).toBe("done");
-    expect(s.list({ kind: "cleanup-part" })).toHaveLength(1);
     s.close();
   });
 });

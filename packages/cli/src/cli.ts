@@ -279,41 +279,12 @@ program
     const rollingEnabled = parseBoolFlag(o.rollingUpload, false);
     let makeRolling: (() => import("@drec/manager").RollingUploadHook) | undefined;
     if (rollingEnabled) {
-      const { makeRollingUploadHookFactory, uploadOwnerForTask, enqueueHubOwnedSkip, rootHubDir, resolveDbPath, TaskStore } = await import("@drec/app");
-      const { rollingQueueModeEnabled, shouldDecideUploadOwner, masterOwnedWithoutRule, enabledHubRuleForTask } = await import("@drec/app");
+      const { makeRollingUploadHookFactory } = await import("@drec/app");
       const slug = platform.extractRoomSlug(roomToUrl(o.room));
-      // Production record is spawned by TaskManager; wire the same hub-owner decision as task run,
-      // otherwise hub-bound rooms would upload on the node AND on the master (double archive).
-      // Only a hub master takes ownership here: a machine that has enabled rule files but runs serve
-      // without --hub has no orchestrator to upload the skipped parts, and must keep uploading on the
-      // node (the serve process marks hub mode with DOUYIN_REC_HUB_MASTER=1).
-      const hubMaster = process.env.DOUYIN_REC_HUB_MASTER === "1";
-      let uploadOwner: (() => ReturnType<typeof uploadOwnerForTask>) | undefined;
-      let enqueueHubSkipped: ((input: { file: string; index: number; seq?: number; streamKey: string; title?: string; expectedDurationSec?: number; confirmedAt?: number }) => boolean) | undefined;
-      if (o.taskId !== undefined && /^\d+$/.test(o.taskId)) {
-        const db = new TaskStore(resolveDbPath());
-        try {
-          const task = db.listTasks().find((t) => t.id === Number(o.taskId));
-          if (task && shouldDecideUploadOwner(task, hubMaster)) {
-            uploadOwner = () => uploadOwnerForTask(task, rootHubDir());
-            enqueueHubSkipped = (info) => enqueueHubOwnedSkip({ ...info, taskId: task.id });
-            // A hub-managed task whose rule is gone would record parts nobody ever uploads: say so.
-            // (Worker nodes legitimately have no local rule files, hence the hub-master scope.)
-            if (masterOwnedWithoutRule(uploadOwnerForTask(task, rootHubDir()), enabledHubRuleForTask(task, rootHubDir()) !== undefined, hubMaster)) {
-              console.error("[rec] ⚠️ hub-owned 房间没有启用中的规则:本场只写 skipped 行,没有 uploader(task=" + String(task.id) + ")");
-            }
-          }
-        } finally { db.close(); }
-      }
       makeRolling = makeRollingUploadHookFactory({
         enabled: true,
         platform: platform.id,
         roomSlug: slug,
-        // Plan 046 PR6 (方案 A): settings switch, default off => this path stays unchanged.
-        queueMode: rollingQueueModeEnabled(),
-        ...(o.taskId !== undefined && /^\d+$/.test(o.taskId) ? { taskId: Number(o.taskId) } : {}),
-        ...(uploadOwner ? { uploadOwner } : {}),
-        ...(enqueueHubSkipped ? { enqueueHubSkipped } : {}),
         log: (m: string) => console.log(m),
         notify: (message: string) => { void notifier.notify({ kind: "error", stage: "边录边传", message }).catch(() => {}); },
       });
