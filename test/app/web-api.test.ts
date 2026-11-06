@@ -2461,6 +2461,41 @@ describe("POST /api/rooms(新建房间)", () => {
     s.close();
   });
 
+  it("规则写失败且 removeTask 抛 SQLite 异常 → 500 且保留原始原因与「可能已创建」", () => {
+    const s = new TaskStore(":memory:");
+    const base = mkdtempSync(join(tmpdir(), "rooms-create-rbthrow-"));
+    const hubConfigPath = join(base, "hub.config.json");
+    writeFileSync(hubConfigPath, JSON.stringify({ workers: [{ id: "local", name: "本机", kind: "local" }] }));
+    const blocked = join(base, "hub-is-a-file");
+    writeFileSync(blocked, "not a dir");
+    const a = makeApi({ store: s, manager: new MockManager(), hubEnabled: true, hubDir: blocked, hubConfigPath });
+    vi.spyOn(s, "removeTask").mockImplementation(() => { throw new Error("SQLITE_IOERR"); });
+    const res = a.createRoom({ recording: { room: "123456" }, processing: { enabled: true } });
+    expect(res.status).toBe(500);
+    expect(errOf(res)).toContain("可能已创建");
+    expect(errOf(res)).toContain("SQLITE_IOERR");
+    expect(errOf(res)).toContain("写入处理配置失败");
+    expect(s.listTasks()).toHaveLength(1);
+    rmSync(base, { recursive: true, force: true });
+    s.close();
+  });
+
+  it("zeroDiskErrorFor 拒绝后 removeTask 抛异常 → 500 且保留原始原因与「可能已创建」", () => {
+    const s = new TaskStore(":memory:");
+    const a = makeApi({ store: s, manager: new MockManager(), ...hubDeps("rooms-create-zerodisk-rbthrow-") });
+    vi.spyOn(s, "removeTask").mockImplementation(() => { throw new Error("SQLITE_BUSY"); });
+    const res = a.createRoom({
+      recording: { room: "123456", streamUpload: true },
+      processing: { enabled: true, workers: ["local"] },
+    });
+    expect(res.status).toBe(500);
+    expect(errOf(res)).toContain("可能已创建");
+    expect(errOf(res)).toContain("SQLITE_BUSY");
+    expect(errOf(res)).toContain("直播直传");
+    expect(s.listTasks()).toHaveLength(1);
+    s.close();
+  });
+
   it("processing 校验失败(rolling + 烧录)→ 400,任务不落库(校验在写之前)", () => {
     const { s, a } = setupMaster("rooms-create-badproc-");
     const res = a.createRoom({

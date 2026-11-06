@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { homeTarget, navSections } from "../../packages/web/src/lib/nav.js";
 
 const APP = readFileSync(join(__dirname, "..", "..", "packages", "web", "src", "App.tsx"), "utf-8");
+const EDITOR = readFileSync(join(__dirname, "..", "..", "packages", "web", "src", "modals", "RoomEditor.tsx"), "utf-8");
 
 /** 每条 `<Route>` 在 App.tsx 里都是单行,按路径取回该行(断言跳转目标/守卫组件)。 */
 const routeLine = (path: string): string =>
@@ -31,8 +32,9 @@ describe("navSections", () => {
 describe("App routes (plans/047 §4.1)", () => {
   it("/tasks 与 /task/:id 是跳转,不再是旧页面", () => {
     const tasks = routeLine("/tasks");
-    expect(tasks).toContain("<Navigate");
-    expect(tasks).toContain('"/rooms"');
+    expect(tasks).toContain("<TasksRedirect />");
+    expect(APP).toContain("function TasksRedirect()");
+    expect(APP).toContain('<Navigate to={{ pathname: "/rooms", search }} replace />');
     expect(tasks).not.toContain("<TaskList");
     // /task/:id 走「任务 id → 房间 key」的二次跳转,保留 query(?logs=1)。
     const task = routeLine("/task/:id");
@@ -41,6 +43,17 @@ describe("App routes (plans/047 §4.1)", () => {
     expect(APP).toContain("/rooms/by-task/");
     expect(APP).not.toContain("import { TaskList }");
     expect(APP).not.toContain("import { TaskDetail }");
+  });
+  it("worker 编辑器只请求平台列表,不打 master 专属 /api/hub/workers", () => {
+    const workersCall = EDITOR.split("\n").find((line) => line.includes("api.listWorkers()")) ?? "";
+    expect(workersCall.trimStart()).toMatch(/^if \(caps\.nodes\) void api\.listWorkers\(\)/);
+    expect(EDITOR).toContain("void api.getPlatforms()");
+    expect(EDITOR).toContain("}, [caps.nodes]);");
+  });
+  it("/tasks 重定向组件保留 search", () => {
+    const body = APP.split("function TasksRedirect(): ReactNode {")[1]?.split("\n}")[0] ?? "";
+    expect(body).toContain("const { search } = useLocation();");
+    expect(body).toContain('<Navigate to={{ pathname: "/rooms", search }} replace />');
   });
   it("任务 id → 房间 key 解析路由与新房间入口都在", () => {
     const byTask = routeLine("/rooms/by-task/:id");

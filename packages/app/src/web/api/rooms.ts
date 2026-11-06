@@ -29,6 +29,19 @@ type RecordingKey = keyof RecordingPatch & keyof Task;
 const _patchKeysAreTaskFields: [Exclude<keyof RecordingPatch, keyof Task>] extends [never] ? true : never = true;
 void _patchKeysAreTaskFields;
 
+function reasonOf(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+function rollbackNewTask(store: TaskStore, id: number): string | null {
+  try {
+    if (store.removeTask(id)) return null;
+    return "回滚未删除任务";
+  } catch (e) {
+    return `回滚异常:${reasonOf(e)}`;
+  }
+}
+
 /**
  * Keys to restore after a forward `patch`: exactly the keys written, plus the columns `updateTask`
  * derives from them (a room change re-validates quality/engine; writing rollingUpload clears
@@ -304,8 +317,9 @@ export function buildRooms(ctx: ApiCtx) {
           : null,
       );
       if (zeroErr) {
-        if (!store.removeTask(task.id)) {
-          return err(500, `${zeroErr};**且刚建的任务未能回滚** —— 任务 id=${task.id} 可能已创建,请手工核对`);
+        const rollbackError = rollbackNewTask(store, task.id);
+        if (rollbackError !== null) {
+          return err(500, `${zeroErr};**且刚建的任务未能回滚(${rollbackError})** —— 房间 ${key} 的任务可能已创建(id=${task.id}),请手工核对`);
         }
         return err(400, zeroErr);
       }
@@ -325,10 +339,11 @@ export function buildRooms(ctx: ApiCtx) {
           });
         } catch (e) {
           // 回滚第一步:本端点的核心承诺是不留半成功。回滚也失败就必须**明说**。
-          if (!store.removeTask(task.id)) {
-            return err(500, `写入处理配置失败(${(e as Error).message});**且新建的录制任务未能回滚** —— 房间 ${key} 的任务可能已创建(id=${task.id}),请手工核对`);
+          const rollbackError = rollbackNewTask(store, task.id);
+          if (rollbackError !== null) {
+            return err(500, `写入处理配置失败(${reasonOf(e)});**且新建的录制任务未能回滚(${rollbackError})** —— 房间 ${key} 的任务可能已创建(id=${task.id}),请手工核对`);
           }
-          return err(500, `写入处理配置失败(${(e as Error).message}),已回滚新建的录制任务`);
+          return err(500, `写入处理配置失败(${reasonOf(e)}),已回滚新建的录制任务`);
         }
         refreshLocalRollingEffective(store, hubDir); // 新规则的派生值立刻生效
       }

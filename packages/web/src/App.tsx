@@ -29,6 +29,11 @@ function TaskIdRedirect(): ReactNode {
   return <Navigate to={{ pathname: `/rooms/by-task/${encodeURIComponent(id)}`, search }} replace />;
 }
 
+function TasksRedirect(): ReactNode {
+  const { search } = useLocation();
+  return <Navigate to={{ pathname: "/rooms", search }} replace />;
+}
+
 /**
  * `/rooms/by-task/:id` — 用 `GET /api/rooms` 找到 `recording.taskId === id` 的房间。
  * 加载中给骨架;找不到 / 请求失败一律回落 `/rooms`(不 404,旧链接仍可用)。
@@ -90,7 +95,7 @@ export function App(): ReactNode {
           <Route path="/rooms/by-task/:id" element={<RoomByTaskRedirect />} />
           <Route path="/rooms/:key" element={<RoomPage />} />
           {/* 旧任务路由退化为跳转:任务不再是用户可见实体,旧链接/通知仍可用(plans/047 §4.1)。 */}
-          <Route path="/tasks" element={<Navigate to="/rooms" replace />} />
+          <Route path="/tasks" element={<TasksRedirect />} />
           <Route path="/task/:id" element={<TaskIdRedirect />} />
           {/* master-only 页面:worker 上给 child-node 说明卡,不解析出任何写操作。 */}
           <Route path="/nodes" element={<MasterOnly descKey="nodes.childDesc"><NodesPage /></MasterOnly>} />

@@ -316,9 +316,12 @@ export function submitPayload(
   const base = payloadFromForm(f, ctx);
   if (!base.ok) return base;
   // `processing` 是 hub 规则字段:worker 上没有规则可写,整段省略(后端 PUT/POST 也会拒)。
-  const payload: RoomPayload = o.withProcessing
-    ? base.payload
-    : (base.payload.recording ? { recording: base.payload.recording } : {});
+  let payload: RoomPayload = base.payload;
+  if (!o.withProcessing) {
+    const { streamUpload, streamUploadSpool, ...recording } = base.payload.recording ?? {};
+    void streamUpload; void streamUploadSpool;
+    payload = base.payload.recording ? { recording } : {};
+  }
   if (o.mode === "edit") return { ok: true, mode: "edit", payload };
   const room = f.room.trim();
   if (!room) return { ok: false, error: "room" };

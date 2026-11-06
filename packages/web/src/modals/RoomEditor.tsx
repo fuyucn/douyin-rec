@@ -81,9 +81,14 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
   useEffect(() => {
     let alive = true;
     void api.getPlatforms().then((r) => { if (alive) setPlatforms(r.platforms ?? []); }).catch(() => {});
-    void api.listWorkers().then((ws) => { if (alive) setWorkers(ws); }).catch(() => {});
     return () => { alive = false; };
   }, []);
+
+  useEffect(() => {
+    let alive = true;
+    if (caps.nodes) void api.listWorkers().then((ws) => { if (alive) setWorkers(ws); }).catch(() => {});
+    return () => { alive = false; };
+  }, [caps.nodes]);
 
   // New rooms derive the platform from the URL the user types; edit uses the stored one.
   const plat = pickPlatform(create ? form.room : room.room, platforms);

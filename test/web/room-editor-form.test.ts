@@ -255,6 +255,35 @@ describe("新增 = 编辑同一弹窗:create 与 edit 共用一条提交路径",
     expect(e.payload.recording).toMatchObject({ quality: "origin", engine: "ffmpeg" });
   });
 
+  it("worker 编辑直播直传房间不回写规则拥有的字段;master 仍按表单语义写回", () => {
+    const processing: NonNullable<RoomDTO["processing"]> = {
+      enabled: true, workers: ["vps1"], requires: [],
+      pipeline: {
+        steps: { mergeSegments: true, burnDanmu: false, burnLivechat: false },
+        upload: { mode: "rolling", private: true, tid: 171, tag: "a,b", titleTemplate: "{name}_{date}" },
+        cleanup: { stageSourceAfterMerge: true, sourceAfterDone: true, stageAfterDone: true },
+      },
+    };
+    const room = mkRoom({
+      recording: { streamUpload: true, streamUploadSpool: false },
+      processing,
+    });
+    const workerRoom = { ...room, processing: null };
+    const workerCtx: RoomContext = { ...ctx, hasRule: false };
+    const workerForm = formFromRoom(workerRoom);
+    const worker = submitPayload(workerForm, workerCtx, { mode: "edit", withProcessing: false });
+    if (!worker.ok) throw new Error("expected worker ok");
+    expect(worker.payload.recording).not.toHaveProperty("streamUpload");
+    expect(worker.payload.recording).not.toHaveProperty("streamUploadSpool");
+    expect(worker.payload.recording).toMatchObject({ quality: "origin", engine: "ffmpeg" });
+    expect("processing" in worker.payload).toBe(false);
+
+    const master = submitPayload(formFromRoom(room), ctx, { mode: "edit", withProcessing: true });
+    if (!master.ok) throw new Error("expected master ok");
+    expect(master.payload.recording).toMatchObject({ streamUpload: true, streamUploadSpool: false });
+    expect(master.payload.processing?.pipeline?.upload?.mode).toBe("rolling");
+  });
+
   it("edit 的 payload 不带 room(存量地址不回写,避免房间校验副作用)", () => {
     const f = formFromRoom(mkRoom()); // 存量 room = https://live.douyin.com/1
     const r = submitPayload(f, ctx, { mode: "edit", withProcessing: true });
