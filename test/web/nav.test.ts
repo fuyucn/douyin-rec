@@ -38,3 +38,36 @@ describe("navSections", () => {
     expect(homeTarget(false)).toBe("/tasks");
   });
 });
+
+describe("node queue kinds dictionary coverage", () => {
+  it("every known proc-queue kind has zh and en labels", () => {
+    const queueSrc = readFileSync(join(__dirname, "..", "..", "packages", "web", "src", "pages", "QueuePage.tsx"), "utf-8");
+    const dictSrc = readFileSync(join(__dirname, "..", "..", "packages", "web", "src", "lib", "i18n.tsx"), "utf-8");
+    const eq = dictSrc.indexOf("=", dictSrc.indexOf("const DICT"));
+    const open = dictSrc.indexOf("{", eq);
+    let depth = 0;
+    let end = -1;
+    for (let i = open; i < dictSrc.length; i++) {
+      if (dictSrc[i] === "{") depth++;
+      else if (dictSrc[i] === "}" && --depth === 0) { end = i + 1; break; }
+    }
+    const dict = (0, eval)("(" + dictSrc.slice(open, end) + ")") as {
+      zh: { queue: { nodeQueue: { kinds: Record<string, string> } } };
+      en: { queue: { nodeQueue: { kinds: Record<string, string> } } };
+    };
+    const kindsMatch = queueSrc.match(/NODE_QUEUE_KINDS = \[([^\]]+)\]/);
+    expect(kindsMatch).not.toBeNull();
+    const kinds = [...kindsMatch![1]!.matchAll(/"([a-z-]+)"/g)].map((m) => m[1]!);
+    expect(kinds).toContain("upload-part");
+    expect(kinds).toContain("cleanup-part");
+    expect(kinds).toContain("reconcile-part");
+    expect(kinds).toContain("remux");
+    expect(kinds).toContain("upload-prep");
+    expect(kinds).toContain("biliup");
+    expect(kinds).not.toContain("cleanup-spool");
+    for (const kind of kinds) {
+      expect(dict.zh.queue.nodeQueue.kinds[kind]).toBeTruthy();
+      expect(dict.en.queue.nodeQueue.kinds[kind]).toBeTruthy();
+    }
+  });
+});

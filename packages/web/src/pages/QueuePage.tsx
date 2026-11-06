@@ -37,7 +37,10 @@ import { fmtTimeInTz } from "../lib/tz";
 type TFunc = (key: string, vars?: Record<string, string | number>) => string;
 
 const NODE_QUEUE_POLL_MS = 10_000;
-const NODE_QUEUE_KINDS = ["upload-part", "cleanup-part", "reconcile-part", "remux", "cleanup-spool"] as const;
+/** Known proc-queue kinds (must stay in sync with `providers-register.ts`): the UI gives these
+ * dedicated labels; anything else folds into the "unknown" aggregate row, never exposing raw keys. */
+export const NODE_QUEUE_KINDS = ["upload-part", "cleanup-part", "reconcile-part", "remux", "upload-prep", "biliup"] as const;
+export type NodeQueueKnownKind = (typeof NODE_QUEUE_KINDS)[number];
 type NodeQueueState = { data: ProcActiveDTO | null; available: boolean; loaded: boolean };
 const INITIAL_NODE_QUEUE_STATE: NodeQueueState = { data: null, available: true, loaded: false };
 
@@ -46,46 +49,43 @@ function NodeQueueCard(): ReactNode {
   const t = useT();
   const [state, setState] = useState<NodeQueueState>(INITIAL_NODE_QUEUE_STATE);
   const alive = useRef(true);
-  usePolling(() => {
-    void api.getProcActive()
-      .then((data) => { if (alive.current) setState({ data, available: true, loaded: true }); })
-      .catch(() => { if (alive.current) setState((prev) => ({ data: prev.data, available: false, loaded: true })); });
-  }, NODE_QUEUE_POLL_MS);
+  // Return the promise so usePolling's reentry guard actually spans the request (P2-1).
+  usePolling(() => api.getProcActive()
+    .then((data) => { if (alive.current) setState({ data, available: true, loaded: true }); })
+    .catch(() => { if (alive.current) setState({ data: null, available: false, loaded: true }); }),
+  NODE_QUEUE_POLL_MS);
   useEffect(() => {
     alive.current = true;
     return () => { alive.current = false; };
   }, []);
   const data = state.data;
-  const extraKinds = data
+  const unknownKinds = data
     ? [...new Set([...Object.keys(data.running), ...Object.keys(data.pending), ...Object.keys(data.leaseAlive)])]
       .filter((kind) => !NODE_QUEUE_KINDS.some((known) => known === kind))
       .sort()
     : [];
-  const kinds = [...NODE_QUEUE_KINDS] as string[];
-  const unknownKindLabel = t("queue.nodeQueue.unknownKind");
-  if (extraKinds.length > 0) kinds.push(unknownKindLabel);
+  const hasUnknown = unknownKinds.length > 0;
+  const snapshot = state.available ? data : null;
   return (
     <section className="mb-5">
       <div className="section-label mb-2.5">{t("queue.nodeQueue.title")}</div>
       <div className="card p-3.5">
         <div className="flex flex-wrap items-center gap-2 mb-3">
           <span className="text-[12px] text-muted">{t("queue.nodeQueue.subtitle")}</span>
-          {data && <span className="chip ml-auto">{t(data.host ? "queue.nodeQueue.hostRunning" : "queue.nodeQueue.hostStopped")}</span>}
+          {snapshot && <span className="chip ml-auto">{t(snapshot.host ? "queue.nodeQueue.hostRunning" : "queue.nodeQueue.hostStopped")}</span>}
         </div>
         {!state.available && <div className="mb-3 text-[12px] text-muted">{t("queue.nodeQueue.unavailable")}</div>}
         {!state.loaded && <div className="text-[12px] text-muted">{t("hub.common.loading")}</div>}
-        {state.loaded && kinds.length > 0 && (
+        {state.loaded && snapshot && (
           <div className="space-y-1.5">
-            {kinds.map((kind) => {
-              const extra = kind === unknownKindLabel;
-              const running = extra ? extraKinds.reduce((sum, k) => sum + (data?.running[k] ?? 0), 0) : data?.running[kind] ?? 0;
-              const pending = extra ? extraKinds.reduce((sum, k) => sum + (data?.pending[k] ?? 0), 0) : data?.pending[kind] ?? 0;
-              const leaseAlive = extra ? extraKinds.some((k) => data?.leaseAlive[k] === true) : data?.leaseAlive[kind] === true;
+            {NODE_QUEUE_KINDS.map((kind) => {
+              const running = snapshot.running[kind] ?? 0;
+              const pending = snapshot.pending[kind] ?? 0;
+              const leaseAlive = snapshot.leaseAlive[kind] === true;
               return (
                 <div key={kind} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-1.5 border-t border-[var(--hairline)] first:border-t-0">
-                  <span className="text-[13px] font-medium text-ink">{extra ? kind : t(`queue.nodeQueue.kinds.${kind}`)}</span>
-                  {!extra && <span className="font-mono text-[11px] text-muted">{kind}</span>}
-                  {extra && <span className="font-mono text-[11px] text-muted">{extraKinds.join(", ")}</span>}
+                  <span className="text-[13px] font-medium text-ink">{t(`queue.nodeQueue.kinds.${kind}`)}</span>
+                  <span className="font-mono text-[11px] text-muted">{kind}</span>
                   <span className="chip ml-auto">{t("queue.nodeQueue.running")} {running}</span>
                   <span className="chip">{t("queue.nodeQueue.pending")} {pending}</span>
                   <span className="inline-flex items-center gap-1.5 text-[11px] text-muted">
@@ -95,9 +95,20 @@ function NodeQueueCard(): ReactNode {
                 </div>
               );
             })}
+            {hasUnknown && (
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 py-1.5 border-t border-[var(--hairline)]">
+                <span className="text-[13px] font-medium text-ink">{t("queue.nodeQueue.unknownKind")}</span>
+                <span className="chip ml-auto">{t("queue.nodeQueue.running")} {unknownKinds.reduce((sum, k) => sum + (snapshot.running[k] ?? 0), 0)}</span>
+                <span className="chip">{t("queue.nodeQueue.pending")} {unknownKinds.reduce((sum, k) => sum + (snapshot.pending[k] ?? 0), 0)}</span>
+                <span className="inline-flex items-center gap-1.5 text-[11px] text-muted">
+                  <span className="dot" style={{ background: unknownKinds.some((k) => snapshot.leaseAlive[k] === true) ? "var(--success)" : "var(--muted-soft)" }} />
+                  {t(unknownKinds.some((k) => snapshot.leaseAlive[k] === true) ? "queue.nodeQueue.leaseAlive" : "queue.nodeQueue.leaseDead")}
+                </span>
+              </div>
+            )}
           </div>
         )}
-        {state.loaded && kinds.length === 0 && <div className="text-[12px] text-muted">{t("queue.nodeQueue.empty")}</div>}
+        {state.loaded && !snapshot && <div className="text-[12px] text-muted">{state.available ? t("queue.nodeQueue.empty") : t("queue.nodeQueue.unavailable")}</div>}
       </div>
     </section>
   );
@@ -802,7 +813,7 @@ export function QueuePage(): ReactNode {
   const filtered = phase.length + states.length + platform.length + (debouncedQ ? 1 : 0) > 0;
 
   // hub 未启用(worker):场次管线只在主控上,本页不请求任何 /api/hub/* 数据。
-  if (hubEnabled === false) {
+  if (hubEnabled !== true) {
     return (
       <>
         <div className="flex flex-wrap items-end justify-between gap-3 mb-6">
@@ -879,6 +890,8 @@ export function QueuePage(): ReactNode {
 
           <LiveUploadLanes lanes={liveUploadLanes(fleetTasks)} now={now} />
 
+          <NodeQueueCard />
+
           <div className="section-label mb-2.5">{t("queue.attentionSection.title")}</div>
           {sections.attention.length === 0 ? (
             <div className="card px-4 py-3 mb-5 text-[12px] text-muted">{t("queue.attentionSection.empty")}</div>
@@ -920,7 +933,6 @@ export function QueuePage(): ReactNode {
             onOpenLog={setLogKey}
             onAck={openAck}
           />
-          <NodeQueueCard />
         </>
       )}
 
