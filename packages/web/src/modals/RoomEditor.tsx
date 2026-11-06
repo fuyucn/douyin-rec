@@ -18,6 +18,8 @@ import { api, type PlatformDTO, type RoomDTO, type WorkerDTO } from "../api/clie
 import { cookieStatusAtom } from "../atoms";
 import { Button, IconButton } from "../components/Button";
 import { ExperimentalBadge } from "../components/ExperimentalBadge";
+import { ModeChoices } from "../components/ModeChoices";
+import { ModeLogo } from "../components/ModeLogo";
 import { Switch } from "../components/Switch";
 import { CleanupSection } from "../components/room-form/CleanupSection";
 import { SeasonSectionField } from "../components/room-form/SeasonSectionField";
@@ -26,7 +28,7 @@ import { errMessage, usePlatformCookieStatuses, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { pickPlatform, qualityLabel } from "../lib/labels";
 import { factsOf, formFromRoom, isValidPartSizeInput, isValidSeasonSectionIdInput, PART_SIZE_MIB_MAX, PART_SIZE_MIB_MIN, ruleFactsOf, payloadFromForm, type RoomContext, type RoomForm } from "../lib/room-editor-form";
-import { burnVersionsApply, deriveConstraints, flowSummary, settledMethod, shownOutputFormat, type Lock, type UploadMethod } from "../lib/room-form-rules";
+import { burnVersionsApply, deriveConstraints, flowSummary, settledMethod, shownOutputFormat, type UploadMethod } from "../lib/room-form-rules";
 import { accountToggleCopy, cookieReadyFor } from "../lib/room-form-rules";
 
 interface Props {
@@ -42,35 +44,15 @@ interface Props {
 type StepId = "record" | "process" | "upload" | "finish";
 const STEPS: readonly StepId[] = ["record", "process", "upload", "finish"];
 
-const METHODS: { id: UploadMethod; key: string; hint: string }[] = [
-  { id: "after", key: "room.editor.timingAfter", hint: "roomForm.method.afterHint" },
-  { id: "rolling", key: "room.editor.timingRolling", hint: "rooms.rollingUploadHint" },
-  { id: "nodeSide", key: "room.editor.timingNode", hint: "room.editor.timingNodeHint" },
+const METHODS: { id: UploadMethod; key: string; hint: string; icon: "merge" | "segment" | "node" }[] = [
+  { id: "after", key: "room.editor.timingAfter", hint: "roomForm.method.afterHint", icon: "merge" },
+  { id: "rolling", key: "room.editor.timingRolling", hint: "roomForm.method.rollingHint", icon: "segment" },
+  { id: "nodeSide", key: "room.editor.timingNode", hint: "roomForm.method.nodeHint", icon: "node" },
 ];
 
 /** Current value not among candidates (old config) → keep it selectable instead of blank. */
 const withCurrent = (list: readonly string[], cur: string): string[] => [...new Set([...list, cur].filter(Boolean))];
 const toggleIn = (list: string[], x: string): string[] => (list.includes(x) ? list.filter((y) => y !== x) : [...list, x]);
-
-export function Seg<T extends string>({ items, value, onChange, small }: {
-  items: { id: T; label: string; lock?: Lock }[];
-  value: T;
-  onChange: (v: T) => void;
-  small?: boolean;
-}): ReactNode {
-  const t = useT();
-  return (
-    <div className={`seg-group rm-seg${small ? " rm-seg-sm" : ""}`} role="radiogroup">
-      {items.map((it) => (
-        <button key={it.id} type="button" role="radio" aria-checked={value === it.id}
-                disabled={it.lock?.locked} title={it.lock?.locked && it.lock.reasonKey ? t(it.lock.reasonKey) : undefined}
-                className={`seg-btn${value === it.id ? " is-active" : ""}`} onClick={() => onChange(it.id)}>
-          {it.label}
-        </button>
-      ))}
-    </div>
-  );
-}
 
 export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props): ReactNode {
   const t = useT();
@@ -125,8 +107,6 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
   const flow = flowSummary(facts, !!room.recording && room.recording.enabled);
   const caps = useMemo(() => [...new Set(workers.flatMap((w) => w.capabilities ?? []))], [workers]);
   const workerName = (id: string): string => workers.find((w) => w.id === id)?.name ?? id;
-  const methodHint = METHODS.find((m) => m.id === form.method)?.hint ?? "";
-  // Locked methods are disabled buttons; tooltips don't exist on phones, so say why in text.
   const lockedMethods = METHODS.filter((m) => m.id !== "after" && (m.id === "rolling" ? c.rolling : c.nodeSide).locked);
 
   async function submit(ev: FormEvent): Promise<void> {
@@ -263,8 +243,14 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                         <RuleSwitch checked={form.procEnabled} onChange={(procEnabled) => update({ procEnabled })} />
                         <div>
                           <span className="field-label">{t("roomForm.output")}</span>
-                          <Seg value={form.mergeSegments ? "merge" : "split"} onChange={(v) => update({ mergeSegments: v === "merge" })}
-                               items={[{ id: "merge", label: t("roomForm.mergeOne") }, { id: "split", label: t("roomForm.mergeSplit") }]} />
+                          <ModeChoices
+                            value={form.mergeSegments ? "merge" : "split"}
+                            onChange={(v) => update({ mergeSegments: v === "merge" })}
+                            items={[
+                              { id: "merge", label: t("roomForm.mergeOne"), hint: t("roomForm.mergeOneHint"), icon: "merge" },
+                              { id: "split", label: t("roomForm.mergeSplit"), hint: t("roomForm.mergeSplitHint"), icon: "split" },
+                            ]}
+                          />
                           <p className="text-xs text-muted mt-1">{t("roomForm.outputHint")}</p>
                         </div>
                         {form.uploadOn && (
@@ -324,23 +310,45 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                     <>
                       <div>
                         <span className="field-label">{t("room.editor.after")}</span>
-                        <Seg value={form.uploadOn ? "upload" : "archive"} onChange={(v) => update({ uploadOn: v === "upload" })}
-                             items={[{ id: "archive", label: t("room.archiveMode") }, { id: "upload", label: t("room.uploadMode") }]} />
+                        <ModeChoices
+                          value={form.uploadOn ? "upload" : "archive"}
+                          onChange={(v) => update({ uploadOn: v === "upload" })}
+                          items={[
+                            { id: "archive", label: t("room.archiveMode"), hint: t("room.editor.archiveHint"), icon: "archive" },
+                            { id: "upload", label: t("room.uploadMode"), hint: t("room.editor.uploadHint"), icon: "bilibili" },
+                          ]}
+                        />
                         {!form.uploadOn && <p className="text-xs text-muted mt-1">{t("room.editor.uploadOffHint")}</p>}
                       </div>
                     {form.uploadOn && (
                     <>
                   <div className="rm-ctx">
                     <span className="field-label !mb-0">{t("room.editor.timing")}</span>
-                    <Seg small value={form.method} onChange={(method) => update({ method })}
-                         items={METHODS.map((m) => ({ id: m.id, label: t(m.key), lock: m.id === "after" ? undefined : m.id === "rolling" ? c.rolling : c.nodeSide }))} />
-                    <p className="text-xs text-muted">
-                      {t(methodHint)}
-                      {lockedMethods.map((m) => {
-                        const reason = (m.id === "rolling" ? c.rolling : c.nodeSide).reasonKey;
-                        return reason ? <span key={m.id} className="block text-muted-soft mt-0.5">{t(m.key)}: {t(reason)}</span> : null;
-                      })}
-                    </p>
+                    <ModeChoices
+                      small
+                      columns={3}
+                      value={form.method}
+                      onChange={(method) => update({ method })}
+                      items={METHODS.map((m) => ({
+                        id: m.id,
+                        label: t(m.key),
+                        hint: t(m.hint),
+                        icon: m.icon,
+                        disabled: m.id !== "after" && (m.id === "rolling" ? c.rolling : c.nodeSide).locked,
+                        disabledReason: (() => {
+                          const reason = (m.id === "rolling" ? c.rolling : c.nodeSide).reasonKey;
+                          return reason ? t(reason) : undefined;
+                        })(),
+                      }))}
+                    />
+                    {lockedMethods.length > 0 && (
+                      <div className="text-xs text-muted-soft space-y-0.5">
+                        {lockedMethods.map((m) => {
+                          const reason = (m.id === "rolling" ? c.rolling : c.nodeSide).reasonKey;
+                          return reason ? <p key={m.id}>{t(m.key)}: {t(reason)}</p> : null;
+                        })}
+                      </div>
+                    )}
                     <label className="flex items-center justify-between gap-3 cursor-pointer">
                       <span className="text-sm text-ink">{t("room.editor.public")} <span className="text-xs text-muted">· {t("room.editor.publicHint")}</span></span>
                       <Switch checked={!form.uploadPrivate} onCheckedChange={(x) => update({ uploadPrivate: !x })} />
@@ -349,6 +357,7 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                       <>
                         <ToggleRow
                           nested
+                          icon={<ModeLogo kind="zero-disk" className="w-[15px] h-[15px]" />}
                           label={t("room.editor.zeroDisk")}
                           hint={t("room.editor.zeroDiskHint")}
                           checked={form.streamUpload}

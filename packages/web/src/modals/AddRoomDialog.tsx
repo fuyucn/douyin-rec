@@ -8,7 +8,7 @@ import { useT } from "../lib/i18n";
 import { pickPlatform } from "../lib/labels";
 import { findCreatedRoom, findExistingRoom, newRoomTaskPayload, planNewRoomFinish, planNewRoomRule } from "../lib/room-create";
 import { OUTPUT_FORMATS, stageExt, type OutputFormat } from "@drec/output-format";
-import { Seg } from "./RoomEditor";
+import { ModeChoices } from "../components/ModeChoices";
 
 interface Props {
   open: boolean;
@@ -128,8 +128,14 @@ export function AddRoomDialog({ open, onClose, onSaved, hubEnabled, workers }: P
         <div className="rm-editor-body">
           <div>
             <span className="field-label">{t("room.addAfter")}</span>
-            <Seg value={mode} onChange={setMode}
-                 items={[{ id: "archive", label: t("room.archiveMode") }, { id: "upload", label: t("room.uploadMode") }]} />
+            <ModeChoices
+              value={mode}
+              onChange={setMode}
+              items={[
+                { id: "archive", label: t("room.archiveMode"), hint: t("room.editor.archiveHint"), icon: "archive" },
+                { id: "upload", label: t("room.uploadMode"), hint: t("room.editor.uploadHint"), icon: "bilibili" },
+              ]}
+            />
           </div>
 
           <label className="rm-ctx">

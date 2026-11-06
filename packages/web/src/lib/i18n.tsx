@@ -222,9 +222,9 @@ const DICT = {
     roomForm: {
       useCookieStream: "带账号信息取流 + 抓礼物/入场", useCookieStreamOnly: "带账号信息取流", notifySection: "通知",
       ruleEnabled: "Hub 编排此房间", ruleEnabledHint: "关掉 = 暂停此房间:各节点停录,录完也不处理(任务与配置保留)", cleanupSection: "清理", output: "产出形态",
-      mergeOne: "合并为一个视频", mergeSplit: "按录制分段",
+      mergeOne: "合并为一个视频", mergeSplit: "按录制分段", mergeOneHint: "整场各分段合成一片,再投稿或存档", mergeSplitHint: "每个分段一个分 P,开烧录则逐段烧",
       outputHint: "合并为一个视频 = 整场各分段合成一片再上传(默认);按录制分段 = 每段一个分 P,开烧录则逐段烧", moreUpload: "更多:稿件名 / 分P名 / 简介", flowLabel: "处理流程",
-      method: { label: "上传方式", after: "收播后上传", afterHint: "收播后由主控合并 / 烧录再投稿(默认)" },
+      method: { label: "上传方式", after: "收播后上传", afterHint: "收播后由主控合并 / 烧录再投稿(默认)", rollingHint: "录制中按分段上传(边录边传),可选直播直传", nodeHint: "录制节点本地合成上传,省录像回传" },
       lock: { needDanmu: "需先开启「录制弹幕」", needNodeSide: "仅在「节点侧上传」时生效", needMerge: "按分段产出时没有合并步骤", needUploadForCleanArchive: "不投稿时存档就是成品,不会被清理;开关已锁定为保留", outputFormatUpload: "投稿固定使用 mp4(B 站要求),此项已锁定", outputFormatHub: "该任务由主控的 Hub 托管(受管任务),输出格式在主控上设置,此处不可选", outputFormatHubRule: "该房间有 Hub 规则按房间号命中本任务、但本任务不是规则的源任务,输出格式只取自规则的源任务,此处不可选", outputFormatRolling: "该任务开启了边录边传(上传后删源),与原地替换容器互斥,此处不可选", outputFormatStreamUpload: "该任务开启了「直播直传」,不产生本地视频文件,此处不可选", outputFormatNoSurvivors: "该任务的 Hub 规则会在收尾后清掉本机所有源录像,没有可转换的文件,此处不可选", zeroDiskNeedsRolling: "「直播直传」只能在「边录边传」+ 关闭烧录 + 恰好勾选一个节点(本机或某个远端节点)时开启" },
       flow: {
         record: "录制", noProcess: "已暂停", rolling: "边录边传", merge: "合并", split: "按分段",
@@ -254,6 +254,7 @@ const DICT = {
         title: "编辑房间", after: "录完之后", when: "什么时候录", whenPlaceholder: "留空 = 全天,如 20:00-02:00",
         where: "在哪录", whereHint: "都不选 = 全部节点", timing: "上传时机",
         timingAfter: "收播后", timingRolling: "边录边传", timingNode: "节点直传", timingNodeHint: "由录制节点本地合成并上传,省掉录像回传(节点需装 biliup + B站 cookie);需烧录弹幕/聊天版的房间不适用",
+        archiveHint: "只留存档,不投稿 B站;之后可手动处理", uploadHint: "合成后自动投稿 B站,可设仅自己可见",
         public: "公开投稿", publicHint: "关 = 仅自己可见",
         zeroDisk: "直播直传（不写本地视频）", zeroDiskHint: "开 = 直播数据直接传 B 站,不写本地视频文件;每 P 达到大小(默认 1.5GB)或时长上限即结算,后续续到同一稿件。仅单节点可用(本机或某个远端节点;远端节点需已升级到支持直播直传的版本)。",
         zeroDiskSpool: "保留本地回退文件（推荐开启）", zeroDiskSpoolHint: "开 = 每个分 P 先写临时文件,失败可整文件重传(推荐);关 = 直播直传且不留本地副本,该分 P 失败时无法本地回退。",
@@ -812,9 +813,9 @@ const DICT = {
     roomForm: {
       useCookieStream: "Use account for streams + gifts/entries", useCookieStreamOnly: "Use account for streams", notifySection: "Notifications",
       ruleEnabled: "Hub manages this room", ruleEnabledHint: "Off = pause this room: nodes stop recording and nothing is processed (task and settings kept)", cleanupSection: "Cleanup", output: "Output",
-      mergeOne: "Merge into one video", mergeSplit: "Per recorded segment",
+      mergeOne: "Merge into one video", mergeSplit: "Per recorded segment", mergeOneHint: "Join the whole broadcast into one file before upload or archive", mergeSplitHint: "One part per recorded segment; burn each segment when burning is on",
       outputHint: "Merge = all segments become one video before upload (default); per segment = each recorded segment is its own part, burned per segment when burning is on", moreUpload: "More: submission / part titles, description", flowLabel: "Processing flow",
-      method: { label: "Upload method", after: "Upload after broadcast", afterHint: "After the broadcast, master merges / burns, then uploads (default)" },
+      method: { label: "Upload method", after: "Upload after broadcast", afterHint: "After the broadcast, master merges / burns, then uploads (default)", rollingHint: "Upload while recording, segment by segment; optional 0-disk", nodeHint: "The recording node merges and uploads locally; no copy back" },
       lock: { needDanmu: "Turn on \"Record danmu\" first", needNodeSide: "Only applies to node-side upload", needMerge: "No merge step when output is per segment", needUploadForCleanArchive: "Without upload the archive is the final output and is never cleaned; locked to keep", outputFormatUpload: "Uploads always use mp4 (Bilibili requirement); locked", outputFormatHub: "This task is managed by the master Hub; its output format is set on the master, so it can't be set here", outputFormatHubRule: "A Hub rule matches this room but this task is not the rule's source task; the output format is taken from the source task only, so it can't be set here", outputFormatRolling: "Rolling upload is on (source deleted after upload), which excludes in-place container replacement, so it can't be set here", outputFormatStreamUpload: "Live upload is on, so no local video file is produced and there is nothing to convert; it can't be set here", outputFormatNoSurvivors: "The task's Hub rule deletes every local source recording after it finishes, so there is nothing to convert; it can't be set here", zeroDiskNeedsRolling: "Live upload requires rolling upload, burning off, and exactly one node (local or a single worker)" },
       flow: {
         record: "Record", noProcess: "Paused", rolling: "Rolling upload", merge: "Merge", split: "Per segment",
@@ -844,6 +845,7 @@ const DICT = {
         title: "Edit room", after: "After recording", when: "When", whenPlaceholder: "Empty = all day, e.g. 20:00-02:00",
         where: "Where", whereHint: "None selected = all nodes", timing: "Upload timing",
         timingAfter: "After broadcast", timingRolling: "Rolling", timingNode: "From node", timingNodeHint: "The recording node merges and uploads locally, skipping the copy back (needs biliup + a Bilibili cookie on the node); not applicable when danmu/chat burn-in is on",
+        archiveHint: "Keep the archive only; nothing is uploaded to Bilibili and you can process it later", uploadHint: "Upload to Bilibili automatically after processing; can be private",
         public: "Public", publicHint: "Off = only visible to me",
         zeroDisk: "Live upload (no local video)", zeroDiskHint: "On = send live data straight to Bilibili with no local video file; each part is sealed at the byte cap (default 1.5GB) or duration cap, and later parts append to the same archive. Single-node use only (local or one worker).",
         zeroDiskSpool: "Keep a local fallback file (recommended)", zeroDiskSpoolHint: "On = each part is written to a temporary file first and can be re-uploaded as a whole on failure (recommended); off = live upload with no local fallback if that part fails.",
