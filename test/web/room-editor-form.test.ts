@@ -152,6 +152,20 @@ describe("room editor form ↔ payload", () => {
     expect(ok(payloadFromForm({ ...f, uploadOn: true }, ctx)).recording?.outputFormat).toBe("mp4");
   });
 
+  it("backend lock is read back and its outputFormat is omitted from the payload (#542)", () => {
+    const locked = formFromRoom(mkRoom({ recording: { outputFormatLock: "hub-rule" } }));
+    expect(locked.outputFormatLock).toBe("hub-rule");
+    const p = ok(payloadFromForm(locked, ctx));
+    expect(p.recording).toBeDefined();
+    expect(p.recording).not.toHaveProperty("outputFormat");
+  });
+
+  it("no backend lock (or legacy backend) → outputFormat is still written", () => {
+    const f = formFromRoom(mkRoom());
+    expect(f.outputFormatLock).toBeNull();
+    expect(ok(payloadFromForm(f, ctx)).recording?.outputFormat).toBe("original");
+  });
+
   it("rolling with burn on falls back to after-broadcast upload (rules decide, not the editor)", () => {
     const f = { ...formFromRoom(mkRoom()), method: "rolling" as const };
     expect(ok(payloadFromForm(f, ctx)).processing?.pipeline?.upload?.mode).toBe("upload");
