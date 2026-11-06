@@ -5,7 +5,7 @@ import { DEFAULT_TITLE_TEMPLATES, blankForm, factsOf, formFromRoom, isValidPartS
 import { deriveConstraints, settledMethod } from "../../packages/web/src/lib/room-form-rules.js";
 import type { RoomDTO } from "../../packages/web/src/api/client.js";
 
-const ctx: RoomContext = { hasRecording: true, hasRule: true, danmuAvailable: true, cookieReady: true, cookieForStream: false };
+const ctx: RoomContext = { hasRecording: true, hasRule: true, writesRule: true, danmuAvailable: true, cookieReady: true, cookieForStream: false };
 
 describe("factsOf carries the room's rule presence (#284)", () => {
   it("task-only room (no processing half) → hasRule false, so VERSIONS stays hidden", () => {
@@ -168,23 +168,19 @@ describe("room editor form ↔ payload", () => {
     expect(q.recording).toMatchObject({ streamUpload: false });
   });
 
-  it("no-rule save (worker or rule-less master) omits rule-owned zero-disk keys; master keeps them", () => {
-    const processing: NonNullable<RoomDTO["processing"]> = {
-      enabled: true, workers: ["vps1"], requires: [],
-      pipeline: {
-        steps: { mergeSegments: true, burnDanmu: false, burnLivechat: false },
-        upload: { mode: "rolling", private: true, tid: 171, tag: "a,b", titleTemplate: "{name}_{date}" },
-        cleanup: { stageSourceAfterMerge: true, sourceAfterDone: true, stageAfterDone: true },
-      },
+  it("master can create rolling + zero-disk in one save, even without an existing rule", () => {
+    const room = mkRoom({ recording: { streamUpload: true, streamUploadSpool: false }, processing: null });
+    const form = {
+      ...formFromRoom(room),
+      uploadOn: true,
+      method: "rolling" as const,
+      burnDanmu: false,
+      burnLivechat: false,
+      workers: ["vps1"],
     };
-    const form = { ...formFromRoom(mkRoom({ recording: { streamUpload: true, streamUploadSpool: false }, processing })), method: "rolling" as const, burnDanmu: false, burnLivechat: false };
-    const noRule = ok(payloadFromForm(form, { ...ctx, hasRule: false }));
-    expect(noRule.recording).not.toHaveProperty("streamUpload");
-    expect(noRule.recording).not.toHaveProperty("streamUploadSpool");
-    expect(noRule.recording).toMatchObject({ quality: "origin", engine: "ffmpeg" });
-
-    const withRule = ok(payloadFromForm(form, ctx));
-    expect(withRule.recording).toMatchObject({ streamUpload: true });
+    const payload = ok(payloadFromForm(form, { ...ctx, hasRule: false }));
+    expect(payload.processing?.pipeline?.upload?.mode).toBe("rolling");
+    expect(payload.recording).toMatchObject({ streamUpload: true, streamUploadSpool: false });
   });
 
   it("empty schedule clears the window; malformed schedule is rejected", () => {
@@ -288,7 +284,7 @@ describe("新增 = 编辑同一弹窗:create 与 edit 共用一条提交路径",
       processing,
     });
     const workerRoom = { ...room, processing: null };
-    const workerCtx: RoomContext = { ...ctx, hasRule: false };
+    const workerCtx: RoomContext = { ...ctx, hasRule: false, writesRule: false };
     const workerForm = formFromRoom(workerRoom);
     const worker = submitPayload(workerForm, workerCtx, { mode: "edit", withProcessing: false });
     if (!worker.ok) throw new Error("expected worker ok");
@@ -305,13 +301,31 @@ describe("新增 = 编辑同一弹窗:create 与 edit 共用一条提交路径",
 
   it("master 编辑无规则但直传开启的任务,不写回规则拥有的字段", () => {
     const room = mkRoom({ recording: { streamUpload: true, streamUploadSpool: false }, processing: null });
-    const noRuleCtx: RoomContext = { ...ctx, hasRule: false };
+    const noRuleCtx: RoomContext = { ...ctx, hasRule: false, writesRule: true };
     const master = submitPayload(formFromRoom(room), noRuleCtx, { mode: "edit", withProcessing: true });
     if (!master.ok) throw new Error("expected master ok");
     expect(master.payload.recording).not.toHaveProperty("streamUpload");
     expect(master.payload.recording).not.toHaveProperty("streamUploadSpool");
     expect(master.payload.recording).toMatchObject({ quality: "origin", engine: "ffmpeg" });
     expect(master.payload.processing).toBeDefined();
+  });
+
+  it("worker 即使有陈旧本地规则也不写回直播直传两键", () => {
+    const processing: NonNullable<RoomDTO["processing"]> = {
+      enabled: true, workers: ["vps1"], requires: [],
+      pipeline: {
+        steps: { mergeSegments: true, burnDanmu: false, burnLivechat: false },
+        upload: { mode: "rolling", private: true, tid: 171, tag: "a,b", titleTemplate: "{name}_{date}" },
+        cleanup: { stageSourceAfterMerge: true, sourceAfterDone: true, stageAfterDone: true },
+      },
+    };
+    const room = mkRoom({ recording: { streamUpload: true, streamUploadSpool: false }, processing });
+    const workerCtx: RoomContext = { ...ctx, hasRule: true, writesRule: false };
+    const worker = submitPayload(formFromRoom(room), workerCtx, { mode: "edit", withProcessing: false });
+    if (!worker.ok) throw new Error("expected worker ok");
+    expect(worker.payload.recording).not.toHaveProperty("streamUpload");
+    expect(worker.payload.recording).not.toHaveProperty("streamUploadSpool");
+    expect("processing" in worker.payload).toBe(false);
   });
 
   it("edit 的 payload 不带 room(存量地址不回写,避免房间校验副作用)", () => {

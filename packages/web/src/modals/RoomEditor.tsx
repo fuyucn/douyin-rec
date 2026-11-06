@@ -111,9 +111,10 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
   const platformId = create ? plat?.id : room.platform;
   const ctx: RoomContext = {
     hasRecording,
-    // A rule exists only when the API returned a processing half; a task-only room has none.
-    // Create writes one on the master (both halves at once), a worker creates the recording half only.
+    // A rule existed when the editor opened only when the API returned a processing half.
+    // This save writes one on the master (both create and edit); a worker creates the recording half only.
     hasRule: create ? caps.editPipeline : !!room.processing,
+    writesRule: caps.editPipeline,
     danmuAvailable: plat ? plat.hasDanmu : true,
     cookieReady: cookieReadyFor(platformId, cookieStatuses, douyinReady),
     // Douyin streams anonymously; its cookie only serves danmu. Other platforms stream with it.

@@ -275,7 +275,7 @@ function uploadMethod(t: ReturnType<typeof useT>, r: RoomDTO): Method {
 }
 
 /**
- * worker 上的「录制方式」(plan §3.2 的 `editNodeDelivery`):只看**任务字段** —— 直播直传 > 边录边传 >
+ * worker 上的「录制方式」(节点能力矩阵):只看**任务字段** —— 直播直传 > 边录边传 >
  * 普通录制 + 存档格式。master 的 `MethodChip` 读规则(处理半边),节点上没有规则,故两者分开判。
  */
 function recordingMethod(t: ReturnType<typeof useT>, r: RoomDTO): Method | null {

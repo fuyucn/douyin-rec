@@ -162,8 +162,10 @@ export function formFromRoom(r: RoomDTO): RoomForm {
 /** Room facts the rules need beyond the form itself. */
 export interface RoomContext {
   hasRecording: boolean;
-  /** The room already has a hub rule. A task-only room has none, so nothing can burn there. */
+  /** The room had a hub rule when the editor opened (not whether this save writes one). */
   hasRule: boolean;
+  /** This save also writes the rule half (master). A worker never does, even if a stale local rule exists. */
+  writesRule: boolean;
   danmuAvailable: boolean;
   cookieReady: boolean;
   cookieForStream: boolean;
@@ -208,10 +210,11 @@ export function payloadFromForm(f: RoomForm, ctx: RoomContext): PayloadResult {
   if (f.uploadOn && !isValidPartSizeInput(f.partSizeMiB)) return { ok: false, error: "partSizeMiB" };
   const stored = storedFromForm(ruleFactsOf(f, ctx));
   const trimOrUndef = (s: string): string | undefined => s.trim() || undefined;
-  // Zero-disk fields are owned by the rule: only a save that also sees it may write them.
-  // Without it the form cannot read the stored value, so both keys are omitted (PATCH =
-  // keep); with it, leaving rolling still clears the switch so it cannot be resurrected.
-  const zeroDisk = ctx.hasRule
+  // Zero-disk fields are owned by the rule: write them only when this save writes the rule
+  // and either it already exists or the new rolling mode needs the override. Otherwise omit
+  // (PATCH = keep) so a task-only room keeps its stored value; leaving rolling still sends false.
+  const writesZeroDisk = ctx.writesRule && (ctx.hasRule || stored.mode === "rolling");
+  const zeroDisk = writesZeroDisk
     ? { streamUpload: stored.mode === "rolling" && f.streamUpload, streamUploadSpool: f.streamUploadSpool }
     : {};
   const recording: RoomPayload["recording"] = ctx.hasRecording
