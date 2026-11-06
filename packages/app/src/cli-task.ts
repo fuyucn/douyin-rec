@@ -68,6 +68,8 @@ import { TaskManager } from "./task-manager.js";
 import { NodeRecordSpawner } from "./process/spawner.js";
 import { makeRollingUploadHookFactory } from "./rolling-upload.js";
 import { makeNodeRemuxHookFactory, resolveNodeOutputFormat } from "./node-remux.js";
+import { uploadOwnerForTask } from "./hub-rule-match.js";
+import { enqueueHubOwnedSkip } from "./hub-owner.js";
 import { effectiveHubConfig, makeNewBroadcastGate } from "./disk-gate.js";
 import { effectiveTimezone } from "./timezone.js";
 
@@ -126,6 +128,9 @@ export function buildSessionForTask(
     enabled: task.rollingEffective, // 只读 master 派生的生效值(issue #40)
     platform: task.platform,
     roomSlug: platformForRoom(task.room).extractRoomSlug(task.room),
+    // plan 046 PR7: master-owned rooms keep a skipped(hub-owned) timeline row per sealed part.
+    uploadOwner: () => uploadOwnerForTask(task, rootHubDir()),
+    enqueueHubSkipped: (info) => enqueueHubOwnedSkip({ ...info, taskId: task.id }),
   });
   // 节点侧原地替换容器(issue #137):与 spawn 路径共用同一个判定点;rolling 生效时恒 original(互斥)。
   // 前台 `task run` 不做崩溃接管(接管在每次 `record` 子进程启动时做,会扫同一目录)。

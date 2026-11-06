@@ -31,7 +31,6 @@ import {
   type NodeRemuxDeps,
 } from "@drec/processors";
 import {
-  platformForRoom,
   sealedSegmentIndices,
   sessionBaseOf,
   STAGE_CONTAINERS,
@@ -45,7 +44,8 @@ import {
   type StageFormat,
 } from "@drec/core";
 import type { RollingUploadHook } from "@drec/manager";
-import { listHubRules, hubKey, type HubRule } from "./hub-store.js";
+import type { HubRule } from "./hub-store.js";
+import { enabledHubRuleForTask } from "./hub-rule-match.js";
 import type { RemuxQueueLike } from "./remux-queue.js";
 import type { Task } from "./store.js";
 
@@ -357,11 +357,8 @@ function sealConversionBlocker(
 ): "hub-managed" | "rolling" | { rule: HubRule } | undefined {
   if (task.managedBy === "hub") return "hub-managed";
   if (task.rollingEffective) return "rolling";
-  const platform = platformForRoom(task.room);
-  const key = hubKey(platform.id, platform.extractRoomSlug(task.room));
   // 源任务规则优先于仅房间键命中的规则:任务既是某规则的源、又与另一规则同房间键时,收尾只认前者的格式。
-  const enabled = listHubRules(hubDir).filter((r) => r.enabled);
-  const rule = enabled.find((r) => r.recording?.sourceTaskId === task.id) ?? enabled.find((r) => r.key === key);
+  const rule = enabledHubRuleForTask(task, hubDir);
   return rule ? { rule } : undefined;
 }
 

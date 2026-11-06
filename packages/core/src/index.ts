@@ -60,3 +60,4 @@ export * from "./fleet-protocol.js";
 
 // Recorder process state file + the single activity judge (plans/044): record child writes, node commands read.
 export * from "./recorder-state.js";
+export * from "./upload-owner.js";
