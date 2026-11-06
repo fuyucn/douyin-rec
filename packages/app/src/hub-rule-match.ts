@@ -7,7 +7,7 @@
 import { hubKey, listHubRules, type HubRule } from "./hub-store.js";
 import { platformForRoom, resolveUploadOwner, type UploadOwner } from "@drec/core";
 
-export type UploadOwnerTask = { id: number; room: string };
+export type UploadOwnerTask = { id: number; room: string; managedBy?: string | null };
 
 /** Enabled rule bound to this task, preferring recording.sourceTaskId over a room-key-only match. */
 export function enabledHubRuleForTask(task: UploadOwnerTask, hubDir: string): HubRule | undefined {
@@ -22,6 +22,9 @@ export function enabledHubRuleForTask(task: UploadOwnerTask, hubDir: string): Hu
  * must write a skipped(hub-owned) placeholder instead of uploading. enabled=false is unbound.
  */
 export function uploadOwnerForTask(task: UploadOwnerTask, hubDir: string): UploadOwner {
+  // A hub-managed task is owned by the master even when the worker has no local rule files
+  // (rules live on the master). Same precedent as node-remux's "hub-managed" lock.
+  if (task.managedBy === "hub") return "master";
   const platform = platformForRoom(task.room);
   const key = hubKey(platform.id, platform.extractRoomSlug(task.room));
   const rule = enabledHubRuleForTask(task, hubDir);

@@ -3,7 +3,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { dirname, join } from "node:path";
-import { parseJobId } from "@drec/core";
+import { jobIdOf, parseJobId } from "@drec/core";
 import { ProcQueueStore, BatchRejected, procQueueDbPath, fileTagOf, GC_RETAIN_MS, LEASE_MS } from "@drec/proc-queue";
 import { SCHEMA_VERSION } from "../../packages/proc-queue/src/schema.js";
 import { makeEnv, type Env } from "./helpers.js";
@@ -891,6 +891,41 @@ describe("prep-failed cascade (plan 038 T03b)", () => {
     expect(s.get(rows[0]!.jobId)?.state).toBe("cancelled");
     expect(s.get(rows[1]!.jobId)?.state).toBe("pending");
     expect(s.get(rows[2]!.jobId)?.state).toBe("pending");
+    s.close();
+  });
+});
+
+describe("A3 store helpers", () => {
+  it("rowsForOrderSeq filters by kind (a biliup row does not mask the part)", () => {
+    const s = env.open();
+    const p = env.file("a.ts");
+    const job = (kind: string) => ({
+      jobId: jobIdOf(kind, "same-broadcast:part:1", 1), kind, logicalKey: "same-broadcast:part:1",
+      generation: 1, inputs: [p], params: kind === "upload-part" ? { ctx: { v: 1, orderKey: "same-broadcast", index: 1, file: p, fp: { size: 1, mtimeMs: 1 } } } : {},
+      replaceInputs: false, owner: {}, createdAt: 1, orderKey: "same-broadcast", seq: 1,
+    });
+    s.enqueue(job("biliup") as never, roots());
+    expect(s.rowsForOrderSeq("same-broadcast", 1)).toHaveLength(0);
+    expect(s.rowsForOrderSeq("same-broadcast", 1, "biliup")).toHaveLength(1);
+    s.close();
+  });
+
+  it("importConfirmedPart on an existing done row still enqueues the cleanup successor", () => {
+    const s = env.open();
+    const p = env.file("a.ts");
+    const base = {
+      logicalKey: "same-broadcast:part:1", generation: 1, inputs: [p],
+      params: { ctx: { v: 1, orderKey: "same-broadcast", index: 1, file: p, fp: { size: 1, mtimeMs: 1 } } },
+      replaceInputs: false, owner: {}, createdAt: 1, orderKey: "same-broadcast", seq: 1,
+    };
+    const upload = { ...base, jobId: jobIdOf("upload-part", base.logicalKey, 1), kind: "upload-part" };
+    const cleanup = {
+      ...base, jobId: jobIdOf("cleanup-part", base.logicalKey, 1), kind: "cleanup-part", orderKey: undefined, seq: undefined,
+      params: { ctx: { ...(base.params.ctx as object), bv: "X" } },
+    };
+    expect(s.importConfirmedPart(upload as never, { allowedRoots: [env.root], bv: "X" }).state).toBe("done");
+    expect(s.importConfirmedPart(upload as never, { allowedRoots: [env.root], bv: "X", cleanupJob: cleanup as never }).state).toBe("done");
+    expect(s.list({ kind: "cleanup-part" })).toHaveLength(1);
     s.close();
   });
 });
