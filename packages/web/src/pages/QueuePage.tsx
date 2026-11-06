@@ -849,7 +849,12 @@ export function QueuePage(): ReactNode {
       />
 
       {!loaded ? (
-        <div className="py-10 text-center text-muted">{t("hub.common.loading")}</div>
+        <>
+          <div className="py-10 text-center text-muted">{t("hub.common.loading")}</div>
+          {/* The node queue is this host's own state, not hub-ledger data: keep it visible even
+              when the first /api/hub/queue never settles. */}
+          <NodeQueueCard />
+        </>
       ) : (
         <>
           <FilterBar
