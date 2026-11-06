@@ -3,7 +3,7 @@
  * master-side delivery builder, spec planning, and the end-to-end "node == master rule" chain.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RemoteTaskSpec } from "@drec/core";
@@ -151,6 +151,37 @@ describe("zeroDiskNodePreflight — refuse loudly, never default", () => {
       },
     });
     expect(r).toMatchObject({ ok: true, cookiesPath: other, credentialSource: "delivered-path" });
+  });
+  it("a garbage alternate is skipped, so a valid later alternate still wins", () => {
+    const root = useRoot("node");
+    const nodeDefault = writeCookies(root, null); // readable but identifies no account
+    const envPath = join(base, "env.json");
+    writeFileSync(envPath, cookiesFor("42")); // primary: exists but unreadable in this test
+    const delivered = join(base, "delivered.json");
+    writeFileSync(delivered, cookiesFor("42"));
+    const r = zeroDiskNodePreflight(json({ ...GOOD, credentialPath: delivered }), {
+      env: { BILIUP_COOKIE: envPath },
+      readFile: (p: string) => {
+        if (p === envPath) throw new Error("EACCES");
+        return readFileSync(p, "utf-8");
+      },
+    });
+    expect(r).toMatchObject({ ok: true, cookiesPath: delivered, credentialSource: "delivered-path" });
+    expect(nodeDefault).not.toBe(delivered);
+  });
+  it("an unreadable env login falls back to the node default", () => {
+    const root = useRoot("node");
+    const nodeDefault = writeCookies(root, "42");
+    const envPath = join(base, "env.json");
+    writeFileSync(envPath, cookiesFor("42"));
+    const r = zeroDiskNodePreflight(json(GOOD), {
+      env: { BILIUP_COOKIE: envPath },
+      readFile: (p: string) => {
+        if (p === envPath) throw new Error("EACCES");
+        return readFileSync(p, "utf-8");
+      },
+    });
+    expect(r).toMatchObject({ ok: true, cookiesPath: nodeDefault, credentialSource: "node-default" });
   });
   it("matching account passes and returns the verified credential path", () => {
     const root = useRoot("node");

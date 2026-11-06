@@ -121,7 +121,7 @@ export function parseZeroDiskDelivery(raw: unknown): ZeroDiskDeliveryParse {
 export type ZeroDiskRefusalCode =
   | "delivery_missing"      // managed node task without (valid) delivered metadata
   | "credential_missing"    // no upload login file found on the node
-  | "credential_unreadable" // a login file exists but the node's service user cannot read/parse it (e.g. root-owned)
+  | "credential_unreadable" // the chosen login cannot be read (e.g. root-owned → EACCES) and no alternate yields a usable account. A readable file with no account ID still reports account_unknown
   | "account_unknown"       // node or master account cannot be identified
   | "account_mismatch";     // node account differs from the master-configured one
 

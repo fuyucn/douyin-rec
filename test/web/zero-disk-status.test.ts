@@ -9,10 +9,10 @@ const dto = (over: Partial<ZeroDiskNodeStatusDTO> = {}): ZeroDiskNodeStatusDTO =
 
 describe("zeroDiskView", () => {
   it("maps every node-reported refusal code to its own wording", () => {
-    const keys = ["account_mismatch", "account_unknown", "credential_missing", "delivery_missing"].map(
+    const keys = ["account_mismatch", "account_unknown", "credential_missing", "credential_unreadable", "delivery_missing"].map(
       (code) => zeroDiskView(dto({ run: "refused", code: code as ZeroDiskNodeStatusDTO["code"] })).key,
     );
-    expect(new Set(keys).size).toBe(4);
+    expect(new Set(keys).size).toBe(5);
     expect(keys.every((k) => k.startsWith("room.zeroDisk.refused"))).toBe(true);
     expect(zeroDiskView(dto({ run: "refused" })).key).toBe("room.zeroDisk.refused"); // unknown code: still a refusal
   });

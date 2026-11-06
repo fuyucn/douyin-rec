@@ -102,9 +102,11 @@ export function zeroDiskNodePreflight(
   let nodeKey = readAccountKey(cred.path);
   let chosen = cred;
   if (nodeKey === null) {
-    // An unreadable (or unparseable) chosen login must not block a readable alternate: the
-    // master-delivered path or the node default may still work. Nothing readable → refuse with a
-    // dedicated code, so the UI says "permission/unreadable" instead of the misleading "no login".
+    // An unreadable chosen login must not block a readable alternate: the master-delivered
+    // path or the node default may still work. Only the *primary* being unreadable triggers this;
+    // a readable login with an unknown/mismatched account still fails loudly (verdict below).
+    // Alternates whose content identifies no account are skipped too: a corrupt file must not
+    // hide the next valid one.
     const envPath = (o.env ?? process.env).BILIUP_COOKIE?.trim();
     const alternates = [
       ...(envPath ? [{ path: envPath, source: "env" as const }] : []),
@@ -114,13 +116,13 @@ export function zeroDiskNodePreflight(
     for (const alt of alternates) {
       if (alt.path === cred.path || !(o.exists ?? existsSync)(alt.path)) continue;
       const key = readAccountKey(alt.path);
-      if (key === null) continue;
+      if (key === null || !isKnownAccountKey(key)) continue;
       nodeKey = key;
       chosen = { path: alt.path, source: alt.source };
       break;
     }
     if (nodeKey === null) {
-      return refuse("credential_unreadable", "the node's upload login file exists but cannot be read (check ownership/permissions: the service user must be able to read it)");
+      return refuse("credential_unreadable", "the node's upload login file could not be read into a usable login (check ownership/permissions and file contents; the service user must be able to read it)");
     }
   }
   const verdict = zeroDiskAccountVerdict(d.value.accountKey, nodeKey);
