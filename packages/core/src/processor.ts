@@ -170,8 +170,12 @@ export interface ProcessResult {
   note?: string;
   /** BV created by this run (biliup). */
   bv?: string;
-  /** Plan 046 §5.4: local proof that this part was fully sent and the in-queue fingerprint still matches. */
-  confirmed?: { size: number; mtimeMs: number; ackedBytes: number };
+  /**
+   * Plan 046 §5.4: local proof that this part was fully sent and the in-queue fingerprint still matches.
+   * ackedBytes is null when no tcp sample was readable at the transfer boundary (unknown, not zero;
+   * the processor logs the degraded check, issue #532).
+   */
+  confirmed?: { size: number; mtimeMs: number; ackedBytes: number | null };
   /**
    * Ask the runner to retry later. Omitted reason = `transfer-retry` (failed/stalled transfer, child
    * confirmed stopped); `slot-busy` = the node-wide upload slot was taken, nothing was uploaded (PR4).

@@ -4,6 +4,13 @@
  * Progress = TCP bytes acked by the peer on the biliup process's sockets (T14 measurement: rchar/wchar
  * plateau for minutes while bytes still flow, tcp.acked does not). Only `step=transfer` can stall;
  * gate_wait and submit never do. Missing evidence (no `ss`, unreadable sockets) never kills.
+ *
+ * "No evidence" and "zero bytes" are different states (issue #532): a null sample, or an ss listing
+ * with no socket for the child, is unknown, not 0. The per-part byte proof reads the snapshot taken at
+ * the transfer-complete boundary (see TransferWatch.markBoundary) so a mid-transfer sample is never
+ * mistaken for a short transfer. A round with no parsed bytes_acked number, or a boundary read where a
+ * socket seen earlier is already gone, is incomplete evidence: the proof stays unknown and the part is
+ * never failed on it.
  */
 import { execFile, execFileSync } from "node:child_process";
 
@@ -79,6 +86,17 @@ export function readTcpAckedAsync(pid: number): Promise<AckSample> {
   });
 }
 
+/**
+ * True when a listing carries real acked-byte evidence: at least one socket with a parsed, positive
+ * bytes_acked. A listing whose entries are all 0 (no bytes_acked token on the socket line, which some
+ * ss outputs print) proves nothing and must never be read as "0 bytes acked" (issue #532).
+ */
+export function hasAckedEvidence(sample: AckSample): boolean {
+  if (sample === null) return false;
+  for (const v of sample.values()) if (v > 0) return true;
+  return false;
+}
+
 export type WatchVerdict = { kind: "ok" } | { kind: "stall"; idleMs: number } | { kind: "wall"; step: string };
 
 /** Pure state machine fed with samples; alerts go through the callback, each kind at most once. */
@@ -90,6 +108,12 @@ export class TransferWatch {
   private windowStart: number;
   private windowBytes = 0;
   private childBytes = 0;
+  /** Readable samples for the current child while transferring; 0 = no evidence either way. */
+  private samples = 0;
+  /** Bytes acked at the transfer-complete boundary; null = no complete reading at that moment. */
+  private boundary: number | null = null;
+  /** Sockets observed for the current child; one missing from the boundary read makes it incomplete. */
+  private readonly seen = new Set<string>();
   private readonly alerted = new Set<string>();
 
   constructor(
@@ -105,9 +129,33 @@ export class TransferWatch {
     return this.step;
   }
 
-  /** Bytes acked by the current child so far (sum of per-socket gains; closed sockets keep their share). */
-  get ackedSinceChild(): number {
-    return this.childBytes;
+  /**
+   * Bytes acked by the current child so far (sum of per-socket gains; closed sockets keep their share).
+   * null = no readable sample yet: "unknown" is never reported as 0 bytes.
+   */
+  get ackedSinceChild(): number | null {
+    return this.samples > 0 ? this.childBytes : null;
+  }
+
+  /** Snapshot of ackedSinceChild taken at the transfer-complete boundary (plan 046 §5.4). */
+  get ackedAtBoundary(): number | null {
+    return this.boundary;
+  }
+
+  /**
+   * Record the byte-proof snapshot for the current child. Called once the child reports the
+   * transfer-complete line, while its sockets are still visible. A boundary read that returned no
+   * socket is unknown: earlier mid-transfer samples are short by nature and must not become the proof.
+   */
+  markBoundary(sample: AckSample): number | null {
+    // Only a complete reading sets the proof; a later unusable one (e.g. a repeated boundary line after
+    // the child moved to submit) never erases the value captured while the sockets were up.
+    if (sample === null || !hasAckedEvidence(sample)) return this.boundary;
+    // The total is a count only when every socket seen during the transfer is still listed: a socket
+    // that closed earlier left bytes unobserved, so the sum would be a lower bound (issue #532, rework 1).
+    for (const key of this.seen) if (!sample.has(key)) return this.boundary;
+    this.boundary = this.ackedSinceChild;
+    return this.boundary;
   }
 
   setStep(step: string): void {
@@ -124,6 +172,9 @@ export class TransferWatch {
     this.lastProgress = this.windowStart = t;
     this.windowBytes = 0;
     this.childBytes = 0;
+    this.samples = 0;
+    this.boundary = null;
+    this.seen.clear();
   }
 
   observe(sample: AckSample): WatchVerdict {
@@ -148,8 +199,18 @@ export class TransferWatch {
       const before = this.prev?.get(k);
       if (before === undefined) gained += v;
       else if (v > before) gained += v - before;
+      // A live socket's bytes_acked never decreases, so a lower total means the tuple was reused by a
+      // new connection: count that socket from its own zero, keeping the closed one's share.
+      else if (v < before) gained += v;
     }
-    this.prev = sample;
+    // An ss listing without this child's sockets carries no byte information: keep the last known
+    // per-socket values (closed sockets keep their share) and do not count it as a sample. It still
+    // counts as "no progress" for the stall watchdog above.
+    if (sample.size > 0) {
+      this.prev = sample;
+      this.samples += 1;
+      for (const key of sample.keys()) this.seen.add(key);
+    }
     if (gained > 0) {
       this.lastProgress = t;
       this.windowBytes += gained;
