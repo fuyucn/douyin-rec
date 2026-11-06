@@ -4,7 +4,7 @@
  *  2. no emoji glyphs (⚠ ⏳) in components — they render differently per OS; use the lucide icons.
  */
 import { describe, it, expect } from "vitest";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 const SRC = join(__dirname, "..", "..", "packages", "web", "src");
@@ -58,7 +58,17 @@ describe("room links (issue #197)", () => {
     const queue = read("pages", "QueuePage.tsx");
     expect(queue.match(/title=\{t\("queue\.openRoom"\)\}/g)?.length).toBe(2);
     expect(queue).not.toMatch(/to="\/hub"/);
-    expect(read("pages", "TaskDetail.tsx")).not.toMatch(/`\/hub\//);
+    // RoomPage 是原任务详情页的超集(任务详情页已退役,plans/047 §3.1):它同样只链到 /rooms/:key,
+    // 不进旧 Hub 概览/旧 Hub 详情页(issue #197)。
+    expect(read("pages", "RoomPage.tsx")).not.toMatch(/`\/hub\//);
+  });
+});
+
+describe("retired task pages (plans/047 §3.1)", () => {
+  it("旧任务列表 / 详情 / 编辑弹窗不再存在(能力已并入 RoomsPage / RoomPage / RoomEditor)", () => {
+    for (const p of ["pages/TaskList.tsx", "pages/TaskDetail.tsx", "modals/CreateEditTaskDialog.tsx"]) {
+      expect(existsSync(join(SRC, p)), p).toBe(false);
+    }
   });
 });
 

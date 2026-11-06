@@ -5,7 +5,7 @@ import { payloadFromForm, formFromRoom, type RoomContext } from "../../packages/
 import type { RoomDTO } from "../../packages/web/src/api/client.js";
 
 const ROOT = join(__dirname, "..", "..");
-const ctx: RoomContext = { hasRecording: true, hasRule: true, danmuAvailable: true, cookieReady: true, cookieForStream: false };
+const ctx: RoomContext = { hasRecording: true, hasRule: true, writesRule: true, deliveryTouched: false, danmuAvailable: true, cookieReady: true, cookieForStream: false };
 
 describe("no-spool option is not selectable", () => {
   it("form payload always sends streamUploadSpool=true, even with a tampered form state", () => {

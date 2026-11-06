@@ -1,4 +1,7 @@
 // lib/nav.ts — top-nav entries (pure, so the master/worker gating is testable without a DOM).
+//
+// plans/047 §4.1: Rooms is the ONE user-visible entity, on every node. "Tasks" is no longer
+// a product concept in the navigation — `/tasks` and `/task/:id` survive only as redirects.
 
 export interface NavItem {
   to: string;
@@ -12,22 +15,21 @@ export interface NavSections {
   advanced: NavItem[];
 }
 
-/** null = hub capability still loading; master redirects to Rooms; worker renders Tasks in place. */
-export function homeTarget(hubEnabled: boolean | null): "/rooms" | "/tasks" | null {
+/** null = hub capability still loading (wait). Otherwise Rooms is home on both roles. */
+export function homeTarget(hubEnabled: boolean | null): "/rooms" | null {
   if (hubEnabled === null) return null;
-  return hubEnabled ? "/rooms" : "/tasks";
+  return "/rooms";
 }
 
 /**
- * Rooms / Queue / Nodes need master-only endpoints (`/api/hub/*`, incl. the hub change stream that
- * answers 503 on a worker), so they only show when hub is enabled. Tasks and Hub remain available
- * as legacy routes, but master navigation now uses Rooms as the one-stop entry; Queue is the only
- * remaining advanced view. Nodes is a first-class master page beside Rooms.
+ * master: 房间 / 节点 / 统计 + 高级「队列」(保持现状)。
+ * worker: 只有「房间」—— /nodes /queue /stats 依赖 master-only 端点
+ * (`/api/hub/*`,含 worker 上 503 的 hub 变更流),因此既不进导航也不进高级菜单。
  */
 export function navSections(hubEnabled: boolean): NavSections {
   if (!hubEnabled) {
     return {
-      primary: [{ to: "/", labelKey: "nav.tasksList", end: true }],
+      primary: [{ to: "/rooms", labelKey: "nav.rooms" }],
       advanced: [],
     };
   }
