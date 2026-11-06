@@ -1194,6 +1194,16 @@ describe("任务视图 outputFormatLock(后端判定下发,前端据此锁定;is
 });
 
 describe("streamUpload 作为 rolling 子选项的规则门禁", () => {
+  it("worker 无规则房间里的旧零落盘任务只改 name → 200,直传保持开启", () => {
+    const deps = hubDeps("su-worker-no-rule-");
+    const a = makeApi({ store, manager, ...deps, hubEnabled: false });
+    const task = a.createTask({ room: "99010", streamUpload: true }).body as { id: number };
+    const res = a.updateRoom("douyin.99010", { recording: { name: "改名" } });
+    expect(res.status).toBe(200);
+    expect(store.getTask(task.id)!.streamUpload).toBe(true);
+    expect(store.getTask(task.id)!.name).toBe("改名");
+  });
+
   it("房间规则绑定 streamUpload 任务,但规则不是 rolling → 400", () => {
     const a = makeApi({ store, manager, ...hubDeps("su-hub-") });
     const t = a.createTask({ room: "99003", streamUpload: true }).body as { id: number };

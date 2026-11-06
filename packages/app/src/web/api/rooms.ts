@@ -404,17 +404,20 @@ export function buildRooms(ctx: ApiCtx) {
       const nextWorkers = sameKey
         ? input.processing?.workers === null ? [] : input.processing?.workers ?? nextRule?.workers
         : nextRule?.workers;
+      // No rule exists before or after this save → zero-disk needs no rule validation
+      // (same reading as createRoom); a stale streamUpload task can still be renamed.
+      const hasRuleAfter = Boolean(nextRule || proc || before.processing);
       const zeroErr = ctx.zeroDiskErrorFor(
         before.recording?.taskId ?? null,
         zeroDiskNext,
-        {
+        hasRuleAfter ? {
           enabled: nextEnabled,
-          // A room with no existing rule and no upload mode in this write is still a rule
-          // being created with the upload-mode default; don't claim it is rolling.
+          // A rule without an explicit mode is read as the upload-mode default (same as
+          // createRoom); don't claim it is rolling.
           mode: mergedPipeline.upload?.mode ?? (nextRule || before.processing ? "upload" : undefined),
           workers: nextWorkers,
           steps: mergedPipeline.steps,
-        },
+        } : null,
       );
       if (zeroErr) return err(400, zeroErr);
       if (proc && sameKey) {

@@ -44,6 +44,14 @@ export function roomActionsFor(input: { managed: boolean; caps: NodeCaps }): Roo
   return { readOnly, startStop: !readOnly, drain: !readOnly, edit: !readOnly, remove: !readOnly };
 }
 
+/**
+ * Task ownership is learned from `/api/tasks`; until it has been fetched successfully,
+ * treat every room as read-only rather than briefly exposing writes on a managed copy.
+ */
+export function roomReadOnly(input: { tasksKnown: boolean; managedBy?: string | null }): boolean {
+  return !input.tasksKnown || input.managedBy === "hub";
+}
+
 /** 页面「能看见什么」(plan §3.2 / §4.1)——worker 上处理半边与 master 专有面板一律不挂。 */
 export interface RoomVisibility {
   /** 处理半边:规则 / 交付方式 / 合成方式 / 版本,以及读 hub 台账的进度数据。 */

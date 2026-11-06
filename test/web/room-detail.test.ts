@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { RoomDTO } from "../../packages/web/src/api/client.js";
 import { nodeCaps } from "../../packages/web/src/lib/capabilities.js";
-import { roomActionsFor, roomVisibilityFor, versionKeys } from "../../packages/web/src/lib/room-detail.js";
+import { roomActionsFor, roomReadOnly, roomVisibilityFor, versionKeys } from "../../packages/web/src/lib/room-detail.js";
 
 const room = (pipeline: object | null, danmu = 1): Pick<RoomDTO, "processing" | "recording"> => ({
   processing: pipeline === null ? null : ({ enabled: true, pipeline } as RoomDTO["processing"]),
@@ -32,6 +32,22 @@ describe("versionKeys", () => {
 });
 
 /** 受管 = 只读(plan §3.3):`managedBy === "hub"` 的房间在**任何角色**上都没有写操作。 */
+describe("roomReadOnly — 任务数据未知时 fail-closed", () => {
+  it("任务列表未返回或拉取失败 → 只读,不暴露写入口", () => {
+    expect(roomReadOnly({ tasksKnown: false })).toBe(true);
+    expect(roomReadOnly({ tasksKnown: false, managedBy: null })).toBe(true);
+  });
+
+  it("任务列表已知且非受管 → 可写", () => {
+    expect(roomReadOnly({ tasksKnown: true, managedBy: null })).toBe(false);
+    expect(roomReadOnly({ tasksKnown: true, managedBy: "local" })).toBe(false);
+  });
+
+  it("任务列表已知且受管 → 只读", () => {
+    expect(roomReadOnly({ tasksKnown: true, managedBy: "hub" })).toBe(true);
+  });
+});
+
 describe("roomActionsFor — 受管即只读", () => {
   const writable = { readOnly: false, startStop: true, drain: true, edit: true, remove: true };
   const none = { readOnly: true, startStop: false, drain: false, edit: false, remove: false };

@@ -8,7 +8,7 @@ import { api, type RoomDTO, type Task, type WorkerDTO } from "../../api/client";
 import { hubEnabledAtom, type ConnState } from "../../atoms";
 import { connOf } from "../../lib/conn";
 import { nodeCaps, type NodeCaps } from "../../lib/capabilities";
-import { roomActionsFor, type RoomActions } from "../../lib/room-detail";
+import { roomActionsFor, roomReadOnly, type RoomActions } from "../../lib/room-detail";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { useHubStream, usePolling, errMessage, useToast, type HubStreamHandle } from "../../lib/hooks";
 import { useT } from "../../lib/i18n";
@@ -22,6 +22,8 @@ import { RoomEditor } from "../../modals/RoomEditor";
 export interface RoomsData {
   rooms: RoomDTO[];
   loaded: boolean;
+  /** Whether the task list has ever been fetched successfully (fail-closed write gates). */
+  tasksKnown: boolean;
   /** Last list fetch, rooms or tasks (null = none yet). */
   conn: ConnState;
   workers: WorkerDTO[];
@@ -76,7 +78,9 @@ export function useRoomsData(): RoomsData {
     try {
       // Tasks drive the start/stop icons and the status badge: refresh them with the rooms so an add / start /
       // stop shows at once instead of waiting for the 5 s poll. A failure keeps the previous list.
-      void api.listTasks().then(setTasks).catch(() => {});
+      // Mark the task fetch too: `tasksKnown` gates every write entry (fail-closed until a
+      // successful read), so a first load must not sit read-only until the 5 s poll fires.
+      void api.listTasks().then((ts) => { setTasks(ts); mark("tasks", true); }).catch(() => mark("tasks", false));
       try {
         setRooms(await api.listRooms());
         mark("rooms", true);
@@ -104,7 +108,8 @@ export function useRoomsData(): RoomsData {
   const taskOf = useCallback((r: RoomDTO) => (r.recording?.taskId != null ? taskById.get(r.recording.taskId) : undefined), [taskById]);
   const conn = useMemo((): ConnState => connOf(fetches.rooms, fetches.tasks), [fetches]);
   const statusOf = useCallback((r: RoomDTO) => roomStatus(r, taskOf(r), runs.get(latestRunKey(r)) ?? null), [taskOf, runs]);
-  return { rooms, loaded, conn, workers, hubEnabled, caps, taskOf, statusOf, refresh, refreshWorkers, stream };
+  const tasksKnown = fetches.tasks?.ok === true;
+  return { rooms, loaded, tasksKnown, conn, workers, hubEnabled, caps, taskOf, statusOf, refresh, refreshWorkers, stream };
 }
 
 export function nodesText(r: RoomDTO, workers: WorkerDTO[], all: string): string {
@@ -209,7 +214,7 @@ export function statusDetail(t: ReturnType<typeof useT>, r: RoomDTO, s: RoomStat
  * Room actions shared by list + detail. Turning a room off = hard stop of the task (cuts the
  * current segment) → always confirmed; on = start. Drain stops after the current stream ends.
  */
-export function useRoomActions(data: Pick<RoomsData, "refresh" | "taskOf" | "caps">, opts: { onDeleted?: () => void } = {}) {
+export function useRoomActions(data: Pick<RoomsData, "refresh" | "taskOf" | "caps" | "tasksKnown">, opts: { onDeleted?: () => void } = {}) {
   const t = useT();
   const toast = useToast();
   const [confirm, setConfirm] = useState<{ kind: "stop" | "delete"; room: RoomDTO } | null>(null);
@@ -224,7 +229,7 @@ export function useRoomActions(data: Pick<RoomsData, "refresh" | "taskOf" | "cap
     }
   };
   const taskIdOf = (r: RoomDTO): number | null => r.recording?.taskId ?? null;
-  const managedOf = (r: RoomDTO): boolean => data.taskOf(r)?.managedBy === "hub";
+  const managedOf = (r: RoomDTO): boolean => roomReadOnly({ tasksKnown: data.tasksKnown, managedBy: data.taskOf(r)?.managedBy });
   /** 这个房间能做什么 —— 唯一判定是纯函数 `roomActionsFor`(受管 = 只读,plan §3.3)。 */
   const actionsOf = (r: RoomDTO): RoomActions => roomActionsFor({ managed: managedOf(r), caps: data.caps });
   /** 入口本该藏起来;真被点到也不静默 —— 明确说一句「受管,由主控负责」。 */
