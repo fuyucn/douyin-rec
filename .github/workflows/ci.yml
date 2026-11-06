@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         # 拉全历史:issue-guard --diff 要用 merge-base 算出 PR 新增行(浅克隆算不出)。
@@ -49,3 +49,28 @@ jobs:
 
       - name: "Web UI install + typecheck + build"
         run: cd packages/web && pnpm install --frozen-lockfile && pnpm typecheck && pnpm build
+
+      - name: "Install Chromium for browser regression"
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: "Room mode indicators browser regression"
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd packages/web && exec node node_modules/vite/bin/vite.js --host localhost --port 18766 --strictPort) &
+          vite_pid=$!
+          trap 'kill "$vite_pid" 2>/dev/null || true; wait "$vite_pid" 2>/dev/null || true' EXIT
+          ready=false
+          for attempt in {1..60}; do
+            kill -0 "$vite_pid"
+            if curl --fail --silent http://localhost:18766/ >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 0.5
+          done
+          if [[ "$ready" != true ]]; then
+            echo "Vite did not become ready" >&2
+            exit 1
+          fi
+          MODE_ICONS_BASE_URL=http://localhost:18766 node test/web/mode-indicators.browser.mjs

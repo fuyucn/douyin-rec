@@ -12,13 +12,12 @@ import { api, type RoomDTO, type WorkerStatus } from "../api/client";
 import { Button, IconButton } from "../components/Button";
 import { ConnStatus } from "../components/ConnStatus";
 import { HubStreamBanner } from "../components/HubStreamBanner";
-import { ModeLogo, type ModeLogoKind } from "../components/ModeLogo";
+import { ModeIndicators } from "../components/ModeIndicator";
 import { WorkersPanel } from "../components/WorkersPanel";
 import { AddRoomDialog } from "../modals/AddRoomDialog";
 import { useTicker } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { roomDisplayId, scheduleText } from "../lib/labels";
-import { roomMethodKind } from "../lib/room-method";
 import { sortByStatus, type RoomStatusKind } from "../lib/room-status";
 import { DeliveryCell, deliverText, nodesText, roomName, RoomBadge, statusDetail, useRoomActions, useRoomsData } from "./rooms/shared";
 
@@ -126,7 +125,7 @@ export function RoomsPage(): ReactNode {
             <thead>
               <tr>
                 <th className="w-[212px]">{t("room.colRoom")}</th>
-                <th className="w-[104px]">{t("room.colUploadMethod")}</th>
+                <th className="w-[136px]">{t("room.colUploadMethod")}</th>
                 <th className="w-[112px]">{t("room.colLastDeliver")}</th>
                 <th className="w-[132px]">{t("room.colNodes")}</th>
                 <th className="w-[96px]">{t("room.colSchedule")}</th>
@@ -173,9 +172,7 @@ export function RoomsPage(): ReactNode {
                       </div>
                     </Link>
                   </td>
-                  <td>
-                    <MethodChip room={r} />
-                  </td>
+                  <td><ModeIndicators room={r} /></td>
                   <td><DeliveryCell s={statusOf(r)} now={now} /></td>
                   <td className="font-mono text-[11px] text-muted truncate max-w-0" title={nodesText(r, data.workers, t("room.allNodes"))}>{nodesText(r, data.workers, t("room.allNodes"))}</td>
                   <td>
@@ -222,33 +219,6 @@ export function RoomsPage(): ReactNode {
     </>
   );
 }
-
-
-/** 上传方式 chip:直播直传 > 边录边传 > 收播后上传 > 存档。私有/公开作为 title 悬浮提示。 */
-function uploadMethod(t: ReturnType<typeof useT>, r: RoomDTO): { label: string; title: string; tone?: string; kind: ModeLogoKind } {
-  const kind = roomMethodKind(r);
-  const privateFlag = r.processing?.pipeline?.upload?.private;
-  const priv = privateFlag === false ? t("room.publicShort") : t("room.privateShort");
-  if (kind === "live") return { label: t("room.methodLiveStream"), title: t("room.methodLiveStream") + " · spool", tone: "var(--status-fg)", kind: "zero-disk" };
-  if (kind === "rolling") return { label: t("room.methodRolling"), title: `${t("room.methodRolling")} · ${priv}`, tone: "var(--status-fg)", kind: "segment" };
-  if (kind === "upload") return { label: t("room.methodUpload"), title: `${t("room.methodUpload")} · ${priv}`, tone: "var(--status-fg)", kind: "bilibili" };
-  if (kind === "archive") return { label: t("room.methodStage"), title: t("room.archiveMode"), kind: "archive" };
-  return r.processing ? { label: r.processing.pipeline?.upload?.mode ?? "—", title: String(r.processing.pipeline?.upload?.mode), kind: "merge" } : { label: "—", title: t("room.noTask"), kind: "archive" };
-}
-
-/** Delivery method in one compact badge: the mark makes live/rolling/upload/archive scannable at a glance. */
-function MethodChip({ room }: { room: RoomDTO }): ReactNode {
-  const t = useT();
-  const m = uploadMethod(t, room);
-  return (
-    <span className="badge badge-muted text-[10.5px] whitespace-nowrap inline-flex items-center gap-1" title={m.title}
-          style={m.tone ? { color: m.tone, borderColor: "var(--hairline)" } : undefined}>
-      <ModeLogo kind={m.kind} className="mode-chip-icon" />
-      {m.label}
-    </span>
-  );
-}
-
 /** Recording half may be missing (rule-only room); scheduleText wants both endpoints. */
 function scheduleOf(r: RoomDTO): Pick<NonNullable<RoomDTO["recording"]>, "scheduleStart" | "scheduleEnd"> {
   return r.recording ?? { scheduleStart: null, scheduleEnd: null };
@@ -323,7 +293,7 @@ function RoomCompactRow({ room, data, actions, now }: {
       </div>
       <div className="mt-2"><DeliveryCell s={s} now={now} /></div>
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
-        <MethodChip room={room} />
+        <ModeIndicators room={room} />
         {scheduleText(scheduleOf(room)) && <span className="font-mono text-[11px] text-muted-soft tabular-nums">{scheduleText(scheduleOf(room))}</span>}
         <span className="font-mono text-[11px] text-muted-soft truncate">{nodesText(room, data.workers, t("room.allNodes"))}</span>
       </div>
