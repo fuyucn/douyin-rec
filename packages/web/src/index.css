@@ -815,8 +815,8 @@ table.tasks tbody tr:last-child td {
 }
 /* Small inline mark inside a room-list badge. */
 .mode-chip-icon {
-  width: 13px;
-  height: 13px;
+  width: 14px;
+  height: 14px;
   flex: none;
 }
 .switch-row-sm {

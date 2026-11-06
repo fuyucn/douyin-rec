@@ -10,9 +10,11 @@ export type RoomMethodKind = "live" | "rolling" | "upload" | "archive" | "none";
 
 export function roomMethodKind(r: Pick<RoomDTO, "recording" | "processing">): RoomMethodKind {
   if (r.recording?.streamUpload === true) return "live";
-  const mode = r.processing?.pipeline?.upload?.mode;
+  if (!r.processing) return "none";
+  const mode = r.processing.pipeline?.upload?.mode;
   if (mode === "rolling") return "rolling";
   if (mode === "upload") return "upload";
   if (mode === "stage") return "archive";
+  if (mode === undefined || mode === null) return "archive";
   return "none";
 }

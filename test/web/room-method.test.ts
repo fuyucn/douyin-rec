@@ -7,6 +7,18 @@ import type { RoomDTO } from "../../packages/web/src/api/client.js";
 const room = (over: Pick<RoomDTO, "recording" | "processing">): Pick<RoomDTO, "recording" | "processing"> => over;
 
 describe("roomMethodKind — the one delivery-mode projection used by the rooms UI", () => {
+  it("treats omitted legacy upload settings as archive, without guessing unknown future modes", () => {
+    expect(roomMethodKind(room({ recording: null, processing: { pipeline: {} } as RoomDTO["processing"] }))).toBe("archive");
+    expect(roomMethodKind(room({ recording: null, processing: { pipeline: { upload: { mode: "future" } } } as unknown as RoomDTO["processing"] }))).toBe("none");
+  });
+
+  it("describes configured delivery independently of whether the room is paused", () => {
+    expect(roomMethodKind(room({
+      recording: { enabled: false } as RoomDTO["recording"],
+      processing: { enabled: false, pipeline: { upload: { mode: "rolling" } } } as RoomDTO["processing"],
+    }))).toBe("rolling");
+  });
+
   it("live upload wins over any processing mode", () => {
     expect(roomMethodKind(room({
       recording: { streamUpload: true } as RoomDTO["recording"],
