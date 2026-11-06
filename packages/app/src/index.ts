@@ -67,6 +67,11 @@ export {
 export type { NodeUploadGateOpts } from "./node-pipeline.js";
 // 边录边传(T-33,见 plans/031):录制端「封口段上传 → 确认后删该段源」的执行体 + 钩子工厂。
 export { RollingUploader, makeRollingUploadHookFactory, resolveRollingUploadMeta } from "./rolling-upload.js";
+// Plan 046 PR6 (方案 A): recorder-side enqueue-only adapters and the settings switch reader.
+export {
+  rollingQueueModeEnabled, enqueueRollingUploadPart, enqueueRollingSkipPart, importRollingConfirmedPart,
+  queueOrderHasRows,
+} from "./rolling-queue.js";
 export { resolveStreamUploadMeta, resolveStreamUploadTitle, resolveStreamPartTitle } from "./rolling-upload.js";
 export { refreshLocalRollingEffective, rollingSpecFields } from "./rolling-effective.js";
 // Zero-disk on a side node (issue #331): node preflight / status + receipt files / master-side delivery object builder.
@@ -87,5 +92,7 @@ export { readFleetConfig, writeFleetConfig, startFleetAgent, watchFleetAgent, ty
 
 export { zeroDiskRoom, resolveZeroDiskPumpDirs, zeroDiskHasUnconfirmedParts, recordNameArg, probeRoomLiving } from "./live-gate.js";
 export type { ZeroDiskPumpDirs } from "./live-gate.js";
-export { enabledHubRuleForTask, uploadOwnerForTask } from "./hub-rule-match.js";
+export {
+  enabledHubRuleForTask, uploadOwnerForTask, shouldDecideUploadOwner, masterOwnedWithoutRule,
+} from "./hub-rule-match.js";
 export { enqueueHubOwnedSkip } from "./hub-owner.js";
