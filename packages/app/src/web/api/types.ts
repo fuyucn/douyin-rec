@@ -214,7 +214,7 @@ export interface CreateTaskInput {
    * 前者不写盘、后者靠文件滚动上传,同时为真 API 回 400。
    */
   streamUpload?: boolean;
-  /** 0 落盘是否保留本地 spool(默认 true);false = 真 0 落盘、失败无本地回退。 */
+  /** 0 落盘是否保留本地 spool(固定 true);false = 400 拒绝写入。 */
   streamUploadSpool?: boolean;
   /** 输出格式(issue #137;白名单见 core `OUTPUT_FORMATS`,非法值(含空串)→ 400;缺省 = original / 不改)。 */
   outputFormat?: string;
@@ -247,7 +247,7 @@ export interface UpdateTaskInput {
    * 前者不写盘、后者靠文件滚动上传,同时为真 API 回 400。
    */
   streamUpload?: boolean;
-  /** 0 落盘是否保留本地 spool(默认 true);false = 真 0 落盘、失败无本地回退。 */
+  /** 0 落盘是否保留本地 spool(固定 true);false = 400 拒绝写入。 */
   streamUploadSpool?: boolean;
   /** 输出格式(issue #137;白名单见 core `OUTPUT_FORMATS`,非法值(含空串)→ 400;缺省 = original / 不改)。 */
   outputFormat?: string;

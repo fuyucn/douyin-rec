@@ -37,6 +37,34 @@ const oneJsonLine = (stdout: string): unknown => {
 };
 
 describe("NODE_COMMANDS", () => {
+  it("apply-tasks: legacy no-spool spec → warnings travel in the JSON receipt; store keeps spool=true", async () => {
+    const root = makeRoot();
+    const spec = {
+      platform: "douyin", roomSlug: "424242", room: "https://live.douyin.com/424242",
+      name: "A", quality: "origin", engine: "ffmpeg", danmu: 1, segmentSec: 1800,
+      scheduleStart: null, scheduleEnd: null, enabled: true, useCookie: true,
+      cookies: null, outDir: null, webhook: null, anchorName: null, rollingUpload: false,
+      streamUpload: true, streamUploadSpool: false,
+    };
+    const b64 = Buffer.from(JSON.stringify({ desired: [spec] }), "utf-8").toString("base64");
+    // The real hidden-command entry (not applyTasksPayload directly): stdout must stay the
+    // parsed JSON contract, with the compatibility warning inside result.warnings.
+    const r = await NODE_COMMANDS["apply-tasks"](root, [b64]);
+    expect(r.exitCode).toBe(0);
+    const out = oneJsonLine(r.stdout) as { applied: string[]; warnings?: string[] };
+    expect(out.applied).toEqual(["douyin:424242"]);
+    expect(out.warnings ?? []).toHaveLength(1);
+    expect(out.warnings![0]).toContain("旧 master 下发了已废弃的真 0 落盘");
+    expect(out.warnings![0]).not.toContain("424242"); // no room number leaks
+    const { TaskStore } = await import("../../packages/app/src/store.js");
+    const store = new TaskStore(join(root, "db", "douyin-rec.db"));
+    try {
+      expect(store.listTasks()[0]).toMatchObject({ streamUpload: true, streamUploadSpool: true });
+    } finally {
+      store.close();
+    }
+  });
+
   it("disk: existing root → {freeGB} and exit 0", async () => {
     const r = await NODE_COMMANDS.disk(makeRoot(), []);
     expect(r.exitCode).toBe(0);

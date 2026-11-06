@@ -50,10 +50,30 @@ describe("applyRemoteTasks", () => {
     expect(t.name).toBe("新名");
   });
 
-  it("master 下发的 zero-disk 字段会被应用,不会被同步清掉", () => {
+  it("master 下发的 zero-disk 字段会被应用;legacy no-spool is upgraded", () => {
     const t = store.addTask({ room: "123456" });
-    applyRemoteTasks(store, [spec({ streamUpload: true, streamUploadSpool: false })], undefined, { adopt: false });
-    expect(store.getTask(t.id)).toMatchObject({ streamUpload: true, streamUploadSpool: false });
+    const logs: string[] = [];
+    applyRemoteTasks(store, [spec({ streamUpload: true, streamUploadSpool: false })], (m) => logs.push(m), { adopt: false });
+    expect(store.getTask(t.id)).toMatchObject({ streamUpload: true, streamUploadSpool: true });
+    expect(logs.filter((line) => line.includes("任务 1(douyin) 旧 master 下发了已废弃的真 0 落盘"))).toHaveLength(1);
+  });
+
+  it("create branch warns once for a legacy no-spool spec and stores spool=true", () => {
+    const logs: string[] = [];
+    applyRemoteTasks(store, [spec({ streamUpload: true, streamUploadSpool: false })], (m) => logs.push(m));
+    const t = store.listTasks().find((x) => x.room.includes("123456"))!;
+    expect(t.streamUpload).toBe(true);
+    expect(t.streamUploadSpool).toBe(true);
+    expect(logs.filter((line) => line.includes("旧 master 下发了已废弃的真 0 落盘"))).toHaveLength(1);
+  });
+
+  it("repeat delivery of the same no-spool spec does not warn again", () => {
+    const logs: string[] = [];
+    const s = spec({ streamUpload: true, streamUploadSpool: false });
+    const warned = new Set<string>();
+    applyRemoteTasks(store, [s], (m) => logs.push(m), { noSpoolWarnedKeys: warned });
+    applyRemoteTasks(store, [s], (m) => logs.push(m), { noSpoolWarnedKeys: warned });
+    expect(logs.filter((line) => line.includes("旧 master 下发了已废弃的真 0 落盘"))).toHaveLength(1);
   });
 
   // T-4:worker 录制时会自抓主播名并持久化;master 侧该值常为 null(只在建/改房间时抓一次)。

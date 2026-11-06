@@ -56,8 +56,6 @@ export function buildRecordArgs(task: Task, cookiesFile?: string): string[] {
   // 0 落盘边录边传:ffmpeg 管道 stdout → UPOS 直传,源录像不落盘。与 rolling 互斥(见上)。
   if (task.streamUpload) {
     args.push("--stream-upload", "1");
-    // 默认保留 spool(可整文件回退);显式关掉 = 真 0 落盘,失败无本地回退。
-    if (task.streamUploadSpool === false) args.push("--stream-upload-spool", "none");
     // Hub-managed side node (issue #331): the child must take its upload metadata and account check
     // from the master-delivered object (env, see spawner) and never from local rule files.
     if (task.managedBy === "hub") args.push("--zero-disk-managed", "1");

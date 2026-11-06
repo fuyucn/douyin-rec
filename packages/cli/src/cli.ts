@@ -211,7 +211,7 @@ program
   .option("--stream-upload-ratio-alert <0-1>", "流式直传每 P 媒体时长/墙钟时长 低于该比例时告警(默认 0.85,0=关闭)")
   .option("--stream-upload-tid <tid>", "流式直传投稿分区(默认 21)")
   .option("--stream-upload-tag <tag>", "流式直传标签(逗号分隔;省略=hub 规则/hub.config 默认)")
-  .option("--stream-upload-spool <full|none>", "直播直传是否保留本地回退文件: full=可整文件回退(默认), none=不留本地副本", "full")
+  .option("--stream-upload-spool <full|none>", "(兼容旧参数,已固定为 full) 直播直传保留本地回退文件; none 不再生效", "full")
   .option("--zero-disk-managed <0|1>", "(内部) hub 受管侧节点的 0 落盘:元数据/账号校验只取 master 下发对象,缺失即拒绝启动")
   .option("--stream-upload-private <0|1>", "流式直传仅自己可见(省略=hub 规则/hub.config 默认,保守为 1)")
   .option("--output-format <fmt>", "节点侧输出格式 original|mp4|mkv: 分段封口后原地 remux 成所选容器、校验通过后删原文件 (默认 original=不转)")
@@ -219,6 +219,10 @@ program
   .option("--config <path>", "YAML 配置文件 (命令行选项优先覆盖)")
   .action(async (o: RecordCliOpts) => {
     const cfg = loadConfig(o.config);
+    if (o.streamUpload === "1" && o.streamUploadSpool === "none") {
+      console.error("[rec] --stream-upload-spool none 已禁用:直播直传必须保留本地回退文件");
+      process.exit(2);
+    }
 
     // 平台驱动默认:命令行 --engine > 兼容别名 --recorder > config > 平台默认引擎。
     // 旧 config.recorder 可能是已废弃的录制器 provider 名(非引擎 id)→ getEngine 返 undefined,
@@ -621,7 +625,7 @@ program
         mediaWallAlertRatio,
         maxSegments: 0,
         submit: true,
-        spoolMode: o.streamUploadSpool === "none" ? "none" : "full",
+        spoolMode: "full",
         signal: abort.signal,
         drainSignal: drain.signal,
         // Wait in-process for the next broadcast instead of exiting (issue #308).
@@ -1514,6 +1518,9 @@ const hubStarter: HubStarter = {
       }
       return map;
     };
+    // Lives for the whole serve process: repeated master sync rounds dedupe the legacy
+    // no-spool compatibility warning through this set (see task-sync ApplyTasksOptions).
+    const noSpoolWarnedKeys = new Set<string>();
     // Local worker: same judgement as ssh / fleet nodes (state files + /proc fallback), NOT the serve-side
     // `[状态]` flag, which flips to "not recording" on `录制停滞` while the tail part is still uploading.
     // Hosts without /proc (macOS) cannot verify state files: there the serve-side flag is the only signal.
@@ -1546,6 +1553,7 @@ const hubStarter: HubStarter = {
       // adopt=false:本机源任务保持用户可编辑(managedBy 不置 hub),只有远端节点的同步任务才锁编辑。
       applyTasks: (input) => applyRemoteTasks(opts.store, input.desired, opts.log, {
         adopt: false,
+        noSpoolWarnedKeys,
         force: input.force === true,
         // 审计快照落 <数据根>/config/managed/(显式传目录,不从 DOUYIN_REC_ROOT 推导)。
         managedStateDir: join(rootConfigDir(), "managed"),
@@ -2016,6 +2024,9 @@ const hubStarter: HubStarter = {
               opts.warn(`[hub] 记录期望版本 ${w.id} 失败(忽略,继续同步): ${(e as Error).message}`);
             }
             const r = await t.applyTasks({ desired, force, ...(expectedVersion !== undefined ? { expectedVersion } : {}) });
+            for (const warning of r.warnings ?? []) {
+              opts.log(`[hub] 节点 ${w.id} 回执: ${warning}`);
+            }
             // A safety-valve rejection means the expected set was NOT fully applied:
             // keep it visible as syncError instead of clearing the receipt.
             try {
