@@ -172,6 +172,8 @@ export interface RoomRecordingDTO {
   streamUploadSpool: boolean;
   /** 输出格式(issue #137,缺省 original);投稿形态下后处理产物恒 mp4(见 core `effectiveStageFormat`)。 */
   outputFormat: OutputFormat;
+  /** 输出格式锁(后端 `nodeOutputFormatLock` 唯一判定;未锁省略)。房间编辑器据此锁定下拉并省略写入。 */
+  outputFormatLock?: OutputFormatLock;
 }
 
 export interface RoomDTO {
