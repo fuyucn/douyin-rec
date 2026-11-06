@@ -82,9 +82,11 @@ describe("part-chain contract", () => {
       ["running", "skipped", "skip-source-gone"],
     ];
     for (const [from, to, reason] of legal) {
-      expect(canTransition(from, to, { reason }), from + "->" + to).toBe(true);
+      const ctx = reason === "reconcile-no-resend" ? { reason, allowReconcileResend: true } : { reason };
+      expect(canTransition(from, to, ctx), from + "->" + to).toBe(true);
       expect(canTransition(from, to), "ungated " + from + "->" + to).toBe(false);
     }
+    expect(canTransition("reconciling", "pending", { reason: "reconcile-no-resend" })).toBe(false);
     for (const to of states) {
       if (!["done", "failed", "pending", "reconciling"].includes(to)) {
         expect(canTransition("reconciling", to, { reason: "reconcile-yes" }), "reconciling->" + to).toBe(false);
