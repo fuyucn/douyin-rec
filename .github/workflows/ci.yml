@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         # 拉全历史:issue-guard --diff 要用 merge-base 算出 PR 新增行(浅克隆算不出)。
