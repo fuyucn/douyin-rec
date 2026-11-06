@@ -9,7 +9,7 @@ import { platformLabel, roomId } from "../lib/labels";
 import { liveStepLabel } from "../lib/queue-live";
 import { countNodeHealth, fmtBytes, type NodeHealthProbe, type NodeSummary } from "../lib/nodes-summary";
 import { QueueStateBadges, PartChainLine } from "./QueueBadges";
-import { queueText, stepLabel } from "../lib/queue-chain";
+import { nodeUploadPhaseLabel, queueText, stepLabel } from "../lib/queue-chain";
 
 type TFunc = (key: string, vars?: Record<string, string | number>) => string;
 
@@ -34,7 +34,7 @@ function uploadLine(item: QueueItemDTO, now: number, tz: string, t: TFunc): Reac
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-muted">
         <span className="inline-flex items-center gap-1"><Gauge className="w-3 h-3" />{t("queue.live.upload")}</span>
         <span>{u.nodeId}</span>
-        <span>{queueText(t, `queue.nodeUpload.${u.phase}`, u.phase)}{u.step ? ` · ${u.step}` : ""}</span>
+        <span>{nodeUploadPhaseLabel(t, u.phase)}{u.step ? ` · ${u.step}` : ""}</span>
         {p && <span>{fmtBytes(p.doneBytes)} / {fmtBytes(p.totalBytes)}</span>}
         {p?.bps != null && p.bps > 0 && <span>{fmtBytes(p.bps)}/s</span>}
         {u.attempts != null && u.attempts > 1 && <span>{queueText(t, "queue.nodeUpload.attempt", `attempt ${u.attempts}`, { n: u.attempts })}</span>}
@@ -101,21 +101,14 @@ export function LiveLane({ item, now, dataAt, tz, onOpenLog }: {
       </div>
 
       <div className="live-flow" role="group" aria-label={t("queue.live.current")}>
-        {item.doneSteps.map((s, index) => (
-          <div key={`d-${s.step}-${index}`} className="live-flow-step" data-state={s.phase === "skipped" ? "skipped" : "done"}>
+        {item.doneSteps.map((s) => (
+          <div key={`d-${s.step}`} className="live-flow-step" data-state="done">
             <div className="flex items-center gap-1.5 text-[11px] font-mono">
-              {s.phase === "skipped"
-                ? <span className="badge badge-neutral">{queueText(t, "room.runtime.stageState.skipped", "skipped")}</span>
-                : <Check className="w-3 h-3" style={{ color: "var(--success-fg)" }} />}
+              <Check className="w-3 h-3" style={{ color: "var(--success-fg)" }} />
               {stepLabel(t, s.step)}
             </div>
           </div>
         ))}
-        {item.state === "skipped" && !item.doneSteps.some((s) => s.phase === "skipped") && (
-          <div className="live-flow-step" data-state="skipped">
-            <span className="badge badge-neutral">{queueText(t, "room.runtime.stageState.skipped", "skipped")}</span>
-          </div>
-        )}
         <div className="live-flow-step" data-state="current">
           <div className="flex items-center gap-1.5 text-[11px] font-mono">
             {item.phase === "queued" ? <Clock3 className="w-3 h-3" /> : <Loader2 className="w-3 h-3 animate-spin" />}
