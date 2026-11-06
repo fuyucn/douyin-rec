@@ -132,6 +132,17 @@ describe("zeroDiskNodePreflight — refuse loudly, never default", () => {
     writeCookies(root, null);
     expect(zeroDiskNodePreflight(json(GOOD))).toMatchObject({ ok: false, refusal: { code: "account_unknown" } });
   });
+  it("a readable-but-account-less primary never switches to a matching delivered path", () => {
+    // Only an *unreadable* primary falls back. A primary that parses but identifies no account is a
+    // misconfiguration and must stay loud — silently switching to the master-delivered account would
+    // publish to an account the node never verified (irreversible).
+    const root = useRoot("node");
+    writeCookies(root, null); // readable, no DedeUserID
+    const delivered = join(base, "delivered.json");
+    writeFileSync(delivered, cookiesFor("42")); // would pass verification if it were tried
+    const r = zeroDiskNodePreflight(json({ ...GOOD, credentialPath: delivered }));
+    expect(r).toMatchObject({ ok: false, refusal: { code: "account_unknown" } });
+  });
   it("an unreadable login file (and no readable alternate) is a credential_unreadable refusal, not a crash", () => {
     const root = useRoot("node");
     writeCookies(root, "42");

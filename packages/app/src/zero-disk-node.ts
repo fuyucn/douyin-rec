@@ -106,7 +106,9 @@ export function zeroDiskNodePreflight(
     // path or the node default may still work. Only the *primary* being unreadable triggers this;
     // a readable login with an unknown/mismatched account still fails loudly (verdict below).
     // Alternates whose content identifies no account are skipped too: a corrupt file must not
-    // hide the next valid one.
+    // hide the next valid one. The first *known-account* alternate wins even if it mismatches the
+    // master's account: that refusal stays loud (account_mismatch) rather than hunting for a
+    // matching login — this path only exists because the primary could not be read at all.
     const envPath = (o.env ?? process.env).BILIUP_COOKIE?.trim();
     const alternates = [
       ...(envPath ? [{ path: envPath, source: "env" as const }] : []),
