@@ -615,6 +615,15 @@ const DICT = {
         more: "更多筛选", less: "收起筛选", groupRuntime: "运行与筛选",
       },
       pool: { cpu: "CPU / 合并烧录", upload: "上传窗口", cooldown: "上传冷却", queued: "排队 {n}", unlimited: "不限速", noCooldown: "正常" },
+      nodeQueue: {
+        title: "本机节点队列", subtitle: "这台机器自己的处理队列（上传/清理/转换）；上面的场次队列是主控管线",
+        workerTitle: "节点处理队列", workerNotice: "这是本节点的处理队列；场次管线在主控上。",
+        kind: "处理类型", running: "执行中", pending: "待执行", lease: "执行者",
+        kinds: { "upload-part": "分 P 上传", "cleanup-part": "分 P 清理", "reconcile-part": "分 P 对账", "upload-prep": "上传预处理", biliup: "B站上传", "\u0072emux": "格式转换" },
+        leaseAlive: "存活", leaseDead: "无存活租约", hostRunning: "执行宿主运行中", hostStopped: "执行宿主未运行",
+        unavailable: "无法读取本机队列", empty: "暂无处理任务",
+        unknownKind: "其他处理类型",
+      },
     },
     nodes: {
       title: "节点",
@@ -1207,6 +1216,15 @@ const DICT = {
         more: "More filters", less: "Fewer filters", groupRuntime: "Runtime & filters",
       },
       pool: { cpu: "CPU / merge+burn", upload: "Upload window", cooldown: "Upload cooldown", queued: "queued {n}", unlimited: "unlimited", noCooldown: "Clear" },
+      nodeQueue: {
+        title: "Local node queue", subtitle: "This machine's own processing queue (upload / cleanup / conversion); the session queue above is the controller pipeline",
+        workerTitle: "Node processing queue", workerNotice: "This is the local node queue; the session pipeline lives on the controller.",
+        kind: "Processor", running: "Running", pending: "Pending", lease: "Executor",
+        kinds: { "upload-part": "Part upload", "cleanup-part": "Part cleanup", "reconcile-part": "Part reconciliation", "upload-prep": "Upload prep", biliup: "Bilibili upload", remux: "Format conversion" },
+        leaseAlive: "Alive", leaseDead: "No live lease", hostRunning: "Runner active", hostStopped: "Runner not active",
+        unavailable: "Cannot read the local queue", empty: "No processing jobs",
+        unknownKind: "Other processor",
+      },
     },
     nodes: {
       title: "Nodes",
