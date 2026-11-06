@@ -11,7 +11,7 @@ import { makeUploadPartProcessor, shouldChainCleanup, PART_WORKFLOW_PARAM, uploa
 let dir: string;
 const setup = (): void => { dir = mkdtempSync(join(tmpdir(), "upload-part-")); };
 const teardown = (): void => rmSync(dir, { recursive: true, force: true });
-const put = (name = "a_000.ts", body = "1234567890"): string => { const p = join(dir, name); writeFileSync(p, body); return p; };
+const put = (name = "a_000.ts", body = "abcdefghij"): string => { const p = join(dir, name); writeFileSync(p, body); return p; };
 const fp = (p: string): { size: number; mtimeMs: number } => { const s = statSync(p); return { size: s.size, mtimeMs: s.mtimeMs }; };
 const ctxOf = (file: string, bv?: string): PartCtx => ({
   v: 1, orderKey: "same-broadcast", index: 1, file, fp: fp(file), ...(bv ? { bv } : {}),
