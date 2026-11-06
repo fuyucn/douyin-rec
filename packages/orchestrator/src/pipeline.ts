@@ -726,6 +726,19 @@ export function tryRollingShortCircuit(o: {
 }): { state: JobState; bv?: string } | null {
   const { streamKey, members, ledger, jlog, cfg } = o;
   if (ledger.get(streamKey)?.bv) return null; // 已有 BV(续跑) → 交给既有续跑路径
+  // plan 046 PR6 hold: a queue-mode session (sidecar carries queueOrderKey) with no bv yet is still being
+  // uploaded part by part by the node's runner. Running the whole-order pipeline now would merge/pull and
+  // upload a second archive for the same broadcast (irreversible). Hold: no select/pull/merge/upload.
+  const queued = members.filter((m) => m.rec.rolling?.queueOrderKey && !m.rec.rolling?.bv);
+  if (queued.length > 0) {
+    const detail = queued.map((m) => m.workerId + ":" + m.rec.sessionBase).join(";");
+    jlog("边录边传队列模式:节点队列尚未确认任何分 P [" + detail + "] → 暂不建稿/上传(保留源,等队列收口后重试)");
+    ledger.setState(streamKey, "needs_manual", {
+      error: "边录边传队列模式:节点队列仍在上传分 P(" + detail + "),master 未上传;等队列收口后重试本场",
+    });
+    o.notify({ kind: "error", stage: "上传", message: streamKey + " 边录边传:节点队列仍在上传,已暂缓整场上传(未重复投稿)" });
+    return { state: "needs_manual" };
+  }
   // #57 R1 止血(检查与动作见 blockUnsettledWithoutBv):先于 rolled/bvs 判定。
   if (blockUnsettledWithoutBv({ streamKey, members, ledger, jlog, notify: o.notify })) return { state: "needs_manual" };
   const rolled = members.filter((m) => m.rec.rolling?.bv);
@@ -1013,7 +1026,8 @@ async function runPipelineInner(
     // 边录边传(T-33):已建稿(rolling.bv)且 tsFiles 已被删空的成员 —— 文件「不存在」是**预期**的,
     // 不能按「已归档」剔除,否则 rolling 短路看不到它(漏收口)。只认「有 tsFiles 但确实缺失」为剔除。
     // 无稿件号但留有建稿意图/不确定段的成员也必须保留:剔除会让 rolling 短路看不到它 → 误走常规管线重复建稿。
-    if ((m.rec.rolling?.bv && m.rec.tsFiles.length === 0) || rollingUnsettledWithoutBv(m.rec.rolling)) {
+    // Queue-mode sessions (plan 046 PR6) keep their place too: the hold below must see them.
+    if ((m.rec.rolling?.bv && m.rec.tsFiles.length === 0) || rollingUnsettledWithoutBv(m.rec.rolling) || m.rec.rolling?.queueOrderKey) {
       presentMembers.push(m);
       continue;
     }

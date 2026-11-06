@@ -12,9 +12,8 @@
  *     source still exists, gets a cleanup-part row via the normal deletion path.
  */
 import { existsSync, statSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
 import {
-  PART_KINDS, ROLLING_QUEUE_MODE_SETTING, jobIdOf, partLogicalKey, segmentSessionBase, stripVideoExt,
+  PART_KINDS, ROLLING_QUEUE_MODE_SETTING, jobIdOf, partLogicalKey, rollingSidecarPathOf,
   type PartCtx, type ProcessJob,
 } from "@drec/core";
 import { ProcQueueStore, procQueueDbPath } from "@drec/proc-queue";
@@ -77,7 +76,6 @@ function partJob(input: QueuePartInput, generation: number, seq: number, fp: { s
     ...(input.bv ? { bv: input.bv } : {}),
   };
   const m = input.meta;
-  const stem = segmentSessionBase(basename(input.file)) ?? stripVideoExt(basename(input.file));
   return {
     jobId: jobIdOf(PART_KINDS.upload, logicalKey, generation),
     kind: PART_KINDS.upload, logicalKey, generation, inputs: [input.file],
@@ -87,7 +85,8 @@ function partJob(input: QueuePartInput, generation: number, seq: number, fp: { s
       ...(m.desc ? { desc: m.desc } : {}),
       ...(m.seasonSectionId ? { seasonSectionId: m.seasonSectionId } : {}),
       ...(input.expectedDurationSec && input.expectedDurationSec > 0 ? { expectedDurationSec: input.expectedDurationSec } : {}),
-      sidecarPath: join(dirname(input.file), stem + ".rolling.json"),
+      // One derivation shared with the processor and the job contract (core.rollingSidecarPathOf).
+      sidecarPath: rollingSidecarPathOf(input.file),
       sidecarIndex: input.index,
       queueOrderKey: input.orderKey,
     },
@@ -110,14 +109,25 @@ function classify(r: { state: string; error?: string; existingState?: string }):
   return "failed";
 }
 
-/** Resolve an existing row for this segment before any file/empty classification (deleted source + done row). */
+/**
+ * Resolve the existing row for this segment before any file/empty classification (deleted source + done
+ * row). Scoped to the live generation: an older generation's row must neither mask this part nor make a
+ * second job id for the same (orderKey, seq). Every row of the pair counts as handled — a pending/running
+ * row under an older logical-key spelling must not be enqueued twice.
+ */
 function existingRow(input: QueuePartInput, seq: number): { state: string } | null {
   const store = openQueue(input.log);
   if (!store) return null;
   try {
     const generation = store.currentOrderGeneration(input.orderKey);
-    const rows = store.rowsForOrderSeq(input.orderKey, seq);
-    if (rows.length > 0) return { state: rows[0]!.state };
+    const rows = store.rowsForOrderSeq(input.orderKey, seq, PART_KINDS.upload, generation);
+    if (rows.length > 0) {
+      const states = new Set(rows.map((r) => r.state));
+      if (states.has("done")) return { state: "done" };
+      if (states.has("skipped")) return { state: "skipped" };
+      if (states.has("running") || states.has("pending") || states.has("reconciling")) return { state: "pending" };
+      return { state: rows[0]!.state };
+    }
     return store.get(jobIdOf(PART_KINDS.upload, partLogicalKey(input.orderKey, seq), generation));
   } catch {
     return null;
@@ -136,6 +146,9 @@ export function enqueueRollingUploadPart(input: QueuePartInput): EnqueuePartResu
   const prior = existingRow(input, seq);
   if (prior) {
     if (prior.state === "done" || prior.state === "skipped") return "already";
+    // A pending/running/reconciling row already owns this part (maybe under an older key spelling):
+    // enqueueing again would create a second claimable job id for the same segment.
+    if (prior.state === "pending" || prior.state === "running" || prior.state === "reconciling") return "queued";
     if (prior.state === "failed" || prior.state === "cancelled") return "terminal";
   }
   const fp = fpOf(input.file);
@@ -163,6 +176,7 @@ export function enqueueRollingSkipPart(input: QueuePartInput): EnqueuePartResult
   const prior = existingRow(input, seq);
   if (prior) {
     if (prior.state === "done" || prior.state === "skipped") return "already";
+    if (prior.state === "pending" || prior.state === "running" || prior.state === "reconciling") return "queued";
     if (prior.state === "failed" || prior.state === "cancelled") return "terminal";
   }
   const fp = fpOf(input.file);
@@ -219,6 +233,15 @@ export function importRollingConfirmedPart(
   } catch (e) {
     input.log?.("[rolling-queue] 段 " + input.index + " 兼容导入异常: " + String((e as Error)?.message ?? e));
     return "failed";
+  } finally { store.close(); }
+}
+
+/** Rollback guard: does this order key already have upload-part rows (any state / generation)? */
+export function queueOrderHasRows(orderKey: string): boolean {
+  const store = openQueue();
+  if (!store) throw new Error("proc-queue unavailable"); // unreadable queue must not look empty
+  try {
+    return store.countOrderRows(orderKey, PART_KINDS.upload) > 0;
   } finally { store.close(); }
 }
 

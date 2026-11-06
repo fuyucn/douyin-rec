@@ -12,6 +12,7 @@
 import { isAbsolute, relative, resolve } from "node:path";
 import type { UploadProgressDTO } from "./api-types.js";
 import { isVideoFileName } from "./output-format.js";
+import { rollingSidecarPathOf } from "./rolling.js";
 import { isUploadRateLimited } from "./upload-contract.js";
 
 export type ResourceClass = "cpu" | "net" | "upload";
@@ -81,6 +82,26 @@ function assertPartCtx(ctx: unknown, kind: string, bad: (why: string) => never):
     }
   }
   if (c.bv !== undefined && (typeof c.bv !== "string" || c.bv === "")) bad("params.ctx.bv must be a non-empty string when present");
+}
+
+/**
+ * `params.sidecarPath` is written by the processor, so it is never taken from a caller: a remote
+ * `_enqueue` payload could otherwise overwrite any file on the node (path traversal / symlink escape).
+ * The only accepted value is the canonical sidecar of `ctx.file` (same directory, session base +
+ * `.rolling.json`), which is derived here from the validated video path.
+ */
+function assertSidecarPath(params: Record<string, unknown>, ctx: unknown, bad: (why: string) => never): void {
+  const raw = params.sidecarPath;
+  if (raw === undefined) return;
+  if (typeof raw !== "string" || raw === "" || raw.includes("\0") || !isAbsolute(raw)) {
+    bad("params.sidecarPath must be a non-empty absolute path");
+  }
+  const file = (ctx as Record<string, unknown>).file;
+  if (typeof file !== "string" || file === "") bad("params.sidecarPath requires params.ctx.file");
+  const expected = rollingSidecarPathOf(file);
+  if (resolve(raw) !== resolve(expected)) {
+    bad("params.sidecarPath must be the canonical sidecar of params.ctx.file (same directory, .rolling.json)");
+  }
 }
 
 export interface ProcessJob {
@@ -367,6 +388,9 @@ export function assertJobInvariants(job: ProcessJob, opts: { allowedRoots: reado
     if (!roots.some((r) => isUnderRoot(p, r))) bad(`路径不在 allowedRoots 内: ${p}`);
   }
   assertPartCtx(job.params.ctx, job.kind, bad);
+  if (job.kind === PART_KINDS.upload || job.kind === PART_KINDS.reconcile) {
+    assertSidecarPath(job.params, job.params.ctx, bad);
+  }
   const ctx = job.params.ctx as PartCtx | undefined;
   if (ctx && typeof ctx.file === "string" && !roots.some((r) => isUnderRoot(ctx.file, r))) {
     bad(`params.ctx.file 不在 allowedRoots 内: ${ctx.file}`);

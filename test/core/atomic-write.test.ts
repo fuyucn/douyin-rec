@@ -1,9 +1,9 @@
 // issue #223: writeFileAtomicSync — atomic replace via unique temp + rename, never deletes.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { existsSync, linkSync, mkdirSync, statSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, statSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { writeFileAtomicSync } from "@drec/core";
+import { withFileLockSync, writeFileAtomicSync } from "@drec/core";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "atomic-write-")); });
@@ -61,5 +61,25 @@ describe("writeFileAtomicSync", () => {
     expect(left).toHaveLength(2);
     expect(new Set(left).size).toBe(2);
     expect(existsSync(f)).toBe(true);
+  });
+});
+
+describe("withFileLockSync (two sidecar writers: the recorder and the queue processor)", () => {
+  it("is exclusive, bounded, and takes over a stale lock", () => {
+    const f = join(dir, "s.rolling.json");
+    writeFileSync(f, "{}");
+    const lock = f + ".lock";
+    writeFileSync(lock, "");
+    // A fresh lock held by someone else: bounded wait, then a clear failure (never a silent overwrite).
+    expect(() => withFileLockSync(f, () => 1, { timeoutMs: 20 })).toThrow(/lock busy/);
+    // An abandoned lock (killed writer) is taken over instead of wedging the session.
+    const old = Date.now() - 60_000;
+    utimesSync(lock, new Date(old), new Date(old));
+    expect(withFileLockSync(f, () => 2, { timeoutMs: 20, staleMs: 1_000 })).toBe(2);
+    expect(existsSync(lock)).toBe(false);
+    // Not re-entrant: a nested acquire of the same file waits (proves mutual exclusion).
+    expect(() => withFileLockSync(f, () => withFileLockSync(f, () => 1, { timeoutMs: 10 }), { timeoutMs: 50 }))
+      .toThrow(/lock busy/);
+    expect(existsSync(lock)).toBe(false);
   });
 });

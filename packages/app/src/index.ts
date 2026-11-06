@@ -70,6 +70,7 @@ export { RollingUploader, makeRollingUploadHookFactory, resolveRollingUploadMeta
 // Plan 046 PR6 (方案 A): recorder-side enqueue-only adapters and the settings switch reader.
 export {
   rollingQueueModeEnabled, enqueueRollingUploadPart, enqueueRollingSkipPart, importRollingConfirmedPart,
+  queueOrderHasRows,
 } from "./rolling-queue.js";
 export { resolveStreamUploadMeta, resolveStreamUploadTitle, resolveStreamPartTitle } from "./rolling-upload.js";
 export { refreshLocalRollingEffective, rollingSpecFields } from "./rolling-effective.js";
@@ -91,5 +92,7 @@ export { readFleetConfig, writeFleetConfig, startFleetAgent, watchFleetAgent, ty
 
 export { zeroDiskRoom, resolveZeroDiskPumpDirs, zeroDiskHasUnconfirmedParts, recordNameArg, probeRoomLiving } from "./live-gate.js";
 export type { ZeroDiskPumpDirs } from "./live-gate.js";
-export { enabledHubRuleForTask, uploadOwnerForTask } from "./hub-rule-match.js";
+export {
+  enabledHubRuleForTask, uploadOwnerForTask, shouldDecideUploadOwner, masterOwnedWithoutRule,
+} from "./hub-rule-match.js";
 export { enqueueHubOwnedSkip } from "./hub-owner.js";

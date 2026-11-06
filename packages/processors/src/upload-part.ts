@@ -19,7 +19,8 @@ import { basename, isAbsolute } from "node:path";
 import {
   APPEND_AMBIGUOUS_MARKER, PART_KINDS, PART_WORKFLOW_TEMPLATES, isAppendAmbiguous,
   isSlotBusy, SLOT_BUSY_MARKER, RETRY_BACKOFF_MS, isVideoFileName, assertJobInvariants,
-  addArchiveToSeasonIfConfigured, seasonCheckpointState, writeFileAtomicSync,
+  addArchiveToSeasonIfConfigured, seasonCheckpointState, writeFileAtomicSync, withFileLockSync,
+  rollingSidecarPathOf,
   type PartCtx, type ProcessContext, type ProcessJob, type ProcessResult, type Processor,
 } from "@drec/core";
 import { appendGroup, isAllFilesUploadedLine, uploadPlain } from "./run-biliup.js";
@@ -137,10 +138,16 @@ export async function runOneBiliupPart(
   if (acked < now.size) throw new Error("upload-part acked bytes " + acked + " < file size " + now.size + "; refusing to confirm " + basename(file));
   // Persist the confirmed evidence back into the rolling sidecar so the master's duplicate guard
   // (rolling.bv short-circuit / scan) still sees an uploaded session (plan 046 PR6 addendum 2).
-  const sidecarPath = typeof job.params.sidecarPath === "string" ? job.params.sidecarPath : null;
-  if (sidecarPath) {
+  // The path is DERIVED from the part file: a caller-supplied params.sidecarPath is never trusted
+  // (a remote _enqueue payload could otherwise rewrite any file on this node).
+  const sidecarPath = rollingSidecarPathOf(file);
+  if (existsSync(sidecarPath)) {
     try { mergeRollingSidecar(sidecarPath, c, st.bv, job); }
     catch (e) { c.alert("upload-part could not update the rolling sidecar (master may re-upload): " + String((e as Error)?.message ?? e).slice(0, 200)); }
+  } else if (typeof job.params.sidecarPath === "string") {
+    // The producer declared a sidecar, so its absence is a real regression (the master's duplicate
+    // guard reads it). Callers that never declared one (non-rolling uses) stay silent.
+    c.alert("upload-part confirmed " + basename(file) + " but its rolling sidecar is missing (master may re-upload)");
   }
   // Season association for the create branch, same helper/checkpoint as the biliup processor.
   if (!ctx.bv && p.seasonSectionId && st.bv) {
@@ -162,17 +169,24 @@ export async function runOneBiliupPart(
   };
 }
 
-/** Merge one confirmed part into the session sidecar atomically (legacy-compatible fields only). */
+/**
+ * Merge one confirmed part into the session sidecar (legacy-compatible fields only).
+ * Read-modify-write runs under the shared sidecar lock so the recorder's persist() cannot land
+ * between the read and the rename and lose this confirmation.
+ */
 function mergeRollingSidecar(sidecarPath: string, ctx: ProcessContext, bv: string, job: ProcessJob): void {
-  let state: Record<string, unknown> = {};
-  try { state = JSON.parse(readFileSync(sidecarPath, "utf-8")) as Record<string, unknown>; } catch { state = {}; }
   const index = typeof job.params.sidecarIndex === "number" ? job.params.sidecarIndex : null;
-  const confirmed = Array.isArray(state.confirmed) ? state.confirmed.filter((n): n is number => typeof n === "number") : [];
-  if (index !== null && !confirmed.includes(index)) confirmed.push(index);
-  writeFileAtomicSync(sidecarPath, JSON.stringify({
-    ...state, ...(bv ? { bv } : {}), confirmed, updatedAt: Date.now(),
-    ...(typeof job.params.queueOrderKey === "string" ? { queueOrderKey: job.params.queueOrderKey } : {}),
-  }));
+  const orderKey = typeof job.params.queueOrderKey === "string" ? job.params.queueOrderKey : null;
+  withFileLockSync(sidecarPath, () => {
+    let state: Record<string, unknown> = {};
+    try { state = JSON.parse(readFileSync(sidecarPath, "utf-8")) as Record<string, unknown>; } catch { state = {}; }
+    const confirmed = Array.isArray(state.confirmed) ? state.confirmed.filter((n): n is number => typeof n === "number") : [];
+    if (index !== null && !confirmed.includes(index)) confirmed.push(index);
+    writeFileAtomicSync(sidecarPath, JSON.stringify({
+      ...state, ...(bv ? { bv } : {}), confirmed, updatedAt: Date.now(),
+      ...(orderKey ? { queueOrderKey: orderKey } : {}),
+    }));
+  });
   ctx.log("rolling sidecar updated with the confirmed part (" + (index ?? "?") + ")");
 }
 

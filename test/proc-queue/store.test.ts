@@ -910,6 +910,26 @@ describe("A3 store helpers", () => {
     s.close();
   });
 
+  it("rowsForOrderSeq is scoped to the live generation; an old generation never masks the part", () => {
+    const s = env.open();
+    const p = env.file("a.ts");
+    const job = (generation: number) => ({
+      jobId: jobIdOf("upload-part", "same-broadcast:part:1", generation), kind: "upload-part",
+      logicalKey: "same-broadcast:part:1", generation, inputs: [p],
+      params: { ctx: { v: 1, orderKey: "same-broadcast", index: 1, file: p, fp: { size: 1, mtimeMs: 1 } } },
+      replaceInputs: false, owner: {}, createdAt: 1, orderKey: "same-broadcast", seq: 1,
+    });
+    s.enqueue(job(1) as never, roots());
+    s.enqueue(job(2) as never, roots());
+    expect(s.rowsForOrderSeq("same-broadcast", 1, "upload-part", 2).map((r) => r.generation)).toEqual([2]);
+    expect(s.rowsForOrderSeq("same-broadcast", 1, "upload-part", 1)).toHaveLength(1);
+    // No generation = every row of the pair (hub-owned dedupe).
+    expect(s.rowsForOrderSeq("same-broadcast", 1, "upload-part")).toHaveLength(2);
+    expect(s.countOrderRows("same-broadcast")).toBe(2);
+    expect(s.countOrderRows("same-broadcast", "biliup")).toBe(0);
+    s.close();
+  });
+
   it("importConfirmedPart on an existing done row still enqueues the cleanup successor", () => {
     const s = env.open();
     const p = env.file("a.ts");

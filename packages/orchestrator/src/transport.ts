@@ -61,6 +61,11 @@ export interface NodeRollingProgress {
    * old bundles / legacy sidecars = unknown, handled exactly as before.
    */
   active?: boolean;
+  /**
+   * plan 046 PR6: this session was handed to the node's upload queue (queue mode). Present without a bv means
+   * the queue is still uploading parts, so the master must not run the whole-order pipeline (duplicate archive).
+   */
+  queueOrderKey?: string;
 }
 export interface NodeInventory {
   workerId: string;

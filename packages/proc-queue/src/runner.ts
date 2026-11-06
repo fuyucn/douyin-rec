@@ -190,8 +190,9 @@ export class ProcRunner {
     const ctx = job.params.ctx as PartCtx | undefined;
     if (!ctx || ctx.index <= 1 || ctx.bv) return;
     for (let seq = ctx.index - 1; seq >= 1; seq -= 1) {
-      // Kind-filtered (orderKey, seq) covers rows written by an older logical-key spelling (PR7) too.
-      const rows = this.o.store.rowsForOrderSeq(job.orderKey, seq, PART_KINDS.upload);
+      // Kind+generation filtered (orderKey, seq) covers rows written by an older logical-key spelling
+      // (PR7) but never a row from another generation: an old generation's bv would be wrong here.
+      const rows = this.o.store.rowsForOrderSeq(job.orderKey, seq, PART_KINDS.upload, job.generation);
       // Missing / non-done predecessor: fail closed (creating a draft here would duplicate the archive).
       if (rows.length === 0) throw new Error("upload-part cannot inherit: lower-seq row " + seq + " is missing");
       // A skipped placeholder carries no draft: keep looking backwards.

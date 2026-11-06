@@ -53,6 +53,7 @@ import {
   sealedSegmentIndices,
   segmentSessionBase,
   stripVideoExt,
+  withFileLockSync,
   UploadGate,
   noteRecorderProgress,
   recorderIsFinalizing,
@@ -84,7 +85,8 @@ import { sanitizePathSegment } from "@drec/record-engine";
 import type { RollingUploadHook } from "@drec/manager";
 // Plan 046 PR6 queue adapters (方案 A). No cycle: rolling-queue imports store/paths/node-enqueue only.
 import {
-  enqueueRollingUploadPart, enqueueRollingSkipPart, importRollingConfirmedPart, rollingQueueMaxSeq,
+  enqueueRollingUploadPart, enqueueRollingSkipPart, importRollingConfirmedPart, queueOrderHasRows,
+  rollingQueueMaxSeq,
 } from "./rolling-queue.js";
 
 /** 一个会话的持久化确认状态(防重启后重复投稿)。 */
@@ -221,24 +223,35 @@ function readState(dir: string, sessionBase: string): RollingState | null {
   }
 }
 
-/** Atomic sidecar write (tmp → fsync → rename), stamped with the writer's pid + heartbeat. Throws on failure. */
-function writeStateFile(dir: string, state: RollingState, pid: number, nowMs: number): void {
+/**
+ * Atomic sidecar write (tmp → fsync → rename), stamped with the writer's pid + heartbeat. Throws on failure.
+ * Runs under the shared sidecar lock so the queue processor's merge cannot land between our read and rename;
+ * `merge` receives the current disk state and returns the body to write (the merged state is returned).
+ */
+function writeStateFile(
+  dir: string, state: RollingState, pid: number, nowMs: number,
+  merge?: (disk: RollingState | null) => RollingState,
+): RollingState {
   const target = statePathFor(dir, state.sessionBase);
-  const tmp = `${target}.tmp.${process.pid}.${Date.now().toString(36)}`;
-  try {
-    const fd = openSync(tmp, "w", 0o644);
+  return withFileLockSync(target, () => {
+    const merged = merge ? merge(readState(dir, state.sessionBase)) : state;
+    const tmp = `${target}.tmp.${process.pid}.${Date.now().toString(36)}`;
     try {
-      const body = { ...state, ownerPid: pid, heartbeatAt: nowMs, schemaVersion: ROLLING_STATE_SCHEMA_VERSION };
-      writeFileSync(fd, JSON.stringify(body), "utf-8");
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
+      const fd = openSync(tmp, "w", 0o644);
+      try {
+        const body = { ...merged, ownerPid: pid, heartbeatAt: nowMs, schemaVersion: ROLLING_STATE_SCHEMA_VERSION };
+        writeFileSync(fd, JSON.stringify(body), "utf-8");
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      renameSync(tmp, target);
+      return merged;
+    } catch (e) {
+      try { unlinkSync(tmp); } catch { /* best-effort 清理临时文件 */ }
+      throw e;
     }
-    renameSync(tmp, target);
-  } catch (e) {
-    try { unlinkSync(tmp); } catch { /* best-effort 清理临时文件 */ }
-    throw e;
-  }
+  });
 }
 
 /** True when `s` still has an unconfirmed, non-empty segment file on disk. */
@@ -357,6 +370,11 @@ export interface RollingUploaderOpts {
   }) => "queued" | "already" | "failed" | "terminal";
   /** Highest seq already present for one order key (restart/same-broadcast continuation). */
   queueMaxSeq?: (orderKey: string) => number;
+  /**
+   * Plan 046 PR6 rollback guard: does this order key already have upload-part rows (any state)?
+   * Production wires the proc-queue lookup; missing = no guard (legacy callers unchanged).
+   */
+  queueOrderHasRows?: (orderKey: string) => boolean;
   /** Delay before retrying a failed queue enqueue (tests pass 0). */
   queueRetryMs?: number;
   /** Task id stamped onto queue rows (owner routing for alerts). */
@@ -421,6 +439,8 @@ export class RollingUploader {
   private readonly queueNotified = new Set<string>();
   /** True when this session loaded an existing sidecar from disk (the only safe trigger for legacy import). */
   private loadedExistingSidecar = false;
+  /** Rollback guard result (undefined = not computed yet): order key already owned by the queue. */
+  private legacyQueueBlock: string | null | undefined = undefined;
 
   constructor(o: RollingUploaderOpts) {
     this.o = o;
@@ -529,8 +549,7 @@ export class RollingUploader {
       // Season metadata is best-effort and must never set stateUntrusted: the sidecar still
       // carries the authoritative upload progress, and losing this field cannot justify
       // stopping the session's uploads and keeping every source.
-      writeStateFile(this.segDir, { ...this.state, seasonState, updatedAt: this.now() }, this.pid, this.now());
-      this.state = { ...this.state, seasonState, updatedAt: this.now() };
+      this.writeSidecar({ seasonState, updatedAt: this.now() });
     } catch (e) {
       this.log(`[rolling] season 状态落盘失败(保留 pending,不影响上传): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
     }
@@ -565,10 +584,10 @@ export class RollingUploader {
     if (!this.state.sessionBase || !this.segDir) return true;
     const target = statePathFor(this.segDir, this.state.sessionBase);
     try {
-      // Queue mode: the runner may have written bv/confirmed into the sidecar. Merge before writing so
-      // the recorder's in-memory state cannot erase them (two writers, one file).
-      if (this.o.queueMode === true) this.state = this.mergeSidecarState(this.state);
-      writeStateFile(this.segDir, this.state, this.pid, this.now());
+      // The queue runner may have written bv/confirmed into the sidecar. Merge on disk under the
+      // shared lock before writing so the recorder's in-memory state cannot erase them (two writers,
+      // one file); the lock is what makes the merge race-free, not just best-effort.
+      this.writeSidecar();
       return true;
     } catch (e) {
       this.stateUntrusted = true;
@@ -580,9 +599,20 @@ export class RollingUploader {
     }
   }
 
+  /**
+   * Write the sidecar under the shared lock, merging runner-written fields from disk first.
+   * Returns the merged state (also installed as this.state).
+   */
+  private writeSidecar(patch: Partial<RollingState> = {}): RollingState {
+    const base = { ...this.state, ...patch };
+    const merged = writeStateFile(this.segDir, base, this.pid, this.now(),
+      (disk) => this.mergeSidecarState(base, disk));
+    this.state = merged;
+    return merged;
+  }
+
   /** Merge durable bv/confirmed/queueOrderKey written by the queue runner into this in-memory state. */
-  private mergeSidecarState(state: RollingState): RollingState {
-    const disk = readState(this.segDir, state.sessionBase);
+  private mergeSidecarState(state: RollingState, disk: RollingState | null): RollingState {
     if (!disk) return state;
     const confirmed = [...new Set([...(state.confirmed ?? []), ...(disk.confirmed ?? [])])].sort((a, b) => a - b);
     return {
@@ -671,6 +701,28 @@ export class RollingUploader {
     return manual();
   }
 
+  /**
+   * Rollback guard (PR6): the order key of this broadcast if it was ever handed to the node queue AND
+   * the queue still holds rows for it. Only the recorder's own sidecar or a *same-broadcast*
+   * predecessor counts, so unrelated sessions never block. Computed once per session.
+   */
+  private legacyQueueConflictKey(): string | null {
+    if (this.legacyQueueBlock !== undefined) return this.legacyQueueBlock;
+    let key = this.state.queueOrderKey ?? null;
+    if (!key) {
+      const found = this.locatePredecessor();
+      const prevKey = found.kind === "found" ? found.prev.s.queueOrderKey : undefined;
+      if (prevKey) key = prevKey;
+    }
+    let blocked: string | null = null;
+    if (key) {
+      try { blocked = this.o.queueOrderHasRows && !this.o.queueOrderHasRows(key) ? null : key; }
+      catch { blocked = key; } // unreadable queue: fail closed (never double-upload)
+    }
+    this.legacyQueueBlock = blocked;
+    return blocked;
+  }
+
   private isEmptySegment(seg: RollingSegment): boolean {
     // Read the real size: a 0-byte segment (ffmpeg reports `Opening` before any write) uploads as
     // duration=0 and Bilibili rejects the whole submission (state -16, irreversible). Independent of
@@ -709,6 +761,15 @@ export class RollingUploader {
     // Plan 046 PR6 (方案 A): queue mode only enqueues; the serve runner uploads and cleanup-part deletes.
     // The legacy implementation below is untouched, so the default (off) path stays byte-identical.
     if (this.o.queueMode) return this._flushQueue(recordingActive);
+    // Plan 046 PR6 rollback guard: turning the queue switch OFF while rows for this broadcast exist is
+    // unsafe. The serve runner keeps claiming upload-part rows (its own process never reads the switch)
+    // while this recorder would upload the same sealed segments from the legacy path -> duplicate
+    // create/append. Fail closed: keep every source, alert once, do nothing here.
+    if (this.legacyQueueConflictKey()) {
+      this.notifyOnce("queue-conflict",
+        "边录边传队列模式:本场已有节点队列行(upload-part),旧路径上传会重复投稿;本进程已停止上传并保留源,请先跑完/清空队列再回退");
+      return { uploaded: [], deleted: [], ambiguous: this.ambiguousIndices };
+    }
     const nowMs = this.now();
     if (this.stateUntrusted) {
       // 失败已在 persist() 日志明示;此后不做任何上传/删源(保留源,转人工)。
@@ -1030,8 +1091,10 @@ export class RollingUploader {
   private queueFailed(index: number, what: string, recordingActive: boolean, terminal = false): void {
     this.notifyOnce("fail:" + index, "边录边传队列模式:段 " + index + " " + what + ",保留源" + (terminal ? "待人工" : "并稍后重试"));
     if (terminal) return;
-    // A later failure may know that recording has finished; the retry must use the latest state.
-    this.queueRetryActive = this.queueRetryActive || recordingActive;
+    // A later failure may know that recording has finished; the retry must use the LATEST state, never
+    // the first failure's: an active failure followed by a session-end failure must retry with
+    // recordingActive=false, otherwise the tail segment is never sealed and never enqueued.
+    this.queueRetryActive = recordingActive;
     if (this.queueRetryTimer) return;
     const timer = setTimeout(() => {
       this.queueRetryTimer = null;
@@ -1696,6 +1759,8 @@ export function makeRollingUploadHookFactory(o: {
   importQueueConfirmed?: RollingUploaderOpts["importQueueConfirmed"];
   /** Test seam for the highest seq already present in one order. */
   queueMaxSeq?: RollingUploaderOpts["queueMaxSeq"];
+  /** Production rollback guard: are there upload-part rows for this order key? */
+  queueOrderHasRows?: RollingUploaderOpts["queueOrderHasRows"];
   timeZone?: string;
   uploadPrivate?: boolean;
   cookies?: string;
@@ -1744,6 +1809,7 @@ export function makeRollingUploadHookFactory(o: {
       enqueueQueueSkip: o.enqueueQueueSkip ?? enqueueRollingSkipPart,
       importQueueConfirmed: o.importQueueConfirmed ?? importRollingConfirmedPart,
       queueMaxSeq: o.queueMaxSeq ?? rollingQueueMaxSeq,
+      queueOrderHasRows: o.queueOrderHasRows ?? queueOrderHasRows,
       // One slot per node process, shared with the queue's biliup processor (plan 038 PR4).
       // Queue mode must never take the upload slot (the runner owns the only uploader).
       slot: o.queueMode === true ? null : (o.slot ?? sharedNodeUploadSlot(o.log)),

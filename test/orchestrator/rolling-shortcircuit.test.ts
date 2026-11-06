@@ -70,3 +70,35 @@ describe("tryRollingShortCircuit records the broadcast span (issue #292)", () =>
     expect([c[0]!.startMs, c[0]!.endMs, c[0]!.durationSec]).toEqual([500, 2000, 20]);
   });
 });
+
+describe("plan 046 PR6: a queue-mode session without a bv holds the whole-order pipeline", () => {
+  const queued = (queueOrderKey: string, bv?: string, tsFiles: string[] = ["/r/s1_000.ts"]) => ({
+    workerId: "w1", rec: {
+      sessionBase: "s1", tsFiles,
+      rolling: { confirmed: [0], ambiguous: [], queueOrderKey, ...(bv ? { bv } : {}) },
+    },
+  }) as never;
+
+  it("sidecar queue-pending, no bv -> needs_manual, nothing is merged or uploaded", () => {
+    const { r, notify, jlog } = run(undefined, [queued("same-broadcast")]);
+    expect(r).toEqual({ state: "needs_manual" });
+    expect(ledger.get(KEY)?.state).toBe("needs_manual");
+    expect(ledger.get(KEY)?.error).toContain("队列");
+    expect(ledger.get(KEY)?.bv).toBeFalsy();
+    expect(jlog).toHaveBeenCalledWith(expect.stringContaining("队列"));
+    expect(notify).toHaveBeenCalledWith(expect.objectContaining({ kind: "error", message: expect.stringContaining("队列") }));
+    // No uploadDone: the master never uploaded anything for this broadcast.
+    expect(notify.mock.calls.some(([e]) => (e as { kind: string }).kind === "uploadDone")).toBe(false);
+  });
+
+  it("once the node queue confirmed a bv the hold is gone (normal rolling short-circuit)", () => {
+    // Every confirmed segment was already deleted by cleanup-part: the residual check passes too.
+    const { r } = run(undefined, [queued("same-broadcast", "BV1", [])]);
+    expect(r).toEqual({ state: "done", bv: "BV1" });
+  });
+
+  it("a legacy session without queueOrderKey is untouched", () => {
+    const { r } = run(undefined, [member({ bv: "BV1", confirmed: ["a"] })]);
+    expect(r).toEqual({ state: "done", bv: "BV1" });
+  });
+});

@@ -522,10 +522,27 @@ export class ProcQueueStore {
     return r.s == null ? 0 : Number(r.s);
   }
 
-  /** Rows of one kind already recorded for (orderKey, seq), regardless of logical-key spelling (PR7 back-compat). */
-  rowsForOrderSeq(orderKey: string, seq: number, kind: string = PART_KINDS.upload): ProcJobRecord[] {
-    return (this.db.prepare("SELECT * FROM proc_jobs WHERE kind=? AND orderKey=? AND seq=?")
-      .all(kind, orderKey, seq) as Row[]).map(toRecord);
+  /**
+   * Rows of one kind already recorded for (orderKey, seq), regardless of logical-key spelling (PR7 back-compat).
+   *
+   * `generation` narrows the answer to the live generation of the order. Without it a done row from an
+   * older generation makes a fresh part look handled (never uploaded), and an old-generation pending
+   * row makes a caller enqueue a second job id for the same part (claimable twice).
+   */
+  rowsForOrderSeq(orderKey: string, seq: number, kind: string = PART_KINDS.upload, generation?: number): ProcJobRecord[] {
+    if (generation === undefined) {
+      return (this.db.prepare("SELECT * FROM proc_jobs WHERE kind=? AND orderKey=? AND seq=?")
+        .all(kind, orderKey, seq) as Row[]).map(toRecord);
+    }
+    return (this.db.prepare("SELECT * FROM proc_jobs WHERE kind=? AND orderKey=? AND seq=? AND generation=?")
+      .all(kind, orderKey, seq, generation) as Row[]).map(toRecord);
+  }
+
+  /** How many rows of one kind exist for an order key (rollback guard: any row means the queue owns it). */
+  countOrderRows(orderKey: string, kind: string = PART_KINDS.upload): number {
+    const r = this.db.prepare("SELECT COUNT(*) AS n FROM proc_jobs WHERE kind=? AND orderKey=?")
+      .get(kind, orderKey) as Row;
+    return r.n == null ? 0 : Number(r.n);
   }
 
   /**

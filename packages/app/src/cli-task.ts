@@ -135,6 +135,9 @@ export function buildSessionForTask(
     // plan 046 PR7: master-owned rooms keep a skipped(hub-owned) timeline row per sealed part.
     uploadOwner: () => uploadOwnerForTask(task, rootHubDir()),
     enqueueHubSkipped: (info) => enqueueHubOwnedSkip({ ...info, taskId: task.id }),
+    // Queue-mode enqueue/metadata failures must reach the notifier, exactly like the serve-spawned
+    // record path (cli.ts). Without it they are log-only and a lost part is invisible.
+    notify: (message: string) => { void notifier.notify({ kind: "error", stage: "边录边传", message }).catch(() => {}); },
   });
   // 节点侧原地替换容器(issue #137):与 spawn 路径共用同一个判定点;rolling 生效时恒 original(互斥)。
   // 前台 `task run` 不做崩溃接管(接管在每次 `record` 子进程启动时做,会扫同一目录)。

@@ -7,9 +7,10 @@ import path from "node:path";
 import { RollingUploader, makeRollingUploadHookFactory } from "./rolling-upload.js";
 import { ProcQueueStore, procQueueDbPath } from "@drec/proc-queue";
 import { TaskStore } from "./store.js";
-import { PART_KINDS, jobIdOf, type PartCtx } from "@drec/core";
+import { PART_KINDS, jobIdOf, partLogicalKey, type PartCtx } from "@drec/core";
 import {
   enqueueRollingUploadPart, enqueueRollingSkipPart, importRollingConfirmedPart, rollingQueueModeEnabled,
+  queueOrderHasRows,
 } from "./rolling-queue.js";
 import { makeUploadPartProcessor } from "@drec/processors";
 import { enqueueHubOwnedSkip } from "./hub-owner.js";
@@ -533,6 +534,15 @@ describe("rework round 2", () => {
     expect(src).toContain("uploadOwnerForTask");
     expect(src).toContain("enqueueHubOwnedSkip");
     expect(src).toContain("new TaskStore(resolveDbPath())");
+    // Ownership is decided only on a hub master (DOUYIN_REC_HUB_MASTER) or for a hub-managed task.
+    expect(src).toContain("shouldDecideUploadOwner(task, hubMaster)");
+    expect(src).toContain("DOUYIN_REC_HUB_MASTER");
+    expect(src).toContain("masterOwnedWithoutRule");
+  });
+
+  it("B2b: task run passes the notifier into the rolling factory (static)", () => {
+    const src = readFileSync(path.join(import.meta.dirname, "cli-task.ts"), "utf-8");
+    expect(src).toContain("notify: (message: string)");
   });
 });
 
@@ -698,17 +708,136 @@ describe("rework addendum 3", () => {
     expect(sc.confirmed).toContain(0);
   });
 
-  it("A3-12: a later inactive failure does not downgrade the retry to inactive", async () => {
-    const paths = segs(1);
-    const calls: boolean[] = [];
+  it("A3-12: the retry uses the LATEST recording state (an active failure then a session-end failure retries inactive)", async () => {
+    // The tail segment can only be sealed once recording has ended: a retry stuck on the first
+    // failure's recordingActive=true would never enqueue it (silent stall, alert already deduped).
+    // Two segments: the active flush seals index 0 (and fails); the session-end flush seals the tail
+    // (index 1) and fails too. Only the tail's false lets the retry seal segment 1.
+    const paths = segs(2);
     const u = queueUploader({ queueRetryMs: 40, enqueueQueuePart: () => "failed" });
     const retry = vi.spyOn(u, "flush");
     paths.forEach((p) => u.noteSegment(p));
     await u.flush({ recordingActive: true });
     await u.flush({ recordingActive: false });
-    await new Promise((r) => setTimeout(r, 70));
-    expect(retry.mock.calls.some(([arg]) => arg.recordingActive === true)).toBe(true);
-    expect(calls).toEqual([]);
+    await new Promise((r) => setTimeout(r, 90));
+    const flags = retry.mock.calls.map(([arg]) => arg.recordingActive);
+    expect(flags).toContain(false);
+    expect(flags[flags.length - 1]).toBe(false);
   });
 
+});
+
+describe("rework addenda 5-7", () => {
+  const meta = { cookies: "c", title: "rendered title", tid: 21, tag: "tag", public: false };
+
+  it("S1: the row names the canonical sidecar next to the part (one derivation with the processor)", () => {
+    const p = segs(1)[0]!;
+    enqueueRollingUploadPart({ file: p, index: 0, orderKey: orderKeyOf(), meta });
+    const row = rowsOf(PART_KINDS.upload)[0]!;
+    expect((row.params as Record<string, unknown>).sidecarPath).toBe(path.join(rec, SESSION_BASE + ".rolling.json"));
+  });
+
+  it("G1: an older generation's done row does not mask the part of the live generation", () => {
+    const p = segs(1)[0]!;
+    expect(importRollingConfirmedPart({ file: p, index: 0, orderKey: orderKeyOf(), bv: FAKE_BV1, meta })).toBe("already");
+    const s = openQueue();
+    try {
+      // A stale re-dispatch bumps the order's live generation.
+      s.enqueue({
+        jobId: jobIdOf(PART_KINDS.upload, partLogicalKey(orderKeyOf(), 9), 2), kind: PART_KINDS.upload,
+        logicalKey: partLogicalKey(orderKeyOf(), 9), generation: 2, inputs: [p],
+        params: { ctx: { v: 1, orderKey: orderKeyOf(), index: 9, file: p, fp: { size: 8, mtimeMs: 1 } } },
+        replaceInputs: false, owner: {}, createdAt: 1, orderKey: orderKeyOf(), seq: 9,
+      } as never, { allowedRoots: [root] });
+    } finally { s.close(); }
+    // Before the fix the gen-1 done row made this look handled => the current part was never uploaded.
+    expect(enqueueRollingUploadPart({ file: p, index: 0, orderKey: orderKeyOf(), meta })).toBe("queued");
+    const rows = rowsOf(PART_KINDS.upload).filter((r) => r.seq === 1);
+    expect(rows.map((r) => r.state).sort()).toEqual(["done", "pending"]);
+  });
+
+  it("G2: a pending row under an older logical-key spelling blocks a second job id", () => {
+    const p = segs(1)[0]!;
+    const s = openQueue();
+    try {
+      s.enqueue({
+        jobId: jobIdOf(PART_KINDS.upload, orderKeyOf() + ":part-1", 1), kind: PART_KINDS.upload,
+        logicalKey: orderKeyOf() + ":part-1", generation: 1, inputs: [p],
+        params: { ctx: { v: 1, orderKey: orderKeyOf(), index: 1, file: p, fp: { size: 8, mtimeMs: 1 } } },
+        replaceInputs: false, owner: {}, createdAt: 1, orderKey: orderKeyOf(), seq: 1,
+      } as never, { allowedRoots: [root] });
+    } finally { s.close(); }
+    expect(enqueueRollingUploadPart({ file: p, index: 0, orderKey: orderKeyOf(), meta })).toBe("queued");
+    expect(rowsOf(PART_KINDS.upload)).toHaveLength(1); // no second claimable row for the same segment
+  });
+
+  it("R1: turning the switch off does not re-upload a broadcast that already has queue rows", async () => {
+    const paths = segs(2);
+    // This session ran in queue mode before the switch was turned off.
+    writeFileSync(sidecar(), JSON.stringify({
+      streamKey: orderKeyOf(), sessionBase: SESSION_BASE, room,
+      segments: paths.map((p, i) => ({ index: i, path: p })), confirmed: [],
+      queueOrderKey: orderKeyOf(), updatedAt: NOW_MS,
+    }));
+    expect(enqueueRollingUploadPart({ file: paths[0]!, index: 0, orderKey: orderKeyOf(), meta })).toBe("queued");
+    expect(queueOrderHasRows(orderKeyOf())).toBe(true);
+
+    const up = vi.fn(async () => FAKE_BV2);
+    const remove = vi.fn(() => true);
+    const notes: string[] = [];
+    const u = new RollingUploader({
+      room, uploadMeta, minSegmentSec: 0, now: () => NOW_MS,
+      gate: { run: async (_k: string, fn: () => Promise<unknown>) => fn() } as never,
+      uploadPlainRaw: up as never, appendGroupRaw: (async () => {}) as never, removeFile: remove,
+      notify: (m) => notes.push(m), queueOrderHasRows,
+    });
+    paths.forEach((p) => u.noteSegment(p));
+    const r = await u.flush({ recordingActive: false });
+    expect(r.uploaded).toEqual([]);
+    expect(up).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(existsSync(paths[0]!)).toBe(true);
+    expect(notes.join(" ")).toMatch(/队列/);
+  });
+
+  it("R2: the same switch-off without any queue rows keeps the legacy upload path", async () => {
+    const paths = segs(2);
+    const up = vi.fn(async () => FAKE_BV3);
+    const remove = vi.fn(() => true);
+    const u = new RollingUploader({
+      room, uploadMeta, minSegmentSec: 0, now: () => NOW_MS,
+      gate: { run: async (_k: string, fn: () => Promise<unknown>) => fn() } as never,
+      uploadPlainRaw: up as never, appendGroupRaw: (async () => {}) as never, removeFile: remove,
+      queueOrderHasRows,
+    });
+    paths.forEach((p) => u.noteSegment(p));
+    const r = await u.flush({ recordingActive: false });
+    expect(r.uploaded).toEqual([0, 1]);
+    expect(remove).toHaveBeenCalledTimes(2);
+  });
+
+  it("R3: a queue-mode predecessor blocks the legacy path too (same broadcast, other session)", async () => {
+    const prevBase = "主播_2026-06-27_07-00-00";
+    const prevFile = path.join(rec, prevBase + "_000.ts");
+    writeFileSync(prevFile, "abcdefgh");
+    utimesSync(prevFile, new Date(BASE_MS - 600_000), new Date(BASE_MS - 600_000));
+    writeFileSync(path.join(rec, prevBase + ".rolling.json"), JSON.stringify({
+      streamKey: orderKeyOf(), sessionBase: prevBase, room,
+      segments: [{ index: 0, path: prevFile }], confirmed: [], queueOrderKey: orderKeyOf(),
+      startMs: BASE_MS - 600_000, updatedAt: BASE_MS - 60_000,
+    }));
+    expect(enqueueRollingUploadPart({ file: prevFile, index: 0, orderKey: orderKeyOf(), meta })).toBe("queued");
+
+    const up = vi.fn(async () => FAKE_BV4);
+    const u = new RollingUploader({
+      room, uploadMeta, minSegmentSec: 0, now: () => NOW_MS,
+      gate: { run: async (_k: string, fn: () => Promise<unknown>) => fn() } as never,
+      uploadPlainRaw: up as never, appendGroupRaw: (async () => {}) as never,
+      queueOrderHasRows, ownerWaitMs: 0,
+    });
+    u.noteSegment(segs(1)[0]!);
+    const r = await u.flush({ recordingActive: false });
+    expect(r.uploaded).toEqual([]);
+    expect(up).not.toHaveBeenCalled();
+  });
 });
