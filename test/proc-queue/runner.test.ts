@@ -1289,3 +1289,99 @@ describe("plan 046 PR4 retry policy", () => {
     expect(run).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("plan 046 PR5 part-chain runner wiring", () => {
+  const orderKey = "order-pr5";
+  const mkPart = (name: string, index: number) => {
+    const job = env.job(name, { kind: "upload-part", logicalKey: `${orderKey}:part:${index}`, orderKey, seq: index, params: { partWorkflow: "whole-order" } });
+    const file = job.inputs[0]!;
+    job.params.ctx = { v: 1, orderKey, index, file, fp: { size: statSync(file).size, mtimeMs: statSync(file).mtimeMs } };
+    return job;
+  };
+
+  it("inherits bv from the done predecessor and runs seq=2 as append", async () => {
+    const seen: Array<{ index: number; bv?: string }> = [];
+    registerProcessor(fakeProcessor({
+      kind: "upload-part", retryable: false,
+      run: async (j) => {
+        const ctx = j.params.ctx as { index: number; bv?: string };
+        seen.push({ index: ctx.index, ...(ctx.bv ? { bv: ctx.bv } : {}) });
+        return { outputs: [], bv: ctx.bv ?? "BVfirst" };
+      },
+    }));
+    const r = mkRunner("A");
+    const s = env.open();
+    const one = mkPart("p1.mp4", 1);
+    const two = mkPart("p2.mp4", 2);
+    s.enqueue(one, allowed());
+    s.enqueue(two, allowed());
+    r.tick();
+    await vi.waitFor(() => { r.tick(); expect(s.get(two.jobId)?.state).toBe("done"); });
+    expect(seen).toEqual([{ index: 1 }, { index: 2, bv: "BVfirst" }]);
+  });
+
+  it("does not claim seq=2 while seq=1 is still running", async () => {
+    const hold = gate();
+    registerProcessor(fakeProcessor({
+      kind: "upload-part", retryable: false,
+      run: async (j) => { if ((j.params.ctx as { index: number }).index === 1) await hold.promise; return { outputs: [], bv: "BVfirst" }; },
+    }));
+    const r = mkRunner("A");
+    const s = env.open();
+    const one = mkPart("p3.mp4", 1);
+    const two = mkPart("p4.mp4", 2);
+    s.enqueue(one, allowed());
+    s.enqueue(two, allowed());
+    r.tick();
+    expect(s.get(one.jobId)?.state).toBe("running");
+    expect(s.get(two.jobId)?.state).toBe("pending");
+    hold.resolve();
+    await vi.waitFor(() => { r.tick(); expect(s.get(two.jobId)?.state).toBe("done"); });
+  });
+
+  it("a terminal part failure cascades later pending parts to cancelled", async () => {
+    registerProcessor(fakeProcessor({
+      kind: "upload-part", retryable: false,
+      run: async () => { throw Object.assign(new Error("permission-denied"), { code: "permission-denied" }); },
+    }));
+    const r = mkRunner("A");
+    const s = env.open();
+    const one = mkPart("p5.mp4", 1);
+    const two = mkPart("p6.mp4", 2);
+    s.enqueue(one, allowed());
+    s.enqueue(two, allowed());
+    r.tick();
+    await vi.waitFor(() => expect(s.get(one.jobId)?.state).toBe("failed"));
+    expect(s.get(two.jobId)?.state).toBe("cancelled");
+  });
+
+  it("a validate rejection also cascades later pending parts", async () => {
+    registerProcessor(fakeProcessor({
+      kind: "upload-part", retryable: false,
+      validate: (j) => (j.params.ctx as { index: number }).index === 1 ? "bad part" : null,
+      run: async () => ({ outputs: [], bv: "BVfirst" }),
+    }));
+    const r = mkRunner("A");
+    const s = env.open();
+    const one = mkPart("p7.mp4", 1);
+    const two = mkPart("p8.mp4", 2);
+    s.enqueue(one, allowed());
+    s.enqueue(two, allowed());
+    r.tick();
+    await vi.waitFor(() => expect(s.get(one.jobId)?.state).toBe("failed"));
+    expect(s.get(two.jobId)?.state).toBe("cancelled");
+  });
+
+  it("a whole-order finish rejection reports finalization, not a chain failure", async () => {
+    registerProcessor(fakeProcessor({ kind: "upload-part", retryable: false, run: async () => ({ outputs: [], bv: "BVx" }) }));
+    const s = env.open();
+    s.finish = vi.fn(() => false) as typeof s.finish;
+    const messages: string[] = [];
+    const r = mkRunner("A", { store: s, alert: (_t, m) => messages.push(m) });
+    const one = mkPart("p9.mp4", 1);
+    s.enqueue(one, allowed());
+    r.tick();
+    await vi.waitFor(() => expect(messages.some((m) => m.includes("任务收尾失败"))).toBe(true));
+    expect(messages.some((m) => m.includes("链出失败"))).toBe(false);
+  });
+});

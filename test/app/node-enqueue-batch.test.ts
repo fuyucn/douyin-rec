@@ -39,7 +39,8 @@ describe("remote enqueue capabilities and batch (plan 038 T10a)", () => {
     const root = env();
     const good = job(root, "biliup", "a.mp4");
     const bad = { ...job(root, "biliup", "b.mp4"), inputs: [join(root, "recordings", "missing.mp4")] };
-    expect(() => handleEnqueue(root, { v: 1, jobs: [good, bad] }, { batch: true, capabilities: ["biliup"], getProcessor: () => proc("biliup") })).toThrow();
+    const r = handleEnqueue(root, { v: 1, jobs: [good, bad] }, { batch: true, capabilities: ["biliup"], getProcessor: () => proc("biliup") });
+    expect(r.results.map((x) => x.state)).toEqual(["rejected", "rejected"]);
     expect(handleProcStatus(root, [good.jobId])).toEqual([]);
   });
 

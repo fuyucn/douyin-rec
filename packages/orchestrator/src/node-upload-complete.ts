@@ -34,6 +34,23 @@ export function mapUploadOutcome(d: UploadDispatch): UploadOutcome {
     case "prep-failed": return manual(`prep ${d.state}${d.error ? `: ${d.error}` : ""} (recover with recover-order --prep)`);
     case "blocked": return manual(d.reason);
     case "biliup": return mapReceipt(d.receipt);
+    case "part-chain-enqueued": {
+      for (const r of d.results) {
+        const bad = enqueueFailure("upload-part", r);
+        if (bad) return bad;
+      }
+      return { action: "none" };
+    }
+    case "part-chain-waiting": {
+      const bv = [...d.receipts].reverse().find((r) => r.state === "done" && r.bv)?.bv;
+      return bv ? { action: "checkpoint", bv } : { action: "none" };
+    }
+    case "part-chain-failed":
+      return manual(`upload-part chain ${d.state}${d.error ? `: ${d.error}` : ""} (sources kept; verify the draft)`);
+    case "part-chain": {
+      const last = d.receipts[d.receipts.length - 1];
+      return last?.bv ? { action: "done", bv: last.bv } : manual("upload-part chain finished without a BV; verify on the creator center");
+    }
   }
 }
 

@@ -37,9 +37,15 @@ describe("parseNodeUploadConfig", () => {
 
   it("falls back per field for bad or too-small numbers and keeps good ones", () => {
     expect(parseNodeUploadConfig({ pollMs: 120_000, unreachableAlertMs: 5_000, concurrency: 2 }))
-      .toEqual({ mode: "blocking", pollMs: 120_000, unreachableAlertMs: 5_000, concurrency: 2 });
+      .toEqual({ mode: "blocking", pollMs: 120_000, unreachableAlertMs: 5_000, concurrency: 2, partChain: false });
     expect(parseNodeUploadConfig({ pollMs: 10, unreachableAlertMs: "x", concurrency: 0 }))
       .toEqual(DEFAULT_NODE_UPLOAD);
+  });
+
+  it("partChain is an explicit boolean opt-in and defaults off", () => {
+    expect(DEFAULT_NODE_UPLOAD.partChain).toBe(false);
+    expect(parseNodeUploadConfig({ partChain: true }).partChain).toBe(true);
+    for (const v of ["true", 1, {}, null]) expect(parseNodeUploadConfig({ partChain: v }).partChain).toBe(false);
   });
 });
 
