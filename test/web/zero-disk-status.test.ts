@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ZeroDiskNodeStatusDTO } from "@drec/core";
 import { liveUploadView, zeroDiskNeedsAttention, zeroDiskView } from "../../packages/web/src/lib/zero-disk-status.js";
@@ -8,13 +10,27 @@ const dto = (over: Partial<ZeroDiskNodeStatusDTO> = {}): ZeroDiskNodeStatusDTO =
   ({ workerId: "n1", workerName: "Node 1", state: "ok", checkedAt: 1, ...over });
 
 describe("zeroDiskView", () => {
-  it("maps every node-reported refusal code to its own wording", () => {
-    const keys = ["account_mismatch", "account_unknown", "credential_missing", "delivery_missing"].map(
-      (code) => zeroDiskView(dto({ run: "refused", code: code as ZeroDiskNodeStatusDTO["code"] })).key,
-    );
-    expect(new Set(keys).size).toBe(4);
-    expect(keys.every((k) => k.startsWith("room.zeroDisk.refused"))).toBe(true);
-    expect(zeroDiskView(dto({ run: "refused" })).key).toBe("room.zeroDisk.refused"); // unknown code: still a refusal
+  it("maps every node-reported refusal code to its own exact wording", () => {
+    const expected: Record<string, string> = {
+      account_mismatch: "room.zeroDisk.refusedAccountMismatch",
+      account_unknown: "room.zeroDisk.refusedAccountUnknown",
+      credential_missing: "room.zeroDisk.refusedCredential",
+      credential_unreadable: "room.zeroDisk.refusedCredentialUnreadable",
+      delivery_missing: "room.zeroDisk.refusedDelivery",
+    };
+    for (const [code, key] of Object.entries(expected)) {
+      expect(zeroDiskView(dto({ run: "refused", code: code as ZeroDiskNodeStatusDTO["code"] })).key).toBe(key);
+    }
+    // the generic fallback must stay reachable only for an unknown code
+    expect(Object.values(expected)).not.toContain("room.zeroDisk.refused");
+    expect(zeroDiskView(dto({ run: "refused" })).key).toBe("room.zeroDisk.refused");
+  });
+  it("every refusal key exists in both dictionaries (they are reached via t(v.key), so no literal-scan check sees them)", () => {
+    const src = readFileSync(join(__dirname, "..", "..", "packages", "web", "src", "lib", "i18n.tsx"), "utf-8");
+    for (const name of ["refused", "refusedAccountMismatch", "refusedAccountUnknown", "refusedCredential", "refusedCredentialUnreadable", "refusedDelivery"]) {
+      const hits = src.match(new RegExp(`\\b${name}\\s*:`, "g")) ?? [];
+      expect(hits.length, `${name} must be defined in zh and en`).toBe(2);
+    }
   });
   it("old node, unreachable node and a blocked push each have their own state and carry the reason", () => {
     expect(zeroDiskView(dto({ state: "unsupported", reason: "too old" }))).toMatchObject({ key: "room.zeroDisk.unsupported", tone: "error", detail: "too old" });

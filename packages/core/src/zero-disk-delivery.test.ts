@@ -102,6 +102,7 @@ describe("receipt / status / report normalizers", () => {
   it("status: unknown state / refusal code are not trusted", () => {
     const st = { v: 1, platform: "douyin", roomSlug: "1", state: "refused", code: "account_mismatch", parts: 0, updatedAt: 1 };
     expect(normalizeZeroDiskStatus(st)?.code).toBe("account_mismatch");
+    expect(normalizeZeroDiskStatus({ ...st, code: "credential_unreadable" })?.code).toBe("credential_unreadable");
     expect(normalizeZeroDiskStatus({ ...st, state: "weird" })).toBeNull();
     expect(normalizeZeroDiskStatus({ ...st, code: "weird" })?.code).toBeUndefined();
   });
