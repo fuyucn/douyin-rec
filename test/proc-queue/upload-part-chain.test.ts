@@ -131,6 +131,20 @@ describe("upload-part runner chain", () => {
     expect(s.list({ kind: PART_KINDS.cleanup })).toHaveLength(0);
   });
 
+  it("unsampled confirmation (ackedBytes null) still chains: unknown never blocks the cleanup (issue #532)", async () => {
+    const file = env.file("a_000.ts");
+    const c = ctxOf(file);
+    registerProcessor(proc({ run: async () => ({ outputs: [], bv: "CONFIRMED", confirmed: { size: c.fp.size, mtimeMs: c.fp.mtimeMs, ackedBytes: null } }) }));
+    const r = mkRunner();
+    const s = env.open();
+    const job = partJob(file, "rolling");
+    const id = s.enqueue(job, allowed()).jobId;
+    s.acquireLease(PART_KINDS.upload, "A", { pid: process.pid });
+    r.tick();
+    await vi.waitFor(() => expect(s.get(id)?.state).toBe("done"));
+    expect(s.list({ kind: PART_KINDS.cleanup })).toHaveLength(1);
+  });
+
   it("stale fp or too few acked bytes means no chain (even if the row has a bv)", async () => {
     const file = env.file("a_000.ts");
     const c = ctxOf(file);

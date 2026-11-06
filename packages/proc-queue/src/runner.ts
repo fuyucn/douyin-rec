@@ -678,7 +678,7 @@ export class ProcRunner {
   // ───────────────────────── 接管 recover ─────────────────────────
 
   /** Single write path for upload-part success: done + cleanup successor in one transaction. */
-  private finishWithChain(job: ProcJobRecord, res: { outputs: string[]; note?: string; bv?: string; confirmed?: { size: number; mtimeMs: number; ackedBytes: number } }): { ok: boolean; error?: string; chained?: boolean } {
+  private finishWithChain(job: ProcJobRecord, res: { outputs: string[]; note?: string; bv?: string; confirmed?: { size: number; mtimeMs: number; ackedBytes: number | null } }): { ok: boolean; error?: string; chained?: boolean } {
     const finish = { state: "done" as const, outputs: res.outputs, ...(res.note ? { note: res.note } : {}) };
     const mode: unknown = job.params.partWorkflow;
     const template = mode === "live-pump" || mode === "rolling" || mode === "whole-order"
@@ -689,8 +689,11 @@ export class ProcRunner {
       return { ok: this.o.store.finish(job.jobId, this.o.owner, finish), error: "完成但收尾失败(持有者已换人)", chained: false };
     }
     const ctx = job.params.ctx as PartCtx | undefined;
+    // ackedBytes null = no readable tcp sample (issue #532). The processor already judged that case
+    // on biliup's explicit success signal, so unknown must not block the chain here; a number below
+    // the size is a real short transfer and still refuses it.
     if (!ctx || res.confirmed.size !== ctx.fp.size || res.confirmed.mtimeMs !== ctx.fp.mtimeMs
-      || res.confirmed.ackedBytes < res.confirmed.size || !res.bv) {
+      || (res.confirmed.ackedBytes !== null && res.confirmed.ackedBytes < res.confirmed.size) || !res.bv) {
       return { ok: false, error: "确认证据不足,拒绝链出清理" };
     }
     const current = this.o.store.get(job.jobId);

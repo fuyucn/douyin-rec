@@ -139,10 +139,13 @@ export interface Supervisor {
   setStep: (step: string) => void;
   /** The next run uploads one part: bytes already uploaded by earlier parts, this part's size, job total. */
   setPart: (baseBytes: number, partBytes: number, totalBytes: number) => void;
-  /** Bytes acked by the last child (the plan 046 §5.4 transfer byte proof). */
-  ackedSinceChild: () => number;
-  /** Feed one tcp-acked sample into the watchdog while still in transfer step. */
-  observeAcked: (sample: AckSample) => void;
+  /** Bytes acked by the last child so far; null = no readable sample (unknown, not zero). */
+  ackedSinceChild: () => number | null;
+  /**
+   * Bytes acked at the transfer-complete boundary, the plan 046 §5.4 byte proof; null = no readable
+   * sample at that moment (unknown, never treated as a short transfer).
+   */
+  ackedAtBoundary: () => number | null;
   /** Rejects with UncertainOutcome once submit passes maxWallMs; never resolves. */
   abandoned: Promise<never>;
   wallHit: () => boolean;
@@ -168,13 +171,27 @@ export function supervise(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps
     if (part.total <= 0) return;
     const t = now();
     if (!force && lastWrite && t - lastWrite.at < (deps.progressEveryMs ?? 30_000)) return;
-    const doneBytes = Math.min(part.total, part.base + Math.min(part.size, watch.ackedSinceChild));
+    const acked = watch.ackedSinceChild;
+    const doneBytes = Math.min(part.total, part.base + (acked === null ? 0 : Math.min(part.size, acked)));
     const dt = lastWrite ? t - lastWrite.at : 0;
     const bps = lastWrite && dt > 0 && doneBytes >= lastWrite.doneBytes ? Math.round(((doneBytes - lastWrite.doneBytes) * 1000) / dt) : null;
     lastWrite = { doneBytes, totalBytes: part.total, bps, at: t };
     // Runs inside a timer / child output handler: a throw here would be uncaught, and progress is display-only.
     try { ctx.setState?.({ progress: lastWrite }); } catch (e) { ctx.log(`progress not saved: ${(e as Error)?.message ?? e}`); }
     slot?.touch();
+  };
+  // Read the child's sockets while it is still alive. The final sample must happen at the transfer
+  // boundary: once the child exits its sockets are gone and ss cannot report them (issue #532).
+  // Returns true only when a sample was actually read (ss worked and listed this child's sockets).
+  const sampleNow = (): boolean => {
+    const c = child;
+    if (!c || c.exited || c.pid <= 0 || watch.currentStep !== "transfer") return false;
+    try {
+      const sample = (deps.readAcked ?? readTcpAcked)(c.pid);
+      if (sample === null || sample.size === 0) return false;
+      watch.observe(sample);
+      return true;
+    } catch { return false; }
   };
   const timer = setInterval(() => {
     const c = child;
@@ -216,7 +233,11 @@ export function supervise(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps
           watch.setStep("transfer");
           ctx.setState?.({ step: "transfer", childPid: pid, childPidStartedAt: (deps.probe ?? probeChild)(pid)?.startedAt ?? null });
         },
-        onLine: (line) => { if (isAllFilesUploadedLine(line)) setStep("submit"); },
+        onLine: (line) => {
+          if (!isAllFilesUploadedLine(line)) return;
+          watch.markBoundary(sampleNow());
+          setStep("submit");
+        },
       });
     } catch (e) {
       if (me.stalled) throw new StallError(`biliup stalled and was stopped (${String((e as Error)?.message ?? e).slice(0, 200)})`);
@@ -228,7 +249,7 @@ export function supervise(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps
   return {
     run, setStep, setPart,
     ackedSinceChild: () => watch.ackedSinceChild,
-    observeAcked: (sample) => { watch.setStep("transfer"); watch.observe(sample); },
+    ackedAtBoundary: () => watch.ackedAtBoundary,
     abandoned, wallHit: () => wall, stop: () => clearInterval(timer),
   };
 }

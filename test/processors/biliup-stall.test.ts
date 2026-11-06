@@ -268,7 +268,68 @@ describe("TransferWatch.ackedSinceChild", () => {
     clock.t = 2; w.observe(new Map([["b", 200]])); // a closed, b new
     expect(w.ackedSinceChild).toBe(700);
     w.childStarted();
-    expect(w.ackedSinceChild).toBe(0);
+    expect(w.ackedSinceChild).toBeNull(); // no sample yet = unknown, never 0 bytes (issue #532)
+  });
+
+  it("no sample (null or an ss listing without the child's sockets) stays unknown", () => {
+    const { w } = mkWatch();
+    w.setStep("transfer");
+    expect(w.ackedSinceChild).toBeNull();
+    w.observe(null);
+    expect(w.ackedSinceChild).toBeNull();
+    expect(w.observe(new Map()).kind).toBe("ok");
+    expect(w.ackedSinceChild).toBeNull();
+    expect(w.markBoundary(false)).toBeNull();
+    expect(w.markBoundary(true)).toBeNull(); // readable but zero samples read: still unknown
+  });
+
+  it("a boundary read without sockets is unknown even after mid-transfer samples", () => {
+    const { w, clock } = mkWatch();
+    w.setStep("transfer");
+    clock.t = 1; w.observe(new Map([["a", 900]])); // mid-transfer totals are short by nature
+    expect(w.markBoundary(false)).toBeNull();
+    w.childStarted();
+    clock.t = 2; w.observe(new Map([["a", 400]]));
+    expect(w.markBoundary(true)).toBe(400);
+  });
+
+  it("a reused socket tuple counts from its own zero, keeping the closed socket's share", () => {
+    const { w, clock } = mkWatch();
+    w.setStep("transfer");
+    clock.t = 1; w.observe(new Map([["a", 500]]));
+    clock.t = 2; w.observe(new Map([["a", 40]])); // same tuple, new connection
+    expect(w.ackedSinceChild).toBe(540);
+  });
+
+  it("an empty listing keeps the per-socket baseline: the next sample is a delta, not a new total", () => {
+    const { w, clock } = mkWatch();
+    w.setStep("transfer");
+    clock.t = 1; w.observe(new Map([["a", 500]]));
+    clock.t = 2; w.observe(new Map()); // sockets briefly invisible
+    clock.t = 3; w.observe(new Map([["a", 550]]));
+    expect(w.ackedSinceChild).toBe(550); // 500 + 50; never 500 + 550
+  });
+
+  it("an empty listing is still no progress for the stall watchdog", () => {
+    const { w, clock } = mkWatch({ stallMs: 100 });
+    w.setStep("transfer");
+    clock.t = 1; w.observe(new Map([["a", 100]]));
+    clock.t = 101; expect(w.observe(new Map()).kind).toBe("stall");
+  });
+
+  it("ackedAtBoundary snapshots the proof at the boundary and resets per child", () => {
+    const { w, clock } = mkWatch();
+    w.setStep("transfer");
+    expect(w.markBoundary(true)).toBeNull();
+    clock.t = 1; w.observe(new Map([["a", 900]]));
+    clock.t = 2; w.observe(new Map([["a", 1000]]));
+    expect(w.markBoundary(true)).toBe(1000);
+    expect(w.ackedAtBoundary).toBe(1000);
+    clock.t = 3; w.observe(new Map([["a", 1500]]));
+    expect(w.ackedAtBoundary).toBe(1000); // late samples never rewrite the proof
+    expect(w.markBoundary(false)).toBe(1000); // an unreadable repeat never erases the proof
+    w.childStarted();
+    expect(w.ackedAtBoundary).toBeNull();
   });
 });
 

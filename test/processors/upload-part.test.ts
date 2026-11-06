@@ -7,6 +7,7 @@ import {
   APPEND_AMBIGUOUS_MARKER, PART_KINDS, jobIdOf, type ProcessContext, type ProcessJob, type PartCtx,
 } from "@drec/core";
 import { makeUploadPartProcessor, shouldChainCleanup, PART_WORKFLOW_PARAM, uploadPartProcessor } from "@drec/processors";
+import type { BiliupHooks } from "../../packages/processors/src/run-biliup.js";
 
 let dir: string;
 const setup = (): void => { dir = mkdtempSync(join(tmpdir(), "upload-part-")); };
@@ -25,28 +26,31 @@ const job = (file: string, over: Partial<ProcessJob> = {}): ProcessJob => {
     ...over, params,
   };
 };
-const pc = (): ProcessContext => ({
+const pc = (logs: string[] = [], alerts: string[] = []): ProcessContext => ({
   signal: new AbortController().signal, assertLease: () => {}, markProgress: () => {},
-  log: () => {}, alert: () => {}, setState: vi.fn(),
+  log: (m: string) => { logs.push(m); }, alert: (m: string) => { alerts.push(m); }, setState: vi.fn(),
 });
-// Default run seam: emits "All files uploaded successfully" and a fake bv for create.
+// Default run seam: a live child pid, the transfer-complete line while the child is still alive (the
+// supervisor samples tcp bytes there; a dead child's sockets are gone), then the final output.
 const BV = "BV1" + "a".repeat(9); // parseBV expects BV + 10 chars
-const ackedRun = (ackedBytes: number) => vi.fn(async (argv: string[]) => {
+const ackedRun = () => vi.fn(async (argv: string[], hooks?: BiliupHooks) => {
+  hooks?.onSpawn?.(4242);
+  hooks?.onLine?.("All files uploaded successfully");
   if (argv[2] === "upload") return "All files uploaded successfully\n" + BV;
   return "All files uploaded successfully\nok";
 });
 
 interface Seam {
   run: ReturnType<typeof ackedRun>;
-  readAcked: () => Map<string, number>;
+  readAcked: () => Map<string, number> | null;
 }
 const seams = (ackedBytes = 20): Seam => ({
-  run: ackedRun(ackedBytes),
+  run: ackedRun(),
   readAcked: () => new Map([["local>peer", ackedBytes]]),
 });
 const processor = (s: Seam, extra: Record<string, unknown> = {}) => makeUploadPartProcessor({
   run: s.run as never, readAcked: s.readAcked, tickMs: 1, now: () => 1_000_000,
-  expectedDurationSec: 60, lookup: { run: async () => "[]", trustNo: true },
+  expectedDurationSec: 60, lookup: { run: async () => "[]", trustNo: true }, probe: () => null,
   ...extra,
 });
 
@@ -114,12 +118,62 @@ describe("upload-part processor", () => {
     } finally { teardown(); }
   });
 
-  it("acked bytes below the file size is NOT success even with an explicit boundary", async () => {
+  it("a readable boundary sample below the file size is NOT success (truncated transfer)", async () => {
     setup();
     try {
       const f = put("a_000.ts", "x".repeat(100));
-      const s = seams(0);
-      await expect(processor(s).run(job(f), pc())).rejects.toThrow(/acked bytes 0 < file size 100/);
+      await expect(processor(seams(99)).run(job(f), pc())).rejects.toThrow(/acked bytes 99 < file size 100/);
+      await expect(processor(seams(0)).run(job(f), pc())).rejects.toThrow(/acked bytes 0 < file size 100/);
+    } finally { teardown(); }
+  });
+
+  it("no readable sample (null) is unknown, not a failure: explicit signal wins and the gap is logged", async () => {
+    setup();
+    try {
+      const f = put("a_000.ts", "x".repeat(100));
+      const s: Seam = { run: ackedRun(), readAcked: () => null };
+      const logs: string[] = [];
+      const r = await processor(s).run(job(f), pc(logs));
+      expect(r.bv).toBe(BV);
+      expect(r.confirmed).toMatchObject({ ackedBytes: null, size: 100 });
+      expect(logs.join(" ")).toMatch(/byte check unavailable/);
+      expect(logs.join(" ")).toMatch(/no tcp acked sample/);
+      // Nothing is deleted or refused: the confirmed part still flows to the cleanup chain.
+      expect(existsSync(f)).toBe(true);
+    } finally { teardown(); }
+  });
+
+  it("an ss listing without the child's sockets is unknown, not zero bytes", async () => {
+    setup();
+    try {
+      const f = put("a_000.ts", "x".repeat(100));
+      const s: Seam = { run: ackedRun(), readAcked: () => new Map() };
+      const logs: string[] = [];
+      const r = await processor(s).run(job(f), pc(logs));
+      expect(r.confirmed).toMatchObject({ ackedBytes: null });
+      expect(logs.join(" ")).toMatch(/byte check unavailable/);
+    } finally { teardown(); }
+  });
+
+  it("mid-transfer samples alone never judge the part (the live boundary snapshot is the proof)", async () => {
+    setup();
+    try {
+      const f = put("a_000.ts", "x".repeat(100));
+      // Samples arrive while transferring but the boundary line never reaches the hooks: the last
+      // sample is by definition short of the final acked bytes, so it must not fail the part.
+      let reads = 0;
+      const readAcked = () => { reads += 1; return new Map([["local>peer", 40]]); };
+      const run = vi.fn(async (argv: string[], hooks?: BiliupHooks) => {
+        hooks?.onSpawn?.(4242);
+        hooks?.onLine?.("uploading chunk 1/2");
+        // Wait for at least one real mid-transfer sample before finishing the transfer.
+        await vi.waitFor(() => expect(reads).toBeGreaterThan(0));
+        return argv[2] === "upload" ? "All files uploaded successfully\n" + BV : "All files uploaded successfully\nok";
+      });
+      const logs: string[] = [];
+      const r = await processor({ run, readAcked }).run(job(f), pc(logs));
+      expect(r.confirmed).toMatchObject({ ackedBytes: null });
+      expect(logs.join(" ")).toMatch(/byte check unavailable/);
     } finally { teardown(); }
   });
 
