@@ -208,6 +208,12 @@ export function payloadFromForm(f: RoomForm, ctx: RoomContext): PayloadResult {
   if (f.uploadOn && !isValidPartSizeInput(f.partSizeMiB)) return { ok: false, error: "partSizeMiB" };
   const stored = storedFromForm(ruleFactsOf(f, ctx));
   const trimOrUndef = (s: string): string | undefined => s.trim() || undefined;
+  // Zero-disk fields are owned by the rule: only a save that also sees it may write them.
+  // Without it the form cannot read the stored value, so both keys are omitted (PATCH =
+  // keep); with it, leaving rolling still clears the switch so it cannot be resurrected.
+  const zeroDisk = ctx.hasRule
+    ? { streamUpload: stored.mode === "rolling" && f.streamUpload, streamUploadSpool: f.streamUploadSpool }
+    : {};
   const recording: RoomPayload["recording"] = ctx.hasRecording
     ? {
         name: f.name.trim() || null,
@@ -217,10 +223,7 @@ export function payloadFromForm(f: RoomForm, ctx: RoomContext): PayloadResult {
         outputFormat: stored.outputFormat,
         danmu: f.danmu ? 1 : 0,
         useCookie: f.useCookie,
-        // Zero-disk is only meaningful under rolling; other modes clear it so a later save
-        // cannot resurrect a hidden switch.
-        streamUpload: stored.mode === "rolling" && f.streamUpload,
-        streamUploadSpool: f.streamUploadSpool,
+        ...zeroDisk,
         ...sched,
         ...webhookPatch(f.webhook, f.webhookClear),
       }
@@ -315,13 +318,11 @@ export function submitPayload(
 ): SubmitResult {
   const base = payloadFromForm(f, ctx);
   if (!base.ok) return base;
-  // `processing` 是 hub 规则字段:worker 上没有规则可写,整段省略(后端 PUT/POST 也会拒)。
-  let payload: RoomPayload = base.payload;
-  if (!o.withProcessing) {
-    const { streamUpload, streamUploadSpool, ...recording } = base.payload.recording ?? {};
-    void streamUpload; void streamUploadSpool;
-    payload = base.payload.recording ? { recording } : {};
-  }
+  // `processing` 是 hub 规则字段:worker 上没有规则可写,整段省略(后端 PUT/POST 也会拒);
+  // spread + undefined 仍会保留键,必须重建不含 processing 的对象。
+  const payload: RoomPayload = o.withProcessing
+    ? base.payload
+    : (base.payload.recording ? { recording: base.payload.recording } : {});
   if (o.mode === "edit") return { ok: true, mode: "edit", payload };
   const room = f.room.trim();
   if (!room) return { ok: false, error: "room" };

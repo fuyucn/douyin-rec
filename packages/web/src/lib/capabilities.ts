@@ -1,7 +1,8 @@
 // lib/capabilities.ts — 节点角色能力矩阵(plans/047 §3.2)。纯函数,无 DOM/atom 依赖,可单测。
 //
 // **唯一真理**:页面不再各自判断 `hubEnabled`,而是问「本节点能不能做这件事」。
-// 录制半边(`editRecording` / `editNodeDelivery` / `createRoom`)两端都有 —— 它们只写 task 字段;
+// 录制半边(`editRecording` / `createRoom`)两端都有;直播直传 / 边录边传是 hub 规则字段,
+// 只属于 `editPipeline`(节点上后端也会拒绝写入)。
 // 处理半边(`editPipeline` / `hubRule`)与 master 专有页(`nodes` / `queue` / `stats` / `mergePanel` / `runs`)
 // 只在 hub master 上成立。
 
@@ -12,8 +13,6 @@ export interface NodeCaps {
   createRoom: true;
   /** 两端都能改录制半边(时间/名字/画质/引擎/分段/弹幕/账号)。 */
   editRecording: true;
-  /** worker:直播直传 / 边录边传 / 存档格式 —— task 字段,不是 hub 规则。 */
-  editNodeDelivery: true;
   /** master only:合并 / 烧录 / 节点直传 / 上传投稿 / 清理。 */
   editPipeline: boolean;
   /** master only:规则文件只在主控配置与生效。 */
@@ -41,7 +40,6 @@ export function nodeCaps(hubEnabled: boolean | null): NodeCaps {
     rooms: true,
     createRoom: true,
     editRecording: true,
-    editNodeDelivery: true,
     editPipeline: master,
     hubRule: master,
     nodes: master,

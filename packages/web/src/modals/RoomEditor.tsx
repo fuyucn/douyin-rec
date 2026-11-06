@@ -332,6 +332,9 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                       ) : null}
                       {/* Archive format is a task field, so a worker keeps it; the master shows it under process. */}
                       {!caps.editPipeline && outputFormatField}
+                      {!caps.editPipeline && (
+                        <p className="text-xs text-muted">{t("room.editor.deliveryByMaster")}</p>
+                      )}
                     </>
                   )}
 

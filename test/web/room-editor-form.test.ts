@@ -168,6 +168,25 @@ describe("room editor form ↔ payload", () => {
     expect(q.recording).toMatchObject({ streamUpload: false });
   });
 
+  it("no-rule save (worker or rule-less master) omits rule-owned zero-disk keys; master keeps them", () => {
+    const processing: NonNullable<RoomDTO["processing"]> = {
+      enabled: true, workers: ["vps1"], requires: [],
+      pipeline: {
+        steps: { mergeSegments: true, burnDanmu: false, burnLivechat: false },
+        upload: { mode: "rolling", private: true, tid: 171, tag: "a,b", titleTemplate: "{name}_{date}" },
+        cleanup: { stageSourceAfterMerge: true, sourceAfterDone: true, stageAfterDone: true },
+      },
+    };
+    const form = { ...formFromRoom(mkRoom({ recording: { streamUpload: true, streamUploadSpool: false }, processing })), method: "rolling" as const, burnDanmu: false, burnLivechat: false };
+    const noRule = ok(payloadFromForm(form, { ...ctx, hasRule: false }));
+    expect(noRule.recording).not.toHaveProperty("streamUpload");
+    expect(noRule.recording).not.toHaveProperty("streamUploadSpool");
+    expect(noRule.recording).toMatchObject({ quality: "origin", engine: "ffmpeg" });
+
+    const withRule = ok(payloadFromForm(form, ctx));
+    expect(withRule.recording).toMatchObject({ streamUpload: true });
+  });
+
   it("empty schedule clears the window; malformed schedule is rejected", () => {
     const f = formFromRoom(mkRoom());
     expect(ok(payloadFromForm({ ...f, schedule: "" }, ctx)).recording).toMatchObject({ scheduleStart: null, scheduleEnd: null });
@@ -282,6 +301,17 @@ describe("新增 = 编辑同一弹窗:create 与 edit 共用一条提交路径",
     if (!master.ok) throw new Error("expected master ok");
     expect(master.payload.recording).toMatchObject({ streamUpload: true, streamUploadSpool: false });
     expect(master.payload.processing?.pipeline?.upload?.mode).toBe("rolling");
+  });
+
+  it("master 编辑无规则但直传开启的任务,不写回规则拥有的字段", () => {
+    const room = mkRoom({ recording: { streamUpload: true, streamUploadSpool: false }, processing: null });
+    const noRuleCtx: RoomContext = { ...ctx, hasRule: false };
+    const master = submitPayload(formFromRoom(room), noRuleCtx, { mode: "edit", withProcessing: true });
+    if (!master.ok) throw new Error("expected master ok");
+    expect(master.payload.recording).not.toHaveProperty("streamUpload");
+    expect(master.payload.recording).not.toHaveProperty("streamUploadSpool");
+    expect(master.payload.recording).toMatchObject({ quality: "origin", engine: "ffmpeg" });
+    expect(master.payload.processing).toBeDefined();
   });
 
   it("edit 的 payload 不带 room(存量地址不回写,避免房间校验副作用)", () => {

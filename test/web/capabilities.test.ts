@@ -3,13 +3,13 @@ import { nodeCaps, type NodeCaps } from "../../packages/web/src/lib/capabilities
 
 /** master 期望的全表(新增字段若没同步进这个表,`toEqual` 会立刻失败)。 */
 const MASTER: NodeCaps = {
-  rooms: true, createRoom: true, editRecording: true, editNodeDelivery: true,
+  rooms: true, createRoom: true, editRecording: true,
   editPipeline: true, hubRule: true, nodes: true, queue: true, stats: true, mergePanel: true, runs: true,
 };
 
 /** worker(以及未探测完成):只保留录制半边。 */
 const WORKER: NodeCaps = {
-  rooms: true, createRoom: true, editRecording: true, editNodeDelivery: true,
+  rooms: true, createRoom: true, editRecording: true,
   editPipeline: false, hubRule: false, nodes: false, queue: false, stats: false, mergePanel: false, runs: false,
 };
 
@@ -36,19 +36,18 @@ describe("nodeCaps", () => {
     }
   });
 
-  it("两端都有: 房间入口 / 建房间 / 改录制半边 / 直传·边录边传·存档格式", () => {
+  it("两端都有: 房间入口 / 建房间 / 改录制半边", () => {
     for (const enabled of [true, false, null] as const) {
       const caps = nodeCaps(enabled);
       expect(caps.rooms).toBe(true);
       expect(caps.createRoom).toBe(true);
       expect(caps.editRecording).toBe(true);
-      expect(caps.editNodeDelivery).toBe(true);
     }
   });
 
-  it("能力表恰好是这 11 个字段(新增能力必须补用例)", () => {
+  it("能力表恰好是这 10 个字段(新增能力必须补用例)", () => {
     expect(Object.keys(nodeCaps(true)).sort()).toEqual(
-      ["createRoom", "editNodeDelivery", "editPipeline", "editRecording", "hubRule", "mergePanel", "nodes", "queue", "rooms", "runs", "stats"].sort(),
+      ["createRoom", "editPipeline", "editRecording", "hubRule", "mergePanel", "nodes", "queue", "rooms", "runs", "stats"].sort(),
     );
   });
 });

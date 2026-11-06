@@ -247,7 +247,7 @@ const DICT = {
       addSubmit: "添加", addedPaused: "房间已添加(默认暂停,手动启用录制)",
       addExists: "该房间已存在,请在房间页编辑",
       editor: {
-        title: "编辑房间", roomRequired: "请填写直播间地址", hubOnly: "由主控配置", after: "录完之后", when: "什么时候录", whenPlaceholder: "留空 = 全天,如 20:00-02:00",
+        title: "编辑房间", roomRequired: "请填写直播间地址", hubOnly: "由主控配置", deliveryByMaster: "直播直传 / 边录边传 / 上传由主控配置", after: "录完之后", when: "什么时候录", whenPlaceholder: "留空 = 全天,如 20:00-02:00",
         where: "在哪录", whereHint: "都不选 = 全部节点", timing: "上传时机",
         timingAfter: "收播后", timingRolling: "边录边传", timingNode: "节点直传", timingNodeHint: "由录制节点本地合成并上传,省掉录像回传(节点需装 biliup + B站 cookie);需烧录弹幕/聊天版的房间不适用",
         archiveHint: "只留存档,不投稿 B站;之后可手动处理", uploadHint: "合成后自动投稿 B站,可设仅自己可见",
@@ -840,7 +840,7 @@ const DICT = {
       addSubmit: "Add", addedPaused: "Room added (paused; start recording manually)",
       addExists: "This room already exists; edit it from the room page",
       editor: {
-        title: "Edit room", roomRequired: "Enter the live room URL", hubOnly: "Configured by the master", after: "After recording", when: "When", whenPlaceholder: "Empty = all day, e.g. 20:00-02:00",
+        title: "Edit room", roomRequired: "Enter the live room URL", hubOnly: "Configured by the master", deliveryByMaster: "Live and rolling upload are configured on the master", after: "After recording", when: "When", whenPlaceholder: "Empty = all day, e.g. 20:00-02:00",
         where: "Where", whereHint: "None selected = all nodes", timing: "Upload timing",
         timingAfter: "After broadcast", timingRolling: "Rolling", timingNode: "From node", timingNodeHint: "The recording node merges and uploads locally, skipping the copy back (needs biliup + a Bilibili cookie on the node); not applicable when danmu/chat burn-in is on",
         archiveHint: "Keep the archive only; nothing is uploaded to Bilibili and you can process it later", uploadHint: "Upload to Bilibili automatically after processing; can be private",

@@ -61,7 +61,8 @@ export interface NodeCaps {
   rooms: true;
   createRoom: true;          // 两端都能建房间
   editRecording: true;       // 两端都能改录制半边
-  editNodeDelivery: true;    // worker：直播直传/边录边传/存档格式（task 字段，非 hub 规则）
+  // 注：实现中移除了曾计划的 editNodeDelivery —— 直播直传/边录边传是 hub 规则字段，
+             // 节点写它会被后端拒绝且永不生效；worker 只写 task 字段（存档格式）。见 §3.5 偏离记录。
   editPipeline: boolean;     // master only：合并/烧录/节点直传/上传投稿/清理
   hubRule: boolean;          // master only
   nodes: boolean;            // master only：节点页、worker 选择、节点状态
@@ -89,18 +90,30 @@ export function nodeCaps(hubEnabled: boolean | null): NodeCaps;
 - 重复检测：提交前用 `findExistingRoom`（保留），命中 → 提示"该房间已存在"，不创建。
 - 默认暂停：创建走新端点后服务端 `store.addTask` 默认 `enabled=0`；前端不调 `startTask`（沿用 T-157 的验收，source-grep 钉住）。
 
-### 3.5 普通节点的 tab 边界（**需要确认**）
+### 3.5 普通节点的 tab 边界（实现口径 + 偏离记录）
 按用户口径"不涉及 hub 编排就保留"：
 
 | 步骤 tab | master | worker |
 |---|---|---|
 | 1 录制（时间/节点/名字/画质/引擎/分段/弹幕/账号） | ✅ | ✅（"节点"选择区隐藏，只剩本机） |
-| 1 录制·附加（直播直传 / 边录边传 / 存档格式） | ✅（在 process/upload 内） | ✅ 收进录制 tab（不改语义，仅换位置与标题） |
+| 1 录制·附加（直播直传 / 边录边传 / 存档格式） | ✅（在 process/upload 内） | 存档格式 ✅ 可写；直传/边录边传 **只读提示「由主控配置」**（见下方偏离记录） |
 | 2 处理（合并/烧录版本/节点直传/能力要求） | ✅ | ❌ 隐藏 |
 | 3 上传（上传方式=存档/投稿、时机、公开、tid/tag/描述/模板/分 P 大小） | ✅ | ❌ 隐藏 |
 | 4 收尾（清理规则 / webhook） | ✅ | 只留 webhook（清理是 master 的 stage/源文件动作） |
 
 > 若用户希望 worker 也保留"上传时机（节点直传）"等 hub 规则字段，那它们必须走 master 的规则文件，本节点无法生效 —— 这正是要禁的部分。因此 worker 只保留 task 字段级的能力。
+
+**偏离记录（2026-11-06，独立审查 MAJOR，用户已同意按此口径）**
+
+- 用户原口径是"worker 保留录制 + 上传 + 存档格式"。实现中发现 **直播直传/边录边传/投稿都不是 task 字段而是 hub 规则字段**：
+  节点上写规则会被 `POST`/`PUT /api/rooms` 拒绝（本计划 PR1 刚加的闸门），也没有规则文件可写；强行放开会得到
+  "看起来配了、实际永不生效"的假配置。
+- 因此 worker 实现为：**存档格式可写**；直播直传/边录边传/投稿在录制 tab 里给一行只读提示（`room.editor.deliveryByMaster`）。
+- **既有值不会被本次编辑清掉**：`payloadFromForm` 只在 `ctx.hasRule === true`（主控、且会写规则）时才包含
+  `streamUpload`/`streamUploadSpool`；其他情况省略（PUT/POST 是 patch 语义 = 保持不动）。这条同时覆盖
+  "主控编辑一个无规则但带直传的旧任务"。
+- 若之后确实要让节点本地配置直传/边录边传，需要独立的"节点本地规则"设计（把规则文件或等价的本地状态落在节点），
+  不是本计划的放开范围。
 
 ---
 
