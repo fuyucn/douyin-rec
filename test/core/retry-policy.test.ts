@@ -9,19 +9,24 @@ const coded = (code: RetryFailureCode): Error & { code: RetryFailureCode } => Ob
 
 describe("classifyRetryableFailure", () => {
   it("classifies transient, deterministic and rate-limit failures from an enumerable matrix", () => {
-    expect(classifyRetryableFailure(new Error("temporary ssh timeout"))).toEqual({ kind: "transient", code: "unknown", retry: true });
+    expect(classifyRetryableFailure(new Error("temporary ssh timeout"))).toEqual({ kind: "transient", code: "unknown", retry: true, countsAsFailure: true });
     for (const code of ["login-expired", "credentials-invalid", "forbidden", "not-found"] as const) {
-      expect(classifyRetryableFailure(coded(code))).toEqual({ kind: "deterministic", code, retry: false });
+      expect(classifyRetryableFailure(coded(code))).toEqual({ kind: "deterministic", code, retry: false, countsAsFailure: false });
     }
-    expect(classifyRetryableFailure(new Error("code: 21566 投稿过于频繁"))).toEqual({ kind: "rate-limit", code: "rate-limit", retry: false });
-    expect(classifyRetryableFailure(new Error("上传视频过快"))).toEqual({ kind: "rate-limit", code: "rate-limit", retry: false });
+    expect(classifyRetryableFailure(new Error("code: 21566 投稿过于频繁"))).toEqual({ kind: "rate-limit", code: "rate-limit", retry: true, countsAsFailure: false });
+    expect(classifyRetryableFailure(new Error("上传视频过快"))).toEqual({ kind: "rate-limit", code: "rate-limit", retry: true, countsAsFailure: false });
   });
 
   it("recognizes known deterministic message shapes without guessing unrelated errors", () => {
     expect(classifyRetryableFailure(new Error("cookie-expired")).code).toBe("credentials-invalid");
     expect(classifyRetryableFailure(new Error("permission-denied")).code).toBe("forbidden");
     expect(classifyRetryableFailure(new Error("missing-cookies")).code).toBe("not-found");
-    expect(classifyRetryableFailure(new Error("permission pending"))).toEqual({ kind: "transient", code: "unknown", retry: true });
+    expect(classifyRetryableFailure(new Error("permission pending"))).toEqual({ kind: "transient", code: "unknown", retry: true, countsAsFailure: true });
+  });
+
+  it("keeps a transient HTTP 403 page body retryable while structured forbidden codes stay deterministic", () => {
+    expect(classifyRetryableFailure(new Error("HTTP 403 Forbidden: temporary gateway body"))).toEqual({ kind: "transient", code: "unknown", retry: true, countsAsFailure: true });
+    expect(classifyRetryableFailure(coded("forbidden"))).toEqual({ kind: "deterministic", code: "forbidden", retry: false, countsAsFailure: false });
   });
 });
 

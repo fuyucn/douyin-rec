@@ -188,12 +188,14 @@ export interface RetryFailureClassification {
   kind: RetryFailureKind;
   code: RetryFailureCode;
   retry: boolean;
+  /** Whether this failure belongs in the stuck-counter / backoff sequence (rate-limit does not). */
+  countsAsFailure: boolean;
 }
 
 const DETERMINISTIC_CODES: Readonly<Record<Exclude<RetryFailureCode, "unknown" | "rate-limit">, readonly string[]>> = Object.freeze({
   "login-expired": Object.freeze(["login-expired"]),
   "credentials-invalid": Object.freeze(["credentials-invalid", "invalid-cookies", "cookie-expired", "cookie-invalid"]),
-  forbidden: Object.freeze(["forbidden", "permission-denied"]),
+  forbidden: Object.freeze(["permission-denied"]),
   "not-found": Object.freeze(["missing-cookies", "missing-cookies-path"]),
 });
 
@@ -206,24 +208,25 @@ function explicitCode(err: unknown): string | null {
   return typeof code === "string" ? code.toLowerCase() : null;
 }
 
-/** One enumerable classification gate; callers must not duplicate string heuristics. */
+/** One enumerable classification gate; callers must not duplicate string heuristics.
+ *  Rate limits retry without consuming an attempt (`countsAsFailure=false`). */
 export function classifyRetryableFailure(err: unknown): RetryFailureClassification {
-  if (isUploadRateLimited(err)) return { kind: "rate-limit", code: "rate-limit", retry: false };
+  if (isUploadRateLimited(err)) return { kind: "rate-limit", code: "rate-limit", retry: true, countsAsFailure: false };
   const code = explicitCode(err);
   if (code) {
-    if (code === "unknown" || code === "rate-limit") return { kind: "transient", code: "unknown", retry: true };
+    if (code === "unknown" || code === "rate-limit") return { kind: "transient", code: "unknown", retry: true, countsAsFailure: true };
     if (code in DETERMINISTIC_CODES) {
-      return { kind: "deterministic", code: code as Exclude<RetryFailureCode, "unknown" | "rate-limit">, retry: false };
+      return { kind: "deterministic", code: code as Exclude<RetryFailureCode, "unknown" | "rate-limit">, retry: false, countsAsFailure: false };
     }
-    return { kind: "transient", code: "unknown", retry: true };
+    return { kind: "transient", code: "unknown", retry: true, countsAsFailure: true };
   }
   const message = failureMessage(err).toLowerCase();
   for (const [deterministicCode, patterns] of Object.entries(DETERMINISTIC_CODES) as Array<[Exclude<RetryFailureCode, "unknown" | "rate-limit">, readonly string[]]>) {
     if (patterns.some((pattern) => message.includes(pattern))) {
-      return { kind: "deterministic", code: deterministicCode, retry: false };
+      return { kind: "deterministic", code: deterministicCode, retry: false, countsAsFailure: false };
     }
   }
-  return { kind: "transient", code: "unknown", retry: true };
+  return { kind: "transient", code: "unknown", retry: true, countsAsFailure: true };
 }
 
 /** Five minutes, doubling to a one-hour cap; repeated failures never terminate by count. */

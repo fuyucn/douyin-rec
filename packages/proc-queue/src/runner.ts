@@ -66,11 +66,12 @@ export interface ProcRunnerOpts {
   childPollMs?: number;
   /** First continuous-failure alert threshold (default 6h). */
   stuckAlertMs?: number;
-  /** Injectable epoch clock for backoff and continuous-failure alerts (defaults to the store clock). */
+  /** Injectable epoch clock for backoff and continuous-failure alerts (defaults to Date.now). */
   now?: () => number;
   /** Injectable retry scheduler; tests can advance the clock without waiting real time. */
   scheduleRetry?: (fn: () => void, delayMs: number) => () => void;
-  /** Pause every upload task for one account after a deterministic credential/permission error. */
+  /** Pause every upload task for one account after a deterministic credential/permission error.
+   *  Intentionally unwired in production (wiring tracked as T-156); runner-side dedup is memory-only. */
   pauseUploadAccount?: (accountKey: string, reason: string) => void;
   /** Explicit PR3 opt-in; default true keeps reconciliation read-only. */
   reconcileShadowMode?: boolean;
@@ -134,6 +135,13 @@ export class ProcRunner {
   private readonly yielding = new Set<string>();
   private readonly inflight = new Map<string, Inflight>();
   private readonly diskAlerted = new Set<string>();
+  /**
+   * Continuous-failure tracking for the generic retry policy. **In-memory only:** the
+   * backoff window, alert-dedup flag and failure count are not persisted. A runner
+   * restart, fence/takeover, or second runner instance loses this state and re-counts
+   * from zero; the rows themselves remain pending and continue to converge. Persisting
+   * notBefore / failure runs in DB is planned later (tracked as T-156).
+   */
   private readonly failureRuns = new Map<string, FailureRun>();
   private readonly pausedAccounts = new Set<string>();
   private readonly now: () => number;
@@ -170,12 +178,13 @@ export class ProcRunner {
     return job.kind === "biliup" || job.kind === "upload-part" || job.kind === "upload-prep" || job.kind === "reconcile-part";
   }
 
-  private alertSafely(job: ProcJobRecord, msg: string): void {
+  private alertSafely(job: ProcJobRecord, msg: string): boolean {
     try {
       this.o.alert(job.owner.taskId, msg);
+      return true;
     } catch (e) {
       this.log(`${job.jobId}: alert failed: ${e instanceof Error ? e.message : String(e)}`);
-      throw e;
+      return false;
     }
   }
 
@@ -189,28 +198,35 @@ export class ProcRunner {
         this.pausedAccounts.add(accountKey);
         this.o.pauseUploadAccount?.(accountKey, msg);
       }
-      this.o.store.finish(job.jobId, this.o.owner, { state: "failed", error: msg });
+      if (!this.o.store.finish(job.jobId, this.o.owner, { state: "failed", error: msg })) {
+        this.log(`${job.jobId}: deterministic finish rejected (holder moved)`);
+        return;
+      }
       this.alertSafely(job, `${job.kind} 任务确定性失败,停止重试: ${msg}`);
       return;
     }
-    if (classification.kind === "rate-limit") {
+    if (!proc.retryable && classification.kind !== "rate-limit") {
       this.failureRuns.delete(job.jobId);
-      this.o.store.finish(job.jobId, this.o.owner, { state: "failed", error: msg });
-      this.alertSafely(job, `${job.kind} 任务账号限流,交由全局闸门冷却: ${msg}`);
-      return;
-    }
-    if (!proc.retryable) {
-      this.failureRuns.delete(job.jobId);
-      this.o.store.finish(job.jobId, this.o.owner, { state: "failed", error: msg });
+      if (!this.o.store.finish(job.jobId, this.o.owner, { state: "failed", error: msg })) {
+        this.log(`${job.jobId}: finish rejected (holder moved)`);
+        return;
+      }
       this.alertSafely(job, `${job.kind} 任务失败: ${msg}`);
       return;
     }
     const now = this.now();
     const run = this.failureRuns.get(job.jobId) ?? { firstFailedAt: now, failures: 0, alerted: false, notBefore: 0 };
-    run.failures += 1;
-    run.notBefore = now + retryBackoffMs(run.failures);
-    this.o.store.finish(job.jobId, this.o.owner, { state: "failed", error: msg });
-    if (!this.o.store.requeue(job.jobId, { retryable: proc.retryable })) {
+    const isRateLimit = classification.kind === "rate-limit";
+    if (classification.countsAsFailure) run.failures += 1;
+    run.notBefore = now + retryBackoffMs(Math.max(1, run.failures));
+    if (!this.o.store.finish(job.jobId, this.o.owner, { state: "failed", error: msg })) {
+      this.failureRuns.delete(job.jobId);
+      this.log(`${job.jobId}: finish rejected before requeue (holder moved)`);
+      return;
+    }
+    // Retryable processors always follow the backoff path. A rate limit also follows it for
+    // non-retryable processors because the rejected submit created no archive/part.
+    if (!this.o.store.requeue(job.jobId, { retryable: true })) {
       this.failureRuns.delete(job.jobId);
       this.alertSafely(job, `${job.kind} 任务重试入队失败,保留 failed 待处置: ${msg}`);
       return;
@@ -230,9 +246,10 @@ export class ProcRunner {
       timer.unref?.();
       this.retryTimers.add(timer);
     }
-    if (!run.alerted && now - run.firstFailedAt >= (this.o.stuckAlertMs ?? STUCK_ALERT_MS)) {
-      run.alerted = true;
-      this.alertSafely(job, `${job.kind} 任务连续失败满 ${Math.round((now - run.firstFailedAt) / 60_000)} 分钟,仍在自动重试: ${msg}`);
+    if (isRateLimit) {
+      this.alertSafely(job, `${job.kind} 任务账号限流,不计入尝试,${Math.round(delayMs / 60_000)} 分钟后重新入队: ${msg}`);
+    } else if (classification.countsAsFailure && !run.alerted && now - run.firstFailedAt >= (this.o.stuckAlertMs ?? STUCK_ALERT_MS)) {
+      if (this.alertSafely(job, `${job.kind} 任务连续失败满 ${Math.round((now - run.firstFailedAt) / 60_000)} 分钟,仍在自动重试: ${msg}`)) run.alerted = true;
     }
     this.failureRuns.set(job.jobId, run);
   }
@@ -241,11 +258,7 @@ export class ProcRunner {
     const run = this.failureRuns.get(job.jobId);
     if (!run) return;
     this.failureRuns.delete(job.jobId);
-    try {
-      if (run.alerted) this.o.alert(job.owner.taskId, `${job.kind} 任务连续失败后已恢复`);
-    } catch (e) {
-      this.log(`${job.jobId}: recovery alert failed: ${e instanceof Error ? e.message : String(e)}`);
-    }
+    if (run.alerted) this.alertSafely(job, `${job.kind} 任务连续失败后已恢复`);
   }
 
   start(): void {
