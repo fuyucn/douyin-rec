@@ -1,14 +1,13 @@
 /**
- * atoms/index.ts — jotai global state: tasks, cookie status.
+ * atoms/index.ts — jotai global state: cookie status, connection, hub role, timezone.
  *
+ * The task list atom lived here too; the rooms pages (`pages/rooms/shared.tsx`) keep their own
+ * local state, so it went away with the retired task list (plans/047 §4.2).
  * Toasts are handled by sonner (see lib/hooks.ts showToast/useToast + <Toaster/>
  * in App.tsx), not jotai — so no toast atoms live here anymore.
  */
 import { atom } from "jotai";
-import type { CookieStatus, Task } from "../api/client";
-
-/** The task list (refreshed by a 2s poll on the list page). */
-export const tasksAtom = atom<Task[]>([]);
+import type { CookieStatus } from "../api/client";
 
 /** Connection indicator for the list header. */
 export type ConnState = { ok: boolean; at: number } | null;

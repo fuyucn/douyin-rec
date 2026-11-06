@@ -1,12 +1,14 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useSetAtom } from "jotai";
-import { Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation, useParams } from "react-router-dom";
 import { Toaster } from "sonner";
 import { api } from "./api/client";
 import { hubEnabledAtom, serverTimezoneAtom } from "./atoms";
 import { Footer } from "./layout/Footer";
 import { TopNav } from "./layout/TopNav";
+import { MasterOnly } from "./components/MasterOnly";
 import { useRefreshCookie } from "./lib/hooks";
+import { useT } from "./lib/i18n";
 import { useEventNotifications } from "./lib/notifications";
 import { HubPage } from "./pages/HubPage";
 import { HomePage } from "./pages/HomePage";
@@ -14,9 +16,53 @@ import { NodesPage } from "./pages/NodesPage";
 import { RoomPage } from "./pages/RoomPage";
 import { RoomsPage } from "./pages/RoomsPage";
 import { QueuePage } from "./pages/QueuePage";
-import { TaskDetail } from "./pages/TaskDetail";
-import { TaskList } from "./pages/TaskList";
 import { StatsPage } from "./pages/StatsPage";
+
+/**
+ * `/task/:id` — 旧任务链接/站内通知 → 房间路由(plans/047 §3.1)。
+ * 任务是「房间里看不见的实现」,所以这里只做跳转;`?logs=1` 等查询参数原样带走(§6 F6)。
+ */
+function TaskIdRedirect(): ReactNode {
+  const { id } = useParams();
+  const { search } = useLocation();
+  if (!id) return <Navigate to={{ pathname: "/rooms", search }} replace />;
+  return <Navigate to={{ pathname: `/rooms/by-task/${encodeURIComponent(id)}`, search }} replace />;
+}
+
+/**
+ * `/rooms/by-task/:id` — 用 `GET /api/rooms` 找到 `recording.taskId === id` 的房间。
+ * 加载中给骨架;找不到 / 请求失败一律回落 `/rooms`(不 404,旧链接仍可用)。
+ */
+function RoomByTaskRedirect(): ReactNode {
+  const { id } = useParams();
+  const { search } = useLocation();
+  const t = useT();
+  /** undefined = 探测中(渲染骨架);string = 目标房间路径;null = 没找到。 */
+  const [target, setTarget] = useState<string | null | undefined>(undefined);
+
+  useEffect(() => {
+    let alive = true;
+    setTarget(undefined);
+    if (!id) {
+      setTarget(null);
+      return () => { alive = false; };
+    }
+    void api
+      .listRooms()
+      .then((rooms) => {
+        if (!alive) return;
+        // taskId 为 null 的房间(只配了处理半边)不参与匹配:String(null) 没有意义。
+        const hit = rooms.find((r) => r.recording !== null && r.recording.taskId !== null
+          && String(r.recording.taskId) === id);
+        setTarget(hit ? `/rooms/${encodeURIComponent(hit.key)}` : null);
+      })
+      .catch(() => { if (alive) setTarget(null); });
+    return () => { alive = false; };
+  }, [id]);
+
+  if (target === undefined) return <p className="text-muted text-sm py-10 text-center">{t("tasks.loading")}</p>;
+  return <Navigate to={{ pathname: target ?? "/rooms", search }} replace />;
+}
 
 /** App shell: nav + routed main + dark footer + toast host. */
 export function App(): ReactNode {
@@ -39,16 +85,19 @@ export function App(): ReactNode {
       <main className="flex-1 w-full min-w-0 max-w-[1200px] mx-auto px-4 sm:px-6 py-8 sm:py-10">
         <Routes>
           <Route path="/" element={<HomePage />} />
-          {/* Legacy master routes stay addressable while Rooms becomes the primary workflow. */}
-          <Route path="/tasks" element={<TaskList />} />
-          <Route path="/nodes" element={<NodesPage />} />
-          <Route path="/task/:id" element={<TaskDetail />} />
-          <Route path="/queue" element={<QueuePage />} />
-          <Route path="/stats" element={<StatsPage />} />
-          <Route path="/hub" element={<HubPage />} />
-          {/* Rooms is the master home; old pages remain as compatibility routes during rollout. */}
+          {/* 唯一用户可见实体 = 房间;master/worker 同一套页面,能力由 lib/capabilities 裁剪。 */}
           <Route path="/rooms" element={<RoomsPage />} />
+          <Route path="/rooms/by-task/:id" element={<RoomByTaskRedirect />} />
           <Route path="/rooms/:key" element={<RoomPage />} />
+          {/* 旧任务路由退化为跳转:任务不再是用户可见实体,旧链接/通知仍可用(plans/047 §4.1)。 */}
+          <Route path="/tasks" element={<Navigate to="/rooms" replace />} />
+          <Route path="/task/:id" element={<TaskIdRedirect />} />
+          {/* master-only 页面:worker 上给 child-node 说明卡,不解析出任何写操作。 */}
+          <Route path="/nodes" element={<MasterOnly descKey="nodes.childDesc"><NodesPage /></MasterOnly>} />
+          <Route path="/queue" element={<MasterOnly descKey="queue.childDesc"><QueuePage /></MasterOnly>} />
+          <Route path="/stats" element={<MasterOnly><StatsPage /></MasterOnly>} />
+          {/* `/hub` 规则级维护仍在 master(plan §6 F1),worker 上原样给 child-node 卡。 */}
+          <Route path="/hub" element={<HubPage />} />
           <Route path="/hub/:key" element={<HubPage />} />
           <Route path="*" element={<HomePage />} />
         </Routes>

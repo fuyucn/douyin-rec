@@ -3,9 +3,12 @@
  * badge, one set of actions — so the two screens can't drift on what "recording" or "stop" means.
  */
 import { useCallback, useMemo, useState, type ReactNode } from "react";
+import { useAtomValue } from "jotai";
 import { api, type RoomDTO, type Task, type WorkerDTO } from "../../api/client";
-import type { ConnState } from "../../atoms";
+import { hubEnabledAtom, type ConnState } from "../../atoms";
 import { connOf } from "../../lib/conn";
+import { nodeCaps, type NodeCaps } from "../../lib/capabilities";
+import { roomActionsFor, type RoomActions } from "../../lib/room-detail";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { useHubStream, usePolling, errMessage, useToast, type HubStreamHandle } from "../../lib/hooks";
 import { useT } from "../../lib/i18n";
@@ -24,10 +27,12 @@ export interface RoomsData {
   workers: WorkerDTO[];
   /** hub master 才发规则(worker 上只建录制任务)。 */
   hubEnabled: boolean;
+  /** 本节点能力矩阵(plans/047 §3.2)。页面的一切裁剪都问它,不要自己判 `hubEnabled`。 */
+  caps: NodeCaps;
   taskOf: (r: RoomDTO) => Task | undefined;
   statusOf: (r: RoomDTO) => RoomStatus;
   refresh: () => Promise<void>;
-  /** Re-read the worker list after add/edit/delete/reorder. */
+  /** Re-read the worker list after add/edit/delete/reorder.worker 上是 no-op(没有节点表)。 */
   refreshWorkers: () => Promise<void>;
   stream: HubStreamHandle;
 }
@@ -37,8 +42,14 @@ export function useRoomsData(): RoomsData {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [runs, setRuns] = useState<Map<string, LatestRun>>(new Map());
   const [workers, setWorkers] = useState<WorkerDTO[]>([]);
-  const [hubEnabled, setHubEnabled] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  /**
+   * 角色唯一真理 = App 启动时探测的 hub 状态(`hubEnabledAtom`)。`null`(探测中)按 worker 保守处理:
+   * 宁可不拉 master 端点 / 不显示写操作,也不在普通节点上打 503(plan §3.2 注 / §6 F5)。
+   */
+  const hubStatus = useAtomValue(hubEnabledAtom);
+  const caps = useMemo(() => nodeCaps(hubStatus), [hubStatus]);
+  const hubEnabled = hubStatus === true;
   /**
    * Shown in the list header like the Tasks page, so a failing fetch is not silent. Rooms and tasks are tracked
    * apart: the 5 s task poll keeps the time fresh, but must not hide a failing room fetch.
@@ -46,13 +57,21 @@ export function useRoomsData(): RoomsData {
   const [fetches, setFetches] = useState<{ rooms: ConnState; tasks: ConnState }>({ rooms: null, tasks: null });
   const mark = useCallback((k: "rooms" | "tasks", ok: boolean) => setFetches((f) => ({ ...f, [k]: { ok, at: Date.now() } })), []);
 
+  // 运行历史 / 节点表都只在 master 存在(`/api/hub/latest-runs` 与 hub 配置在普通节点无意义):
+  // worker 上**不发请求**,状态保持空,列表退回 `listTasks` 的 5 s 轮询(状态徽标只依赖它)。
   const refreshRuns = useCallback(async (): Promise<void> => {
+    if (!caps.runs) {
+      // 保持同一个空 Map:每 30 s 新建一份会让 `statusOf` 换身份、列表无谓重算。
+      setRuns((prev) => (prev.size === 0 ? prev : new Map()));
+      return;
+    }
     const { rooms: rs } = await api.getLatestRuns();
     setRuns(new Map(rs.map((r) => [r.roomKey, r])));
-  }, []);
+  }, [caps.runs]);
   const refreshWorkers = useCallback(async (): Promise<void> => {
+    if (!caps.nodes) return; // worker 上没有节点页,也不读 hub 配置
     setWorkers(await api.listWorkers());
-  }, []);
+  }, [caps.nodes]);
   const refresh = useCallback(async (): Promise<void> => {
     try {
       // Tasks drive the start/stop icons and the status badge: refresh them with the rooms so an add / start /
@@ -72,19 +91,20 @@ export function useRoomsData(): RoomsData {
     }
   }, [refreshRuns]);
   // Push-driven (hub stream) with bounded backoff polling fallback; same as the queue page.
-  const stream = useHubStream(refresh);
+  // worker 上 `/api/hub/stream` 是 master 端点 → 不订阅(handle 恒 stale=false,banner 不显示),
+  // 只靠下面的 30 s 轮询刷数据。
+  const stream = useHubStream(refresh, { enabled: caps.runs });
   usePolling(() => void refresh().catch(() => {}), 30_000);
   // The 5 s task poll also refreshes the connection time: room fetches are push-driven and can be minutes apart.
   usePolling(() => void api.listTasks().then((ts) => { setTasks(ts); mark("tasks", true); })
     .catch(() => mark("tasks", false)), 5_000);
-  usePolling(() => void refreshWorkers().catch(() => {}), 300_000);
-  usePolling(() => void api.getHubStatus().then((s) => setHubEnabled(s.enabled)).catch(() => {}), 300_000);
+  usePolling(() => void refreshWorkers().catch(() => {}), 300_000, caps.nodes);
 
   const taskById = useMemo(() => new Map(tasks.map((x) => [x.id, x])), [tasks]);
   const taskOf = useCallback((r: RoomDTO) => (r.recording?.taskId != null ? taskById.get(r.recording.taskId) : undefined), [taskById]);
   const conn = useMemo((): ConnState => connOf(fetches.rooms, fetches.tasks), [fetches]);
   const statusOf = useCallback((r: RoomDTO) => roomStatus(r, taskOf(r), runs.get(latestRunKey(r)) ?? null), [taskOf, runs]);
-  return { rooms, loaded, conn, workers, hubEnabled, taskOf, statusOf, refresh, refreshWorkers, stream };
+  return { rooms, loaded, conn, workers, hubEnabled, caps, taskOf, statusOf, refresh, refreshWorkers, stream };
 }
 
 export function nodesText(r: RoomDTO, workers: WorkerDTO[], all: string): string {
@@ -189,7 +209,7 @@ export function statusDetail(t: ReturnType<typeof useT>, r: RoomDTO, s: RoomStat
  * Room actions shared by list + detail. Turning a room off = hard stop of the task (cuts the
  * current segment) → always confirmed; on = start. Drain stops after the current stream ends.
  */
-export function useRoomActions(data: Pick<RoomsData, "refresh" | "taskOf">, opts: { onDeleted?: () => void } = {}) {
+export function useRoomActions(data: Pick<RoomsData, "refresh" | "taskOf" | "caps">, opts: { onDeleted?: () => void } = {}) {
   const t = useT();
   const toast = useToast();
   const [confirm, setConfirm] = useState<{ kind: "stop" | "delete"; room: RoomDTO } | null>(null);
@@ -204,17 +224,27 @@ export function useRoomActions(data: Pick<RoomsData, "refresh" | "taskOf">, opts
     }
   };
   const taskIdOf = (r: RoomDTO): number | null => r.recording?.taskId ?? null;
+  const managedOf = (r: RoomDTO): boolean => data.taskOf(r)?.managedBy === "hub";
+  /** 这个房间能做什么 —— 唯一判定是纯函数 `roomActionsFor`(受管 = 只读,plan §3.3)。 */
+  const actionsOf = (r: RoomDTO): RoomActions => roomActionsFor({ managed: managedOf(r), caps: data.caps });
+  /** 入口本该藏起来;真被点到也不静默 —— 明确说一句「受管,由主控负责」。 */
+  const refuse = (): void => { toast(t("tasks.managedHint"), "info"); };
   const setEnabled = (r: RoomDTO, on: boolean): void => {
+    if (!actionsOf(r).startStop) { refuse(); return; }
     const id = taskIdOf(r);
     if (id === null) return;
     if (on) void run(() => api.startTask(id));
     else setConfirm({ kind: "stop", room: r });
   };
   const drain = (r: RoomDTO): void => {
+    if (!actionsOf(r).drain) { refuse(); return; }
     const id = taskIdOf(r);
     if (id !== null) void run(() => api.drainTask(id));
   };
-  const managedOf = (r: RoomDTO): boolean => data.taskOf(r)?.managedBy === "hub";
+  const edit = (r: RoomDTO): void => {
+    if (!actionsOf(r).edit) { refuse(); return; }
+    setEditing(r);
+  };
 
   const dialogs = (
     <>
@@ -224,7 +254,7 @@ export function useRoomActions(data: Pick<RoomsData, "refresh" | "taskOf">, opts
           managed={managedOf(editing)}
           onClose={() => setEditing(null)}
           onSaved={() => { setEditing(null); void data.refresh().catch(() => {}); }}
-          onDelete={(taskIdOf(editing) !== null || editing.processing !== null) && !managedOf(editing) ? () => setConfirm({ kind: "delete", room: editing }) : undefined}
+          onDelete={(taskIdOf(editing) !== null || editing.processing !== null) && actionsOf(editing).remove ? () => setConfirm({ kind: "delete", room: editing }) : undefined}
         />
       )}
       <ConfirmDialog
@@ -255,5 +285,5 @@ export function useRoomActions(data: Pick<RoomsData, "refresh" | "taskOf">, opts
       />
     </>
   );
-  return { setEnabled, drain, edit: setEditing, managedOf, dialogs };
+  return { setEnabled, drain, edit, managedOf, actionsOf, dialogs };
 }

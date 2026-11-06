@@ -252,7 +252,7 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
       setTimezone(r.timezone);
       setTzDefault(r.default);
       setTzEffective(r.effective);
-      // 全局 atom 也要同步,否则 TaskList/TaskDetail/CreateEditTaskDialog 的时区显示要等下次刷新页面才会变。
+      // 全局 atom 也要同步,否则房间列表/详情(RoomPage 的排期与开始时间)的时区显示要等下次刷新页面才会变。
       setServerTimezone(r.effective || r.default);
       toast(t("settings.tzSaved"), "success");
     } catch (e) {

@@ -1,13 +1,18 @@
 /**
  * RoomEditor — `/rooms` create/edit sheet: four free-to-jump step tabs, no wizard.
  *
- * Four steps as tabs (free to jump, nothing is a wizard): 1 record (when / where / recorder options),
- * 2 process (merge, versions, node capabilities), 3 upload (archive vs submit to Bilibili, then timing and
- * metadata while submitting), 4 finish (cleanup, webhook). A flow summary sits below the tabs.
+ * One dialog serves both modes (`room === null` = create): four steps as tabs (free to jump, nothing
+ * is a wizard): 1 record (when / where / recorder options), 2 process (merge, versions, node
+ * capabilities), 3 upload (archive vs submit to Bilibili, then timing and metadata while submitting),
+ * 4 finish (cleanup, webhook). A flow summary sits below the tabs.
  * Desktop: centered card; phone: full-screen sheet with a pinned footer.
  *
- * Field dependencies come from room-form-rules (shared with the Hub dialog); mapping to the
- * payload from room-editor-form. Saving is one `PUT /api/rooms/:key` (backend rolls back halves).
+ * Field dependencies come from room-form-rules (shared with the Hub dialog); mapping + validation
+ * from room-editor-form ({@link submitPayload} is the one submit path for create and edit). Saving is
+ * one `POST /api/rooms` (create, both halves at once) or one `PUT /api/rooms/:key` (edit; backend
+ * rolls back halves). A worker (`nodeCaps().editPipeline === false`) only edits the recording half:
+ * its steps are record + finish and the hub-rule fields (process / upload / cleanup / nodes) are not
+ * rendered — the backend rejects them there anyway.
  */
 import { Dialog as BaseDialog } from "@base-ui/react/dialog";
 import { useAtomValue } from "jotai";
@@ -15,7 +20,7 @@ import { X } from "lucide-react";
 import { useEffect, useMemo, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { OUTPUT_FORMATS, stageExt } from "@drec/output-format";
 import { api, type PlatformDTO, type RoomDTO, type WorkerDTO } from "../api/client";
-import { cookieStatusAtom } from "../atoms";
+import { cookieStatusAtom, hubEnabledAtom } from "../atoms";
 import { Button, IconButton } from "../components/Button";
 import { ExperimentalBadge } from "../components/ExperimentalBadge";
 import { ModeChoices } from "../components/ModeChoices";
@@ -24,25 +29,31 @@ import { Switch } from "../components/Switch";
 import { CleanupSection } from "../components/room-form/CleanupSection";
 import { SeasonSectionField } from "../components/room-form/SeasonSectionField";
 import { RuleSwitch, ToggleRow } from "../components/room-form/parts";
+import { nodeCaps } from "../lib/capabilities";
 import { errMessage, usePlatformCookieStatuses, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { pickPlatform, qualityLabel } from "../lib/labels";
-import { factsOf, formFromRoom, isValidPartSizeInput, isValidSeasonSectionIdInput, PART_SIZE_MIB_MAX, PART_SIZE_MIB_MIN, ruleFactsOf, payloadFromForm, type RoomContext, type RoomForm } from "../lib/room-editor-form";
+import { findExistingRoom } from "../lib/room-create";
+import { blankForm, factsOf, formFromRoom, isValidPartSizeInput, isValidSeasonSectionIdInput, PART_SIZE_MIB_MAX, PART_SIZE_MIB_MIN, ruleFactsOf, submitPayload, type PayloadError, type RoomContext, type RoomForm } from "../lib/room-editor-form";
 import { burnVersionsApply, deriveConstraints, flowSummary, settledMethod, shownOutputFormat, type UploadMethod } from "../lib/room-form-rules";
 import { accountToggleCopy, cookieReadyFor } from "../lib/room-form-rules";
 
 interface Props {
-  room: RoomDTO;
+  /** `null` = 新增房间(直播间地址变成必填输入);否则编辑该房间。 */
+  room: RoomDTO | null;
   /** Task is hub-managed (remote copy): recording half is read-only on this node. */
   managed: boolean;
   onClose: () => void;
   onSaved: () => void;
-  /** Omitted = no delete button (managed rooms). A rule-only room (its task already gone) is deletable too. */
+  /** Omitted = no delete button (new rooms have nothing to delete yet; managed rooms are read-only).
+   * A rule-only room (its task already gone) is deletable too. */
   onDelete?: () => void;
 }
 
 type StepId = "record" | "process" | "upload" | "finish";
 const STEPS: readonly StepId[] = ["record", "process", "upload", "finish"];
+/** A worker has no hub rule to configure: only the recording half and the webhook are real there. */
+const WORKER_STEPS: readonly StepId[] = ["record", "finish"];
 
 const METHODS: { id: UploadMethod; key: string; hint: string; icon: "merge" | "segment" | "node" }[] = [
   { id: "after", key: "room.editor.timingAfter", hint: "roomForm.method.afterHint", icon: "merge" },
@@ -57,9 +68,11 @@ const toggleIn = (list: string[], x: string): string[] => (list.includes(x) ? li
 export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props): ReactNode {
   const t = useT();
   const toast = useToast();
+  const create = room === null;
+  const caps = nodeCaps(useAtomValue(hubEnabledAtom));
   const douyinReady = !!useAtomValue(cookieStatusAtom)?.hasSession;
   const cookieStatuses = usePlatformCookieStatuses(true);
-  const [form, setForm] = useState<RoomForm>(() => formFromRoom(room));
+  const [form, setForm] = useState<RoomForm>(() => (room ? formFromRoom(room) : blankForm()));
   const [busy, setBusy] = useState(false);
   const [step, setStep] = useState<StepId>("record");
   const [platforms, setPlatforms] = useState<PlatformDTO[]>([]);
@@ -72,17 +85,34 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
     return () => { alive = false; };
   }, []);
 
-  const plat = pickPlatform(room.room, platforms);
-  // Managed task: the backend 403s recording writes → treat as "no recording half" for the payload.
-  const hasRecording = !!room.recording && !managed;
+  // New rooms derive the platform from the URL the user types; edit uses the stored one.
+  const plat = pickPlatform(create ? form.room : room.room, platforms);
+  // Platform defaults follow the typed URL, so an untouched create form still saves a valid quality/engine.
+  // Edit never normalizes stored values (an old quality outside today's list stays selectable, see withCurrent).
+  useEffect(() => {
+    if (!create || !plat) return;
+    setForm((f) => ({
+      ...f,
+      quality: plat.qualities.includes(f.quality) ? f.quality : plat.defaultQuality,
+      engine: plat.engines.includes(f.engine) ? f.engine : plat.defaultEngine,
+      // 无弹幕能力的平台(快手)→ 开关被锁,存的值也必须是关:显示与保存不能各说各话。
+      danmu: plat.hasDanmu ? f.danmu : false,
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plat?.id, platforms.length]);
+
+  // Create always writes a recording half; managed tasks are read-only here → treat as "no half".
+  const hasRecording = create || (!!room.recording && !managed);
+  const platformId = create ? plat?.id : room.platform;
   const ctx: RoomContext = {
     hasRecording,
     // A rule exists only when the API returned a processing half; a task-only room has none.
-    hasRule: !!room.processing,
+    // Create writes one on the master (both halves at once), a worker creates the recording half only.
+    hasRule: create ? caps.editPipeline : !!room.processing,
     danmuAvailable: plat ? plat.hasDanmu : true,
-    cookieReady: cookieReadyFor(room.platform, cookieStatuses, douyinReady),
+    cookieReady: cookieReadyFor(platformId, cookieStatuses, douyinReady),
     // Douyin streams anonymously; its cookie only serves danmu. Other platforms stream with it.
-    cookieForStream: room.platform !== "douyin",
+    cookieForStream: platformId !== "douyin",
   };
   const facts = ruleFactsOf(form, ctx);
   const c = deriveConstraints(facts);
@@ -93,21 +123,31 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
       return { ...next, method: settledMethod(ruleFactsOf(next, ctx)) };
     });
 
+  const steps = caps.editPipeline ? STEPS : WORKER_STEPS;
   // Arrow/Home/End move between tabs (roving tabindex).
   const onStepKey = (e: KeyboardEvent) => {
     const keys = ["ArrowLeft", "ArrowRight", "Home", "End"];
     if (!keys.includes(e.key)) return;
-    const at = STEPS.indexOf(step);
-    const next = e.key === "Home" ? 0 : e.key === "End" ? STEPS.length - 1
-      : (at + (e.key === "ArrowRight" ? 1 : -1) + STEPS.length) % STEPS.length;
+    const at = steps.indexOf(step);
+    const next = e.key === "Home" ? 0 : e.key === "End" ? steps.length - 1
+      : (at + (e.key === "ArrowRight" ? 1 : -1) + steps.length) % steps.length;
     e.preventDefault();
-    setStep(STEPS[next]);
-    document.getElementById(`rm-step-${STEPS[next]}`)?.focus();
+    setStep(steps[next]);
+    document.getElementById(`rm-step-${steps[next]}`)?.focus();
   };
-  const flow = flowSummary(facts, !!room.recording && room.recording.enabled);
-  const caps = useMemo(() => [...new Set(workers.flatMap((w) => w.capabilities ?? []))], [workers]);
+  // A new room is created paused, so the flow starts at "not recording" (same as an off room).
+  const flow = flowSummary(facts, create ? false : !!room.recording && room.recording.enabled);
+  const capabilities = useMemo(() => [...new Set(workers.flatMap((w) => w.capabilities ?? []))], [workers]);
   const workerName = (id: string): string => workers.find((w) => w.id === id)?.name ?? id;
   const lockedMethods = METHODS.filter((m) => m.id !== "after" && (m.id === "rolling" ? c.rolling : c.nodeSide).locked);
+
+  /** Payload validation failed: jump to the step that owns the field and say what is wrong. */
+  const reportInvalid = (error: PayloadError): void => {
+    if (error === "room") { setStep("record"); toast(t("room.editor.roomRequired"), "error"); return; }
+    if (error === "schedule") { setStep("record"); toast(t("rooms.scheduleInvalid"), "error"); return; }
+    setStep(caps.editPipeline ? "upload" : "record");
+    toast(t("room.editor.fieldInvalid"), "error");
+  };
 
   async function submit(ev: FormEvent): Promise<void> {
     ev.preventDefault();
@@ -118,15 +158,31 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
       : form.uploadOn && !isValidSeasonSectionIdInput(form.seasonSectionId) ? "upload"
       : form.uploadOn && !isValidPartSizeInput(form.partSizeMiB) ? "upload" : null;
     if (bad) { setStep(bad); toast(t("room.editor.fieldInvalid"), "error"); return; }
-    const r = payloadFromForm(form, ctx);
-    if (!r.ok) {
-      toast(t(r.error === "schedule" ? "rooms.scheduleInvalid" : "room.editor.fieldInvalid"), "error");
-      return;
-    }
     setBusy(true);
+    // processing 只在主控存在:worker(或角色还没探测完 → nodeCaps 保守)上这些控件根本没渲染,
+    // 用户不可能改过它们 → 整段不发,存量规则原样保留(漏发比误发安全;后端带 processing 也会 400)。
+    const withProcessing = caps.editPipeline;
+    // 新增与编辑走同一个 submitPayload(同一套校验/映射),入口/端点只是不同。
     try {
-      await api.updateRoom(room.key, r.payload);
-      toast(t("rooms.saved"), "success");
+      if (room === null) {
+        const r = submitPayload(form, ctx, { mode: "create", withProcessing });
+        if (!r.ok) { reportInvalid(r.error); return; }
+        // Duplicate check before writing anything (the create endpoint also returns 409).
+        if (plat) {
+          const dup = findExistingRoom(await api.listRooms().catch(() => []), plat.id, form.room.trim());
+          if (dup) { toast(t("room.addExists"), "error"); return; }
+        }
+        await api.createRoom(r.payload);
+        // Created paused: starting a recording is an explicit later action, never a side effect of
+        // creating the room (no startTask call here — T-157).
+        toast(t("room.addedPaused"), "success");
+      } else {
+        const r = submitPayload(form, ctx, { mode: "edit", withProcessing });
+        if (!r.ok) { reportInvalid(r.error); return; }
+        // No `recording.room` in the edit payload: writing the stored URL back would re-validate it.
+        await api.updateRoom(room.key, r.payload);
+        toast(t("rooms.saved"), "success");
+      }
       onSaved();
     } catch (e) {
       // Backend says which half failed and whether it rolled back — show it verbatim.
@@ -136,7 +192,22 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
     }
   }
 
-  const name = room.recording?.name || room.recording?.anchorName || room.roomSlug;
+  const name = room ? room.recording?.name || room.recording?.anchorName || room.roomSlug : "";
+  // A new room needs the URL before anything can be sent; a worker's rule-only room has no half to edit.
+  const canSubmit = create ? form.room.trim() !== "" : hasRecording || caps.editPipeline;
+
+  /** Archive format, shared by the master's process tab and the worker's record tab. */
+  const outputFormatField = (
+    <label className="rm-ctx">
+      <span className="field-label !mb-0">{t("rooms.outputFormat")}</span>
+      <select className="select" value={shownOutputFormat(facts)} disabled={!hasRecording || c.outputFormat.locked}
+              onChange={(e) => update({ outputFormat: e.target.value as RoomForm["outputFormat"] })}>
+        {OUTPUT_FORMATS.map((f) => (
+          <option key={f} value={f}>{f === "original" ? t("rooms.outputFormatOriginal") : stageExt(f).slice(1).toUpperCase()}</option>
+        ))}
+      </select>
+    </label>
+  );
 
   return (
     <BaseDialog.Root open onOpenChange={(o) => !o && onClose()}>
@@ -147,20 +218,22 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
             <form onSubmit={submit} className="contents">
               <div className="rm-editor-head">
                 <div className="min-w-0">
-                  <BaseDialog.Title className="headline text-lg leading-snug truncate">{name}</BaseDialog.Title>
-                  <p className="font-mono text-[11px] text-muted mt-0.5 truncate" title={room.room}>{room.platform} · {room.room}</p>
+                  <BaseDialog.Title className="headline text-lg leading-snug truncate">{create ? t("room.addTitle") : name}</BaseDialog.Title>
+                  <p className="font-mono text-[11px] text-muted mt-0.5 truncate" title={create ? form.room : room.room}>
+                    {create ? t("room.addSubtitle") : `${room.platform} · ${room.room}`}
+                  </p>
                 </div>
                 <IconButton type="button" aria-label={t("common.close")} onClick={onClose}><X className="w-4 h-4" /></IconButton>
               </div>
 
               <div className="rm-editor-body">
-                {!room.recording && <p className="status-strip">{t("room.editor.noTask")}</p>}
+                {!create && !room.recording && <p className="status-strip">{t("room.editor.noTask")}</p>}
                 {managed && <p className="status-strip">{t("room.editor.managed")}</p>}
                 {/* Managed rooms are owned by the master: every control is read-only here and Save is off,
                     otherwise the processing half would still be written to this node's rule file. */}
                 {/* Outside the fieldset: a managed room is read-only, but its steps must stay browsable. */}
                 <div role="tablist" className="rm-steps" aria-label={t("room.editor.steps")} onKeyDown={onStepKey}>
-                  {STEPS.map((sid, i) => {
+                  {steps.map((sid, i) => {
                     return (
                       <button key={sid} type="button" role="tab" id={`rm-step-${sid}`} aria-selected={step === sid} aria-controls="rm-step-panel"
                               tabIndex={step === sid ? 0 : -1}
@@ -174,33 +247,51 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
 
                 <fieldset disabled={managed} className="contents">
 
-                <p className="text-xs text-muted">
-                  <span className="font-mono uppercase mr-2">{t("room.editor.flow")}</span>
-                  {flow.map((s) => t(s.key, s.vars)).join(" → ")}
-                </p>
+                {/* 流程摘要描述的是主控的流水线:worker 没有它,不渲染以免误导。 */}
+                {caps.editPipeline && (
+                  <p className="text-xs text-muted">
+                    <span className="font-mono uppercase mr-2">{t("room.editor.flow")}</span>
+                    {flow.map((s) => t(s.key, s.vars)).join(" → ")}
+                  </p>
+                )}
 
                 <div role="tabpanel" id="rm-step-panel" aria-labelledby={`rm-step-${step}`} className="rm-panel">
                   {step === "record" && (
                     <>
+                      {create && (
+                        <label className="rm-ctx">
+                          <span className="field-label !mb-0">{t("room.addRoom")}</span>
+                          <input className="input font-mono text-sm" placeholder={t("dialog.roomPlaceholder")}
+                                 value={form.room} autoFocus onChange={(e) => update({ room: e.target.value })} />
+                        </label>
+                      )}
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         <label className="block min-w-0">
                           <span className="field-label">{t("room.editor.when")}</span>
                           <input className="input font-mono" placeholder={t("room.editor.whenPlaceholder")} value={form.schedule}
                                  disabled={!hasRecording} onChange={(e) => update({ schedule: e.target.value })} />
                         </label>
-                        <div className="min-w-0">
-                          <span className="field-label">{t("room.editor.where")}</span>
-                          <div className="flex flex-wrap gap-1.5 min-h-10 items-center">
-                            {workers.map((w) => (
-                              <button key={w.id} type="button" aria-pressed={form.workers.includes(w.id)}
-                                      className={`chip rm-pick${form.workers.includes(w.id) ? " is-on" : ""}`}
-                                      onClick={() => update({ workers: toggleIn(form.workers, w.id) })}>
-                                {w.name || w.id}
-                              </button>
-                            ))}
-                            {form.workers.length === 0 && <span className="text-xs text-muted">{t("room.editor.whereHint")}</span>}
+                        {/* Node selection is a hub-rule field: a worker only records locally and has no rule to write. */}
+                        {caps.nodes ? (
+                          <div className="min-w-0">
+                            <span className="field-label">{t("room.editor.where")}</span>
+                            <div className="flex flex-wrap gap-1.5 min-h-10 items-center">
+                              {workers.map((w) => (
+                                <button key={w.id} type="button" aria-pressed={form.workers.includes(w.id)}
+                                        className={`chip rm-pick${form.workers.includes(w.id) ? " is-on" : ""}`}
+                                        onClick={() => update({ workers: toggleIn(form.workers, w.id) })}>
+                                  {w.name || w.id}
+                                </button>
+                              ))}
+                              {form.workers.length === 0 && <span className="text-xs text-muted">{t("room.editor.whereHint")}</span>}
+                            </div>
                           </div>
-                        </div>
+                        ) : (
+                          <div className="min-w-0">
+                            <span className="field-label">{t("room.editor.where")}</span>
+                            <p className="text-xs text-muted mt-2">{t("room.editor.hubOnly")}</p>
+                          </div>
+                        )}
                       </div>
                       {hasRecording ? (
                         <section className="space-y-3">
@@ -234,10 +325,12 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                                      checked={form.useCookie} onChange={(useCookie) => update({ useCookie })} lock={c.cookie} />
                         </section>
                       ) : null}
+                      {/* Archive format is a task field, so a worker keeps it; the master shows it under process. */}
+                      {!caps.editPipeline && outputFormatField}
                     </>
                   )}
 
-                  {step === "process" && (
+                  {caps.editPipeline && step === "process" && (
                     <>
                       <section className="space-y-3">
                         <RuleSwitch checked={form.procEnabled} onChange={(procEnabled) => update({ procEnabled })} />
@@ -257,11 +350,11 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                           <ToggleRow label={t("hub.ruleDialog.toggleTsDirectLabel")} hint={t("hub.ruleDialog.toggleTsDirectSub")}
                                      checked={form.tsDirect} onChange={(tsDirect) => update({ tsDirect })} lock={c.tsDirect} />
                         )}
-                        {caps.length > 0 && (
+                        {capabilities.length > 0 && (
                           <div>
                             <span className="field-label">{t("room.editor.caps")}</span>
                             <div className="flex flex-wrap gap-1.5">
-                              {caps.map((cap) => (
+                              {capabilities.map((cap) => (
                                 <button key={cap} type="button" aria-pressed={form.requires.includes(cap)}
                                         className={`chip rm-pick${form.requires.includes(cap) ? " is-on" : ""}`}
                                         onClick={() => update({ requires: toggleIn(form.requires, cap) })}>{cap}</button>
@@ -275,17 +368,7 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                           </div>
                         )}
                       </section>
-                      {!form.uploadOn && (
-                  <label className="rm-ctx">
-                    <span className="field-label !mb-0">{t("rooms.outputFormat")}</span>
-                    <select className="select" value={shownOutputFormat(facts)} disabled={!hasRecording || c.outputFormat.locked}
-                            onChange={(e) => update({ outputFormat: e.target.value as RoomForm["outputFormat"] })}>
-                      {OUTPUT_FORMATS.map((f) => (
-                        <option key={f} value={f}>{f === "original" ? t("rooms.outputFormatOriginal") : stageExt(f).slice(1).toUpperCase()}</option>
-                      ))}
-                    </select>
-                  </label>
-                      )}
+                      {!form.uploadOn && outputFormatField}
                 {burnVersionsApply(factsOf(form, ctx)) && (
                   <div>
                     <span className="field-label">{t("room.editor.versions")}</span>
@@ -306,7 +389,7 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                     </>
                   )}
 
-                  {step === "upload" && (
+                  {caps.editPipeline && step === "upload" && (
                     <>
                       <div>
                         <span className="field-label">{t("room.editor.after")}</span>
@@ -432,7 +515,8 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
 
                   {step === "finish" && (
                     <>
-                    <CleanupSection value={form} onChange={update} constraints={c} procEnabled={form.procEnabled} />
+                    {/* Cleanup is a master-side stage/source action: a worker creates no rule to run it. */}
+                    {caps.editPipeline && <CleanupSection value={form} onChange={update} constraints={c} procEnabled={form.procEnabled} />}
 
                     {hasRecording && (
                       <label className="block">
@@ -455,12 +539,14 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
               </div>
 
               <div className="rm-editor-foot">
-                {onDelete && (
+                {!create && onDelete && (
                   <Button type="button" variant="secondary" className="rm-del" onClick={onDelete}>{t("room.editor.delete")}</Button>
                 )}
                 <span className="flex-1 rm-foot-gap" />
                 <Button type="button" variant="secondary" onClick={onClose}>{t("hub.common.cancel")}</Button>
-                <Button type="submit" disabled={busy || managed}>{busy ? t("rooms.saving") : t("rooms.save")}</Button>
+                <Button type="submit" disabled={busy || managed || !canSubmit}>
+                  {busy ? t("rooms.saving") : create ? t("room.addSubmit") : t("rooms.save")}
+                </Button>
               </div>
             </form>
           </BaseDialog.Popup>
