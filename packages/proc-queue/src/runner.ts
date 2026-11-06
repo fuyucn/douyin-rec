@@ -6,7 +6,11 @@
  */
 import { existsSync, statfsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { freeBytesOf, isSameChild, isUncertainOutcome, listProcessors, probeChild, type ChildFingerprint, type ProcActiveDTO, type ProcessContext, type Processor } from "@drec/core";
+import {
+  classifyRetryableFailure, freeBytesOf, isSameChild, isUncertainOutcome, listProcessors, PART_KINDS,
+  PART_WORKFLOW_TEMPLATES, probeChild, retryBackoffMs, STUCK_ALERT_MS,
+  type ChildFingerprint, type PartCtx, type ProcActiveDTO, type ProcessContext, type Processor,
+} from "@drec/core";
 
 import { GC_RETAIN_MS, LEASE_MS, ProcQueueStore, procQueueDbPath, type ProcJobRecord } from "./store.js";
 
@@ -64,7 +68,29 @@ export interface ProcRunnerOpts {
   probeChild?: (pid: number) => ChildFingerprint | null;
   /** How often a finished job's still-alive child is re-checked before its slot is released (default 5s). */
   childPollMs?: number;
+  /** First continuous-failure alert threshold (default 6h). */
+  stuckAlertMs?: number;
+  /** Injectable epoch clock for backoff and continuous-failure alerts (defaults to Date.now). */
+  now?: () => number;
+  /** Injectable retry scheduler; tests can advance the clock without waiting real time. */
+  scheduleRetry?: (fn: () => void, delayMs: number) => () => void;
+  /** Pause every upload task for one account after a deterministic credential/permission error.
+   *  Intentionally unwired in production (wiring tracked as T-156); runner-side dedup is memory-only. */
+  pauseUploadAccount?: (accountKey: string, reason: string) => void;
+  /** Explicit PR3 opt-in; default true keeps reconciliation read-only. */
+  reconcileShadowMode?: boolean;
+  /** Time box for a reconciling row (default 24h); only used when shadowMode is explicitly false. */
+  reconcileMaxMs?: number;
+  /** Explicit opt-in after a measured settle window exists; default false. */
+  reconcileAllowResend?: boolean;
+  /** Roots for the atomic cleanup successor's contract check (defaults to the data root of the store). */
+  chainAllowedRoots?: readonly string[];
+  /** Read-only archive query seam for tests; production may leave undefined. */
+  reconcileQuery?: (job: ProcJobRecord) => Promise<"yes" | "no" | "unknown">;
 }
+
+export const DEFAULT_RECONCILE_MAX_MS = 24 * 3600_000;
+export const RECONCILE_SHADOW_LOG = "@@DREC_RECONCILE_SHADOW@@";
 
 const defaultFreeBytes = (dir: string): number | null => {
   try {
@@ -97,6 +123,13 @@ interface Inflight {
   settled: Promise<void>;
 }
 
+interface FailureRun {
+  firstFailedAt: number;
+  failures: number;
+  alerted: boolean;
+  notBefore: number;
+}
+
 export class ProcRunner {
   private readonly o: ProcRunnerOpts;
   private readonly limiter: SlotLimiter;
@@ -108,9 +141,23 @@ export class ProcRunner {
   private readonly yielding = new Set<string>();
   private readonly inflight = new Map<string, Inflight>();
   private readonly diskAlerted = new Set<string>();
+  /**
+   * Continuous-failure tracking for the generic retry policy. **In-memory only:** the
+   * backoff window, alert-dedup flag and failure count are not persisted. A runner
+   * restart, fence/takeover, or second runner instance loses this state and re-counts
+   * from zero; the rows themselves remain pending and continue to converge. Persisting
+   * notBefore / failure runs in DB is planned later (tracked as T-156).
+   */
+  private readonly failureRuns = new Map<string, FailureRun>();
+  private readonly pausedAccounts = new Set<string>();
+  private readonly now: () => number;
+  private readonly retryTimers = new Set<NodeJS.Timeout>();
+  private readonly cancelRetryTimers = new Set<() => void>();
   /** 正在做孤儿处置(recover + settleOrphan)的 jobId:同一行同一时刻只允许一份处置(D1)。 */
   private readonly settling = new Set<string>();
   private readonly hbFails = new Map<string, number>();
+  /** One timeout alert per reconciling row; cleared when the row leaves that state. */
+  private readonly reconcileTimeoutAlerted = new Set<string>();
   private timers: NodeJS.Timeout[] = [];
   private started = false;
   private stopping = false;
@@ -120,10 +167,138 @@ export class ProcRunner {
     this.limiter = opts.limiter ?? new SimpleSlotLimiter();
     this.freeBytes = opts.freeBytes ?? defaultFreeBytes;
     this.leaseMs = opts.leaseMs ?? LEASE_MS;
+    this.now = opts.now ?? Date.now;
+    if (opts.stuckAlertMs !== undefined && !(opts.stuckAlertMs > 0)) throw new Error("stuckAlertMs must be positive");
   }
 
   private log(m: string): void {
     this.o.log?.(`[proc] ${m}`);
+  }
+
+  private accountKeyOf(job: ProcJobRecord): string {
+    const configured = job.params.accountKey ?? job.params.cookies;
+    return typeof configured === "string" && configured !== "" ? configured : "default";
+  }
+
+  private isUploadTask(job: ProcJobRecord): boolean {
+    return job.kind === "biliup" || job.kind === "upload-part" || job.kind === "upload-prep" || job.kind === "reconcile-part";
+  }
+
+  /** Fill seq>1 upload-part ctx.bv from the latest done predecessor row in this order. */
+  private inheritPartBv(job: ProcJobRecord): void {
+    if (job.kind !== PART_KINDS.upload || !job.orderKey) return;
+    const ctx = job.params.ctx as PartCtx | undefined;
+    if (!ctx || ctx.index <= 1 || ctx.bv) return;
+    for (let seq = ctx.index - 1; seq >= 1; seq -= 1) {
+      // Kind+generation filtered (orderKey, seq) covers rows written by an older logical-key spelling
+      // (PR7) but never a row from another generation: an old generation's bv would be wrong here.
+      const rows = this.o.store.rowsForOrderSeq(job.orderKey, seq, PART_KINDS.upload, job.generation);
+      // Missing / non-done predecessor: fail closed (creating a draft here would duplicate the archive).
+      if (rows.length === 0) throw new Error("upload-part cannot inherit: lower-seq row " + seq + " is missing");
+      // A skipped placeholder carries no draft: keep looking backwards.
+      if (rows.every((r) => r.state === "skipped")) continue;
+      const done = rows.find((r) => r.state === "done");
+      if (!done) {
+        throw new Error("upload-part cannot inherit: lower-seq row " + seq + " is " + rows.map((r) => r.state).join(","));
+      }
+      if (done.bv) {
+        job.params = { ...job.params, ctx: { ...ctx, bv: done.bv } };
+        return;
+      }
+    }
+    // No confirmed predecessor: this part creates the draft (e.g. earlier parts were empty placeholders).
+  }
+
+  /** A terminal part failure blocks every later pending part in the same order. */
+  private cascadePartBlocked(job: ProcJobRecord): void {
+    if (job.kind !== PART_KINDS.upload || !job.orderKey || job.seq == null) return;
+    try { this.o.store.cascadeOrderBlocked(job.orderKey, job.generation, job.seq); }
+    catch (e) { this.log(`${job.jobId}: cascade order-blocked failed: ${e instanceof Error ? e.message : String(e)}`); }
+  }
+
+  private alertSafely(job: ProcJobRecord, msg: string): boolean {
+    try {
+      this.o.alert(job.owner.taskId, msg);
+      return true;
+    } catch (e) {
+      this.log(`${job.jobId}: alert failed: ${e instanceof Error ? e.message : String(e)}`);
+      return false;
+    }
+  }
+
+  private finishGeneralFailure(job: ProcJobRecord, proc: Processor, e: unknown): void {
+    const msg = e instanceof Error ? e.message : String(e);
+    const classification = classifyRetryableFailure(e);
+    if (classification.kind === "deterministic") {
+      this.failureRuns.delete(job.jobId);
+      const accountKey = this.accountKeyOf(job);
+      if (this.isUploadTask(job) && !this.pausedAccounts.has(accountKey)) {
+        this.pausedAccounts.add(accountKey);
+        this.o.pauseUploadAccount?.(accountKey, msg);
+      }
+      if (!this.o.store.finish(job.jobId, this.o.owner, { state: "failed", error: msg })) {
+        this.log(`${job.jobId}: deterministic finish rejected (holder moved)`);
+        return;
+      }
+      this.cascadePartBlocked(job);
+      this.alertSafely(job, `${job.kind} 任务确定性失败,停止重试: ${msg}`);
+      return;
+    }
+    if (!proc.retryable && classification.kind !== "rate-limit") {
+      this.failureRuns.delete(job.jobId);
+      if (!this.o.store.finish(job.jobId, this.o.owner, { state: "failed", error: msg })) {
+        this.log(`${job.jobId}: finish rejected (holder moved)`);
+        return;
+      }
+      this.cascadePartBlocked(job);
+      this.alertSafely(job, `${job.kind} 任务失败: ${msg}`);
+      return;
+    }
+    const now = this.now();
+    const run = this.failureRuns.get(job.jobId) ?? { firstFailedAt: now, failures: 0, alerted: false, notBefore: 0 };
+    const isRateLimit = classification.kind === "rate-limit";
+    if (classification.countsAsFailure) run.failures += 1;
+    run.notBefore = now + retryBackoffMs(Math.max(1, run.failures));
+    if (!this.o.store.finish(job.jobId, this.o.owner, { state: "failed", error: msg })) {
+      this.failureRuns.delete(job.jobId);
+      this.log(`${job.jobId}: finish rejected before requeue (holder moved)`);
+      return;
+    }
+    // Retryable processors always follow the backoff path. A rate limit also follows it for
+    // non-retryable processors because the rejected submit created no archive/part.
+    if (!this.o.store.requeue(job.jobId, { retryable: true })) {
+      this.failureRuns.delete(job.jobId);
+      this.alertSafely(job, `${job.kind} 任务重试入队失败,保留 failed 待处置: ${msg}`);
+      return;
+    }
+    const delayMs = Math.max(0, run.notBefore - this.now());
+    if (this.o.scheduleRetry) {
+      const cancel = this.o.scheduleRetry(() => {
+        this.cancelRetryTimers.delete(cancel);
+        this.tick();
+      }, delayMs);
+      this.cancelRetryTimers.add(cancel);
+    } else {
+      const timer = setTimeout(() => {
+        this.retryTimers.delete(timer);
+        this.tick();
+      }, delayMs);
+      timer.unref?.();
+      this.retryTimers.add(timer);
+    }
+    if (isRateLimit) {
+      this.alertSafely(job, `${job.kind} 任务账号限流,不计入尝试,${Math.round(delayMs / 60_000)} 分钟后重新入队: ${msg}`);
+    } else if (classification.countsAsFailure && !run.alerted && now - run.firstFailedAt >= (this.o.stuckAlertMs ?? STUCK_ALERT_MS)) {
+      if (this.alertSafely(job, `${job.kind} 任务连续失败满 ${Math.round((now - run.firstFailedAt) / 60_000)} 分钟,仍在自动重试: ${msg}`)) run.alerted = true;
+    }
+    this.failureRuns.set(job.jobId, run);
+  }
+
+  private noteGeneralSuccess(job: ProcJobRecord): void {
+    const run = this.failureRuns.get(job.jobId);
+    if (!run) return;
+    this.failureRuns.delete(job.jobId);
+    if (run.alerted) this.alertSafely(job, `${job.kind} 任务连续失败后已恢复`);
   }
 
   start(): void {
@@ -259,6 +434,44 @@ export class ProcRunner {
         this.log(`${p.kind}: 认领失败: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
+    this.reconcileTick();
+  }
+
+  private reconcileTick(): void {
+    const shadowMode = this.o.reconcileShadowMode !== false;
+    const maxMs = this.o.reconcileMaxMs ?? DEFAULT_RECONCILE_MAX_MS;
+    const now = Date.now();
+    let rows: ProcJobRecord[];
+    try { rows = this.o.store.listReconciling(); }
+    catch (e) { this.log("[proc] reconciling scan failed: " + String(e)); return; }
+    for (const row of rows) {
+      const confirmedAt = Number(row.params.confirmedAt ?? row.params.ackedAt ?? row.updatedAt ?? now);
+      const timedOut = Number.isFinite(confirmedAt) && now - confirmedAt >= maxMs;
+      if (!timedOut) this.reconcileTimeoutAlerted.delete(row.jobId);
+      const proof = timedOut ? "unknown" : (this.o.reconcileQuery?.(row) ?? Promise.resolve("unknown" as const));
+      void Promise.resolve(proof).then((value) => {
+        const outcome = timedOut ? "timeout" : value;
+        const wouldBe = timedOut ? "failed" : value === "yes" ? "done"
+          : value === "no" && this.o.reconcileAllowResend === true ? "pending" : "reconciling";
+        this.log(RECONCILE_SHADOW_LOG + " " + JSON.stringify({
+          v: 1, jobId: row.jobId, outcome: outcome === "no" && wouldBe === "reconciling" ? "no(not enabled)" : outcome,
+          wouldBe, shadowMode, at: now,
+        }));
+        if (timedOut && !this.reconcileTimeoutAlerted.has(row.jobId)) {
+          this.reconcileTimeoutAlerted.add(row.jobId);
+          this.o.alert(row.owner.taskId, "reconcile timeout, manual check required: " + row.jobId);
+        }
+        if (shadowMode && !timedOut) return;
+        const settled = timedOut
+          ? this.o.store.settleReconciling(row.jobId, this.o.owner, "timeout")
+          : value === "yes"
+            ? this.o.store.settleReconciling(row.jobId, this.o.owner, "yes")
+            : value === "no"
+              ? this.o.store.settleReconciling(row.jobId, this.o.owner, "no", { allowResend: this.o.reconcileAllowResend === true })
+              : this.o.store.settleReconciling(row.jobId, this.o.owner, "unknown");
+        if (!settled) this.log("[proc] reconcile settle rejected: " + row.jobId);
+      }).catch((e: unknown) => this.log("[proc] reconcile query failed: " + String(e)));
+    }
   }
 
   private claimLoop(p: Processor): void {
@@ -273,6 +486,8 @@ export class ProcRunner {
         job = this.o.store.claim({
           kinds: [p.kind], owner: this.o.owner,
           accept: (j) => {
+          const retryAfter = this.failureRuns.get(j.jobId)?.notBefore ?? 0;
+          if (retryAfter > this.now()) return false;
             const msg = this.diskDenied(p, j);
             if (msg !== null) denied ??= { job: j, msg };
             return msg === null;
@@ -396,9 +611,11 @@ export class ProcRunner {
     const { store, owner } = this.o;
     const ctx = this.ctxFor(job, ac);
     try {
+      if (job.kind === PART_KINDS.upload) this.inheritPartBv(job);
       const bad = proc.validate(job);
       if (bad !== null) {
         store.finish(job.jobId, owner, { state: "failed", error: `validate: ${bad}` });
+        this.cascadePartBlocked(job);
         this.o.alert(job.owner.taskId, `${job.kind} 任务被拒: ${bad}`);
         return;
       }
@@ -414,12 +631,26 @@ export class ProcRunner {
           if (proc.interruptible) store.updateStep(job.jobId, "transfer");
           ok = store.retryTransfer(job.jobId, owner, res.retry.notBefore, await this.childStopped(store.get(job.jobId)));
         }
-        if (!ok) store.finish(job.jobId, owner, { state: "failed", error: "retry requested but not allowed" });
+        if (!ok) {
+          store.finish(job.jobId, owner, { state: "failed", error: "retry requested but not allowed" });
+          this.cascadePartBlocked(job);
+        }
         return;
       }
-      if (!store.finish(job.jobId, owner, { state: "done", outputs: res.outputs, note: res.note })) {
+      if (job.kind === PART_KINDS.upload) {
+        const chained = this.finishWithChain(job, { ...res, bv: res.bv });
+        if (!chained.ok) {
+          // Chain failure must not leave a done row without its successor and must not be silent.
+          this.log(`${job.jobId}: ${chained.error}`);
+          const what = chained.chained === false ? "任务收尾失败" : "任务确认后链出失败";
+          this.o.alert(job.owner.taskId, `${job.kind} ${what}: ${chained.error}`);
+          return;
+        }
+      } else if (!store.finish(job.jobId, owner, { state: "done", outputs: res.outputs, note: res.note })) {
         this.log(`${job.jobId}: 完成但收尾失败(持有者已换人),忽略`);
+        return;
       }
+      this.noteGeneralSuccess(job);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (f.reason === "fenced") return;
@@ -430,20 +661,46 @@ export class ProcRunner {
       }
       if (f.reason === "cancel") {
         store.finish(job.jobId, owner, { state: "cancelled", error: "已取消" });
+        this.cascadePartBlocked(job);
         return;
       }
       if (isUncertainOutcome(e)) {
         // Outcome unknown (e.g. submit past maxWallMs): cancelled-with-intent → uncertain for biliup, never retried.
         store.finish(job.jobId, owner, { state: "cancelled", hasIntent: true, error: msg });
+        this.cascadePartBlocked(job);
         this.o.alert(job.owner.taskId, `${job.kind} 任务结果无法确定,需人工确认: ${msg}`);
         return;
       }
-      store.finish(job.jobId, owner, { state: "failed", error: msg });
-      this.o.alert(job.owner.taskId, `${job.kind} 任务失败: ${msg}`);
+      this.finishGeneralFailure(job, proc, e);
     }
   }
 
   // ───────────────────────── 接管 recover ─────────────────────────
+
+  /** Single write path for upload-part success: done + cleanup successor in one transaction. */
+  private finishWithChain(job: ProcJobRecord, res: { outputs: string[]; note?: string; bv?: string; confirmed?: { size: number; mtimeMs: number; ackedBytes: number } }): { ok: boolean; error?: string; chained?: boolean } {
+    const finish = { state: "done" as const, outputs: res.outputs, ...(res.note ? { note: res.note } : {}) };
+    const mode: unknown = job.params.partWorkflow;
+    const template = mode === "live-pump" || mode === "rolling" || mode === "whole-order"
+      ? PART_WORKFLOW_TEMPLATES[mode]
+      : null;
+    // Missing/invalid mode and whole-order are deliberately conservative: no successor row.
+    if (!template || template.cleanupAt !== "part-confirmed" || !res.confirmed || !res.bv) {
+      return { ok: this.o.store.finish(job.jobId, this.o.owner, finish), error: "完成但收尾失败(持有者已换人)", chained: false };
+    }
+    const ctx = job.params.ctx as PartCtx | undefined;
+    if (!ctx || res.confirmed.size !== ctx.fp.size || res.confirmed.mtimeMs !== ctx.fp.mtimeMs
+      || res.confirmed.ackedBytes < res.confirmed.size || !res.bv) {
+      return { ok: false, error: "确认证据不足,拒绝链出清理" };
+    }
+    const current = this.o.store.get(job.jobId);
+    const attempts = current?.attempts ?? job.attempts;
+    const r = this.o.store.completeAndChain(job.jobId, this.o.owner, finish, {
+      logicalKey: job.logicalKey, generation: job.generation,
+      ctx: { ...ctx, bv: res.bv }, owner: job.owner,
+    }, { allowedRoots: this.o.chainAllowedRoots ?? [dirname(dirname(this.o.store.dbPath))], attempts });
+    return r.ok ? { ok: true, chained: true } : { ok: false, error: r.error, chained: true };
+  }
 
   /** 刚取得租约:对该 kind 非本进程在跑的 running 行逐个 `recover()`(只碰该行列出的路径)。 */
   private async recoverKind(p: Processor): Promise<void> {
@@ -534,6 +791,10 @@ export class ProcRunner {
     this.started = false;
     for (const h of this.timers) clearInterval(h);
     this.timers = [];
+    for (const h of this.retryTimers) clearTimeout(h);
+    this.retryTimers.clear();
+    for (const cancel of this.cancelRetryTimers) cancel();
+    this.cancelRetryTimers.clear();
     const { store, owner } = this.o;
     const all = [...this.inflight.values()];
     for (const f of all) {

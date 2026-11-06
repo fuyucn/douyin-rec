@@ -1,9 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { DEFAULT_TITLE_TEMPLATES, factsOf, formFromRoom, isValidPartSizeInput, isValidSeasonSectionIdInput, partSizePayload, payloadFromForm, ruleFactsOf, seasonSectionIdPatch, seasonSectionIdPayload, webhookPatch, type RoomContext } from "../../packages/web/src/lib/room-editor-form.js";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { DEFAULT_TITLE_TEMPLATES, blankForm, factsOf, formFromRoom, isValidPartSizeInput, isValidSeasonSectionIdInput, partSizePayload, payloadFromForm, ruleFactsOf, seasonSectionIdPatch, seasonSectionIdPayload, submitPayload, webhookPatch, type RoomContext } from "../../packages/web/src/lib/room-editor-form.js";
 import { deriveConstraints, settledMethod } from "../../packages/web/src/lib/room-form-rules.js";
 import type { RoomDTO } from "../../packages/web/src/api/client.js";
 
-const ctx: RoomContext = { hasRecording: true, hasRule: true, danmuAvailable: true, cookieReady: true, cookieForStream: false };
+const ctx: RoomContext = { hasRecording: true, hasRule: true, writesRule: true, deliveryTouched: false, danmuAvailable: true, cookieReady: true, cookieForStream: false };
 
 describe("factsOf carries the room's rule presence (#284)", () => {
   it("task-only room (no processing half) → hasRule false, so VERSIONS stays hidden", () => {
@@ -166,6 +168,21 @@ describe("room editor form ↔ payload", () => {
     expect(q.recording).toMatchObject({ streamUpload: false });
   });
 
+  it("master can create rolling + zero-disk in one save, even without an existing rule", () => {
+    const room = mkRoom({ recording: { streamUpload: true, streamUploadSpool: false }, processing: null });
+    const form = {
+      ...formFromRoom(room),
+      uploadOn: true,
+      method: "rolling" as const,
+      burnDanmu: false,
+      burnLivechat: false,
+      workers: ["vps1"],
+    };
+    const payload = ok(payloadFromForm(form, { ...ctx, hasRule: false }));
+    expect(payload.processing?.pipeline?.upload?.mode).toBe("rolling");
+    expect(payload.recording).toMatchObject({ streamUpload: true, streamUploadSpool: false });
+  });
+
   it("empty schedule clears the window; malformed schedule is rejected", () => {
     const f = formFromRoom(mkRoom());
     expect(ok(payloadFromForm({ ...f, schedule: "" }, ctx)).recording).toMatchObject({ scheduleStart: null, scheduleEnd: null });
@@ -208,5 +225,151 @@ describe("title templates are prefilled but clearing them keeps the old fallback
     expect(u?.titleTemplate).toBeUndefined();
     expect(u?.submissionTitleTemplate).toBeUndefined();
     expect(u?.partTitleTemplate).toBeUndefined();
+  });
+});
+
+describe("新增 = 编辑同一弹窗:create 与 edit 共用一条提交路径", () => {
+  const plat = { defaultQuality: "origin", defaultEngine: "ffmpeg" };
+  const emptyRoom = () => formFromRoom({ key: "", platform: "douyin", roomSlug: "", room: "", recording: null, processing: null });
+
+  it("blankForm 与「编辑一个空房间」完全一致,只有 room 空着、弹幕默认开", () => {
+    const b = blankForm(plat);
+    expect(b).toEqual({ ...emptyRoom(), room: "", danmu: true, quality: "origin", engine: "ffmpeg" });
+    expect(b).toMatchObject({ segmentSec: "1800", useCookie: true, tid: "21", uploadOn: false, procEnabled: true });
+    expect(b.titleTemplate).toBe(DEFAULT_TITLE_TEMPLATES.titleTemplate);
+    // 平台未识别时 quality/engine 留空,待识别后补默认
+    expect(blankForm()).toMatchObject({ quality: "", engine: "" });
+  });
+
+  it("create 必填直播间地址;其余校验与 edit 同一套(schedule 报同一错)", () => {
+    expect(submitPayload(blankForm(plat), ctx, { mode: "create", withProcessing: true })).toEqual({ ok: false, error: "room" });
+    expect(submitPayload({ ...blankForm(plat), room: "   " }, ctx, { mode: "create", withProcessing: true })).toEqual({ ok: false, error: "room" });
+    expect(submitPayload({ ...blankForm(plat), room: "100001", schedule: "20:00" }, ctx, { mode: "create", withProcessing: true }))
+      .toEqual({ ok: false, error: "schedule" });
+  });
+
+  it("create 一次写两半:recording.room 去空白,master 带 processing", () => {
+    const r = submitPayload({ ...blankForm(plat), room: " https://live.douyin.com/100001 " }, ctx, { mode: "create", withProcessing: true });
+    if (!r.ok) throw new Error("expected ok");
+    expect(r.mode).toBe("create");
+    expect(r.payload.recording.room).toBe("https://live.douyin.com/100001");
+    expect(r.payload.recording).toMatchObject({ segmentSec: 1800, danmu: 1, useCookie: true, outputFormat: "original" });
+    expect(r.payload.processing).toBeDefined();
+  });
+
+  it("worker(无 editPipeline)create/edit 都不发 processing(规则只在主控生效)", () => {
+    const c = submitPayload({ ...blankForm(plat), room: "100001" }, ctx, { mode: "create", withProcessing: false });
+    if (!c.ok) throw new Error("expected ok");
+    expect("processing" in c.payload).toBe(false);
+    expect(c.payload.recording).toBeDefined();
+
+    const e = submitPayload(formFromRoom(mkRoom()), ctx, { mode: "edit", withProcessing: false });
+    if (!e.ok) throw new Error("expected ok");
+    expect("processing" in e.payload).toBe(false);
+    // worker 仍能写录制半边
+    expect(e.payload.recording).toMatchObject({ quality: "origin", engine: "ffmpeg" });
+  });
+
+  it("worker 编辑直播直传房间不回写规则拥有的字段;master 仍按表单语义写回", () => {
+    const processing: NonNullable<RoomDTO["processing"]> = {
+      enabled: true, workers: ["vps1"], requires: [],
+      pipeline: {
+        steps: { mergeSegments: true, burnDanmu: false, burnLivechat: false },
+        upload: { mode: "rolling", private: true, tid: 171, tag: "a,b", titleTemplate: "{name}_{date}" },
+        cleanup: { stageSourceAfterMerge: true, sourceAfterDone: true, stageAfterDone: true },
+      },
+    };
+    const room = mkRoom({
+      recording: { streamUpload: true, streamUploadSpool: false },
+      processing,
+    });
+    const workerRoom = { ...room, processing: null };
+    const workerCtx: RoomContext = { ...ctx, hasRule: false, writesRule: false, deliveryTouched: true };
+    const workerForm = formFromRoom(workerRoom);
+    const worker = submitPayload(workerForm, workerCtx, { mode: "edit", withProcessing: false });
+    if (!worker.ok) throw new Error("expected worker ok");
+    expect(worker.payload.recording).not.toHaveProperty("streamUpload");
+    expect(worker.payload.recording).not.toHaveProperty("streamUploadSpool");
+    expect(worker.payload.recording).toMatchObject({ quality: "origin", engine: "ffmpeg" });
+    expect("processing" in worker.payload).toBe(false);
+
+    const master = submitPayload(formFromRoom(room), ctx, { mode: "edit", withProcessing: true });
+    if (!master.ok) throw new Error("expected master ok");
+    expect(master.payload.recording).toMatchObject({ streamUpload: true, streamUploadSpool: false });
+    expect(master.payload.processing?.pipeline?.upload?.mode).toBe("rolling");
+  });
+
+  it("master 编辑无规则但直传开启的任务,不写回规则拥有的字段", () => {
+    const room = mkRoom({ recording: { streamUpload: true, streamUploadSpool: false }, processing: null });
+    const noRuleCtx: RoomContext = { ...ctx, hasRule: false, writesRule: true, deliveryTouched: false };
+    const master = submitPayload(formFromRoom(room), noRuleCtx, { mode: "edit", withProcessing: true });
+    if (!master.ok) throw new Error("expected master ok");
+    expect(master.payload.recording).not.toHaveProperty("streamUpload");
+    expect(master.payload.recording).not.toHaveProperty("streamUploadSpool");
+    expect(master.payload.recording).toMatchObject({ quality: "origin", engine: "ffmpeg" });
+    expect(master.payload.processing).toBeDefined();
+  });
+
+  it("master 无规则保存且主动关掉旧直传 → 写回 false,不再卡在新规则校验", () => {
+    const room = mkRoom({ recording: { streamUpload: true, streamUploadSpool: false }, processing: null });
+    const form = formFromRoom(room);
+    const turnedOff = { ...form, uploadOn: true, method: "after" as const, streamUpload: false };
+    const payload = ok(payloadFromForm(turnedOff, { ...ctx, hasRule: false, deliveryTouched: true }));
+    expect(payload.processing?.pipeline?.upload?.mode).toBe("upload");
+    expect(payload.recording).toMatchObject({ streamUpload: false });
+  });
+
+  it("master 无规则保存且未改交付 → 两键省略,保持存量 true", () => {
+    const room = mkRoom({ recording: { streamUpload: true, streamUploadSpool: false }, processing: null });
+    const payload = ok(payloadFromForm(formFromRoom(room), { ...ctx, hasRule: false }));
+    expect(payload.recording).not.toHaveProperty("streamUpload");
+    expect(payload.recording).not.toHaveProperty("streamUploadSpool");
+  });
+
+  it("worker 即使有陈旧本地规则也不写回直播直传两键", () => {
+    const processing: NonNullable<RoomDTO["processing"]> = {
+      enabled: true, workers: ["vps1"], requires: [],
+      pipeline: {
+        steps: { mergeSegments: true, burnDanmu: false, burnLivechat: false },
+        upload: { mode: "rolling", private: true, tid: 171, tag: "a,b", titleTemplate: "{name}_{date}" },
+        cleanup: { stageSourceAfterMerge: true, sourceAfterDone: true, stageAfterDone: true },
+      },
+    };
+    const room = mkRoom({ recording: { streamUpload: true, streamUploadSpool: false }, processing });
+    const workerCtx: RoomContext = { ...ctx, hasRule: true, writesRule: false, deliveryTouched: true };
+    const worker = submitPayload(formFromRoom(room), workerCtx, { mode: "edit", withProcessing: false });
+    if (!worker.ok) throw new Error("expected worker ok");
+    expect(worker.payload.recording).not.toHaveProperty("streamUpload");
+    expect(worker.payload.recording).not.toHaveProperty("streamUploadSpool");
+    expect("processing" in worker.payload).toBe(false);
+  });
+
+  it("edit 的 payload 不带 room(存量地址不回写,避免房间校验副作用)", () => {
+    const f = formFromRoom(mkRoom()); // 存量 room = https://live.douyin.com/1
+    const r = submitPayload(f, ctx, { mode: "edit", withProcessing: true });
+    if (!r.ok) throw new Error("expected ok");
+    expect(r.mode).toBe("edit");
+    expect(r.payload).not.toHaveProperty("room");
+    expect(r.payload.recording && "room" in r.payload.recording).toBe(false);
+    expect(r.payload.processing).toBeDefined();
+  });
+});
+
+describe("新增房间的接线(T-157:建房间不自动开播)", () => {
+  const src = readFileSync(join(__dirname, "..", "..", "packages", "web", "src", "modals", "RoomEditor.tsx"), "utf-8");
+
+  it("走 POST /api/rooms 一次写两半,并提示「已创建(默认暂停)」", () => {
+    expect(src).toContain("api.createRoom(r.payload)");
+    expect(src).toContain('toast(t("room.addedPaused"), "success")');
+    expect(src).toContain("findExistingRoom(");
+  });
+
+  it("从不调用 startTask(开录是显式动作)", () => {
+    expect(src).not.toContain("api.startTask(");
+  });
+
+  it("创建成功的文案中英都有", () => {
+    const dict = readFileSync(join(__dirname, "..", "..", "packages", "web", "src", "lib", "i18n.tsx"), "utf-8");
+    expect(dict.match(/\baddedPaused\s*:/g) ?? []).toHaveLength(2);
   });
 });

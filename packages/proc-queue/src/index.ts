@@ -1,9 +1,11 @@
 // @drec/proc-queue — 每节点持久任务表 + 租约执行循环(plans/036 §2.3)。
 export {
   ProcQueueStore, BatchRejected, procQueueDbPath, fileTagOf, FILE_TAG_PLACEHOLDER, LEASE_MS, GC_RETAIN_MS,
-  type ProcJobRecord, type LeaseRow, type FinishOutcome, type ListFilter, type ProcQueueStoreOpts,
+  type ProcJobRecord, type LeaseRow, type FinishOutcome, type ChainJob, type CompleteAndChainResult,
+  type ListFilter, type ProcQueueStoreOpts,
 } from "./store.js";
 export {
   ProcRunner, SimpleSlotLimiter, readProcActive,
   type ProcRunnerOpts, type SlotLimiter,
 } from "./runner.js";
+export { DEFAULT_RECONCILE_MAX_MS, RECONCILE_SHADOW_LOG } from "./runner.js";

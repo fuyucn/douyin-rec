@@ -59,6 +59,8 @@ export function buildHubRules(ctx: ApiCtx) {
       const rerr = task.streamUpload ? null : recordingError(sourceTaskId, roomSlug);
       if (rerr) return err(400, rerr);
       // 同房间规则已存在时 upsert 会深合并 pipeline → 按合并后校验。
+      // Issue #481: identity is the filename stem, but create still keys the file by the source task's CURRENT
+      // room — reusing an older divergent stem would write the new room into it and leave a dead rule.
       const existingRule = hubStore.getHubRule(hubDir, hubStore.hubKey(platform.id, roomSlug));
       const perr = validatePipeline(input, existingRule?.pipeline);
       if (perr) return err(400, perr);

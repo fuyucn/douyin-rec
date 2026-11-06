@@ -3,7 +3,7 @@
  * master-side delivery builder, spec planning, and the end-to-end "node == master rule" chain.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RemoteTaskSpec } from "@drec/core";
@@ -132,11 +132,85 @@ describe("zeroDiskNodePreflight — refuse loudly, never default", () => {
     writeCookies(root, null);
     expect(zeroDiskNodePreflight(json(GOOD))).toMatchObject({ ok: false, refusal: { code: "account_unknown" } });
   });
-  it("an unreadable login file is a credential_missing refusal, not a crash", () => {
+  it("a readable-but-account-less primary never switches to a matching delivered path", () => {
+    // Only an *unreadable* primary falls back. A primary that parses but identifies no account is a
+    // misconfiguration and must stay loud — silently switching to the master-delivered account would
+    // publish to an account the node never verified (irreversible).
+    const root = useRoot("node");
+    writeCookies(root, null); // readable, no DedeUserID
+    const delivered = join(base, "delivered.json");
+    writeFileSync(delivered, cookiesFor("42")); // would pass verification if it were tried
+    const r = zeroDiskNodePreflight(json({ ...GOOD, credentialPath: delivered }));
+    expect(r).toMatchObject({ ok: false, refusal: { code: "account_unknown" } });
+  });
+  it("an unreadable login file (and no readable alternate) is a credential_unreadable refusal, not a crash", () => {
     const root = useRoot("node");
     writeCookies(root, "42");
     const r = zeroDiskNodePreflight(json(GOOD), { readFile: () => { throw new Error("EACCES"); } });
-    expect(r).toMatchObject({ ok: false, refusal: { code: "credential_missing" } });
+    expect(r).toMatchObject({ ok: false, refusal: { code: "credential_unreadable" } });
+    if (!r.ok) expect(r.refusal.message).not.toContain(root);
+  });
+  it("an unreadable node login falls back to a readable delivered path (permission on one file must not block)", () => {
+    const root = useRoot("node");
+    writeCookies(root, "42"); // node default: unreadable in this test
+    const other = join(base, "other.json");
+    writeFileSync(other, cookiesFor("42")); // delivered path: readable
+    const r = zeroDiskNodePreflight(json({ ...GOOD, credentialPath: other }), {
+      readFile: (p: string) => {
+        if (p === other) return cookiesFor("42");
+        throw new Error("EACCES");
+      },
+    });
+    expect(r).toMatchObject({ ok: true, cookiesPath: other, credentialSource: "delivered-path" });
+  });
+  it("a garbage alternate is skipped, so a valid later alternate still wins", () => {
+    const root = useRoot("node");
+    const nodeDefault = writeCookies(root, null); // readable but identifies no account
+    const envPath = join(base, "env.json");
+    writeFileSync(envPath, cookiesFor("42")); // primary: exists but unreadable in this test
+    const delivered = join(base, "delivered.json");
+    writeFileSync(delivered, cookiesFor("42"));
+    const r = zeroDiskNodePreflight(json({ ...GOOD, credentialPath: delivered }), {
+      env: { BILIUP_COOKIE: envPath },
+      readFile: (p: string) => {
+        if (p === envPath) throw new Error("EACCES");
+        return readFileSync(p, "utf-8");
+      },
+    });
+    expect(r).toMatchObject({ ok: true, cookiesPath: delivered, credentialSource: "delivered-path" });
+    expect(nodeDefault).not.toBe(delivered);
+  });
+  it("the first known-account alternate wins even when it mismatches (no hunting for a matching login)", () => {
+    // Pins the documented policy: alternates are a recovery for an unreadable primary, not a search
+    // for whichever file happens to match. A mismatching alternate stays a loud refusal.
+    const root = useRoot("node");
+    writeCookies(root, "7"); // readable, wrong account = first known alternate
+    const envPath = join(base, "env.json");
+    writeFileSync(envPath, cookiesFor("42")); // primary: unreadable in this test
+    const delivered = join(base, "delivered.json");
+    writeFileSync(delivered, cookiesFor("42")); // matches, but must never be reached
+    const r = zeroDiskNodePreflight(json({ ...GOOD, credentialPath: delivered }), {
+      env: { BILIUP_COOKIE: envPath },
+      readFile: (p: string) => {
+        if (p === envPath) throw new Error("EACCES");
+        return readFileSync(p, "utf-8");
+      },
+    });
+    expect(r).toMatchObject({ ok: false, refusal: { code: "account_mismatch" } });
+  });
+  it("an unreadable env login falls back to the node default", () => {
+    const root = useRoot("node");
+    const nodeDefault = writeCookies(root, "42");
+    const envPath = join(base, "env.json");
+    writeFileSync(envPath, cookiesFor("42"));
+    const r = zeroDiskNodePreflight(json(GOOD), {
+      env: { BILIUP_COOKIE: envPath },
+      readFile: (p: string) => {
+        if (p === envPath) throw new Error("EACCES");
+        return readFileSync(p, "utf-8");
+      },
+    });
+    expect(r).toMatchObject({ ok: true, cookiesPath: nodeDefault, credentialSource: "node-default" });
   });
   it("matching account passes and returns the verified credential path", () => {
     const root = useRoot("node");
@@ -502,6 +576,16 @@ describe("createZeroDiskReporter — one managed run: status trail + exactly one
     // Own `-zd` namespace: never the bare date key a regular recording of the same room and day uses (issue #324).
     expect(rep.receipts[0]!.streamKey).toMatch(/-zd$/);
     expect(rep.status[0]).toMatchObject({ state: "finished", parts: 2, bvid: "BVfake1" });
+  });
+  it("a run that delivered parts but lost some at stop still writes its receipt, and the loss rides on the status", () => {
+    const r = mk();
+    const fin = r.finish({ ok: true, bvid: "BVfake1", segments: 2, lostParts: 1 });
+    expect(fin).toEqual({ receiptWritten: true });
+    const rep = buildZeroDiskReport({ isAlive: () => false });
+    expect(rep.receipts).toHaveLength(1);
+    expect(rep.receipts[0]).toMatchObject({ bvid: "BVfake1", parts: 2 });
+    expect(rep.status[0]).toMatchObject({ state: "finished", bvid: "BVfake1" });
+    expect(String(rep.status[0]!.message)).toContain("丢失");
   });
   it("parts = the larger of confirmed-so-far and this run's segments", () => {
     const r = mk();

@@ -16,7 +16,7 @@
  */
 import { parseOutputFormat, platformForRoom, redactTaskSecrets, streamUploadConflicts, type RoomDTO, type RoomPayload, type RoomRecordingDTO, type HubRulePayload } from "@drec/core";
 import type { ApiCtx } from "./context.js";
-import type { ApiResult } from "./types.js";
+import type { ApiResult, CreateRoomInput } from "./types.js";
 import { refreshLocalRollingEffective } from "../../rolling-effective.js";
 import * as hubStore from "../../hub-store.js";
 import { activeHubJobKeys, deleteHubJobHistory } from "../../hub-jobs.js";
@@ -28,6 +28,19 @@ type RecordingPatch = Parameters<TaskStore["updateTask"]>[1];
 type RecordingKey = keyof RecordingPatch & keyof Task;
 const _patchKeysAreTaskFields: [Exclude<keyof RecordingPatch, keyof Task>] extends [never] ? true : never = true;
 void _patchKeysAreTaskFields;
+
+function reasonOf(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+function rollbackNewTask(store: TaskStore, id: number): string | null {
+  try {
+    if (store.removeTask(id)) return null;
+    return "回滚未删除任务";
+  } catch (e) {
+    return `回滚异常:${reasonOf(e)}`;
+  }
+}
 
 /**
  * Keys to restore after a forward `patch`: exactly the keys written, plus the columns `updateTask`
@@ -50,7 +63,15 @@ function stripIdentity(dto: RoomDTO["processing"] & { key?: string }): NonNullab
 }
 
 export function buildRooms(ctx: ApiCtx) {
-  const { deps, store, manager, hubDir, err, normWebhook } = ctx;
+  const { deps, store, manager, hubDir, err, normWebhook, toUseCookie,
+    validateWorkers, validatePipeline, zeroDiskErrorFor } = ctx;
+
+  /**
+   * 普通节点没有 hub 编排:规则文件只属于 master。写在本机不会生效,只会留下一份
+   * 「看起来配了处理、其实永不运行」的假配置。POST/PUT 共用这一句,文案同源。
+   */
+  const ruleWriteRefusal = (): ApiResult =>
+    err(400, "本节点未启用 hub(master),房间的处理半边只能在主控配置");
 
   /**
    * 解析 `{platform}.{roomSlug}`;格式非法 → null(调用方回 400)。
@@ -174,6 +195,170 @@ export function buildRooms(ctx: ApiCtx) {
     },
 
     /**
+     * POST /api/rooms —— **新建一个房间**:一次写两半(录制任务 + 处理规则)。
+     *
+     * 为什么需要它:此前「加房间」= 先 POST /api/tasks 再 POST /api/hub/rules —— 两步之间失败会留下
+     * 「任务建了、规则没绑」的半成功,前端还得靠读列表反查 key 才补得上。
+     *
+     * 顺序:解析房间 → 重复检测 → 校验 processing(与 PUT 同一套单点) → addTask(默认停用)
+     * → (master 且给了 processing)写规则 → 写失败回滚(删掉刚建的任务)。
+     * 回滚本身失败必须**明说任务可能已创建**(静默半成功不可接受,与 PUT 同口径)。
+     *
+     * 普通节点(未启用 hub)拒绝 processing:节点上写的规则永不生效(见 ruleWriteRefusal)。
+     * 只建录制半边时返回的 `processing` 恒为 null —— 前端据此知道「本节点没有处理配置」。
+     */
+    createRoom(input: CreateRoomInput): ApiResult {
+      const room = (input.recording?.room ?? "").trim();
+      if (!room) return err(400, "recording.room 必填(新建房间必须能判定平台与房间号)");
+      const proc = input.processing;
+      // 闸门必须在**任何写操作之前**:节点上带了 processing 就是一次注定无效的写。
+      if (proc && deps.hubEnabled !== true) return ruleWriteRefusal();
+
+      // 平台/房间解析失败 = 房间地址非法 → 400,不要冒成 500。
+      let platform: ReturnType<typeof platformForRoom>;
+      let roomSlug: string;
+      try {
+        platform = platformForRoom(room);
+        roomSlug = platform.extractRoomSlug(room);
+      } catch (e) {
+        return err(400, `房间地址非法:${(e as Error).message}`);
+      }
+      if (!roomSlug) return err(400, `房间地址非法,取不到房间号: ${room}`);
+      const key = hubStore.hubKey(platform.id, roomSlug);
+
+      // 一个房间只有一条录制半边:同 (platform, roomSlug) 已有任务 → 409(与 findTask/view 同口径,
+      // 裸房间号与规范 URL 经 normalizeRoom 后撞在一起)。
+      const dup = findTask(platform.id, roomSlug, null);
+      if (dup) return err(409, `该房间已有录制任务(id=${dup.id}),请直接编辑它而不是新建`);
+
+      const rec = input.recording;
+
+      // ── 录制半边的输入归一化(全部复用唯一真理源,不写第二套) ──────────────────
+      // schedule 是**两个字段**:只给一端会造出半个窗口 → 400,而不是静默存坏。
+      let scheduleStart: string | null = null;
+      let scheduleEnd: string | null = null;
+      {
+        const s = rec.scheduleStart ?? null;
+        const e = rec.scheduleEnd ?? null;
+        const empty = (v: string | null): boolean => v == null || v.trim() === "";
+        if (empty(s) !== empty(e)) return err(400, "定时窗口的起止需同时填写或同时留空");
+        if (s != null && e != null && !empty(s) && !empty(e)) {
+          try {
+            [scheduleStart, scheduleEnd] = parseSchedule(`${s}-${e}`);
+          } catch (e2) {
+            return err(400, (e2 as Error).message);
+          }
+        }
+      }
+      // 互斥(单一判定 = core.streamUploadConflicts):直播直传不写盘,滚动上传靠文件。
+      if (streamUploadConflicts(rec.streamUpload === true, rec.rollingUpload === true)) {
+        return err(400, "streamUpload 与 rollingUpload 互斥:直播直传不写盘,滚动上传靠文件");
+      }
+      let outputFormat: ReturnType<typeof parseOutputFormat>;
+      try { outputFormat = parseOutputFormat(rec.outputFormat); } catch (e) { return err(400, (e as Error).message); }
+
+      // ── 处理半边:校验在写之前(与 PUT 同一套:workers / pipeline) ────────────
+      // 房间可能已有「只有规则、没有任务」的残留(旧路径留下的),create 是 upsert:
+      // pipeline 校验要对**合并后**的结果做,不能只看本次请求。
+      const existingRule = hubStore.getHubRule(hubDir, key);
+      if (proc) {
+        const checkInput: HubRulePayload = {
+          enabled: proc.enabled,
+          pipeline: proc.pipeline,
+          workers: proc.workers === null ? undefined : proc.workers,
+          requires: proc.requires,
+        };
+        const werr = validateWorkers(checkInput);
+        if (werr) return err(400, werr);
+        const perr = validatePipeline(checkInput, existingRule?.pipeline);
+        if (perr) return err(400, perr);
+      }
+
+      // ── 录制任务:不传 enabled → store 默认 false(创建即暂停,需手动开启) ──────
+      let task: Task;
+      try {
+        task = store.addTask({
+          room,
+          name: rec.name ?? null,
+          quality: rec.quality,
+          engine: rec.engine, // store 按 platform.engines 校验/回落
+          danmu: toDanmuFlag(rec.danmu),
+          segmentSec: rec.segmentSec,
+          cookies: rec.cookies ?? null,
+          useCookie: toUseCookie(rec.useCookie),
+          outDir: rec.outDir ?? null,
+          scheduleStart,
+          scheduleEnd,
+          webhook: normWebhook(rec.webhook),
+          rollingUpload: rec.rollingUpload === true,
+          streamUpload: rec.streamUpload === true,
+          streamUploadSpool: rec.streamUploadSpool !== false,
+          outputFormat,
+        });
+      } catch (e) {
+        return err(400, `创建录制任务失败:${(e as Error).message}`);
+      }
+
+      // 直播直传是 rolling 的子模式,且 zeroDiskErrorFor 要求有真实的 source task →
+      // 这一步只能在 addTask 之后判;判失败就删掉刚建的任务(不留半成功)。
+      // 无规则且本次没给 processing 时传 null(= 与 createTask 同口径,允许先建任务后配规则)。
+      const merged = hubStore.mergePipeline(existingRule?.pipeline, proc?.pipeline);
+      const zeroErr = zeroDiskErrorFor(
+        task.id,
+        rec.streamUpload === true,
+        (existingRule || proc)
+          ? {
+              enabled: proc?.enabled ?? existingRule?.enabled ?? true,
+              // 新建规则未显式给 mode = 按默认 upload 判(与 PUT 的 `?? "upload"` 同口径)。
+              mode: merged.upload?.mode ?? "upload",
+              workers: proc?.workers === null ? [] : proc?.workers ?? existingRule?.workers,
+              steps: merged.steps,
+            }
+          : null,
+      );
+      if (zeroErr) {
+        const rollbackError = rollbackNewTask(store, task.id);
+        if (rollbackError !== null) {
+          return err(500, `${zeroErr};**且刚建的任务未能回滚(${rollbackError})** —— 房间 ${key} 的任务可能已创建(id=${task.id}),请手工核对`);
+        }
+        return err(400, zeroErr);
+      }
+
+      // ── 处理半边:写规则(sourceTaskId 指向刚建的任务) ────────────────────────
+      if (proc) {
+        try {
+          hubStore.upsertHubRule(hubDir, {
+            platform: platform.id,
+            roomSlug,
+            room: task.room,
+            enabled: proc.enabled,
+            pipeline: proc.pipeline,
+            workers: proc.workers,
+            requires: proc.requires,
+            recording: { sourceTaskId: task.id },
+          });
+        } catch (e) {
+          // 回滚第一步:本端点的核心承诺是不留半成功。回滚也失败就必须**明说**。
+          const rollbackError = rollbackNewTask(store, task.id);
+          if (rollbackError !== null) {
+            return err(500, `写入处理配置失败(${reasonOf(e)});**且新建的录制任务未能回滚(${rollbackError})** —— 房间 ${key} 的任务可能已创建(id=${task.id}),请手工核对`);
+          }
+          return err(500, `写入处理配置失败(${reasonOf(e)}),已回滚新建的录制任务`);
+        }
+        refreshLocalRollingEffective(store, hubDir); // 新规则的派生值立刻生效
+      }
+
+      // 创建即抓主播名(不等开始录制);后台写回,UI 轮询即显示。
+      ctx.resolveAnchorBg(task.id, task.room);
+      // 新建的规则要立刻下发,不等 60s 周期 tick(节点未注入该依赖时是无害 no-op)。
+      deps.requestSyncTasks?.();
+
+      const after = view(key);
+      if (!after) return err(500, "房间创建后读不回来(store/hub 目录不一致?)");
+      return { status: 201, body: after };
+    },
+
+    /**
      * PUT /api/rooms/:key —— 一次改两半(各自可选)。
      *
      * 顺序:校验 → 写 task → 写规则 → (规则失败则回滚 task)。
@@ -189,6 +374,8 @@ export function buildRooms(ctx: ApiCtx) {
       const before = view(key);
       if (!before) return err(404, `未找到房间 ${key}`);
       const proc = input.processing;
+      // 普通节点不得写规则文件(与 POST 同一闸门):校验在任何写之前,避免留下无效的本地规则。
+      if (proc && deps.hubEnabled !== true) return ruleWriteRefusal();
 
       const recInput = input.recording;
       const existingStreamUpload = before.recording?.streamUpload === true;
@@ -217,17 +404,20 @@ export function buildRooms(ctx: ApiCtx) {
       const nextWorkers = sameKey
         ? input.processing?.workers === null ? [] : input.processing?.workers ?? nextRule?.workers
         : nextRule?.workers;
+      // No rule exists before or after this save → zero-disk needs no rule validation
+      // (same reading as createRoom); a stale streamUpload task can still be renamed.
+      const hasRuleAfter = Boolean(nextRule || proc || before.processing);
       const zeroErr = ctx.zeroDiskErrorFor(
         before.recording?.taskId ?? null,
         zeroDiskNext,
-        {
+        hasRuleAfter ? {
           enabled: nextEnabled,
-          // A room with no existing rule and no upload mode in this write is still a rule
-          // being created with the upload-mode default; don't claim it is rolling.
+          // A rule without an explicit mode is read as the upload-mode default (same as
+          // createRoom); don't claim it is rolling.
           mode: mergedPipeline.upload?.mode ?? (nextRule || before.processing ? "upload" : undefined),
           workers: nextWorkers,
           steps: mergedPipeline.steps,
-        },
+        } : null,
       );
       if (zeroErr) return err(400, zeroErr);
       if (proc && sameKey) {

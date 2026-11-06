@@ -3,8 +3,9 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { dirname, join } from "node:path";
-import { parseJobId } from "@drec/core";
+import { jobIdOf, parseJobId } from "@drec/core";
 import { ProcQueueStore, BatchRejected, procQueueDbPath, fileTagOf, GC_RETAIN_MS, LEASE_MS } from "@drec/proc-queue";
+import { SCHEMA_VERSION } from "../../packages/proc-queue/src/schema.js";
 import { makeEnv, type Env } from "./helpers.js";
 
 let env: Env;
@@ -23,7 +24,7 @@ describe("procQueueDbPath", () => {
 });
 
 describe("迁移", () => {
-  it("repeated first open is idempotent (same-process connections; real multi-process lives in store-multiproc.test.ts): user_version=5, data kept, tables present", () => {
+  it("repeated first open is idempotent (same-process connections; real multi-process lives in store-multiproc.test.ts): current user_version, data kept, tables present", () => {
     const s1 = env.open();
     const r = s1.enqueue(env.job("a.ts"), roots());
     expect(r.state).toBe("pending");
@@ -31,7 +32,7 @@ describe("迁移", () => {
     const s3 = env.open();
     expect(s3.get(r.jobId)?.state).toBe("pending");
     const raw = new DatabaseSync(env.dbPath);
-    expect((raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(5);
+    expect((raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(SCHEMA_VERSION);
     const tables = (raw.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>).map((t) => t.name);
     expect(tables).toEqual(expect.arrayContaining(["proc_jobs", "proc_runner_lease", "proc_order_cursor", "proc_lease_reservation"]));
     raw.close();
@@ -532,6 +533,32 @@ describe("list / active / gc", () => {
     expect(s.get(fresh)?.state).toBe("done");
   });
 
+  it("gc:skipped 与 done/cancelled 同口径保留 7 天后删", () => {
+    const s = env.open();
+    lease(s);
+    const old = s.enqueue(env.job("sk.ts"), roots()).jobId;
+    s.claim({ kinds: ["fake"], owner: "A", accept: (j) => j.jobId === old });
+    expect(s.finish(old, "A", { state: "skipped", reason: "skip-hub-owned" })).toBe(true);
+    env.clock.t += GC_RETAIN_MS + 1;
+    lease(s);
+    const fresh = s.enqueue(env.job("sk2.ts"), roots()).jobId;
+    s.claim({ kinds: ["fake"], owner: "A", accept: (j) => j.jobId === fresh });
+    expect(s.finish(fresh, "A", { state: "skipped", reason: "skip-source-gone" })).toBe(true);
+    expect(s.gc()).toBe(1);
+    expect(s.get(old)).toBeNull();
+    expect(s.get(fresh)?.state).toBe("skipped");
+  });
+
+  it("PR1 拒绝写入 reconciling(出边由 PR3 落地),行保持 running 可恢复", () => {
+    const s = env.open();
+    lease(s);
+    const r = s.enqueue(env.job("a.ts"), roots());
+    s.claim({ kinds: ["fake"], owner: "A" });
+    expect(s.finish(r.jobId, "A", { state: "reconciling", error: "submit interrupted", reason: "reconcile-start" })).toBe(false);
+    expect(s.get(r.jobId)?.state).toBe("running");
+    expect(s.gc()).toBe(0);
+  });
+
   it("gc purgeFailed 删 failed,uncertain 须先 ack 才删", () => {
     const s = env.open();
     lease(s);
@@ -551,6 +578,25 @@ describe("list / active / gc", () => {
 });
 
 describe("v1 -> v2 migration (plan 038 T01)", () => {
+  it("a legacy v5 database with no new-state rows upgrades without schema columns", () => {
+    const s0 = env.open();
+    const r = s0.enqueue(env.job("a.ts"), roots());
+    s0.close();
+    const raw = new DatabaseSync(env.dbPath);
+    raw.exec("PRAGMA user_version=5;");
+    raw.close();
+    const s = env.open();
+    expect(s.get(r.jobId)?.state).toBe("pending");
+    const cols = (new DatabaseSync(env.dbPath).prepare("PRAGMA table_info(proc_jobs)").all() as Array<{ name: string }>).map((c) => c.name);
+    expect(cols).not.toContain("ctx");
+    expect(cols).not.toContain("chain");
+    const part = env.job("b.ts", { kind: "upload-part", params: { ctx: { v: 1, orderKey: "k", index: 1, file: join(env.root, "recordings", "b.ts"), fp: { size: 1, mtimeMs: 1 } } } });
+    const enqueued = s.enqueue(part, roots());
+    expect(enqueued.state).toBe("pending");
+    expect(s.get(enqueued.jobId)?.params.ctx).toMatchObject({ v: 1 });
+    s.close();
+  });
+
   it("an existing v1 db gains 8 columns and the cursor table; old rows read the new columns as null", () => {
     const path = join(env.root, "db", "old.db");
     mkdirSync(dirname(path), { recursive: true });
@@ -845,6 +891,87 @@ describe("prep-failed cascade (plan 038 T03b)", () => {
     expect(s.get(rows[0]!.jobId)?.state).toBe("cancelled");
     expect(s.get(rows[1]!.jobId)?.state).toBe("pending");
     expect(s.get(rows[2]!.jobId)?.state).toBe("pending");
+    s.close();
+  });
+});
+
+describe("A3 store helpers", () => {
+  it("rowsForOrderSeq filters by kind (a biliup row does not mask the part)", () => {
+    const s = env.open();
+    const p = env.file("a.ts");
+    const job = (kind: string) => ({
+      jobId: jobIdOf(kind, "same-broadcast:part:1", 1), kind, logicalKey: "same-broadcast:part:1",
+      generation: 1, inputs: [p], params: kind === "upload-part" ? { ctx: { v: 1, orderKey: "same-broadcast", index: 1, file: p, fp: { size: 1, mtimeMs: 1 } } } : {},
+      replaceInputs: false, owner: {}, createdAt: 1, orderKey: "same-broadcast", seq: 1,
+    });
+    s.enqueue(job("biliup") as never, roots());
+    expect(s.rowsForOrderSeq("same-broadcast", 1)).toHaveLength(0);
+    expect(s.rowsForOrderSeq("same-broadcast", 1, "biliup")).toHaveLength(1);
+    s.close();
+  });
+
+  it("rowsForOrderSeq is scoped to the live generation; an old generation never masks the part", () => {
+    const s = env.open();
+    const p = env.file("a.ts");
+    const job = (generation: number) => ({
+      jobId: jobIdOf("upload-part", "same-broadcast:part:1", generation), kind: "upload-part",
+      logicalKey: "same-broadcast:part:1", generation, inputs: [p],
+      params: { ctx: { v: 1, orderKey: "same-broadcast", index: 1, file: p, fp: { size: 1, mtimeMs: 1 } } },
+      replaceInputs: false, owner: {}, createdAt: 1, orderKey: "same-broadcast", seq: 1,
+    });
+    s.enqueue(job(1) as never, roots());
+    s.enqueue(job(2) as never, roots());
+    expect(s.rowsForOrderSeq("same-broadcast", 1, "upload-part", 2).map((r) => r.generation)).toEqual([2]);
+    expect(s.rowsForOrderSeq("same-broadcast", 1, "upload-part", 1)).toHaveLength(1);
+    // No generation = every row of the pair (hub-owned dedupe).
+    expect(s.rowsForOrderSeq("same-broadcast", 1, "upload-part")).toHaveLength(2);
+    expect(s.countOrderRows("same-broadcast")).toBe(2);
+    expect(s.countOrderRows("same-broadcast", "biliup")).toBe(0);
+    // A9-3: the rollback guard counts only rows the queue still owns (open states), not history.
+    expect(s.countOpenOrderRows("same-broadcast")).toBe(2);
+    const other = { ...job(1), jobId: jobIdOf("upload-part", "same-broadcast:part:2", 1), logicalKey: "same-broadcast:part:2", seq: 2 };
+    s.enqueue(other as never, roots());
+    expect(s.countOpenOrderRows("same-broadcast")).toBe(3);
+    s.close();
+  });
+
+  it("countOpenOrderRows ignores drained rows (done/skipped/cancelled) only", () => {
+    const s = env.open();
+    const p = env.file("a.ts");
+    const mk = (seq: number, logicalKey: string) => ({
+      jobId: jobIdOf("upload-part", logicalKey, 1), kind: "upload-part", logicalKey, generation: 1, inputs: [p],
+      params: { ctx: { v: 1, orderKey: "same-broadcast", index: seq, file: p, fp: { size: 1, mtimeMs: 1 } } },
+      replaceInputs: false, owner: {}, createdAt: 1, orderKey: "same-broadcast", seq,
+    });
+    s.enqueue(mk(1, "same-broadcast:part:1") as never, roots());
+    s.enqueue(mk(2, "same-broadcast:part:2") as never, roots());
+    s.enqueue(mk(3, "same-broadcast:part:3") as never, roots());
+    const raw = new DatabaseSync(env.dbPath);
+    raw.prepare("UPDATE proc_jobs SET state='done' WHERE seq=1").run();
+    raw.prepare("UPDATE proc_jobs SET state='skipped' WHERE seq=2").run();
+    raw.prepare("UPDATE proc_jobs SET state='cancelled' WHERE seq=3").run();
+    raw.close();
+    expect(s.countOrderRows("same-broadcast")).toBe(3);
+    expect(s.countOpenOrderRows("same-broadcast")).toBe(0);
+    s.close();
+  });
+
+  it("importConfirmedPart on an existing done row still enqueues the cleanup successor", () => {
+    const s = env.open();
+    const p = env.file("a.ts");
+    const base = {
+      logicalKey: "same-broadcast:part:1", generation: 1, inputs: [p],
+      params: { ctx: { v: 1, orderKey: "same-broadcast", index: 1, file: p, fp: { size: 1, mtimeMs: 1 } } },
+      replaceInputs: false, owner: {}, createdAt: 1, orderKey: "same-broadcast", seq: 1,
+    };
+    const upload = { ...base, jobId: jobIdOf("upload-part", base.logicalKey, 1), kind: "upload-part" };
+    const cleanup = {
+      ...base, jobId: jobIdOf("cleanup-part", base.logicalKey, 1), kind: "cleanup-part", orderKey: undefined, seq: undefined,
+      params: { ctx: { ...(base.params.ctx as object), bv: "X" } },
+    };
+    expect(s.importConfirmedPart(upload as never, { allowedRoots: [env.root], bv: "X" }).state).toBe("done");
+    expect(s.importConfirmedPart(upload as never, { allowedRoots: [env.root], bv: "X", cleanupJob: cleanup as never }).state).toBe("done");
+    expect(s.list({ kind: "cleanup-part" })).toHaveLength(1);
     s.close();
   });
 });

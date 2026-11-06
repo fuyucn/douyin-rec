@@ -69,6 +69,8 @@ export interface RouteMatch {
     | "getVersion"
     | "getMesioPath"
     | "setMesioPath"
+    | "getLiveGate"
+    | "setLiveGate"
     | "getDouyinApiMode"
     | "setDouyinApiMode"
     | "getTimezone"
@@ -83,6 +85,7 @@ export interface RouteMatch {
     | "putHubResources"
     | "applyHubTasks"
     | "listRooms"
+    | "createRoom"
     | "getRoom"
     | "updateRoom"
     | "deleteRoom"
@@ -166,6 +169,8 @@ const ROUTES: readonly RouteEntry[] = [
   { name: "getVersion", methods: ["GET"], pattern: /^\/api\/version$/ },
   { name: "getMesioPath", methods: ["GET"], pattern: /^\/api\/mesio-path$/ },
   { name: "setMesioPath", methods: ["POST"], pattern: /^\/api\/mesio-path$/, needsBody: true },
+  { name: "getLiveGate", methods: ["GET"], pattern: /^\/api\/live-gate$/ },
+  { name: "setLiveGate", methods: ["POST"], pattern: /^\/api\/live-gate$/, needsBody: true },
   { name: "getDouyinApiMode", methods: ["GET"], pattern: /^\/api\/douyin-api-mode$/ },
   { name: "setDouyinApiMode", methods: ["POST"], pattern: /^\/api\/douyin-api-mode$/, needsBody: true },
   { name: "getTimezone", methods: ["GET"], pattern: /^\/api\/timezone$/ },
@@ -180,6 +185,7 @@ const ROUTES: readonly RouteEntry[] = [
   { name: "hubStatus", methods: ["GET"], pattern: /^\/api\/hub\/status$/ },
   { name: "applyHubTasks", methods: ["POST"], pattern: /^\/api\/hub\/apply$/ },
   { name: "listRooms", methods: ["GET"], pattern: /^\/api\/rooms$/ },
+  { name: "createRoom", methods: ["POST"], pattern: /^\/api\/rooms$/, needsBody: true },
   { name: "getRoom", methods: ["GET"], pattern: /^\/api\/rooms\/([^/]+)$/, param: "slug", decode: true },
   { name: "updateRoom", methods: ["PUT"], pattern: /^\/api\/rooms\/([^/]+)$/, param: "slug", decode: true, needsBody: true },
   { name: "deleteRoom", methods: ["DELETE"], pattern: /^\/api\/rooms\/([^/]+)$/, param: "slug", decode: true },
@@ -637,6 +643,12 @@ async function dispatch(
       const body = (await readJson(req, res)) as { mesioPath?: string };
       return api.setMesioPath(body ?? {});
     }
+    case "getLiveGate":
+      return api.getLiveGate();
+    case "setLiveGate": {
+      const body = (await readJson(req, res)) as { enabled?: boolean };
+      return api.setLiveGate(body ?? {});
+    }
     case "getDouyinApiMode":
       return api.getDouyinApiMode();
     case "setDouyinApiMode": {
@@ -671,6 +683,10 @@ async function dispatch(
     }
     case "listRooms":
       return api.listRooms();
+    case "createRoom": {
+      const body = (await readJson(req, res)) as Parameters<Api["createRoom"]>[0];
+      return api.createRoom(body ?? ({} as Parameters<Api["createRoom"]>[0]));
+    }
     case "getRoom":
       return api.getRoom(match.slug!);
     case "updateRoom": {

@@ -62,8 +62,15 @@ function sameBroadcastSiblings(
 function planIds(json: string): { nodeId: string; ids: string[] } | null {
   try {
     const p = JSON.parse(json) as Partial<UploadPlan>;
-    if (typeof p.nodeId !== "string" || typeof p.prepJobId !== "string" || typeof p.biliupJobId !== "string") return null;
-    return { nodeId: p.nodeId, ids: [p.prepJobId, p.biliupJobId] };
+    if (typeof p.nodeId !== "string" || typeof p.prepJobId !== "string" || p.prepJobId === "") return null;
+    if (p.v === 2) {
+      if (!Array.isArray(p.uploadJobIds) || !p.uploadJobIds.every((id) => typeof id === "string" && id !== "")) return null;
+      return { nodeId: p.nodeId, ids: [p.prepJobId, ...p.uploadJobIds] };
+    }
+    if (p.v === 1 && typeof p.biliupJobId === "string" && p.biliupJobId !== "") {
+      return { nodeId: p.nodeId, ids: [p.prepJobId, p.biliupJobId] };
+    }
+    return null;
   } catch {
     return null;
   }

@@ -17,7 +17,7 @@ import { bilibiliPlatform } from "@drec/bilibili-live";
 import { kuaishouPlatform } from "@drec/kuaishou-live";
 import { ffmpegEngine, mesioEngine } from "@drec/record-engine";
 import { existsSync } from "node:fs";
-import { makeBiliupProcessor, remuxProcessor, uploadPrepProcessor } from "@drec/processors";
+import { cleanupPartProcessor, makeBiliupProcessor, makeUploadPartProcessor, reconcilePartProcessor, remuxProcessor, uploadPrepProcessor } from "@drec/processors";
 import { openNodeUploadGate, openNodeUploadSlot, resolveUploadAccountKey, rootBiliupCookies } from "@drec/app";
 
 // ── 平台 ────────────────────────────────────────────────────────────────────
@@ -35,6 +35,9 @@ registerEngine(mesioEngine);
 // 加处理器 = `@drec/processors` 里一个模块 + 此处一行(与上面 registerPlatform / registerEngine 并列)。
 registerProcessor(remuxProcessor);
 registerProcessor(uploadPrepProcessor);
+// cleanup-part (plan 046 PR2): registered but never enqueued yet — rows only appear once PR5 wires the chain.
+registerProcessor(cleanupPartProcessor);
+registerProcessor(reconcilePartProcessor);
 // biliup on a node: same account rate-limit gate and local cookies as the blocking node pipeline (plan 038 T15b).
 // One gate per process: the runner lives in the long-running serve process, so a gate per job would leak a
 // sqlite handle per upload (the gate exposes no close); the store itself serialises across processes.
@@ -42,6 +45,18 @@ let nodeUploadGate: ReturnType<typeof openNodeUploadGate> | undefined;
 // One node-wide upload slot, shared with rolling upload (plan 038 PR4); null = unusable store, never blocks.
 const nodeUploadSlot = openNodeUploadSlot();
 registerProcessor(makeBiliupProcessor({
+  gate: () => (nodeUploadGate ??= openNodeUploadGate()),
+  ...(nodeUploadSlot ? { slot: nodeUploadSlot } : {}),
+  accountKey: resolveUploadAccountKey,
+  localCookies: () => {
+    const local = process.env.BILIUP_COOKIE ?? rootBiliupCookies();
+    return existsSync(local) ? local : null;
+  },
+}));
+
+// upload-part (plan 046 PR6): same node-wide slot and account gate as the biliup processor — one
+// uploader per node, never a second gate/slot instance.
+registerProcessor(makeUploadPartProcessor({
   gate: () => (nodeUploadGate ??= openNodeUploadGate()),
   ...(nodeUploadSlot ? { slot: nodeUploadSlot } : {}),
   accountKey: resolveUploadAccountKey,

@@ -10,7 +10,7 @@ import { buildRecordArgs } from "../../packages/app/src/process/record-args.js";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { platformForRoom } from "@drec/core";
 import { DatabaseSync } from "node:sqlite";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TaskStore, type Task } from "../../packages/app/src/store.js";
@@ -90,6 +90,18 @@ class MockManager implements ManagerLike {
   forceRunning(id: number): void {
     this.running.add(id);
   }
+  /** Live gate (plans/042 Task 6): tasks waiting behind the gate / how many releaseGates reports. */
+  readonly gated = new Set<number>();
+  releaseCalls = 0;
+  isGated(id: number): boolean {
+    return this.gated.has(id);
+  }
+  releaseGates(): number {
+    this.releaseCalls += 1;
+    const n = this.gated.size;
+    this.gated.clear();
+    return n;
+  }
 }
 
 let store: TaskStore;
@@ -101,6 +113,40 @@ beforeEach(() => {
   manager = new MockManager();
   const deps: ApiDeps = { store, manager };
   api = makeApi(deps);
+});
+
+describe("判活闸门设置端点与 TaskDTO.gated", () => {
+  it("默认开;只有显式 false 才关", () => {
+    expect((api.getLiveGate().body as { enabled: boolean }).enabled).toBe(true);
+    api.setLiveGate({ enabled: false });
+    expect(store.getSetting("liveGate")).toBe("false");
+    expect((api.getLiveGate().body as { enabled: boolean }).enabled).toBe(false);
+    api.setLiveGate({ enabled: true });
+    expect((api.getLiveGate().body as { enabled: boolean }).enabled).toBe(true);
+  });
+  it("关闭时释放闸门中的任务(released 回显数量);开启不释放", () => {
+    manager.gated.add(1); manager.gated.add(2);
+    const on = api.setLiveGate({ enabled: true });
+    expect((on.body as { released: number }).released).toBe(0);
+    expect(manager.releaseCalls).toBe(0);
+    const off = api.setLiveGate({ enabled: false });
+    expect((off.body as { released: number }).released).toBe(2);
+    expect(manager.releaseCalls).toBe(1);
+  });
+  it("非布尔 → 400,且不改设置", () => {
+    expect(api.setLiveGate({}).status).toBe(400);
+    expect(api.setLiveGate({ enabled: "no" as unknown as boolean }).status).toBe(400);
+    expect(store.getSetting("liveGate")).toBeFalsy();
+  });
+  it("任务视图只对闸门中的任务带 gated:true", () => {
+    const a = store.addTask({ room: "111" }).id;
+    const b = store.addTask({ room: "222" }).id;
+    manager.forceRunning(a); manager.forceRunning(b);
+    manager.gated.add(a);
+    const list = api.listTasks().body as Array<{ id: number; gated?: boolean }>;
+    expect(list.find((t) => t.id === a)!.gated).toBe(true);
+    expect(list.find((t) => t.id === b)!.gated).toBeUndefined();
+  });
 });
 
 describe("抖音 API 模式设置端点", () => {
@@ -138,6 +184,9 @@ describe("抖音 API 模式设置端点", () => {
  * 建一个带 worker 配置的临时 hub 环境。
  * hub 规则里的 worker id 现在必须真实存在(防幽灵 id 导致本机抑制 + 远端没人接的静默漏录),
  * 所以凡是要建规则的用例都要把 hubConfigPath 一起注入。
+ *
+ * `hubEnabled: true`(master):规则/处理半边只属于 master —— 带着这份 fixture 的用例就是在
+ * 模拟 master。要模拟普通节点(不得写规则),显式在 spread 之后传 `hubEnabled: false`。
  */
 function hubDeps(prefix: string, extra: Partial<ApiDeps> = {}): Partial<ApiDeps> {
   const hubDir = mkdtempSync(join(tmpdir(), prefix));
@@ -148,7 +197,7 @@ function hubDeps(prefix: string, extra: Partial<ApiDeps> = {}): Partial<ApiDeps>
       { id: "vps2", name: "VPS", kind: "ssh", host: "1.2.3.4", dataRoot: "/drec" },
     ],
   }, null, 2));
-  return { hubDir, hubConfigPath, ...extra };
+  return { hubDir, hubConfigPath, hubEnabled: true, ...extra };
 }
 
 describe("createTask → resolveAnchor 创建即抓主播名", () => {
@@ -592,7 +641,7 @@ describe("startTask", () => {
 
   it("T-2: 非 master / 未就绪 → 400,不假装成功", () => {
     const requestSyncTasks = vi.fn();
-    const slave = makeApi({ store, manager, ...hubDeps("apply-slave-", { requestSyncTasks }) });
+    const slave = makeApi({ store, manager, ...hubDeps("apply-slave-", { requestSyncTasks }), hubEnabled: false });
     expect(slave.applyHubTasks({ force: true }).status).toBe(400);
     expect(requestSyncTasks).not.toHaveBeenCalled();
     const noDep = makeApi({ store, manager, hubEnabled: true, ...hubDeps("apply-nodep-") });
@@ -1109,7 +1158,7 @@ describe("任务视图 outputFormatLock(后端判定下发,前端据此锁定;is
   });
   it("非 hub 模式但残留规则绑定 → 不锁(T9b:规则任务改由收尾后转换);规则清掉所有源 → no-survivors", () => {
     const deps = hubDeps("lock-stale-");
-    const a = makeApi({ store, manager, ...deps }); // hubEnabled 未开
+    const a = makeApi({ store, manager, ...deps, hubEnabled: false }); // hubEnabled 未开
     const t = a.createTask({ room: "111" }).body as { id: number };
     upsertHubRule(deps.hubDir as string, { platform: "douyin", roomSlug: "111", recording: { sourceTaskId: t.id } });
     expect(lockOf(a, t.id)).toBeUndefined();
@@ -1145,6 +1194,16 @@ describe("任务视图 outputFormatLock(后端判定下发,前端据此锁定;is
 });
 
 describe("streamUpload 作为 rolling 子选项的规则门禁", () => {
+  it("worker 无规则房间里的旧零落盘任务只改 name → 200,直传保持开启", () => {
+    const deps = hubDeps("su-worker-no-rule-");
+    const a = makeApi({ store, manager, ...deps, hubEnabled: false });
+    const task = a.createTask({ room: "99010", streamUpload: true }).body as { id: number };
+    const res = a.updateRoom("douyin.99010", { recording: { name: "改名" } });
+    expect(res.status).toBe(200);
+    expect(store.getTask(task.id)!.streamUpload).toBe(true);
+    expect(store.getTask(task.id)!.name).toBe("改名");
+  });
+
   it("房间规则绑定 streamUpload 任务,但规则不是 rolling → 400", () => {
     const a = makeApi({ store, manager, ...hubDeps("su-hub-") });
     const t = a.createTask({ room: "99003", streamUpload: true }).body as { id: number };
@@ -2008,7 +2067,7 @@ describe("rooms 域(T9 统一房间视图)", () => {
     const base = mkdtempSync(join(tmpdir(), "rooms-ro-"));
     const blocked = join(base, "hub-is-a-file");
     writeFileSync(blocked, "not a dir");
-    const roApi = makeApi({ store: s, manager: new MockManager(), hubDir: blocked, hubConfigPath: join(base, "hub.config.json") });
+    const roApi = makeApi({ store: s, manager: new MockManager(), hubEnabled: true, hubDir: blocked, hubConfigPath: join(base, "hub.config.json") });
 
     // 前提:房间在**不可写目录**下仍读得到(task 在 store 里,与 hubDir 无关)→ 不是 404 路径
     expect(roApi.getRoom("douyin.123456").status).toBe(200);
@@ -2041,7 +2100,7 @@ describe("rooms 域(T9 统一房间视图)", () => {
     const base = mkdtempSync(join(tmpdir(), "rooms-rb-all-ro-"));
     const blocked = join(base, "hub-is-a-file");
     writeFileSync(blocked, "not a dir");
-    const roApi = makeApi({ store: s, manager: new MockManager(), hubDir: blocked, hubConfigPath: join(base, "hub.config.json") });
+    const roApi = makeApi({ store: s, manager: new MockManager(), hubEnabled: true, hubDir: blocked, hubConfigPath: join(base, "hub.config.json") });
     const res = roApi.updateRoom("douyin.123456", {
       recording: { ...ALL_RECORDING_FIELDS, room: "123456" } as never,
       processing: { enabled: false },
@@ -2065,7 +2124,7 @@ describe("rooms 域(T9 统一房间视图)", () => {
     const base = mkdtempSync(join(tmpdir(), "rooms-rb-untouched-ro-"));
     const blocked = join(base, "hub-is-a-file");
     writeFileSync(blocked, "not a dir");
-    const roApi = makeApi({ store: s, manager: new MockManager(), hubDir: blocked, hubConfigPath: join(base, "hub.config.json") });
+    const roApi = makeApi({ store: s, manager: new MockManager(), hubEnabled: true, hubDir: blocked, hubConfigPath: join(base, "hub.config.json") });
     const spy = vi.spyOn(s, "updateTask");
     expect(roApi.updateRoom("douyin.123456", { recording: { name: "改名" }, processing: { enabled: false } }).status).toBe(500);
     expect(Object.keys(spy.mock.calls.at(-1)![1])).toEqual(["name"]);
@@ -2335,6 +2394,173 @@ describe("rooms 域(T9 统一房间视图)", () => {
   });
 });
 
+// ── plans/047 PR1:POST /api/rooms(一次建两半)+ 节点规则闸门 ───────────
+describe("POST /api/rooms(新建房间)", () => {
+  interface RoomShape {
+    key: string;
+    recording: { taskId: number; enabled: boolean; quality: string } | null;
+    processing: { workers?: string[]; recording?: { sourceTaskId?: number | null } } | null;
+  }
+  const roomOf = (a: ReturnType<typeof makeApi>, key = "douyin.123456"): RoomShape =>
+    a.getRoom(key).body as RoomShape;
+  const errOf = (r: { body: unknown }): string => ((r.body as { error?: string }).error ?? "");
+  const ruleFile = (hubDir: string, key = "douyin.123456"): string => join(hubDir, `${key}.json`);
+
+  function setupMaster(prefix: string, extra: Partial<ApiDeps> = {}) {
+    const s = new TaskStore(":memory:");
+    const hub = hubDeps(prefix, extra);
+    const a = makeApi({ store: s, manager: new MockManager(), ...hub });
+    return { s, a, hubDir: hub.hubDir as string };
+  }
+
+  it("创建成功:201 + 与 GET 同形;任务默认停用;规则 sourceTaskId 指向新任务并触发同步", () => {
+    const requestSyncTasks = vi.fn();
+    const { s, a } = setupMaster("rooms-create-", { requestSyncTasks });
+    const res = a.createRoom({
+      recording: { room: "123456", name: "主播" },
+      processing: { enabled: true, workers: ["local"] },
+    });
+    expect(res.status).toBe(201);
+    const dto = res.body as RoomShape;
+    expect(dto.key).toBe("douyin.123456");
+    expect(dto.recording?.enabled).toBe(false); // 创建即暂停(store.addTask 默认 enabled=0)
+    expect(dto.recording?.taskId).toBeGreaterThan(0);
+    expect(dto.processing?.workers).toEqual(["local"]);
+    // 规则把 sourceTaskId 绑到刚建的那个任务(不是靠「读列表反查」)
+    expect(dto.processing?.recording?.sourceTaskId).toBe(dto.recording?.taskId);
+    // 返回体与后续 GET 必须同形(同一 view 出口)
+    expect(roomOf(a)).toEqual(dto);
+    expect(requestSyncTasks).toHaveBeenCalled();
+    s.close();
+  });
+
+  it("重复房间(同 platform+roomSlug,裸号与规范 URL 撞在一起)→ 409,不新建第二个任务", () => {
+    const { s, a } = setupMaster("rooms-create-dup-");
+    expect(a.createRoom({ recording: { room: "123456" } }).status).toBe(201);
+    const again = a.createRoom({ recording: { room: "https://live.douyin.com/123456" } });
+    expect(again.status).toBe(409);
+    expect(errOf(again)).toContain("已有录制任务");
+    expect(s.listTasks()).toHaveLength(1);
+    s.close();
+  });
+
+  it("规则写失败 → 删掉刚建的任务并 500(不留半成功)", () => {
+    const s = new TaskStore(":memory:");
+    const base = mkdtempSync(join(tmpdir(), "rooms-create-ro-"));
+    const blocked = join(base, "hub-is-a-file");
+    writeFileSync(blocked, "not a dir"); // 磁盘满 / 权限 / 目录被文件占位是同一类故障
+    const a = makeApi({ store: s, manager: new MockManager(), hubEnabled: true, hubDir: blocked, hubConfigPath: join(base, "hub.config.json") });
+    const res = a.createRoom({ recording: { room: "123456" }, processing: { enabled: true } });
+    expect(res.status).toBe(500);
+    expect(errOf(res)).toContain("已回滚");
+    expect(s.listTasks()).toHaveLength(0);
+    expect(a.listRooms().body).toEqual([]);
+    s.close();
+  });
+
+  it("回滚本身失败 → 500 里明说「任务可能已创建」,不静默半成功", () => {
+    const s = new TaskStore(":memory:");
+    const base = mkdtempSync(join(tmpdir(), "rooms-create-rbfail-"));
+    const blocked = join(base, "hub-is-a-file");
+    writeFileSync(blocked, "not a dir");
+    const a = makeApi({ store: s, manager: new MockManager(), hubEnabled: true, hubDir: blocked, hubConfigPath: join(base, "hub.config.json") });
+    vi.spyOn(s, "removeTask").mockReturnValue(false);
+    const res = a.createRoom({ recording: { room: "123456" }, processing: { enabled: true } });
+    expect(res.status).toBe(500);
+    expect(errOf(res)).toContain("可能已创建");
+    s.close();
+  });
+
+  it("规则写失败且 removeTask 抛 SQLite 异常 → 500 且保留原始原因与「可能已创建」", () => {
+    const s = new TaskStore(":memory:");
+    const base = mkdtempSync(join(tmpdir(), "rooms-create-rbthrow-"));
+    const hubConfigPath = join(base, "hub.config.json");
+    writeFileSync(hubConfigPath, JSON.stringify({ workers: [{ id: "local", name: "本机", kind: "local" }] }));
+    const blocked = join(base, "hub-is-a-file");
+    writeFileSync(blocked, "not a dir");
+    const a = makeApi({ store: s, manager: new MockManager(), hubEnabled: true, hubDir: blocked, hubConfigPath });
+    vi.spyOn(s, "removeTask").mockImplementation(() => { throw new Error("SQLITE_IOERR"); });
+    const res = a.createRoom({ recording: { room: "123456" }, processing: { enabled: true } });
+    expect(res.status).toBe(500);
+    expect(errOf(res)).toContain("可能已创建");
+    expect(errOf(res)).toContain("SQLITE_IOERR");
+    expect(errOf(res)).toContain("写入处理配置失败");
+    expect(s.listTasks()).toHaveLength(1);
+    rmSync(base, { recursive: true, force: true });
+    s.close();
+  });
+
+  it("zeroDiskErrorFor 拒绝后 removeTask 抛异常 → 500 且保留原始原因与「可能已创建」", () => {
+    const s = new TaskStore(":memory:");
+    const a = makeApi({ store: s, manager: new MockManager(), ...hubDeps("rooms-create-zerodisk-rbthrow-") });
+    vi.spyOn(s, "removeTask").mockImplementation(() => { throw new Error("SQLITE_BUSY"); });
+    const res = a.createRoom({
+      recording: { room: "123456", streamUpload: true },
+      processing: { enabled: true, workers: ["local"] },
+    });
+    expect(res.status).toBe(500);
+    expect(errOf(res)).toContain("可能已创建");
+    expect(errOf(res)).toContain("SQLITE_BUSY");
+    expect(errOf(res)).toContain("直播直传");
+    expect(s.listTasks()).toHaveLength(1);
+    s.close();
+  });
+
+  it("processing 校验失败(rolling + 烧录)→ 400,任务不落库(校验在写之前)", () => {
+    const { s, a } = setupMaster("rooms-create-badproc-");
+    const res = a.createRoom({
+      recording: { room: "123456" },
+      processing: { enabled: true, workers: ["local"], pipeline: { upload: { mode: "rolling" }, steps: { burnDanmu: true, burnLivechat: false } } },
+    });
+    expect(res.status).toBe(400);
+    expect(errOf(res)).toContain("烧录");
+    expect(s.listTasks()).toHaveLength(0);
+    s.close();
+  });
+
+  it("worker(hubEnabled 未开)带 processing → 400,不建任务也不落规则文件", () => {
+    const s = new TaskStore(":memory:");
+    const hub = hubDeps("rooms-create-w-");
+    // spread 之后显式 false:这份 fixture 默认当 master,这里要模拟普通节点。
+    const a = makeApi({ store: s, manager: new MockManager(), ...hub, hubEnabled: false });
+    const res = a.createRoom({ recording: { room: "123456" }, processing: { enabled: true } });
+    expect(res.status).toBe(400);
+    expect(errOf(res)).toContain("未启用 hub");
+    expect(s.listTasks()).toHaveLength(0);
+    expect(existsSync(ruleFile(hub.hubDir as string))).toBe(false);
+    s.close();
+  });
+
+  it("worker 只建录制半边 → 201,processing 恒为 null(节点上不写规则)", () => {
+    const s = new TaskStore(":memory:");
+    const hub = hubDeps("rooms-create-w2-");
+    const a = makeApi({ store: s, manager: new MockManager(), ...hub, hubEnabled: false });
+    const res = a.createRoom({ recording: { room: "123456", name: "节点房" } });
+    expect(res.status).toBe(201);
+    const dto = res.body as RoomShape;
+    expect(dto.recording?.enabled).toBe(false);
+    expect(dto.processing).toBeNull();
+    expect(existsSync(ruleFile(hub.hubDir as string))).toBe(false);
+    s.close();
+  });
+
+  it("PUT 在节点上带 processing → 400,且录制半边一字未改(闸门在任何写之前)", () => {
+    const s = new TaskStore(":memory:");
+    const hub = hubDeps("rooms-put-worker-");
+    const a = makeApi({ store: s, manager: new MockManager(), ...hub, hubEnabled: false });
+    const t = s.addTask({ room: "123456", name: "主播" });
+    const res = a.updateRoom("douyin.123456", {
+      recording: { name: "改名" },
+      processing: { enabled: true },
+    });
+    expect(res.status).toBe(400);
+    expect(errOf(res)).toContain("未启用 hub");
+    expect(s.getTask(t.id)!.name).toBe("主播"); // 被拒时录制半边不落盘
+    expect(existsSync(ruleFile(hub.hubDir as string))).toBe(false);
+    s.close();
+  });
+});
+
 // ── T17 远端录制状态的「何时核对的」必须透出 ────────────────────────────────────
 describe("T17 recordingWorkers.checkedAt 透出", () => {
   it("checkedAt 原样出现在 /api/tasks 的 recordingWorkers 里(前端据此显示「N 秒前核对」)", () => {
@@ -2392,6 +2618,54 @@ describe("T15 /api/hub/resources", () => {
     const body = r.body as { resources: { maxCpuParallel: number }; source: string };
     expect(body.source).toBe("root-file");
     expect(body.resources.maxCpuParallel).toBeGreaterThanOrEqual(1);
+    s.close();
+  });
+
+
+  it("GET 读实际生效的来源:inline / settings 的值不被根文件盖掉(issue #473)", () => {
+    // inline: the resources live only in the resolved JSON, never in the file on disk.
+    {
+      const s = new TaskStore(":memory:");
+      const dir = mkdtempSync(join(tmpdir(), "hubres-api-"));
+      const cfgPath = join(dir, "hub.config.json");
+      writeFileSync(cfgPath, JSON.stringify({ resources: { maxCpuParallel: 1 } }), "utf-8");
+      const a = makeApi({
+        store: s, manager: new MockManager(), hubDir: dir, hubConfigPath: cfgPath,
+        hubConfigSource: () => ({ json: JSON.stringify({ workers: [], resources: { maxCpuParallel: 6 } }), source: "inline" as const }),
+      });
+      const body = a.getHubResources().body as { resources: { maxCpuParallel: number }; source: string };
+      expect(body.source).toBe("inline");
+      expect(body.resources.maxCpuParallel).toBe(6); // not the file's 1
+      s.close();
+    }
+    // settings: same shape (json only, no path).
+    {
+      const s = new TaskStore(":memory:");
+      const dir = mkdtempSync(join(tmpdir(), "hubres-api-"));
+      const cfgPath = join(dir, "hub.config.json");
+      writeFileSync(cfgPath, JSON.stringify({ resources: { maxCpuParallel: 2 } }), "utf-8");
+      const a = makeApi({
+        store: s, manager: new MockManager(), hubDir: dir, hubConfigPath: cfgPath,
+        hubConfigSource: () => ({ json: JSON.stringify({ resources: { maxCpuParallel: 5 } }), source: "settings" as const }),
+      });
+      const body = a.getHubResources().body as { resources: { maxCpuParallel: number }; source: string };
+      expect(body.source).toBe("settings");
+      expect(body.resources.maxCpuParallel).toBe(5); // not the file's 2
+      s.close();
+    }
+  });
+
+  it("PUT 响应回读新值(hubConfigSource 每轮现解析)", () => {
+    const s = new TaskStore(":memory:");
+    const dir = mkdtempSync(join(tmpdir(), "hubres-api-"));
+    const cfgPath = join(dir, "hub.config.json");
+    writeFileSync(cfgPath, JSON.stringify({ resources: { maxCpuParallel: 1 } }), "utf-8");
+    const a = makeApi({
+      store: s, manager: new MockManager(), hubDir: dir, hubConfigPath: cfgPath,
+      hubConfigSource: () => ({ json: readFileSync(cfgPath, "utf-8"), path: cfgPath, source: "root-file" as const }),
+    });
+    const body = a.putHubResources({ maxCpuParallel: 8 }).body as { resources: { maxCpuParallel: number } };
+    expect(body.resources.maxCpuParallel).toBe(8);
     s.close();
   });
 
@@ -2952,3 +3226,60 @@ describe("setMesioPath 校验(issue #427:路径直进录制子进程,web 入口�
     expect((ok.body as { mesioPath: string }).mesioPath).toBe(exec);
   });
 });
+
+describe("hub rule identity is the filename stem (issue #481)", () => {
+  it("changing the source task room: create writes the NEW slug file and leaves the old stem untouched", () => {
+    const hubDir = mkdtempSync(join(tmpdir(), "hub-ident3-"));
+    const hubConfigPath = join(mkdtempSync(join(tmpdir(), "hub-ident3-cfg-")), "hub.config.json");
+    writeFileSync(hubConfigPath, JSON.stringify({ workers: [{ id: "local", name: "本机", kind: "local", dataRoot: "/data" }] }, null, 2));
+    const a = makeApi({ store, manager, hubDir, hubConfigPath });
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    const first = a.createHubRule({ recording: { sourceTaskId: t.id } }).body as { key: string };
+    const oldPath = join(hubDir, first.key + ".json");
+    const oldBytes = readFileSync(oldPath, "utf-8");
+
+    store.updateTask(t.id, { room: "999" });
+    const second = a.createHubRule({ recording: { sourceTaskId: t.id } }).body as { key: string };
+
+    // Two distinct outcomes on disk: a NEW file for the new slug, and the old stem file unchanged.
+    expect(second.key).not.toBe(first.key);
+    expect(existsSync(oldPath)).toBe(true);
+    expect(readFileSync(oldPath, "utf-8")).toBe(oldBytes);
+    expect(existsSync(join(hubDir, second.key + ".json"))).toBe(true);
+    expect(readdirSync(hubDir).filter((n) => n.endsWith(".json"))).toHaveLength(2);
+  });
+
+  it("divergent rule still shows its source task display (anchor/task name) in the rules list", () => {
+    const hubDir = mkdtempSync(join(tmpdir(), "hub-ident4-"));
+    const hubConfigPath = join(mkdtempSync(join(tmpdir(), "hub-ident4-cfg-")), "hub.config.json");
+    writeFileSync(hubConfigPath, JSON.stringify({ workers: [] }, null, 2));
+    const src = store.addTask({ room: "https://live.douyin.com/222", name: "任务名X" });
+    // Divergent: stem says room 111, the bound source task lives in room 222.
+    writeFileSync(join(hubDir, "douyin.111.json"), JSON.stringify({
+      room: "https://live.douyin.com/222", enabled: true, pipeline: {}, recording: { sourceTaskId: src.id },
+    }) + String.fromCharCode(10), "utf-8");
+    const a = makeApi({ store, manager, hubDir, hubConfigPath });
+    const rule = (a.listHubRules().body as Array<{ key: string; taskName?: string | null; room?: string }>)[0];
+    expect(rule.key).toBe("douyin.111");
+    expect(rule.taskName).toBe("任务名X"); // bound by id, not by stem/room match
+  });
+
+  it("PATCH by the listed key hits the divergent rule file (no 404, no ghost)", () => {
+    const hubDir = mkdtempSync(join(tmpdir(), "hub-ident2-"));
+    const hubConfigPath = join(mkdtempSync(join(tmpdir(), "hub-ident2-cfg-")), "hub.config.json");
+    writeFileSync(hubConfigPath, JSON.stringify({ workers: [] }, null, 2));
+    // Legacy state: file stem says 111, the display room says 222 (task room edited after creation).
+    writeFileSync(join(hubDir, "douyin.111.json"), JSON.stringify({
+      room: "https://live.douyin.com/222", enabled: true, pipeline: {},
+    }) + String.fromCharCode(10), "utf-8");
+    const a = makeApi({ store, manager, hubDir, hubConfigPath });
+    const listed = a.listHubRules().body as Array<{ key: string }>;
+    expect(listed.map((r) => r.key)).toEqual(["douyin.111"]);
+    const patched = a.updateHubRule("douyin.111", { enabled: false });
+    expect(patched.status).toBe(200);
+    expect((patched.body as { key: string }).key).toBe("douyin.111");
+    expect(JSON.parse(readFileSync(join(hubDir, "douyin.111.json"), "utf-8")).enabled).toBe(false);
+    expect(readdirSync(hubDir).filter((n) => n.endsWith(".json"))).toHaveLength(1); // no room-derived ghost
+  });
+});
+

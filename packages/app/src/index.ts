@@ -16,6 +16,8 @@ export type { ApplyTasksResult } from "./task-sync.js";
 // 文件版 hub 任务配置(<root>/config/hub/{roomSlug}.json):cli reconciler + api 用。
 export * as hubStore from "./hub-store.js";
 export type { HubRule } from "./hub-store.js";
+export { resolveRuleSyncRoom } from "./hub-store.js";
+export { desiredSpecsForWorker, type HubDesiredCtx, type HubDesiredWorker } from "./hub-desired.js";
 // 文件版 worker(录制节点)配置(hub.config.json 的 workers 数组):cli reconciler + api 用。
 export * as workerStore from "./worker-store.js";
 export type { WorkerConfig } from "./worker-store.js";
@@ -65,6 +67,11 @@ export {
 export type { NodeUploadGateOpts } from "./node-pipeline.js";
 // 边录边传(T-33,见 plans/031):录制端「封口段上传 → 确认后删该段源」的执行体 + 钩子工厂。
 export { RollingUploader, makeRollingUploadHookFactory, resolveRollingUploadMeta } from "./rolling-upload.js";
+// Plan 046 PR6 (方案 A): recorder-side enqueue-only adapters and the settings switch reader.
+export {
+  rollingQueueModeEnabled, enqueueRollingUploadPart, enqueueRollingSkipPart, importRollingConfirmedPart,
+  queueOrderHasRows,
+} from "./rolling-queue.js";
 export { resolveStreamUploadMeta, resolveStreamUploadTitle, resolveStreamPartTitle } from "./rolling-upload.js";
 export { refreshLocalRollingEffective, rollingSpecFields } from "./rolling-effective.js";
 // Zero-disk on a side node (issue #331): node preflight / status + receipt files / master-side delivery object builder.
@@ -80,3 +87,12 @@ export type { RollingUploaderOpts } from "./rolling-upload.js";
 // 节点侧原地替换容器(issue #137 第 2/2):封口后 remux + 校验 + 删原文件 + 崩溃接管 + 唯一判定点。
 export { RemuxQueue, type RemuxQueueLike, type RemuxWaitOutcome } from "./remux-queue.js";
 export { makeNodeRemuxHookFactory, recoverNodeRemux, recoverNodeRemuxInBackground, convertSegmentInPlace, resolveNodeOutputFormat, shouldConvertAtSeal, nodeOutputFormatLock, verifyRemuxed, NODE_REMUX_TMP_SUFFIX } from "./node-remux.js";
+// Fleet agent (plans/042): worker side of the master ↔ worker long connection.
+export { readFleetConfig, writeFleetConfig, startFleetAgent, watchFleetAgent, type FleetAgent, type FleetAgentConfig, type FleetNodeCommand } from "./fleet-agent.js";
+
+export { zeroDiskRoom, resolveZeroDiskPumpDirs, zeroDiskHasUnconfirmedParts, recordNameArg, probeRoomLiving } from "./live-gate.js";
+export type { ZeroDiskPumpDirs } from "./live-gate.js";
+export {
+  enabledHubRuleForTask, uploadOwnerForTask, shouldDecideUploadOwner, masterOwnedWithoutRule,
+} from "./hub-rule-match.js";
+export { enqueueHubOwnedSkip } from "./hub-owner.js";

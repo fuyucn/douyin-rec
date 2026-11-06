@@ -9,6 +9,7 @@
  */
 import type { Task } from "../store.js";
 import { resolveOutputDir } from "../paths.js";
+import { recordNameArg } from "../live-gate.js";
 
 /**
  * Build the `record` subcommand argv for a task. Output shape:
@@ -39,16 +40,10 @@ export function buildRecordArgs(task: Task, cookiesFile?: string): string[] {
     "--segment",
     String(task.segmentSec),
   ];
-  if (task.name) {
-    // per-streamer output subfolder + filename prefix
-    args.push("--name", task.name);
-  } else if (task.streamUpload && task.anchorName) {
-    // Zero-disk only: it has no recording filename to inherit the anchor from, so a cached
-    // anchor keeps title templates and danmu metadata from falling back to the room slug.
-    // Deliberately scoped to streamUpload: the normal recorder resolves the owner itself from
-    // each stream, and a stale cached name would rename its output subfolder.
-    args.push("--name", task.anchorName);
-  }
+  // Per-streamer output subfolder + filename prefix. Zero-disk tasks fall back to the cached anchor
+  // name (see recordNameArg, shared with the serve-side live gate).
+  const nameArg = recordNameArg(task);
+  if (nameArg) args.push("--name", nameArg);
   if (cookiesFile) {
     args.push("--cookies-file", cookiesFile);
   }
@@ -67,11 +62,12 @@ export function buildRecordArgs(task: Task, cookiesFile?: string): string[] {
     // from the master-delivered object (env, see spawner) and never from local rule files.
     if (task.managedBy === "hub") args.push("--zero-disk-managed", "1");
   }
+  // Always pass the task id: the record child writes its state file (`run/rec-<id>.json`, plans/044) under it.
+  // The remux queue attribution in `record` is gated on --output-format, not on this flag.
+  if (typeof task.id === "number") args.push("--task-id", String(task.id));
   // 节点侧原地替换(issue #137):`task.outputFormat` 在这里已是**判定后的生效值**(TaskManager.spawnFor 经
   // resolveNodeOutputFormat 算定:hub 受管 / 有规则绑定 / 边录边传 → original)。original = 不带 flag,行为不变。
   if (task.outputFormat && task.outputFormat !== "original") {
-    // 任务标识只给封口转换队列用(入队行归属任务 → serve 侧失败告警按任务归属);无 outputFormat 时无人消费,不带。
-    if (typeof task.id === "number") args.push("--task-id", String(task.id));
     args.push("--output-format", task.outputFormat); // 保持末尾(既有用例/约定)
   }
   return args;

@@ -1,16 +1,8 @@
-/**
- * Resolve the room key used by the zero-disk pump.
- *
- * The pump passes this value straight to Platform.getStream. Platforms that need a numeric
- * room id (Douyin) reject a full live URL, so normalize at this boundary instead of relying
- * on every stream fetch implementation to accept both forms.
- */
 import { join } from "node:path";
-import { processTimeZone, sanitizePathSegment, zonedStamp, type Platform } from "@drec/core";
+import { processTimeZone, sanitizePathSegment, zonedStamp } from "@drec/core";
 
-export function zeroDiskRoom(platform: Platform, room: string): string {
-  return platform.extractRoomSlug(platform.roomToUrl(room));
-}
+// zeroDiskRoom lives in @drec/app (shared with the serve-side live gate); re-exported for the cli.
+export { zeroDiskRoom } from "@drec/app";
 
 /**
  * Danmu xml path for one zero-disk run (issue #329).

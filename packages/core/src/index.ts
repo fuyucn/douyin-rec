@@ -37,6 +37,8 @@ export * from "./ttl-memo.js";
 export * from "./redact-log.js";
 // 边录边传生效判定(issue #40):规则 mode=rolling + 旧 task 开关迁移 + 单节点闸门;仅 master 调用。
 export * from "./rolling-policy.js";
+export * from "./node-side-upload-policy.js";
+export * from "./bool-flag.js";
 export * from "./zero-disk-policy.js";
 // Zero-disk on a side node (issue #331): delivery contract, strict parsers, receipts/status shapes.
 export * from "./zero-disk-delivery.js";
@@ -53,3 +55,9 @@ export * from "./survivors.js";
 export * from "./child-identity.js";
 // Output path resolver (issue #333): stage / recording / job-log paths and the one name-sanitize rule.
 export * from "./output-paths.js";
+// Master ↔ worker control-plane protocol fleet/1 (plans/042): shared by the node agent and the master hub.
+export * from "./fleet-protocol.js";
+
+// Recorder process state file + the single activity judge (plans/044): record child writes, node commands read.
+export * from "./recorder-state.js";
+export * from "./upload-owner.js";

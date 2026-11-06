@@ -88,6 +88,7 @@ export function zeroDiskNodePreflight(
   try { parsed = JSON.parse(rawDelivery); } catch { return refuse("delivery_missing", "delivered zero-disk metadata is not valid JSON"); }
   const d = parseZeroDiskDelivery(parsed);
   if (!d.ok) return refuse("delivery_missing", d.error);
+  const readFile = o.readFile ?? ((p: string) => readFileSync(p, "utf-8"));
   const cred = resolveNodeUploadCredential({
     ...(o.env ? { env: o.env } : {}),
     ...(o.nodeDefaultPath ? { nodeDefaultPath: o.nodeDefaultPath } : {}),
@@ -95,15 +96,40 @@ export function zeroDiskNodePreflight(
     ...(o.exists ? { exists: o.exists } : {}),
   });
   if (!cred) return refuse("credential_missing", "no upload login file found on this node");
-  let nodeKey: string;
-  try {
-    nodeKey = biliAccountKeyFromCookiesJson((o.readFile ?? ((p: string) => readFileSync(p, "utf-8")))(cred.path));
-  } catch {
-    return refuse("credential_missing", "upload login file on this node is unreadable");
+  const readAccountKey = (p: string): string | null => {
+    try { return biliAccountKeyFromCookiesJson(readFile(p)); } catch { return null; }
+  };
+  let nodeKey = readAccountKey(cred.path);
+  let chosen = cred;
+  if (nodeKey === null) {
+    // An unreadable chosen login must not block a readable alternate: the master-delivered
+    // path or the node default may still work. Only the *primary* being unreadable triggers this;
+    // a readable login with an unknown/mismatched account still fails loudly (verdict below).
+    // Alternates whose content identifies no account are skipped too: a corrupt file must not
+    // hide the next valid one. The first *known-account* alternate wins even if it mismatches the
+    // master's account: that refusal stays loud (account_mismatch) rather than hunting for a
+    // matching login — this path only exists because the primary could not be read at all.
+    const envPath = (o.env ?? process.env).BILIUP_COOKIE?.trim();
+    const alternates = [
+      ...(envPath ? [{ path: envPath, source: "env" as const }] : []),
+      { path: o.nodeDefaultPath ?? rootBiliupCookies(), source: "node-default" as const },
+      ...(d.value.credentialPath ? [{ path: d.value.credentialPath, source: "delivered-path" as const }] : []),
+    ];
+    for (const alt of alternates) {
+      if (alt.path === cred.path || !(o.exists ?? existsSync)(alt.path)) continue;
+      const key = readAccountKey(alt.path);
+      if (key === null || !isKnownAccountKey(key)) continue;
+      nodeKey = key;
+      chosen = { path: alt.path, source: alt.source };
+      break;
+    }
+    if (nodeKey === null) {
+      return refuse("credential_unreadable", "the node's upload login file could not be read into a usable login (check ownership/permissions and file contents; the service user must be able to read it)");
+    }
   }
   const verdict = zeroDiskAccountVerdict(d.value.accountKey, nodeKey);
   if (verdict) return { ok: false, refusal: verdict };
-  return { ok: true, delivery: d.value, cookiesPath: cred.path, credentialSource: cred.source };
+  return { ok: true, delivery: d.value, cookiesPath: chosen.path, credentialSource: chosen.source };
 }
 
 /**
@@ -506,7 +532,7 @@ export function createZeroDiskReporter(o: {
   running(): void;
   partConfirmed(info: { count: number; bvid?: string }): void;
   /** `receiptError` is set when the archive exists but the receipt could not be persisted. */
-  finish(res: { ok: boolean; bvid?: string; error?: string; segments: number }): { receiptWritten: boolean; receiptError?: string };
+  finish(res: { ok: boolean; bvid?: string; error?: string; segments: number; lostParts?: number; unknownParts?: number }): { receiptWritten: boolean; receiptError?: string };
   failed(message: string): void;
 } {
   const now = o.now ?? Date.now;
@@ -543,7 +569,9 @@ export function createZeroDiskReporter(o: {
         const atMs = now();
         const streamKey = zeroDiskStreamKey(o.platform, o.roomSlug, startMs);
         const r = writeZeroDiskReceipt({ id: `${o.platform}:${o.roomSlug}:${startMs}`, platform: o.platform, roomSlug: o.roomSlug, streamKey, startMs, bvid: res.bvid, parts, atMs }, atMs);
-        write("finished");
+        // The receipt has no field for it; the status message carries the loss to the master console.
+        const note = res.lostParts ? `${res.lostParts} 个分 P 在停止时丢失` : res.unknownParts ? `${res.unknownParts} 个分 P 提交结果未知` : undefined;
+        write("finished", note);
         return { receiptWritten: r.written };
       } catch (e) {
         const msg = `archive uploaded but the receipt could not be written, the master ledger will not record it: ${(e as Error).message}`;

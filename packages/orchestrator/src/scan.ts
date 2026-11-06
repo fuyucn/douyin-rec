@@ -2,7 +2,7 @@
 // 共享录像扫描函数：被 LocalTransport 和 _inventory CLI 子命令复用。
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { epochFromZonedParts, listPlatforms, parseRoomDirName, processTimeZone } from "@drec/core";
+import { epochFromZonedParts, listPlatforms, parseRoomDirName, processTimeZone, ROLLING_ACTIVE_MAX_QUIET_MS } from "@drec/core";
 import { groupSessionsInDir } from "@drec/post-process";
 import type { ActiveRecordingRoom, NodeRecording, NodeRollingProgress, NodeRollingSession } from "./transport.js";
 import { readGaps, totalGapSecOf } from "./gaps.js";
@@ -72,7 +72,8 @@ function readSession(dir: string, base: string): {
  * Issue #309: an owner that is still alive and has not closed its session is still working on it (slot wait or
  * tail upload). Bounded by the last sidecar write, so a stale pid (reused by another process) stops counting.
  */
-export const ROLLING_ACTIVE_MAX_QUIET_MS = 3 * 3600_000;
+// The constant lives in core (shared with the recorder state judge); re-exported for existing importers.
+export { ROLLING_ACTIVE_MAX_QUIET_MS };
 
 function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException)?.code === "EPERM"; }
@@ -99,7 +100,7 @@ function readRolling(dir: string, base: string): NodeRollingProgress | undefined
   try {
     const d = JSON.parse(readFileSync(join(dir, `${base}.rolling.json`), "utf-8")) as
       { bv?: string; confirmed?: unknown; ambiguous?: unknown; uploading?: { index?: unknown; kind?: unknown } | null;
-        ownerPid?: unknown; closedAt?: unknown; heartbeatAt?: unknown; updatedAt?: unknown };
+        queueOrderKey?: unknown; ownerPid?: unknown; closedAt?: unknown; heartbeatAt?: unknown; updatedAt?: unknown };
     const u = d.uploading;
     // 意图标记原样透传给主控(主控据此区分「建稿中被杀」);形状不合法 → 当作无(不抛)。
     const uploading: NodeRollingProgress["uploading"] = u && typeof u.index === "number" && (u.kind === "create" || u.kind === "append")
@@ -112,6 +113,8 @@ function readRolling(dir: string, base: string): NodeRollingProgress | undefined
       bv: typeof d.bv === "string" && d.bv ? d.bv : undefined,
       confirmed: Array.isArray(d.confirmed) ? d.confirmed.filter((n): n is number => typeof n === "number") : undefined,
       ambiguous: Array.isArray(d.ambiguous) ? d.ambiguous.filter((n): n is number => typeof n === "number") : undefined,
+      ...(typeof d.queueOrderKey === "string" && d.queueOrderKey ? { queueOrderKey: d.queueOrderKey } : {}),
+      ...(typeof d.updatedAt === "number" && Number.isFinite(d.updatedAt) ? { updatedAt: d.updatedAt } : {}),
     };
   } catch {
     return undefined;
@@ -253,7 +256,9 @@ export async function scanRecordings(
       // 但它是**已完成上传**的场(rolling.bv 存在)—— 必须照样出现在清单里,否则 master 收不到
       // 「已建稿」事实,reconciler 会把它当没有录像而漏掉收口。故:无 ts 但 rolling.bv 存在 → 仍产出。
       // 同理:无 ts、无 bv,但留有建稿意图/不确定段 → 也要产出,主控才能转人工而不是装作没这场。
-      if (!g.ts.length && !rolling?.bv && !rolling?.uploading && !rolling?.ambiguous?.length) continue;
+      // A queue-mode session (plan 046 PR6) may legitimately have no bv yet: the node queue is still
+      // uploading its parts. Dropping it here would hide the session from the master's hold check.
+      if (!g.ts.length && !rolling?.bv && !rolling?.uploading && !rolling?.ambiguous?.length && !rolling?.queueOrderKey) continue;
       let durationSec = 0, startMs = Infinity, endMs = 0;
       let totalBytes = 0, bytesKnown = true;
       for (const f of g.ts) {

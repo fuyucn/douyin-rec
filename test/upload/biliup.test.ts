@@ -173,7 +173,7 @@ describe("isUploadRateLimited：识别 601 与 21566", () => {
     expect(isUploadRateLimited(new Error("biliup 失败 (rc=1): code: 601 您上传视频过快，请您稍作休息后再继续"))).toBe(true);
   });
   it("21566 投稿过于频繁(app 接口风控)", () => {
-    // 真实报错形态(biliup 1.2.1):ResponseData { code: 21566, ..., message: "投稿过于频繁…" }
+    // Real error shape observed in a biliup 1.x release: ResponseData { code: 21566, ..., message: "投稿过于频繁…" }
     const msg = 'biliup 失败 (rc=1): ResponseData { code: 21566, data: None, message: "投稿过于频繁，建议将APP升级至最新版本后再试", ttl: Some(1) }';
     expect(isUploadRateLimited(new Error(msg))).toBe(true);
   });

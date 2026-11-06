@@ -27,6 +27,8 @@ import { ProcQueueStore, ProcRunner, SimpleSlotLimiter } from "@drec/proc-queue"
 import { TaskManager } from "./task-manager.js";
 import { masterSendsTransition, roomIsLive, workerProbeUsable, type LiveTick } from "./live-notify.js";
 import { NotifyOutbox } from "./notify-outbox.js";
+import { watchFleetAgent, type FleetAgent, type FleetNodeCommand } from "./fleet-agent.js";
+import { APP_VERSION } from "./version.js";
 import { TaskLogStore } from "@drec/observability";
 import { NodeRecordSpawner } from "./process/spawner.js";
 import { sweepCredentialFiles } from "./process/credential-file.js";
@@ -60,6 +62,12 @@ export interface ServeDeps {
   getWebhook: () => string | undefined;
   /** 多节点 hub 编排实现(由 cli 注入,app 不依赖 orchestrator)。 */
   hubStarter?: HubStarter;
+  /**
+   * Node command registry (cli/node-commands.ts), injected by the CLI. With `<root>/config/fleet.json`
+   * present on a worker (no --hub), serve runs the fleet agent that answers the master over one long
+   * connection instead of ssh-spawned processes (plans/042).
+   */
+  fleetCommands?: Readonly<Record<string, FleetNodeCommand>>;
 }
 
 /** 跑起 Web 控制台(+ 可选调度 + 可选 hub)。行为与拆分前 `task serve` 完全一致。 */
@@ -100,6 +108,8 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     // ONE manager drives both the web (manual start/stop) and, if requested,
     // the scheduler (automatic start/stop). They share the same subprocess
     // lifecycle + crash auto-restart.
+    // Serve-level hub flag, known only after the config resolves below: the spawner reads it per spawn.
+    const spawnerFlags = { hubMaster: false };
     const spawner = new NodeRecordSpawner({
       // getter:每次 spawn 读「全局 --discord-webhook/env ?? settings 表 discordWebhook」(与下方
       // EventCenter 的 globalHook 一致),否则 UI 里设的 webhook 进不了子进程(子进程无 DB)。
@@ -115,6 +125,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
         ? { live: false, recordEnd: false, merge: false, hub: false, error: false }
         : resolveWebhookToggles(store.getSetting("notifWebhookToggles")),
       onLog: (m) => console.log(m),
+      hubMaster: () => spawnerFlags.hubMaster,
     });
     // Per-task log ring buffer shared with the manager so the Web 详情/日志
     // 页面 can tail each recorder subprocess's captured output.
@@ -199,6 +210,8 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     // hub 是否在本节点启用(master)?= --hub + 有 hubStarter + 能解析出 hub 配置。
     // slave(无 --hub)= false → 前端据此隐藏 Hub 页 / 显示 child node 提示。
     const hubEnabled = !!(o.hub && hubStarter && resolveHubConfigJson(o.hubConfig, store));
+    // Children spawned from here on may take upload ownership for rule-bound rooms (plan 046 PR6).
+    spawnerFlags.hubMaster = hubEnabled;
     // 边录边传生效值(issue #40):首轮 hub 同步前,先用唯一判定刷新绑定了规则的本机任务,
     // 堵住「同步未跑完、daemon 已起录」窗口里按旧开关放行而绕过多节点重复投稿闸门。失败只告警(回落旧开关迁移)。
     rollingGuardOn = hubEnabled;
@@ -210,6 +223,18 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
         console.warn(`[rolling] 启动刷新边录边传生效值失败(回落旧开关迁移):${String((e as Error)?.message ?? e)}`);
       }
     }
+    // Fleet agent (plans/042): workers only. fleet.json is followed, so a master-issued join (or token
+    // rotation) takes effect without restarting serve. Absent/invalid → off, the master uses ssh.
+    const fleetAgent: FleetAgent | null =
+      !hubEnabled && deps.fleetCommands
+        ? watchFleetAgent({
+            configPath: join(rootConfigDir(), "fleet.json"),
+            dataRoot: drecRoot(),
+            appVersion: APP_VERSION,
+            commands: deps.fleetCommands,
+            log: (m) => serveLog.info(m),
+          })
+        : null;
     // hub 台账路径与 cli hubStarter 同一推导(<db>-sync.db)——「hub 任务」端点读它展示进度/ETA/日志。
     const syncDbPath = resolveDbPath(o.db).replace(/\.db$/, "-sync.db");
     // T4:台账变更监视 → SSE(/api/hub/stream)。
@@ -338,6 +363,8 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
         if (prev === undefined) { lastRec.set(t.id, next); continue; }
         if (rec === prev.live) { lastRec.set(t.id, next); continue; }
         lastRec.set(t.id, next);
+        // Tell the master right away instead of at the next heartbeat tick (only recording state changed).
+        fleetAgent?.triggerHeartbeat(["recording-status"]);
         const anchor = taskDisplayName(t, manager.getAnchorName(t.id));
         const selfNotifies = !masterSendsTransition(prev, next);
         events.emit(
@@ -550,6 +577,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
         serveLog.error("[proc] runner 停止出错:", err);
       });
       clearInterval(recWatch);
+      fleetAgent?.stop();
       if (notifyRelay) clearInterval(notifyRelay);
       notifyOutbox?.close();
       clearInterval(diskWatch);
@@ -589,6 +617,11 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
         serveLog.info("定时调度已关闭（--no-schedule）：仅手动启停");
       }
     };
+    // Fleet long connection (plans/042): workers dial the master on this same port. Anything else that asks
+    // for an upgrade is refused.
+    server.on("upgrade", (req, socket, head) => {
+      if (!(hubEnabled && hubStarter?.fleetUpgrade?.(req, socket, head))) socket.destroy();
+    });
     if (host) server.listen(port, host, onListen);
     else server.listen(port, onListen);
 }

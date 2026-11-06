@@ -3,7 +3,7 @@
 #
 # 用法:
 #   scripts/install-biliup.sh [目标目录]      # 默认 ./bin → ./bin/biliup
-#   BILIUP_VERSION=v1.2.1 scripts/install-biliup.sh
+#   BILIUP_VERSION=v1.3.4 scripts/install-biliup.sh
 #   BILIUP_LIBC=musl scripts/install-biliup.sh   # linux 上选 musl(默认 gnu;alpine 用 musl)
 #
 # 与 install-mesio.sh 同款。biliup 用于 B 站上传(upload/append),CLI 1.x 线带 --is-only-self。
@@ -16,7 +16,7 @@ REPO="biliup/biliup"
 # │ 升级:改下面这行为新 tag(见 github.com/biliup/biliup/releases),或临时        │
 # │ `BILIUP_VERSION=vX.Y.Z scripts/install-biliup.sh`。需 1.x 线(带 --is-only-self)。│
 # └────────────────────────────────────────────────────────────────────────────┘
-PINNED_VERSION="v1.2.1"
+PINNED_VERSION="v1.3.4"
 VERSION="${BILIUP_VERSION:-$PINNED_VERSION}"
 
 DEST="${1:-${BILIUP_DEST:-./bin}}"

@@ -70,6 +70,7 @@ import type { ActiveRecordingRoom, ApplyTasksResult } from "./transport.js";
 import { LocalTransport } from "./transport-local.js";
 import { SshTransport } from "./transport-ssh.js";
 import type { EnqueueRequest, EnqueueResponse, NodeTaskDTO, ProcessReceipt, RemoteTaskSpec } from "@drec/core";
+import type { FleetLink } from "./fleet-hub.js";
 
 export function registerBuiltinTransports(deps: {
   ffprobe: (file: string) => Promise<{ durationSec: number; startMs: number; endMs: number }>;
@@ -89,6 +90,8 @@ export function registerBuiltinTransports(deps: {
     procStatus(dataRoot: string, jobIds: string[]): ProcessReceipt[];
     procCancel?(dataRoot: string, jobIds: string[]): ProcessReceipt[];
   };
+  /** Fleet long connection (plans/042) for ssh workers; read per call, null → ssh only. */
+  fleet?: () => FleetLink | null;
 }): void {
   const taskRooms = deps.taskRooms ?? {};
   registerTransport("local", (cfg) =>
@@ -111,9 +114,13 @@ export function registerBuiltinTransports(deps: {
     }),
   );
   registerTransport("ssh", (cfg) =>
-    new SshTransport({ id: cfg.id, host: cfg.host!, dataRoot: cfg.dataRoot! }),
+    new SshTransport({ id: cfg.id, host: cfg.host!, dataRoot: cfg.dataRoot!, ...(deps.fleet ? { fleet: deps.fleet } : {}) }),
   );
   registerTransport("tailscale-ssh", (cfg) =>
-    new SshTransport({ id: cfg.id, host: cfg.host!, dataRoot: cfg.dataRoot! }),
+    new SshTransport({ id: cfg.id, host: cfg.host!, dataRoot: cfg.dataRoot!, ...(deps.fleet ? { fleet: deps.fleet } : {}) }),
   );
 }
+// Fleet long connection, master side (plans/042).
+export { type FleetLink } from "./fleet-hub.js";
+export { startFleetController, type FleetController } from "./fleet-controller.js";
+export { createProbeCache } from "./probe-cache.js";

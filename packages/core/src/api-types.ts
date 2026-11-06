@@ -520,7 +520,7 @@ export interface UploadProgressDTO {
 export interface NodeUploadStatusDTO {
   nodeId: string;
   /** prep = the upload-prep job; biliup = the upload job; blocked = the order cannot advance. */
-  phase: "prep" | "biliup" | "blocked";
+  phase: "prep" | "biliup" | "part-chain" | "blocked";
   /** proc-queue job state (pending/running/done/failed/uncertain/cancelled) or enqueue result. */
   state: string | null;
   /** biliup step: gate_wait / transfer / submit. */
@@ -1057,6 +1057,8 @@ export interface TaskDTO {
   anchorName: string | null;
   /** 是否真正在录视频(区分 running 但等待开播)。 */
   recording: boolean;
+  /** 判活闸门中:任务已启动、未开播,**未占用录制进程**(running 仍为 true)。旧后端无此字段 = false。 */
+  gated?: boolean;
   /**
    * 硬停收尾中(已发停止信号、进程尚未退出;rolling 任务在传末段,最长约 10 分钟)。
    * UI 用它显示「停止中」并禁用「启动」,避免超时返回后被误当成没停。

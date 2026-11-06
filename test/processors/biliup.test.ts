@@ -22,7 +22,7 @@ function files(n = 2): string[] {
 describe("biliup processor (plan 038 T08)", () => {
   it("appends one by one after creating P1 and returns the bv", async () => {
     const run = vi.fn(async (argv: string[]) => argv[2] === "upload" ? "BV1aaaaaaaaa" : "ok"); // issue-guard: allow (fake BV fixture)
-    const p = makeBiliupProcessor({ run, expectedDurationSec: 60, lookup: { run: async () => "[]" } });
+    const p = makeBiliupProcessor({ run, expectedDurationSec: 60, lookup: { run: async () => "[]", trustNo: true } });
     const r = await p.run(job(files(2)), ctx());
     expect(r.bv).toBe("BV1aaaaaaaaa"); // issue-guard: allow (fake BV fixture)
     expect(run).toHaveBeenCalledTimes(2);
@@ -58,11 +58,18 @@ describe("biliup processor (plan 038 T08)", () => {
         calls.push(u);
         return new Response(JSON.stringify({ code: 0, data: null }), { status: 200 });
       }
+      // issue #460: the configured 123 is a legacy section id inside season 500.
+      if (u.includes("/x2/creative/web/seasons")) {
+        return new Response(JSON.stringify({
+          code: 0,
+          data: { seasons: [{ season: { id: 500 }, sections: { sections: [{ id: 123 }] } }], total: 1 },
+        }), { status: 200 });
+      }
       return new Response(JSON.stringify({ code: -1 }), { status: 404 });
     }) as unknown as typeof fetch);
     try {
       const run = vi.fn(async (argv: string[]) => argv[2] === "upload" ? "BV1aaaaaaaaa" : "ok"); // issue-guard: allow (fake BV fixture)
-      const p = makeBiliupProcessor({ run, expectedDurationSec: 60, lookup: { run: async () => "[]" } });
+      const p = makeBiliupProcessor({ run, expectedDurationSec: 60, lookup: { run: async () => "[]", trustNo: true } });
       const c1 = ctx();
       await p.run(job(files(1), { cookies: login, seasonSectionId: 123 }), c1);
       expect(calls).toHaveLength(1);
@@ -101,7 +108,7 @@ describe("biliup processor (plan 038 T08)", () => {
     vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
     try {
       const run = vi.fn(async (argv: string[]) => argv[2] === "upload" ? "BV1aaaaaaaaa" : "ok"); // issue-guard: allow (fake BV fixture)
-      const p = makeBiliupProcessor({ run, expectedDurationSec: 60, lookup: { run: async () => "[]" } });
+      const p = makeBiliupProcessor({ run, expectedDurationSec: 60, lookup: { run: async () => "[]", trustNo: true } });
       const c = ctx() as unknown as { setState: ReturnType<typeof vi.fn> };
       c.setState = vi.fn((patch: { seasonState?: string }) => {
         if (patch.seasonState === "pending") throw new Error("EIO season write");
@@ -121,7 +128,7 @@ describe("biliup processor (plan 038 T08)", () => {
     vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
     try {
       const run = vi.fn(async (argv: string[]) => argv[2] === "upload" ? "BV1aaaaaaaaa" : "ok"); // issue-guard: allow (fake BV fixture)
-      const p = makeBiliupProcessor({ run, expectedDurationSec: 60, lookup: { run: async () => "[]" } });
+      const p = makeBiliupProcessor({ run, expectedDurationSec: 60, lookup: { run: async () => "[]", trustNo: true } });
       const c = ctx() as unknown as { setState?: unknown };
       c.setState = undefined;
       const r = await p.run(job(files(1), { seasonSectionId: 123 }), c as never);
@@ -134,15 +141,22 @@ describe("biliup processor (plan 038 T08)", () => {
 
   it("no-draft proof yes -> refuse to create; unknown -> refuse (manual)", async () => {
     const run = vi.fn(async () => "BV1ccccccccc"); // issue-guard: allow (fake BV fixture)
-    const yes = makeBiliupProcessor({ run, expectedDurationSec: 60, lookup: { run: async (a: string[]) => a.includes("--pubed") ? JSON.stringify([{ bvid: "BV1ccccccccc", title: "t", duration: 60 }]) : "[]" } }); // issue-guard: allow (fake BV fixture)
+    const yes = makeBiliupProcessor({ run, expectedDurationSec: 60, lookup: { run: async (a: string[]) => a[0] === "show" ? JSON.stringify({ archive: { bvid: "BV1ccccccccc", title: "t", ctime: Math.floor(Date.now() / 1000), duration: 60 } }) : a.includes("--pubed") ? JSON.stringify([{ bvid: "BV1ccccccccc", title: "t", duration: 60 }]) : "[]" } }); // issue-guard: allow (fake BV fixture)
     await expect(yes.run(job(files(1)), ctx())).rejects.toThrow(/duplicate/);
     const unknown = makeBiliupProcessor({ run, expectedDurationSec: 60, lookup: { run: async () => { throw new Error("x"); } } });
     await expect(unknown.run(job(files(1)), ctx())).rejects.toThrow(/cannot confirm/);
   });
 
+  it("default archive lookup does not trust absence, so create stays fail-closed", async () => {
+    const run = vi.fn(async () => "BV1ccccccccc"); // issue-guard: allow (fake BV fixture)
+    const p = makeBiliupProcessor({ run, expectedDurationSec: 60, lookup: { run: async () => "[]", log: () => {} } });
+    await expect(p.run(job(files(1)), ctx())).rejects.toThrow(/cannot confirm/);
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("an uncertain append outcome is marked ambiguous and not retried", async () => {
     const run = vi.fn(async (argv: string[]) => { if (argv[2] === "upload") return "BV1ddddddddd"; throw new Error("connection error start=1 end=2 uploader.rs:3"); }); // issue-guard: allow (fake BV fixture)
-    const p = makeBiliupProcessor({ run, expectedDurationSec: 60, lookup: { run: async () => "[]" } });
+    const p = makeBiliupProcessor({ run, expectedDurationSec: 60, lookup: { run: async () => "[]", trustNo: true } });
     await expect(p.run(job(files(2)), ctx())).rejects.toThrow(/无法确认是否已提交|线路/);
     expect(run.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(run.mock.calls.filter((c) => c[0].includes("append")).length).toBeGreaterThanOrEqual(1);
@@ -205,7 +219,7 @@ describe("biliup processor (plan 038 T08)", () => {
       return "BV1hhhhhhhhh"; // issue-guard: allow (fake BV fixture)
     });
     const countParts = vi.fn(async () => n);
-    const lookup = { run: async () => "[]" };
+    const lookup = { run: async () => "[]", trustNo: true };
     const r = await makeBiliupProcessor({ run, countParts, lookup, expectedDurationSec: 60 }).run(job(files(2)), ctx());
     expect(r.bv).toBe("BV1hhhhhhhhh"); // issue-guard: allow (fake BV fixture)
     // The append reached the server although the client saw an error: it must not be retried on another line.
@@ -224,7 +238,7 @@ describe("biliup processor node wiring (plan 038 T15b)", () => {
   it("creating P1 uploads the first part file (regression: the create command had no file)", async () => {
     const run = vi.fn(async (argv: string[]) => argv[2] === "upload" ? "BV1iiiiiiiii" : "ok"); // issue-guard: allow (fake BV fixture)
     const fs = files(2);
-    await makeBiliupProcessor({ run, expectedDurationSec: 60, lookup: { run: async () => "[]" } }).run(job(fs), ctx());
+    await makeBiliupProcessor({ run, expectedDurationSec: 60, lookup: { run: async () => "[]", trustNo: true } }).run(job(fs), ctx());
     expect(run.mock.calls[0]![0]).toContain(fs[0]);
     expect(run.mock.calls[1]![0]).toContain(fs[1]);
   });
@@ -234,7 +248,7 @@ describe("biliup processor node wiring (plan 038 T15b)", () => {
     const keys: string[] = [];
     const gate = { run: async <T>(k: string, fn: () => Promise<T>) => { keys.push(k); return fn(); } };
     const p = makeBiliupProcessor({
-      run, expectedDurationSec: 60, lookup: { run: async () => "[]" },
+      run, expectedDurationSec: 60, lookup: { run: async () => "[]", trustNo: true },
       gate: () => gate, accountKey: (c) => `acct:${c}`, localCookies: () => "/node/cookies.json",
     });
     await p.run(job(files(3), { cookies: "/master/cookies.json" }), ctx());

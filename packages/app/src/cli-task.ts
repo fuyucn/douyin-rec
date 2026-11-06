@@ -67,7 +67,10 @@ import { TaskDaemon } from "./daemon.js";
 import { TaskManager } from "./task-manager.js";
 import { NodeRecordSpawner } from "./process/spawner.js";
 import { makeRollingUploadHookFactory } from "./rolling-upload.js";
+import { rollingQueueModeEnabled } from "./rolling-queue.js";
 import { makeNodeRemuxHookFactory, resolveNodeOutputFormat } from "./node-remux.js";
+import { shouldDecideUploadOwner, uploadOwnerForTask } from "./hub-rule-match.js";
+import { enqueueHubOwnedSkip } from "./hub-owner.js";
 import { effectiveHubConfig, makeNewBroadcastGate } from "./disk-gate.js";
 import { effectiveTimezone } from "./timezone.js";
 
@@ -126,6 +129,19 @@ export function buildSessionForTask(
     enabled: task.rollingEffective, // 只读 master 派生的生效值(issue #40)
     platform: task.platform,
     roomSlug: platformForRoom(task.room).extractRoomSlug(task.room),
+    // Plan 046 PR6 (方案 A): settings switch, default off => recorder-side upload path unchanged.
+    queueMode: rollingQueueModeEnabled(),
+    taskId: task.id,
+    // plan 046 PR7: master-owned rooms keep a skipped(hub-owned) timeline row per sealed part.
+    // Same gate as the production record path (rework addendum 10): only a hub-managed task or a hub
+    // master decides ownership; a machine with leftover rule files keeps uploading on the node.
+    ...(shouldDecideUploadOwner(task, process.env.DOUYIN_REC_HUB_MASTER === "1")
+      ? { uploadOwner: () => uploadOwnerForTask(task, rootHubDir()) }
+      : {}),
+    enqueueHubSkipped: (info) => enqueueHubOwnedSkip({ ...info, taskId: task.id }),
+    // Queue-mode enqueue/metadata failures must reach the notifier, exactly like the serve-spawned
+    // record path (cli.ts). Without it they are log-only and a lost part is invisible.
+    notify: (message: string) => { void notifier.notify({ kind: "error", stage: "边录边传", message }).catch(() => {}); },
   });
   // 节点侧原地替换容器(issue #137):与 spawn 路径共用同一个判定点;rolling 生效时恒 original(互斥)。
   // 前台 `task run` 不做崩溃接管(接管在每次 `record` 子进程启动时做,会扫同一目录)。
@@ -281,6 +297,11 @@ export interface HubStarter {
     log: (msg: string) => void;
     warn: (msg: string) => void;
   }): Promise<(() => void) | undefined>;
+  /**
+   * Fleet long connection (plans/042): hand an http `upgrade` to the master's fleet hub. Returns false when
+   * the path is not the fleet route or the hub is off (serve then destroys the socket).
+   */
+  fleetUpgrade?: (req: import("node:http").IncomingMessage, socket: import("node:stream").Duplex, head: Buffer) => boolean;
   /** 连接测试(cli L5 用 orchestrator getTransport + listInventory 实现)。 */
   testWorker?: (cfg: { kind: string; host?: string; dataRoot?: string; id?: string; apiUrl?: string }) => Promise<import("@drec/core").WorkerTestResult>;
   /** 批量存活探针(cli L5 用 orchestrator scoped transport ping 实现)。省略 → status 端点返回 []。 */

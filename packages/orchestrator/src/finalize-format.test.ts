@@ -409,6 +409,25 @@ describe("pollFollowups:对账轮询回执", () => {
     expect(events).toHaveLength(0);
   });
 
+  it("回执查询报错(队列状态未知)→ 本轮跳过:不写 missing、不告警,下轮继续(issue #470)", async () => {
+    const ps = vi.fn(async () => {
+      throw new Error("_proc-status 失败: proc-queue status unavailable: no such table: proc_jobs");
+    });
+    const s = await seed(ps as never);
+    const before = parseFollowups(s.ledger.getFollowups(KEY))!;
+    const events: NotifyEvent[] = [];
+    const poll = () => pollFollowups({ ledger: s.ledger, transports: s.transports, notify: (e) => events.push(e), now: () => T0 });
+    await poll();
+    await poll();
+    const after = parseFollowups(s.ledger.getFollowups(KEY))!;
+    // The round is skipped: no state transition (in particular never `missing`) and no alert.
+    expect(after.items.map((i) => i.state)).toEqual(before.items.map((i) => i.state));
+    expect(after.items.some((i) => i.state === "missing")).toBe(false);
+    expect(after.notes.join("\n")).not.toContain("回执缺席");
+    expect(events).toHaveLength(0);
+    expect(ps).toHaveBeenCalledTimes(2); // keeps polling on later rounds
+  });
+
   it("节点回滚(_proc-status 未知命令 → ProcUnsupported):标注、停止轮询、job 状态不变、不进 needs_manual", async () => {
     const ps = vi.fn(async () => { throw new ProcUnsupported(); });
     const s = await seed(ps as never);

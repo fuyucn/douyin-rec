@@ -48,4 +48,10 @@ export interface ApplyTasksResult {
    * - `mass-shrink`    期望骤减超过阈值 → 只停用不删除
    */
   rejected?: string;
+  /**
+   * Issue #480: delivered specs that failed validation and were skipped this round (never applied, never
+   * treated as "absent from the desired set"). Absent when the batch was clean, so old masters see the
+   * unchanged success shape.
+   */
+  skipped?: Array<{ index: number; room?: string; reason: string }>;
 }

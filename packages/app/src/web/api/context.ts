@@ -167,7 +167,9 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
           if (p.steps?.burnLivechat !== false) steps.push("livechat");
           let lastRun: { state: string; bv: string | null } | null = null;
           if (deps.syncDbPath) {
-            const r = listHubJobs(deps.syncDbPath, { room: rule.key, limit: 1 }).jobs[0];
+            // Issue #481: ledger rows are keyed by the TASK's room (streamKey), not by the rule filename stem.
+            // Using rule.key would lose last-run info for a divergent rule.
+            const r = listHubJobs(deps.syncDbPath, { room: hubStore.hubKey(platform.id, roomSlug), limit: 1 }).jobs[0];
             if (r) lastRun = { state: r.state, bv: r.bv };
           }
           hubRule = {
@@ -194,6 +196,8 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
       ...(stopping ? { stopping } : {}),
       anchorName: manager.getAnchorName(t.id) ?? t.anchorName,
       recording: manager.isRecording(t.id),
+      // Waiting behind the live gate: running but no recorder process is held (see TaskManager).
+      ...(manager.isGated?.(t.id) ? { gated: true } : {}),
       ...(rollingStatus ? { rollingApplied: rollingStatus.applied, ...(rollingStatus.drift ? { rollingPending: true } : {}) } : {}),
       // 空数组不下发:前端 recordingWorkers?.length 判定依赖它。
       ...(workers && workers.length > 0 ? { recordingWorkers: workers } : {}),
@@ -257,11 +261,10 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
 
   // hub 规则 → DTO:补 anchorName(若有同 roomSlug 的录制任务,显示其主播名/任务名)。
   const hubRuleView = (r: hubStore.HubRule): HubRuleDTO => {
+    // Issue #481: a bound rule belongs to its source task regardless of the filename stem; matching by id
+    // keeps the anchor name / task name / rolling display for divergent rules (same identity as sync).
     const srcTask = r.recording?.sourceTaskId
-      ? store.listTasks().find(
-          (task) => task.id === r.recording!.sourceTaskId &&
-            platformForRoom(task.room).extractRoomSlug(task.room) === r.roomSlug,
-        ) ?? null
+      ? store.listTasks().find((task) => task.id === r.recording!.sourceTaskId) ?? null
       : null;
     const t = srcTask ?? store.listTasks().find(
       (task) => platformForRoom(task.room).extractRoomSlug(task.room) === r.roomSlug,

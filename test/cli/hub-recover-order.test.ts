@@ -12,7 +12,7 @@ afterEach(() => env.cleanup());
 
 const ORDER = "douyin:1:2026-10-17";
 const BV = "BV1abcdefghi"; // issue-guard: allow (fake BV fixture)
-const noDraft: RecoverDeps = { lookup: { run: async () => "" } };
+const noDraft: RecoverDeps = { lookup: { run: async () => "", trustNo: true } };
 const roots = (): { allowedRoots: string[] } => ({ allowedRoots: [env.root] });
 
 /** Seed generation 1: prep (seq 1) then a three-part biliup row (seq 2) bound to it. */
@@ -183,6 +183,17 @@ describe("--restart", () => {
     failUpload(s);
     const failing: RecoverDeps = { lookup: { run: async () => { throw new Error("net"); } } };
     const p = await planRecoverOrder(s, { orderKey: ORDER, mode: "restart" }, failing);
+    expect(p.ok).toBe(false);
+    expect(p.refusal).toMatch(/cannot confirm no draft/);
+  });
+
+  it("refuses restart by default when absence is not trusted", async () => {
+    const s = env.open();
+    seed(s);
+    endPrep(s, "done");
+    failUpload(s);
+    const conservative: RecoverDeps = { lookup: { run: async () => "", log: () => {} } };
+    const p = await planRecoverOrder(s, { orderKey: ORDER, mode: "restart" }, conservative);
     expect(p.ok).toBe(false);
     expect(p.refusal).toMatch(/cannot confirm no draft/);
   });

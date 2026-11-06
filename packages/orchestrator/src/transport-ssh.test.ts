@@ -279,6 +279,14 @@ describe("SshTransport", () => {
     expect(cmdStr).toContain("custom-node");
     expect(cmdStr).toContain("_inventory");
   });
+  it("hidden-command args are single-quoted on the ssh line (shell never interprets them)", async () => {
+    const calls: string[] = [];
+    const t = new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec", rsync: async () => {},
+      run: async (argv) => { calls.push(argv.join(" ")); return "true\n"; } });
+    await t.isDone("a'b; rm -rf /");
+    expect(calls[0]).toBe("node /data/drec/dist/douyin-rec.mjs _is-done /data/drec 'a'\\''b; rm -rf /'");
+  });
+
   it("isDone：远端 _is-done 返回 true → 已收播", async () => {
     const t = new SshTransport({ id: "vps", host: "h", dataRoot: "~/drec",
       run: async () => "true", rsync: async () => {} });
@@ -304,6 +312,28 @@ describe("SshTransport", () => {
     expect(cmdStr).toContain("/data/drec");
     expect(cmdStr).toContain("411");
     expect(cmdStr).not.toContain("ffmpeg");
+  });
+  it("isDone：新格式心跳(含 finalizing)缓存命中 → 不走命令;房间在 finalizing → false(#456)", async () => {
+    const run = vi.fn(async () => "true\n");
+    const link = {
+      supports: () => false, cached: () => null, request: async () => { throw new Error("no"); },
+      recordingRooms: () => new Set(["rec"]), finalizingRooms: () => new Set(["fin"]),
+    };
+    const t = new SshTransport({ id: "n", host: "h", dataRoot: "/d", rsync: async () => {}, run, fleet: () => link });
+    expect(await t.isDone("fin")).toBe(false);
+    expect(await t.isDone("rec")).toBe(false);
+    expect(await t.isDone("other")).toBe(true);
+    expect(run).not.toHaveBeenCalled();
+  });
+  it("isDone：旧格式心跳(无 finalizing)不能证明收播 → 回落 is-done 命令", async () => {
+    const run = vi.fn(async () => "false\n");
+    const link = {
+      supports: () => false, cached: () => null, request: async () => { throw new Error("no"); },
+      recordingRooms: () => new Set<string>(), finalizingRooms: () => null,
+    };
+    const t = new SshTransport({ id: "n", host: "h", dataRoot: "/d", rsync: async () => {}, run, fleet: () => link });
+    expect(await t.isDone("411")).toBe(false);
+    expect(run).toHaveBeenCalledTimes(1);
   });
   it("isDone：支持 remoteNode 覆盖", async () => {
     const capturedArgv: string[][] = [];
@@ -476,7 +506,7 @@ describe("SshTransport.taskLogs(F3:master 代查节点日志)", () => {
     const calls: string[] = [];
     const t = mkT(async (argv) => { calls.push(argv.join(" ")); return JSON.stringify({ lines: ["x", "y"] }); });
     await expect(t.taskLogs(7, 200)).resolves.toEqual({ lines: ["x", "y"] });
-    expect(calls[0]).toContain("_task-logs /data/drec 7 200");
+    expect(calls[0]).toContain("_task-logs /data/drec '7' '200'");
 
     const t2 = mkT(async () => JSON.stringify({ lines: [], error: "serve 未起" }));
     await expect(t2.taskLogs(7, 50)).resolves.toEqual({ lines: [], error: "serve 未起" });

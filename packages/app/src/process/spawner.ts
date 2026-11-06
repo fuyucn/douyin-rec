@@ -78,6 +78,12 @@ export interface NodeRecordSpawnerOpts {
    */
   douyinApiMode?: () => string | undefined;
   /**
+   * Serve-level hub flag (getter, read at spawn time). True -> the child runs with DOUYIN_REC_HUB_MASTER=1,
+   * which lets it take upload ownership for a rule-bound (not hub-managed) room. Without it a machine that
+   * only has rule files keeps uploading on the node (plan 046 PR6 rollback finding).
+   */
+  hubMaster?: () => boolean;
+  /**
    * 每类提醒的 webhook 开关(getter,每次 spawn 时读取 settings 表)。经
    * `DREC_WEBHOOK_TOGGLES` 环境变量注入子进程,子进程发 Discord 前按类型过滤。
    * 省略=不注入,子进程全开(向后兼容)。
@@ -122,6 +128,7 @@ export class NodeRecordSpawner implements Spawner {
   private readonly onLog: ((msg: string) => void) | undefined;
   private readonly killTimeoutMs: number | undefined;
   private readonly rollingKillTimeoutMs: number;
+  private readonly hubMaster: (() => boolean) | undefined;
 
   constructor(opts: NodeRecordSpawnerOpts = {}) {
     this.command = opts.command ?? process.execPath;
@@ -134,6 +141,7 @@ export class NodeRecordSpawner implements Spawner {
     this.onLog = opts.onLog;
     this.killTimeoutMs = opts.killTimeoutMs;
     this.rollingKillTimeoutMs = opts.rollingKillTimeoutMs ?? ROLLING_STOP_GRACE_MS;
+    this.hubMaster = opts.hubMaster;
   }
 
   spawn(task: Task): ChildRecorderProcess {
@@ -165,14 +173,18 @@ export class NodeRecordSpawner implements Spawner {
     const apiMode = this.douyinApiMode?.()?.trim();
     const toggles = this.webhookToggles?.();
     const zeroDiskEnv = zeroDiskDeliveryEnv(task);
+    // Serve-level hub flag: only a hub master may take upload ownership for a rule-bound room that is not
+    // hub-managed (plan 046 PR6 rollback finding). Env, like the zero-disk delivery object.
+    const hubMaster = this.hubMaster?.() === true;
     const env =
-      mesio || apiMode || toggles || zeroDiskEnv
+      mesio || apiMode || toggles || zeroDiskEnv || hubMaster
         ? {
             ...process.env,
             ...(mesio ? { MESIO_PATH: mesio } : {}),
             ...(apiMode ? { DOUYIN_REC_API_MODE: apiMode } : {}),
             ...(toggles ? { [WEBHOOK_TOGGLES_ENV]: JSON.stringify(toggles) } : {}),
             ...(zeroDiskEnv ?? {}),
+            ...(hubMaster ? { DOUYIN_REC_HUB_MASTER: "1" } : {}),
           }
         : undefined;
     return new ChildRecorderProcess({

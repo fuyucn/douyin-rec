@@ -37,6 +37,10 @@ export interface ManagerLike {
   getAnchorName(id: number): string | null;
   /** 是否真正在录视频（区分「录制中」vs running 但「等待开播中」）。 */
   isRecording(id: number): boolean;
+  /** Waiting behind the live gate (no child process held). Optional: older mocks omit it. */
+  isGated?(id: number): boolean;
+  /** Spawn every gated task now (liveGate turned off); returns how many. */
+  releaseGates?(): number;
   /** 边录边传「实际生效 vs 期望」(issue #89);不在跑 → null。可选:旧的测试替身可不实现。 */
   rollingStatus?(id: number): { applied: boolean; desired: boolean; drift: boolean } | null;
   /** Per-task captured log lines (oldest → newest) for the 日志 console. */
@@ -249,6 +253,13 @@ export interface UpdateTaskInput {
   outputFormat?: string;
 }
 
+/**
+ * POST /api/rooms 的入参:与 PUT 同一份 `RoomPayload`,但 `recording.room` **必填** ——
+ * 新建必须能从房间地址判定平台与房间号;其余字段可选(缺省 = store 默认值)。
+ * 类型只放 app 域,core 不新增导出(避免契约面扩大)。
+ */
+export type CreateRoomInput = RoomPayload & { recording: { room: string } };
+
 /** Public status of one platform cookie (never leaks the raw value). */
 export interface CookieStatus {
   platform: string;
@@ -310,6 +321,10 @@ export interface Api {
   /** POST /api/douyin-api-mode { mode } — 设抖音 API 模式(balance/web/webHTML/mobile/random);
    *  非法值回落默认 balance。改设置下次 spawn 生效(经 env 注入录制子进程)。 */
   setDouyinApiMode(input: { mode?: string }): ApiResult;
+  /** GET /api/live-gate — 判活闸门开关(settings.liveGate;默认开)。 */
+  getLiveGate(): ApiResult;
+  /** POST /api/live-gate { enabled } — 开关判活闸门;关闭时闸门中的任务立即启动录制进程(released=数量)。 */
+  setLiveGate(input: { enabled?: boolean }): ApiResult;
   /** GET /api/timezone — 当前生效时区(settings.timezone,留空=默认)+ 默认值。 */
   getTimezone(): ApiResult;
   /** POST /api/timezone { timezone } — 设时区(config 驱动,覆盖 host 环境变量,立即生效不用重启);
@@ -335,6 +350,8 @@ export interface Api {
   listRooms(): ApiResult;
   /** GET /api/rooms/:key — 单个房间;两半都没有 → 404。 */
   getRoom(key: string): ApiResult;
+  /** POST /api/rooms — 一次新建两半(录制任务默认停用);重复房间 409,节点上带 processing 400。 */
+  createRoom(input: CreateRoomInput): ApiResult;
   /** PUT /api/rooms/:key — 一次改两半(各自可选);第二步失败回滚第一步,不留半成功。 */
   updateRoom(key: string, input: RoomPayload): ApiResult;
   /** DELETE /api/rooms/:key — 删除整个房间(录制任务 + hub 规则),含与两个旧端点一致的守卫。 */

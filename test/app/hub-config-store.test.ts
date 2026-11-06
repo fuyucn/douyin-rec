@@ -38,6 +38,35 @@ describe("hub-config-store(T15 resources)", () => {
     expect(r.maxNetParallel).toBe(DEFAULT_HUB_RESOURCES.maxNetParallel);
   });
 
+
+  it("内联 JSON 来源 → 用它自己的值(不是根文件/默认值,issue #473)", () => {
+    writeFileSync(cfg, JSON.stringify({ resources: { maxCpuParallel: 7 } }), "utf-8");
+    const r = readResources({ json: JSON.stringify({ resources: { maxCpuParallel: 4, uploadRateLimit: 9 } }) });
+    expect(r.maxCpuParallel).toBe(4);
+    expect(r.uploadRateLimit).toBe(9);
+    expect(r.minBurnFreeMemMB).toBe(DEFAULT_HUB_RESOURCES.minBurnFreeMemMB);
+  });
+
+  it("settings 来源(只有 json、没有 path)→ 用它自己的值", () => {
+    const r = readResources({ json: JSON.stringify({ resources: { maxConcurrentPipelines: 5 } }) });
+    expect(r.maxConcurrentPipelines).toBe(5);
+  });
+
+  it("文件来源({json, path} 都给了)→ 与只给 path 完全一致", () => {
+    writeFileSync(cfg, JSON.stringify({ resources: { maxNetParallel: 3 } }), "utf-8");
+    expect(readResources({ json: readFileSync(cfg, "utf-8"), path: cfg })).toEqual(readResources(cfg));
+  });
+
+  it("json 优先于 path(解析出的那份才是实际生效的)", () => {
+    writeFileSync(cfg, JSON.stringify({ resources: { maxNetParallel: 1 } }), "utf-8");
+    expect(readResources({ json: JSON.stringify({ resources: { maxNetParallel: 6 } }), path: cfg }).maxNetParallel).toBe(6);
+  });
+
+  it("坏的内联 JSON → 默认值,不抛", () => {
+    expect(readResources({ json: "{ not json" })).toEqual(DEFAULT_HUB_RESOURCES);
+    expect(readResources({ json: "null" })).toEqual(DEFAULT_HUB_RESOURCES);
+  });
+
   it("写 resources **不破坏** workers / workerSeq / 自定义字段", () => {
     writeFileSync(cfg, JSON.stringify({
       workerSeq: 2,

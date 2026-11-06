@@ -184,6 +184,64 @@ describe("uploadChunks", () => {
   });
 });
 
+describe("chunk failure reporting (#461)", () => {
+  it("PUT 重试耗尽:onChunkFailure 带块号与最后一次 HTTP 状态,错误消息也带状态", async () => {
+    fakeCookies();
+    const mod = await import("./upos-stream.js");
+    const { impl } = makeFetch({ failChunk: 2 });
+    const session = await mod.preupload({ cookiesPath: COOKIES, fileName: "t.mkv", totalSize: 2048, fetchImpl: impl });
+    const failures: Array<{ chunk: number; httpStatus?: number }> = [];
+    const err = await mod.uploadChunks({
+      session, totalSize: 2048, fetchImpl: impl, retries: 0,
+      onChunkFailure: (f: { chunk: number; httpStatus?: number }) => failures.push(f),
+      readChunk: async (_i: number, s: number) => new Uint8Array(s),
+    }).catch((e: Error) => e);
+    expect(failures).toEqual([{ chunk: 1, httpStatus: 500 }]);
+    expect((err as Error).message).toMatch(/分块 1 上传失败.*HTTP 500/);
+  });
+
+  it("网络异常(无 HTTP 状态):块号回传,httpStatus 缺席", async () => {
+    fakeCookies();
+    const mod = await import("./upos-stream.js");
+    const { impl } = makeFetch();
+    const session = await mod.preupload({ cookiesPath: COOKIES, fileName: "t.mkv", totalSize: 1024, fetchImpl: impl });
+    // 先成功传一次,把 upload_id 缓存到会话上;再换坏 fetch,只让 PUT 本身失败。
+    await mod.uploadChunks({ session, totalSize: 1024, fetchImpl: impl, readChunk: async () => new Uint8Array(1024) });
+    const failing = (async () => { throw new Error("socket hung up"); }) as unknown as typeof fetch;
+    const failures: Array<{ chunk: number; httpStatus?: number }> = [];
+    await expect(mod.uploadChunks({
+      session, totalSize: 1024, fetchImpl: failing, retries: 0,
+      onChunkFailure: (f: { chunk: number; httpStatus?: number }) => failures.push(f),
+      readChunk: async () => new Uint8Array(1024),
+    })).rejects.toThrow(/分块 0 上传失败/);
+    expect(failures).toEqual([{ chunk: 0, error: expect.stringContaining("socket hung up") }]);
+  });
+
+  it("超时/网络错误:回传错误名+消息;每轮尝试重置,500 后超时不再报 HTTP 500", async () => {
+    fakeCookies();
+    const mod = await import("./upos-stream.js");
+    const { impl } = makeFetch();
+    const session = await mod.preupload({ cookiesPath: COOKIES, fileName: "t.mkv", totalSize: 1024, fetchImpl: impl });
+    // 先成功传一次,把 upload_id 缓存到会话上;再换坏 fetch 只让 PUT 失败。
+    await mod.uploadChunks({ session, totalSize: 1024, fetchImpl: impl, readChunk: async () => new Uint8Array(1024) });
+    let calls = 0;
+    const flaky = (async () => {
+      if (++calls === 1) return new Response("boom", { status: 500 });
+      const e = new Error("The operation was aborted due to timeout");
+      e.name = "TimeoutError";
+      throw e;
+    }) as unknown as typeof fetch;
+    const failures: Array<{ chunk: number; httpStatus?: number; error?: string }> = [];
+    await expect(mod.uploadChunks({
+      session, totalSize: 1024, fetchImpl: flaky, retries: 1,
+      onChunkFailure: (f: { chunk: number; httpStatus?: number; error?: string }) => failures.push(f),
+      readChunk: async () => new Uint8Array(1024),
+    })).rejects.toThrow(/分块 0 上传失败.*TimeoutError/);
+    expect(failures).toEqual([{ chunk: 0, error: expect.stringContaining("TimeoutError") }]);
+    expect(failures[0]?.httpStatus).toBeUndefined(); // 第一轮的 500 已按轮重置,不再误报
+  });
+});
+
 describe("complete", () => {
   it("parts 原样提交,带 name/uploadId/biz_id/output", async () => {
     fakeCookies();
