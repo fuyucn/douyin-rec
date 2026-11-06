@@ -43,9 +43,6 @@ export default defineConfig({
     include: ["test/**/*.test.ts", "packages/**/*.test.ts"],
     exclude: ["**/node_modules/**", "**/dist/**", "packages/web/**"],
     setupFiles: ["./test/setup.ts"],
-    // Build dist once from the current source so CLI-spawning tests cannot pass on a stale artifact
-    // (see test/global-setup.ts). Single pass: no race with skipIf(existsSync(dist)) guards.
-    globalSetup: ["./test/global-setup.ts"],
   },
   // workspace 包别名(随 packages/ 增长在此登记,让 vitest 解析 @drec/*)。
   resolve: {

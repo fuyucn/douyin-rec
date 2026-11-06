@@ -10,16 +10,40 @@
  *     including legacy streamUploadSpool=false rows;
  *   - test/cli/cli-flags.test.ts: rejectsNoSpoolFlag(full/FULL/empty/undefined) is false.
  * Rejection happens after loadConfig and before platformForRoom/getStream, so the fake room
- * never reaches the network. `dist/` is built once from the current source by test/global-setup.ts,
- * so this always exercises today's cli.ts wiring rather than a leftover artifact.
+ * never reaches the network.
+ *
+ * The CLI bundle is built into a private temp directory (DREC_BUNDLE_MAIN_OUT) on every run, from
+ * the current source. Sharing dist/ with other test files was rejected: deleting it broke their
+ * `describe.skipIf(existsSync(dist))` guards, and keeping it let a reverted wiring fix pass against
+ * a stale artifact. A per-run path has neither problem and needs no lock.
  */
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const ROOT = join(__dirname, "..", "..");
-const ENTRY = join(ROOT, "dist", "douyin-rec.mjs");
 const ROOM = "https://live.douyin.com/1";
+/** Private per-run bundle: never the shared dist/, so no other test file can observe it. */
+let ENTRY = "";
+
+beforeAll(() => {
+  const dir = mkdtempSync(join(tmpdir(), "drec-cli-entry-"));
+  ENTRY = join(dir, "douyin-rec.mjs");
+  // ~200ms locally. DREC_BUNDLE_MAIN_OUT also tells esbuild to stop after the main bundle
+  // (no TUI, no launcher), so this touches nothing under dist/.
+  execSync("pnpm bundle", {
+    cwd: ROOT,
+    stdio: "pipe",
+    timeout: 120_000,
+    env: { ...process.env, DREC_BUNDLE_MAIN_OUT: ENTRY },
+  });
+}, 120_000);
+
+afterAll(() => {
+  if (ENTRY) rmSync(join(ENTRY, ".."), { recursive: true, force: true });
+});
 
 interface Result {
   code: number | null;
