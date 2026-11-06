@@ -19,15 +19,17 @@ export function homeTarget(hubEnabled: boolean | null): "/rooms" | "/tasks" | nu
 }
 
 /**
- * Rooms / Queue / Nodes need master-only endpoints (`/api/hub/*`, incl. the hub change stream that
- * answers 503 on a worker), so they only show when hub is enabled. Tasks and Hub remain available
- * as legacy routes, but master navigation now uses Rooms as the one-stop entry; Queue is the only
- * remaining advanced view. Nodes is a first-class master page beside Rooms.
+ * Queue reads local `/api/proc/active` on every node, so it is primary for both roles. Rooms,
+ * Nodes, and Stats need master-only endpoints (`/api/hub/*`) and only show when hub is enabled;
+ * Tasks remains the worker home, while legacy Tasks/Hub routes stay directly addressable.
  */
 export function navSections(hubEnabled: boolean): NavSections {
   if (!hubEnabled) {
     return {
-      primary: [{ to: "/", labelKey: "nav.tasksList", end: true }],
+      primary: [
+        { to: "/", labelKey: "nav.tasksList", end: true },
+        { to: "/queue", labelKey: "nav.queue", end: true },
+      ],
       advanced: [],
     };
   }
@@ -35,8 +37,9 @@ export function navSections(hubEnabled: boolean): NavSections {
     primary: [
       { to: "/rooms", labelKey: "nav.rooms" },
       { to: "/nodes", labelKey: "nav.nodes" },
+      { to: "/queue", labelKey: "nav.queue", end: true },
       { to: "/stats", labelKey: "nav.stats" },
     ],
-    advanced: [{ to: "/queue", labelKey: "nav.queue", end: true }],
+    advanced: [],
   };
 }

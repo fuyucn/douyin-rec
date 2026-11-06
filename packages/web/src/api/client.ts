@@ -46,9 +46,10 @@ import type {
   RoomDTO,
   StatsDTO,
   RoomPayload,
+  ProcActiveDTO,
   HubResources,
 } from "@drec/contracts";
-export type { Task, TaskDetail, TaskRuntime, CookieStatus, BiliupAuthStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobNodeStateDTO, HubJobCandidateDTO, HubJobEventDTO, HubJobsDTO, HubQueueDTO, RollingDeliveryDTO, QueueItemDTO, NodeUploadStatusDTO, HubPoolSnapshotDTO, HubBlockedBroadcastDTO, QueuePhase, HubJobStepDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, NotifWebhookToggles, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult, WorkerStatus, NodeTasksDTO, NodeTaskLogsDTO, RoomDTO, RoomPayload, HubResources, StatsDTO };
+export type { Task, TaskDetail, TaskRuntime, CookieStatus, BiliupAuthStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobNodeStateDTO, HubJobCandidateDTO, HubJobEventDTO, HubJobsDTO, HubQueueDTO, RollingDeliveryDTO, QueueItemDTO, NodeUploadStatusDTO, HubPoolSnapshotDTO, HubBlockedBroadcastDTO, QueuePhase, HubJobStepDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, NotifWebhookToggles, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult, WorkerStatus, NodeTasksDTO, NodeTaskLogsDTO, RoomDTO, RoomPayload, HubResources, ProcActiveDTO, StatsDTO };
 
 /** POST /api/login/qr → start a QR-login session. */
 export interface QrStart {
@@ -243,6 +244,8 @@ export const api = {
 
   // ── 版本号(About)──────────────────────────────────────────────────────────
   getVersion: (): Promise<{ version: string }> => request("GET", "/api/version"),
+
+  getProcActive: (): Promise<ProcActiveDTO> => request("GET", "/api/proc/active"),
 
   // ── mesio 二进制路径 ─────────────────────────────────────────────────────────
   // mesioPath = 用户覆盖值(空=用默认);default = 留空时实际会用的路径(供占位符提示)。

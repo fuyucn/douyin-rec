@@ -4,16 +4,21 @@ import { join } from "node:path";
 import { homeTarget, navSections } from "../../packages/web/src/lib/nav.js";
 
 describe("navSections", () => {
-  it("worker (no hub): tasks only — rooms/hub/queue need master-only endpoints", () => {
+  it("worker (no hub): tasks and the local queue are primary; advanced is empty", () => {
     const nav = navSections(false);
-    expect(nav.primary.map((i) => i.to)).toEqual(["/"]);
+    expect(nav.primary.map((i) => i.to)).toEqual(["/", "/queue"]);
+    expect(nav.primary.find((i) => i.to === "/queue")?.end).toBe(true);
     expect(nav.advanced).toEqual([]);
   });
-  it("master: rooms and nodes primary; queue is the only advanced item", () => {
+  it("master: rooms, nodes, queue, and stats are primary; advanced is empty", () => {
     const nav = navSections(true);
-    expect(nav.primary.map((i) => i.to)).toEqual(["/rooms", "/nodes", "/stats"]);
-    expect(nav.advanced.map((i) => i.to)).toEqual(["/queue"]);
-    expect(nav.advanced[0]?.end).toBe(true);
+    expect(nav.primary.map((i) => i.to)).toEqual(["/rooms", "/nodes", "/queue", "/stats"]);
+    expect(nav.primary.find((i) => i.to === "/queue")?.end).toBe(true);
+    expect(nav.advanced).toEqual([]);
+  });
+  it("queue is never left in the advanced menu", () => {
+    expect(navSections(true).advanced.map((i) => i.to)).not.toContain("/queue");
+    expect(navSections(false).advanced.map((i) => i.to)).not.toContain("/queue");
   });
   it("rooms also stays active on /rooms/:key", () => {
     const nav = navSections(true);
