@@ -28,7 +28,9 @@ import {
 } from "../lib/nodes-summary";
 import { HubStreamBanner } from "../components/HubStreamBanner";
 import { AttentionCard, FleetPulse, LiveLane, LivePool, LiveUploadLanes, StageReadyRow } from "../components/QueueLive";
+import { PartChainLine, QueueStateBadges, SkippedStepBadges } from "../components/QueueBadges";
 import { liveUploadLanes, queueSummary, splitQueue } from "../lib/queue-live";
+import { queueText, stepLabel } from "../lib/queue-chain";
 import { useT } from "../lib/i18n";
 import { fmtTimeInTz } from "../lib/tz";
 
@@ -51,17 +53,6 @@ function sessionTime(streamKey: string, t: TFunc): string {
   return `${short} ${hh}:${mm}`;
 }
 
-/**
- * 步骤名 → 展示标签(与 HubJobs 的 stepNode 同源)。
- * 未知步骤名(新版本加的步骤、旧前端没这条 i18n)→ 安全回落成**步骤名原文**,
- * 不渲染成空白、也不把 `hub.jobs.stepNode.xxx` 这种键名糊到 UI 上。
- */
-function stepLabel(t: TFunc, step: string): string {
-  const key = `hub.jobs.stepNode.${step}`;
-  const label = t(key);
-  return label === key ? step : label;
-}
-
 /** A poll snapshot older than this is shown as stale (the master polls every minute). */
 const NODE_UPLOAD_STALE_MS = 3 * 60_000;
 
@@ -72,21 +63,31 @@ const NODE_UPLOAD_STALE_MS = 3 * 60_000;
 function nodeUploadLine(s: NodeUploadStatusDTO, now: number, t: TFunc): ReactNode {
   const ago = (at: number): string => humanSec(Math.max(0, Math.round((now - at) / 1000)));
   const stepKey = s.step === "gate_wait" || s.step === "transfer" || s.step === "submit" ? s.step : null;
-  const parts: string[] = [t("queue.nodeUpload.node", { node: s.nodeId }), t(`queue.nodeUpload.${s.phase}`)];
-  if (s.phase === "biliup" && s.state === "running" && stepKey) parts.push(t(`queue.nodeUpload.step.${stepKey}`));
+  const phaseKey = s.phase === "part-chain" ? "queue.nodeUpload.partChain" : `queue.nodeUpload.${s.phase}`;
+  const parts: string[] = [
+    queueText(t, "queue.nodeUpload.node", `node ${s.nodeId}`, { node: s.nodeId }),
+    queueText(t, phaseKey, s.phase),
+  ];
+  if (s.phase === "biliup" && s.state === "running" && stepKey) parts.push(queueText(t, `queue.nodeUpload.step.${stepKey}`, stepKey));
+  else if (s.phase === "part-chain" && stepKey) parts.push(queueText(t, `queue.nodeUpload.step.${stepKey}`, stepKey));
   else if (s.state) parts.push(s.state);
   if (s.progress && s.progress.totalBytes > 0) {
     parts.push(`${fmtBytes(s.progress.doneBytes)} / ${fmtBytes(s.progress.totalBytes)}`);
     if (s.progress.bps) parts.push(t("queue.nodeUpload.rate", { rate: fmtBytes(s.progress.bps) }));
   }
   if (s.heartbeatAt) parts.push(t("queue.nodeUpload.heartbeat", { time: ago(s.heartbeatAt) }));
-  if (s.attempts && s.attempts > 1) parts.push(t("queue.nodeUpload.attempt", { n: s.attempts }));
-  if (s.notBefore && s.notBefore > now) parts.push(t("queue.nodeUpload.retryIn", { time: humanSec(Math.round((s.notBefore - now) / 1000)) }));
+  if (s.attempts != null && (s.attempts > 1 || s.phase === "part-chain")) {
+    parts.push(queueText(t, "queue.nodeUpload.attempt", `attempt ${s.attempts}`, { n: s.attempts }));
+  }
+  if (s.notBefore && s.notBefore > now) {
+    const seconds = humanSec(Math.round((s.notBefore - now) / 1000));
+    parts.push(queueText(t, "queue.nodeUpload.retryIn", `retry in ${seconds}`, { time: seconds }));
+  }
   const stale = now - s.polledAt > NODE_UPLOAD_STALE_MS;
   return (
     <div className="text-[11px] mt-0.5 font-mono" style={{ color: stale ? "var(--warning-fg)" : "var(--muted-soft)" }} title={s.error ?? undefined}>
       {parts.join(" · ")}
-      {stale && <span> · {t("queue.nodeUpload.stale", { time: ago(s.polledAt) })}</span>}
+      {stale && <span> · {queueText(t, "queue.nodeUpload.stale", `status from ${ago(s.polledAt)} ago`, { time: ago(s.polledAt) })}</span>}
     </div>
   );
 }
@@ -300,6 +301,7 @@ function QueueCard({ item, index, tz, onOpenLog, onAck }: { item: QueueItemDTO; 
         <span className="inline-flex items-center gap-1.5 text-[13px] font-medium shrink-0" style={{ color: phaseColor(info.kind, item.state) }}>
           <PhaseGlyph kind={info.kind} />
           {t(info.textKey)}
+          <QueueStateBadges item={item} t={t} />
         </span>
       </div>
       <div className="mt-2 text-[12px] text-muted-soft break-words">
@@ -313,6 +315,9 @@ function QueueCard({ item, index, tz, onOpenLog, onAck }: { item: QueueItemDTO; 
             {item.nextSteps.length > 0 && <> → {item.nextSteps.map((st) => stepLabel(t, st)).join(" / ")}</>}
           </>}
       </div>
+      {(item.state === "skipped" || item.doneSteps.some((st) => st.phase === "skipped")) && (
+        <div className="mt-1 flex flex-wrap gap-1"><SkippedStepBadges item={item} t={t} /></div>
+      )}
       {(info.kind === "manual" || info.kind === "stopped") && item.error && (
         <div className="mt-1 text-[11px] break-words" style={{ color: "var(--error-fg)" }}>{item.error}</div>
       )}
@@ -385,12 +390,15 @@ function QueueRow({ item, index, tz, now, dataAt, onOpenLog, onAck }: { item: Qu
         <span className="inline-flex items-center gap-1.5 text-[13px] font-medium" style={{ color: phaseColor(info.kind, item.state) }}>
           <PhaseGlyph kind={info.kind} />
           {t(info.textKey)}
+          <QueueStateBadges item={item} t={t} />
         </span>
         <div className="text-[11px] text-muted-soft mt-0.5">
           {rowTiming(item, now, dataAt, t)}
           {finished && item.winnerWorker && <span> · {t("hub.jobs.selected", { worker: item.winnerWorker })}</span>}
         </div>
-        {!finished && item.nodeUpload && nodeUploadLine(item.nodeUpload, now, t)}
+        {!finished && item.nodeUpload && (item.nodeUpload.phase === "part-chain"
+          ? <PartChainLine upload={item.nodeUpload} now={now} tz={tz} t={t} className="mt-0.5" />
+          : nodeUploadLine(item.nodeUpload, now, t))}
         {/* 真故障/已停止:把台账里的 error 亮出来(否则只看到「待人工」不知为何)。
             两行截断 + 完整内容进 title:错误文本可能很长,不截断会把整行撑成小作文、挤掉同屏其它场次。 */}
         {((manual || stopped) && item.error) && (
@@ -444,6 +452,7 @@ function QueueRow({ item, index, tz, now, dataAt, onOpenLog, onAck }: { item: Qu
           )}
             </>
           )}
+          <SkippedStepBadges item={item} t={t} />
           {finished && item.bv && (
             <>
               <ChevronRight className="w-3 h-3 text-muted-soft shrink-0" />
@@ -800,7 +809,7 @@ export function QueuePage(): ReactNode {
           ) : (
             <div className="space-y-2 mb-5">
               {sections.live.map((item) => (
-                <LiveLane key={item.streamKey} item={item} now={now} dataAt={dataAt} onOpenLog={setLogKey} />
+                <LiveLane key={item.streamKey} item={item} now={now} dataAt={dataAt} tz={tz} onOpenLog={setLogKey} />
               ))}
             </div>
           )}

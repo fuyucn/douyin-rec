@@ -456,7 +456,7 @@ const DICT = {
       },
       jobs: {
         step: { pending: "排队中", settling: "等待收播", syncing: "拉取文件", merging: "合并 / 烧录", uploading: "上传 B 站", retrying: "单节点重跑", done: "已完成", failed: "失败", needsManual: "待人工" },
-        stepNode: { select: "选优", pull: "拉取", node_upload: "节点本地上传", merge: "合并 plain", merge_segments: "分段产出", burn_danmu: "烧 danmu", burn_livechat: "烧 livechat", upload_plain: "传 plain P1", append_danmu: "追 danmu P2", append_livechat: "追 livechat P3", clean_verify: "核验分P", clean_stage_src: "清理存档源段", clean_source: "清理节点源", clean_stage: "清理存档产物" },
+        stepNode: { select: "选优", pull: "拉取", node_upload: "节点本地上传", merge: "合并 plain", merge_segments: "分段产出", burn_danmu: "烧 danmu", burn_livechat: "烧 livechat", upload_plain: "传 plain P1", append_danmu: "追 danmu P2", append_livechat: "追 livechat P3", upload_part: "上传分 P", cleanup_part: "清理分 P", reconcile_part: "对账分 P", clean_verify: "核验分P", clean_stage_src: "清理存档源段", clean_source: "清理节点源", clean_stage: "清理存档产物" },
         termDone: "完成", skipped: "跳过", noStepRecord: "（无流程记录;旧版本任务）",
         candComplete: "完整", candCoverage: "覆盖 {pct}%", candWinner: "最优",
         candDanmu: "弹幕 {n} 条", candNoDanmu: "无弹幕",
@@ -588,13 +588,16 @@ const DICT = {
       nothingDone: "尚未开始",
       doneNoStepRecord: "（无步骤记录）",
       queuedAt: "等锁 · 第 {n} 位",
-      nodeUpload: {
-        node: "节点 {node}", prep: "预处理", biliup: "上传", blocked: "无法推进",
+        nodeUpload: {
+        node: "节点 {node}", prep: "预处理", biliup: "上传", blocked: "无法推进", partChain: "分 P 链", notBefore: "最早重试 {time}",
         step: { gate_wait: "等配额", transfer: "传输中", submit: "提交中" },
         rate: "{rate}/s", heartbeat: "心跳 {time}前", attempt: "第 {n} 次", retryIn: "{time}后重试", stale: "状态停在 {time}前",
       },
       doing: { preparing: "准备中" },
-      phase: { running: "执行中", queued: "排队中", pulling: "拉取中", settle: "等待收播", manual: "失败·待处理", uploadWait: "待上传", stopped: "已停止", done: "已完成", failed: "失败" },
+      phase: {
+        running: "执行中", queued: "排队中", pulling: "拉取中", settle: "等待收播", manual: "失败·待处理", uploadWait: "待上传", stopped: "已停止", done: "已完成", failed: "失败",
+        reconciling: "自动对账中", reconcilingTip: "这是自动对账，不是故障；最多核对 24 小时，超时才需要人工处理。",
+      },
       section: { all: "全部记录", delivering: "边录边传中", blocked: "被失联节点挡住的场次" },
       blocked: { by: "被节点 {nodes} 挡住", since: "已 {min} 分钟", rounds: "连续 {n} / {max} 轮,达到后转待人工", roundsNoLimit: "连续 {n} 轮(未设转人工阈值)" },
       nodes: { title: "节点", offline: "节点不可达", drift: "节点 v{v},主控是 v{m}", recording: "在录 {n} 个房间", unavailable: "{n} 个房间状态未知", disk: "磁盘剩余 {gb} GB", rolling: "边录边传 {n} 场", locked: "未确认占盘 {size}", synced: "任务配置 {ago}前同步", syncLag: "任务配置期望 v{expected},节点停在 v{applied}", state: { recording: "录制中", waiting: "等待开播", unavailable: "状态未知", disabled: "已停用" }, disabledCount: "另有 {n} 个已停用房间" },
@@ -1043,7 +1046,7 @@ const DICT = {
       },
       jobs: {
         step: { pending: "Queued", settling: "Waiting for stream to end", syncing: "Pulling files", merging: "Merging / burning", uploading: "Uploading to Bilibili", retrying: "Retrying node", done: "Done", failed: "Failed", needsManual: "Needs review" },
-        stepNode: { select: "Select", pull: "Pull", node_upload: "Node upload", merge: "Merge plain", merge_segments: "Segments", burn_danmu: "Burn danmu", burn_livechat: "Burn livechat", upload_plain: "Upload plain P1", append_danmu: "Append danmu P2", append_livechat: "Append livechat P3", clean_verify: "Verify parts", clean_stage_src: "Clean archived src", clean_source: "Clean node src", clean_stage: "Clean archive" },
+        stepNode: { select: "Select", pull: "Pull", node_upload: "Node upload", merge: "Merge plain", merge_segments: "Segments", burn_danmu: "Burn danmu", burn_livechat: "Burn livechat", upload_plain: "Upload plain P1", append_danmu: "Append danmu P2", append_livechat: "Append livechat P3", upload_part: "Upload part", cleanup_part: "Clean up part", reconcile_part: "Reconcile part", clean_verify: "Verify parts", clean_stage_src: "Clean archived src", clean_source: "Clean node src", clean_stage: "Clean archive" },
         termDone: "Done", skipped: "Skipped", noStepRecord: "(no step record; legacy job)",
         candComplete: "complete", candCoverage: "{pct}% cover", candWinner: "winner",
         candDanmu: "{n} danmu", candNoDanmu: "no danmu",
@@ -1176,13 +1179,16 @@ const DICT = {
       nothingDone: "Not started",
       doneNoStepRecord: "(no step record)",
       queuedAt: "waiting · #{n}",
-      nodeUpload: {
-        node: "node {node}", prep: "prep", biliup: "upload", blocked: "cannot advance",
+        nodeUpload: {
+        node: "node {node}", prep: "prep", biliup: "upload", blocked: "cannot advance", partChain: "Part chain", notBefore: "not before {time}",
         step: { gate_wait: "waiting for quota", transfer: "transferring", submit: "submitting" },
         rate: "{rate}/s", heartbeat: "heartbeat {time} ago", attempt: "attempt {n}", retryIn: "retry in {time}", stale: "status from {time} ago",
       },
       doing: { preparing: "Preparing" },
-      phase: { running: "Running", queued: "Queued", pulling: "Pulling", settle: "Waiting to end", manual: "Failed · needs action", uploadWait: "Ready to upload", stopped: "Stopped", done: "Done", failed: "Failed" },
+      phase: {
+        running: "Running", queued: "Queued", pulling: "Pulling", settle: "Waiting to end", manual: "Failed · needs action", uploadWait: "Ready to upload", stopped: "Stopped", done: "Done", failed: "Failed",
+        reconciling: "Reconciling", reconcilingTip: "Automatic reconciliation, not a failure. It keeps checking for up to 24 hours; only then does it need a person.",
+      },
       section: { all: "All records", delivering: "Uploading while recording", blocked: "Broadcasts blocked by an unreachable node" },
       blocked: { by: "Blocked by node {nodes}", since: "for {min} min", rounds: "{n} / {max} rounds; becomes manual at the limit", roundsNoLimit: "{n} rounds (no manual threshold)" },
       nodes: { title: "Nodes", offline: "Node unreachable", drift: "Node v{v}, master v{m}", recording: "Recording {n} rooms", unavailable: "{n} rooms status unknown", disk: "Disk free {gb} GB", rolling: "Rolling upload {n}", locked: "{size} unconfirmed on disk", synced: "Task config synced {ago} ago", syncLag: "Task config expected v{expected}, node stuck at v{applied}", state: { recording: "Recording", waiting: "Waiting", unavailable: "Unknown", disabled: "Disabled" }, disabledCount: "{n} more disabled rooms" },
