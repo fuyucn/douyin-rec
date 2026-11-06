@@ -15,7 +15,7 @@ import {
   assertJobInvariants, getProcessor, stageSessionDir, type EnqueueRequest, type EnqueueResponse, type EnqueueResult, type ProcessJob,
   PART_KINDS, type PartCtx, type ProcessReceipt, type Processor,
 } from "@drec/core";
-import { ProcQueueStore, procQueueDbPath } from "@drec/proc-queue";
+import { BatchRejected, ProcQueueStore, procQueueDbPath } from "@drec/proc-queue";
 import { effectiveHubConfig } from "./disk-gate.js";
 import { readOutputLayout, rootStageDir } from "./paths.js";
 import { TaskStore } from "./store.js";
@@ -158,14 +158,20 @@ export function handleEnqueue(dataRoot: string, req: EnqueueRequest, opts: Handl
   const store = new ProcQueueStore(procQueueDbPath(dataRoot), { log: opts.log });
   try {
     if (opts.batch || req.batch === true) {
-      const kinds = opts.remoteKinds ?? remoteEnqueueKinds(opts.capabilities);
-      const jobs: ProcessJob[] = [];
-      for (const job of req.jobs) {
-        if (!kinds.includes(job.kind)) return { v: 1, results: [{ jobId: job.jobId, state: "rejected", error: `remote enqueue does not accept kind=${job.kind}` }] };
-        jobs.push(assertJobInvariantsReal(localizeUploadPart(localizePrepStage(job)), roots));
+      try {
+        const kinds = opts.remoteKinds ?? remoteEnqueueKinds(opts.capabilities);
+        const jobs: ProcessJob[] = [];
+        for (const job of req.jobs) {
+          if (!kinds.includes(job.kind)) throw new Error(`remote enqueue does not accept kind=${job.kind}`);
+          jobs.push(assertJobInvariantsReal(localizeUploadPart(localizePrepStage(job)), roots));
+        }
+        return { v: 1, results: store.enqueueBatch(jobs, { allowedRoots: roots.map(realpathDeep) }) };
+      } catch (e) {
+        // A batch is all-or-nothing. Surface a normal rejected receipt so master maps it to needs_manual
+        // instead of treating a permanent item error as an unreachable node and retrying forever.
+        const error = e instanceof BatchRejected ? e.message : String((e as Error)?.message ?? e);
+        return { v: 1, results: req.jobs.map((job) => ({ jobId: job.jobId, state: "rejected", error })) };
       }
-      const results = store.enqueueBatch(jobs, { allowedRoots: roots.map(realpathDeep) });
-      return { v: 1, results };
     }
     const results: EnqueueResult[] = req.jobs.map((job) => {
       const reject = (error: string): EnqueueResult => ({ jobId: job.jobId, state: "rejected", error });

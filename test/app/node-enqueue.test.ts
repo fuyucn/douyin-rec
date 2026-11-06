@@ -382,8 +382,8 @@ describe("plan 046 PR5: upload-part remote enqueue", () => {
   it("a missing part file rejects the whole batch and leaves no rows", () => {
     const a = file(rec, "p3.mp4");
     const missing = join(rec, "missing.mp4");
-    expect(() => handleEnqueue(root, { v: 1, jobs: [partJob(a, 1), partJob(missing, 2)], batch: true }, { ...opts(), remoteKinds: ["upload-part"] }))
-      .toThrow();
+    const r = handleEnqueue(root, { v: 1, jobs: [partJob(a, 1), partJob(missing, 2)], batch: true }, { ...opts(), remoteKinds: ["upload-part"] });
+    expect(r.results.map((x) => x.state)).toEqual(["rejected", "rejected"]);
     expect(store().list()).toHaveLength(0);
   });
 });

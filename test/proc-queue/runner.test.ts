@@ -1354,4 +1354,34 @@ describe("plan 046 PR5 part-chain runner wiring", () => {
     await vi.waitFor(() => expect(s.get(one.jobId)?.state).toBe("failed"));
     expect(s.get(two.jobId)?.state).toBe("cancelled");
   });
+
+  it("a validate rejection also cascades later pending parts", async () => {
+    registerProcessor(fakeProcessor({
+      kind: "upload-part", retryable: false,
+      validate: (j) => (j.params.ctx as { index: number }).index === 1 ? "bad part" : null,
+      run: async () => ({ outputs: [], bv: "BVfirst" }),
+    }));
+    const r = mkRunner("A");
+    const s = env.open();
+    const one = mkPart("p7.mp4", 1);
+    const two = mkPart("p8.mp4", 2);
+    s.enqueue(one, allowed());
+    s.enqueue(two, allowed());
+    r.tick();
+    await vi.waitFor(() => expect(s.get(one.jobId)?.state).toBe("failed"));
+    expect(s.get(two.jobId)?.state).toBe("cancelled");
+  });
+
+  it("a whole-order finish rejection reports finalization, not a chain failure", async () => {
+    registerProcessor(fakeProcessor({ kind: "upload-part", retryable: false, run: async () => ({ outputs: [], bv: "BVx" }) }));
+    const s = env.open();
+    s.finish = vi.fn(() => false) as typeof s.finish;
+    const messages: string[] = [];
+    const r = mkRunner("A", { store: s, alert: (_t, m) => messages.push(m) });
+    const one = mkPart("p9.mp4", 1);
+    s.enqueue(one, allowed());
+    r.tick();
+    await vi.waitFor(() => expect(messages.some((m) => m.includes("任务收尾失败"))).toBe(true));
+    expect(messages.some((m) => m.includes("链出失败"))).toBe(false);
+  });
 });

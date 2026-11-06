@@ -1,6 +1,6 @@
 // plan 046 PR5: master part-chain plan (v2), atomic upload-part enqueue and completion mapping.
 import { describe, it, expect, vi } from "vitest";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EnqueueRequest, EnqueueResponse, ProcessJob, ProcessReceipt } from "@drec/core";
@@ -8,6 +8,7 @@ import { SyncLedger } from "../../packages/orchestrator/src/ledger.js";
 import { advanceUpload, ensureUploadPlan, partJobIds, type BiliupMeta, type PrepSpec, type UploadInput } from "../../packages/orchestrator/src/node-upload-queue.js";
 import { mapUploadOutcome } from "../../packages/orchestrator/src/node-upload-complete.js";
 import { createUploadQueuePoller } from "../../packages/orchestrator/src/node-upload-poll.js";
+import { handleEnqueue } from "../../packages/app/src/node-enqueue.js";
 import type { Transport } from "../../packages/orchestrator/src/transport.js";
 
 const KEY = "douyin:1:2026-10-17";
@@ -101,6 +102,26 @@ describe("part-chain plan (v2)", () => {
     expect(requests).toHaveLength(1);
     await createUploadQueuePoller(opts).poll();
     expect(requests).toHaveLength(1);
+  });
+
+  it("a permanent part enqueue error becomes a rejected receipt, not an endless transport retry", async () => {
+    const root = mkdtempSync(join(tmpdir(), "nuq5-enq-"));
+    const stage = join(root, "stage", "s");
+    mkdirSync(stage, { recursive: true });
+    const good = join(stage, "one.mp4");
+    writeFileSync(good, "x");
+    const missing = join(stage, "missing.mp4");
+    const l = fresh();
+    const plan = ensureUploadPlan(l, KEY, "n1", input(), 1, { partChain: true });
+    const n = {
+      enqueue: async (req: EnqueueRequest): Promise<EnqueueResponse> => handleEnqueue(root, req, { remoteKinds: ["upload-part"] }),
+      procStatus: async (ids: string[]): Promise<ProcessReceipt[]> => ids.includes(plan.prepJobId)
+        ? [{ jobId: plan.prepJobId, state: "done", outputs: [good, missing], leaseAlive: true }] : [],
+    } as unknown as Transport;
+    const d = await advanceUpload(n, plan, { now: () => 1000, persist: (p) => l.setUploadPlan(KEY, JSON.stringify(p)) });
+    expect(d).toMatchObject({ phase: "part-chain-failed", state: "rejected" });
+    expect(mapUploadOutcome(d)).toMatchObject({ action: "needs_manual" });
+    expect((JSON.parse(l.getUploadPlan(KEY)!) as typeof plan).uploadJobIds).toEqual([]);
   });
 
   it("failed and missing parts are conservative manual outcomes, never failed/retried", () => {

@@ -80,6 +80,16 @@ describe("tryQueueUpload", () => {
     expect(n.jobs[0]!.inputs).toEqual(["/n/rec/a.ts", "/n/rec/b.ts"]);
   });
 
+  it("the v1 queue log keeps its original byte-for-byte shape", async () => {
+    const n = node();
+    const a = args(n.t, QUEUE);
+    const logs: string[] = [];
+    a.jlog = (m) => logs.push(m);
+    await tryQueueUpload(a, ["biliup-queue"]);
+    const plan = JSON.parse(a.ledger.getUploadPlan(KEY)!);
+    expect(logs).toContain(`节点侧上传进入队列: node=n1 prep=${plan.prepJobId} biliup=${plan.biliupJobId}`);
+  });
+
   it("partChain opts in only when the node advertises upload-part; otherwise the old v1 plan is used", async () => {
     const cap = node(["upload-prep", "biliup", "biliup-queue", "upload-part"]);
     const a = args(cap.t, { ...QUEUE, partChain: true });

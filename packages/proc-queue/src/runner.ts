@@ -606,6 +606,7 @@ export class ProcRunner {
       const bad = proc.validate(job);
       if (bad !== null) {
         store.finish(job.jobId, owner, { state: "failed", error: `validate: ${bad}` });
+        this.cascadePartBlocked(job);
         this.o.alert(job.owner.taskId, `${job.kind} 任务被拒: ${bad}`);
         return;
       }
@@ -632,7 +633,8 @@ export class ProcRunner {
         if (!chained.ok) {
           // Chain failure must not leave a done row without its successor and must not be silent.
           this.log(`${job.jobId}: ${chained.error}`);
-          this.o.alert(job.owner.taskId, `${job.kind} 任务确认后链出失败: ${chained.error}`);
+          const what = chained.chained === false ? "任务收尾失败" : "任务确认后链出失败";
+          this.o.alert(job.owner.taskId, `${job.kind} ${what}: ${chained.error}`);
           return;
         }
       } else if (!store.finish(job.jobId, owner, { state: "done", outputs: res.outputs, note: res.note })) {
@@ -667,7 +669,7 @@ export class ProcRunner {
   // ───────────────────────── 接管 recover ─────────────────────────
 
   /** Single write path for upload-part success: done + cleanup successor in one transaction. */
-  private finishWithChain(job: ProcJobRecord, res: { outputs: string[]; note?: string; bv?: string; confirmed?: { size: number; mtimeMs: number; ackedBytes: number } }): { ok: boolean; error?: string } {
+  private finishWithChain(job: ProcJobRecord, res: { outputs: string[]; note?: string; bv?: string; confirmed?: { size: number; mtimeMs: number; ackedBytes: number } }): { ok: boolean; error?: string; chained?: boolean } {
     const finish = { state: "done" as const, outputs: res.outputs, ...(res.note ? { note: res.note } : {}) };
     const mode: unknown = job.params.partWorkflow;
     const template = mode === "live-pump" || mode === "rolling" || mode === "whole-order"
@@ -675,7 +677,7 @@ export class ProcRunner {
       : null;
     // Missing/invalid mode and whole-order are deliberately conservative: no successor row.
     if (!template || template.cleanupAt !== "part-confirmed" || !res.confirmed || !res.bv) {
-      return { ok: this.o.store.finish(job.jobId, this.o.owner, finish), error: "完成但收尾失败(持有者已换人)" };
+      return { ok: this.o.store.finish(job.jobId, this.o.owner, finish), error: "完成但收尾失败(持有者已换人)", chained: false };
     }
     const ctx = job.params.ctx as PartCtx | undefined;
     if (!ctx || res.confirmed.size !== ctx.fp.size || res.confirmed.mtimeMs !== ctx.fp.mtimeMs
@@ -688,7 +690,7 @@ export class ProcRunner {
       logicalKey: job.logicalKey, generation: job.generation,
       ctx: { ...ctx, bv: res.bv }, owner: job.owner,
     }, { allowedRoots: this.o.chainAllowedRoots ?? [dirname(dirname(this.o.store.dbPath))], attempts });
-    return r.ok ? { ok: true } : { ok: false, error: r.error };
+    return r.ok ? { ok: true, chained: true } : { ok: false, error: r.error, chained: true };
   }
 
   /** 刚取得租约:对该 kind 非本进程在跑的 running 行逐个 `recover()`(只碰该行列出的路径)。 */

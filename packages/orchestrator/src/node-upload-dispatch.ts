@@ -79,7 +79,9 @@ export async function tryQueueUpload(o: NodeSideUploadArgs, capabilities?: reado
   // State stays where the blocking node path leaves it (syncing); the step row shows the queue progress.
   ledger.logStep(streamKey, "node_upload", "start", `queued on ${plan.nodeId}`);
   ledger.syncNodeState(streamKey, "node_upload", "running");
-  jlog(`节点侧上传进入队列: node=${plan.nodeId} prep=${plan.prepJobId} mode=${plan.v === 2 ? "part-chain" : "whole-order"}${plan.v === 1 ? ` biliup=${plan.biliupJobId}` : ""}`);
+  jlog(plan.v === 2
+    ? `节点侧上传进入队列: node=${plan.nodeId} prep=${plan.prepJobId} mode=part-chain`
+    : `节点侧上传进入队列: node=${plan.nodeId} prep=${plan.prepJobId} biliup=${plan.biliupJobId}`);
   try {
     const d = await advanceUpload(transport, plan, { persist: (p) => ledger.setUploadPlan(streamKey, JSON.stringify(p)) });
     try { ledger.setUploadStatus(streamKey, JSON.stringify(uploadStatusOf(plan, d, Date.now()))); } catch { /* display only */ }

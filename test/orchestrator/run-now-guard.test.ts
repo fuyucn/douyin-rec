@@ -13,6 +13,10 @@ const fresh = (): SyncLedger => new SyncLedger(join(mkdtempSync(join(tmpdir(), "
 const planJson = (key: string, nodeId = "n1"): string => JSON.stringify({
   v: 1, nodeId, orderKey: key, generation: 1, prepJobId: `prep:${key}`, biliupJobId: `up:${key}`, input: {},
 });
+const partPlanJson = (key: string, nodeId = "n1"): string => JSON.stringify({
+  v: 2, mode: "part-chain", nodeId, orderKey: key, generation: 1, prepJobId: `prep:${key}`, biliupJobId: "",
+  uploadJobIds: [`part:${key}:1`, `part:${key}:2`], input: {},
+});
 const rec = (state: ProcessReceipt["state"]): ProcessReceipt => ({ jobId: "x", state, leaseAlive: true });
 const node = (procStatus: Transport["procStatus"]): Map<string, Transport> => new Map([["n1", { procStatus } as Transport]]);
 const order = (l: SyncLedger, key: string, plan = true): void => { l.upsertPending(key); if (plan) l.claimUploadPlan(key, planJson(key)); };
@@ -64,6 +68,22 @@ describe("runNowConflict", () => {
     for (const state of ["failed", "cancelled"] as const) {
       const l = fresh(); order(l, BASE);
       expect(await runNowConflict({ ledger: l, transports: node(async () => [rec(state)]) }, BASE, { force: false })).toBeNull();
+    }
+  });
+
+  it("a v2 part-chain plan blocks on its upload-part rows, not on the empty biliup id", async () => {
+    for (const state of ["pending", "running"] as const) {
+      const l = fresh(); l.upsertPending(BASE); l.claimUploadPlan(BASE, partPlanJson(BASE));
+      const seen: string[][] = [];
+      const msg = await runNowConflict({
+        ledger: l,
+        transports: node(async (ids: string[]) => {
+          seen.push(ids);
+          return ids.filter((id) => id !== "").map((jobId) => ({ jobId, state: jobId === `prep:${BASE}` ? "done" : state, leaseAlive: true }));
+        }),
+      }, BASE, { force: false });
+      expect(msg).toMatch(state);
+      expect(seen[0]).toEqual([`prep:${BASE}`, `part:${BASE}:1`, `part:${BASE}:2`]);
     }
   });
 
