@@ -1,17 +1,19 @@
 /**
  * app/rolling-queue.ts — plan 046 PR6 (方案 A): the recorder's seal hook only enqueues upload-part rows.
  *
- * The switch (settings.`ROLLING_QUEUE_MODE_SETTING`, default off) is read once per factory build. When off,
+ * The switch (settings.ROLLING_QUEUE_MODE_SETTING, default off) is read once per factory build. When off,
  * nothing here runs and the legacy rolling-upload path stays byte-identical. When on:
  *   - the recorder never spawns biliup, never takes the node upload slot or the account gate;
- *   - each sealed part becomes one deterministic upload-part row (orderKey = same-broadcast key,
- *     seq = part index, params.partWorkflow = "rolling" so the confirmed upload chains cleanup-part);
+ *   - each sealed part becomes one deterministic upload-part row (params.partWorkflow = "rolling" so the
+ *     confirmed upload chains cleanup-part);
  *   - the serve runner is the only uploader, and cleanup-part (PR2) is the only deleter;
- *   - the legacy sidecar is imported once per confirmed part as a done row (idempotent), never rewritten.
+ *   - hub-owned rooms write only a skipped(hub-owned) row (same job id as the upload row would have had);
+ *   - the legacy sidecar is imported once per confirmed part as a done row (idempotent) and, while its
+ *     source still exists, gets a cleanup-part row via the normal deletion path.
  */
 import { existsSync, statSync } from "node:fs";
 import {
-  PART_KINDS, ROLLING_QUEUE_MODE_SETTING, jobIdOf, parseBoolFlag,
+  PART_KINDS, ROLLING_QUEUE_MODE_SETTING, jobIdOf, partLogicalKey,
   type PartCtx, type ProcessJob,
 } from "@drec/core";
 import { ProcQueueStore, procQueueDbPath } from "@drec/proc-queue";
@@ -20,25 +22,42 @@ import { drecRoot } from "./paths.js";
 import { dbPathForDataRoot } from "./timezone.js";
 import { nodeAllowedRoots } from "./node-enqueue.js";
 
+export interface QueueMeta {
+  /** Resolved upload metadata (same values the legacy path sends to biliup). */
+  cookies: string;
+  title: string;
+  tid: number;
+  tag: string;
+  desc?: string;
+  public: boolean;
+  seasonSectionId?: number;
+}
+
 export interface QueuePartInput {
   file: string;
   /** 0-based part index as the recorder numbers segments; queue seq is index + 1. */
   index: number;
+  /** Explicit queue seq across sessions of the same broadcast (defaults to index + 1). */
+  seq?: number;
   orderKey: string;
   bv?: string;
-  title?: string;
+  meta: QueueMeta;
   expectedDurationSec?: number;
   taskId?: number;
   log?: (message: string) => void;
 }
 
-/** Settings read for the switch. Missing row / unreadable db / invalid value => false (fail closed). */
+/**
+ * Explicit-on parser for this switch. parseBoolFlag is deliberately fail-open (an unknown flag means "on"),
+ * which is wrong for a switch that disables the recorder's only upload path: a typo must mean OFF.
+ */
 export function rollingQueueModeEnabled(dbPath: string = dbPathForDataRoot(drecRoot())): boolean {
   try {
     if (!existsSync(dbPath)) return false;
     const store = new TaskStore(dbPath);
     try {
-      return parseBoolFlag(store.getSetting(ROLLING_QUEUE_MODE_SETTING) ?? undefined, false);
+      const raw = (store.getSetting(ROLLING_QUEUE_MODE_SETTING) ?? "").trim().toLowerCase();
+      return raw === "1" || raw === "true" || raw === "on" || raw === "yes" || raw === "y";
     } finally { store.close(); }
   } catch {
     return false;
@@ -51,17 +70,20 @@ function openQueue(log?: (m: string) => void): ProcQueueStore | null {
 }
 
 function partJob(input: QueuePartInput, generation: number, seq: number, fp: { size: number; mtimeMs: number }): ProcessJob {
-  const logicalKey = input.orderKey + ":part:" + String(seq);
+  const logicalKey = partLogicalKey(input.orderKey, seq);
   const ctx: PartCtx = {
     v: 1, orderKey: input.orderKey, index: seq, file: input.file, fp,
     ...(input.bv ? { bv: input.bv } : {}),
   };
+  const m = input.meta;
   return {
     jobId: jobIdOf(PART_KINDS.upload, logicalKey, generation),
     kind: PART_KINDS.upload, logicalKey, generation, inputs: [input.file],
     params: {
       ctx, partWorkflow: "rolling",
-      ...(input.title ? { title: input.title } : {}),
+      cookies: m.cookies, title: m.title, tid: m.tid, tag: m.tag, public: m.public,
+      ...(m.desc ? { desc: m.desc } : {}),
+      ...(m.seasonSectionId ? { seasonSectionId: m.seasonSectionId } : {}),
       ...(input.expectedDurationSec && input.expectedDurationSec > 0 ? { expectedDurationSec: input.expectedDurationSec } : {}),
     },
     replaceInputs: false,
@@ -70,71 +92,123 @@ function partJob(input: QueuePartInput, generation: number, seq: number, fp: { s
   };
 }
 
+/** Seal a part: pending/running/done/skipped all mean "this part needs no more enqueue work". */
+export type EnqueuePartResult = "queued" | "already" | "failed";
+
+function classify(r: { state: string; error?: string; existingState?: string }): EnqueuePartResult {
+  if (r.state === "pending" || r.state === "running") return "queued";
+  if (r.state === "done" || r.state === "skipped") return "already";
+  // A row already finished by another producer (e.g. skipped(hub-owned)) means this segment is handled.
+  if (r.state === "rejected" && (r.existingState === "done" || r.existingState === "skipped")) return "already";
+  return "failed";
+}
+
 function fpOf(file: string): { size: number; mtimeMs: number } | null {
   try { const s = statSync(file); return { size: s.size, mtimeMs: s.mtimeMs }; } catch { return null; }
 }
 
-/** Enqueue one sealed part. Returns false when the store rejects it (caller keeps the source). */
-export function enqueueRollingUploadPart(input: QueuePartInput): boolean {
+/** Enqueue one sealed part. "failed" is the only result the caller must treat as retryable. */
+export function enqueueRollingUploadPart(input: QueuePartInput): EnqueuePartResult {
+  const seq = input.seq ?? input.index + 1;
   const fp = fpOf(input.file);
-  if (!fp) { input.log?.("[rolling-queue] 入队失败:源文件无法 stat: " + input.file); return false; }
+  if (!fp) {
+    // The source is gone; an existing terminal row still means the part was handled.
+    const store = openQueue(input.log);
+    if (store) {
+      try {
+        const generation = store.currentOrderGeneration(input.orderKey);
+        const prior = store.get(jobIdOf(PART_KINDS.upload, partLogicalKey(input.orderKey, seq), generation));
+        if (prior && (prior.state === "done" || prior.state === "skipped")) return "already";
+      } finally { store.close(); }
+    }
+    input.log?.("[rolling-queue] 入队失败:源文件无法 stat: " + input.file);
+    return "failed";
+  }
   const store = openQueue(input.log);
-  if (!store) return false;
+  if (!store) return "failed";
   try {
     const generation = store.currentOrderGeneration(input.orderKey);
-    const r = store.enqueue(partJob(input, generation, input.index + 1, fp), { allowedRoots: nodeAllowedRoots(drecRoot()) });
-    if (r.state !== "pending" && r.state !== "running") {
-      input.log?.("[rolling-queue] 段 " + input.index + " 入队被拒(" + r.state + "): " + (r.error ?? ""));
-      return false;
-    }
-    return true;
+    const r = store.enqueue(partJob(input, generation, seq, fp), { allowedRoots: nodeAllowedRoots(drecRoot()) });
+    const out = classify(r);
+    if (out === "failed") input.log?.("[rolling-queue] 段 " + input.index + " 入队被拒(" + r.state + "): " + (r.error ?? ""));
+    return out;
   } catch (e) {
     input.log?.("[rolling-queue] 段 " + input.index + " 入队异常: " + String((e as Error)?.message ?? e));
-    return false;
+    return "failed";
   } finally { store.close(); }
 }
 
 /** Empty/fragment sealed part: a skipped placeholder keeps seq gapless for later parts. */
-export function enqueueRollingSkipPart(input: QueuePartInput & { reason?: string }): boolean {
+export function enqueueRollingSkipPart(input: QueuePartInput): EnqueuePartResult {
+  const seq = input.seq ?? input.index + 1;
   const fp = fpOf(input.file);
-  if (!fp) return false;
+  if (!fp) return "failed";
   const store = openQueue(input.log);
-  if (!store) return false;
+  if (!store) return "failed";
   try {
     const generation = store.currentOrderGeneration(input.orderKey);
-    const r = store.enqueueSourceGone(partJob(input, generation, input.index + 1, fp), { allowedRoots: nodeAllowedRoots(drecRoot()) });
-    if (r.state !== "skipped" && r.state !== "pending" && r.state !== "done") {
-      input.log?.("[rolling-queue] 段 " + input.index + " 占位被拒(" + r.state + "): " + (r.error ?? ""));
-      return false;
-    }
-    return true;
+    const r = store.enqueueSourceGone(partJob(input, generation, seq, fp), { allowedRoots: nodeAllowedRoots(drecRoot()) });
+    const out: EnqueuePartResult = r.state === "skipped" || r.state === "done" ? "already"
+      : r.state === "pending" || r.state === "running" ? "queued" : "failed";
+    if (out === "failed") input.log?.("[rolling-queue] 段 " + input.index + " 占位被拒(" + r.state + "): " + (r.error ?? ""));
+    return out;
   } catch (e) {
     input.log?.("[rolling-queue] 段 " + input.index + " 占位异常: " + String((e as Error)?.message ?? e));
-    return false;
+    return "failed";
   } finally { store.close(); }
 }
 
 /**
  * Backward-compat import: a part the legacy uploader already confirmed becomes a done row so later parts
- * inherit its bv from the queue. Idempotent (existing done row is reported, never rewritten).
+ * inherit its bv. If its source still exists, also enqueue cleanup-part (the normal deletion path) so a
+ * legacy confirm whose delete failed does not leave the file forever.
  */
-export function importRollingConfirmedPart(input: QueuePartInput & { bv: string }): boolean {
+export function importRollingConfirmedPart(input: QueuePartInput & { bv: string }): EnqueuePartResult {
+  const seq = input.seq ?? input.index + 1;
   const fp = fpOf(input.file);
-  if (!fp) return false; // deleted source: nothing to import (cleanup already ran in the old path)
+  if (!fp) return "already"; // source already deleted by the legacy path
   const store = openQueue(input.log);
-  if (!store) return false;
+  if (!store) return "failed";
   try {
     const generation = store.currentOrderGeneration(input.orderKey);
-    const r = store.importConfirmedPart(partJob({ ...input, bv: input.bv }, generation, input.index + 1, fp), {
+    const done = store.importConfirmedPart(partJob({ ...input, bv: input.bv }, generation, seq, fp), {
       allowedRoots: nodeAllowedRoots(drecRoot()), bv: input.bv,
     });
-    if (r.state !== "done") {
-      input.log?.("[rolling-queue] 段 " + input.index + " 兼容导入未成功(" + r.state + "): " + (r.error ?? ""));
-      return false;
+    if (done.state !== "done") {
+      input.log?.("[rolling-queue] 段 " + input.index + " 兼容导入未成功(" + done.state + "): " + (done.error ?? ""));
+      return "failed";
     }
-    return true;
+    const logicalKey = input.orderKey + ":cleanup:" + String(seq);
+    const ctx: PartCtx = { v: 1, orderKey: input.orderKey, index: seq, file: input.file, fp, bv: input.bv };
+    const cleanup: ProcessJob = {
+      jobId: jobIdOf(PART_KINDS.cleanup, logicalKey, generation),
+      kind: PART_KINDS.cleanup, logicalKey, generation, inputs: [input.file],
+      params: { ctx }, replaceInputs: false,
+      owner: { ...(input.taskId !== undefined ? { taskId: input.taskId } : {}), streamKey: input.orderKey },
+      createdAt: Date.now(),
+    };
+    const c = store.enqueue(cleanup, { allowedRoots: nodeAllowedRoots(drecRoot()) });
+    if (c.state !== "pending" && c.state !== "running" && c.state !== "done") {
+      input.log?.("[rolling-queue] 段 " + input.index + " 已确认但补删源入队被拒(" + c.state + "): " + (c.error ?? ""));
+    }
+    return "already";
   } catch (e) {
     input.log?.("[rolling-queue] 段 " + input.index + " 兼容导入异常: " + String((e as Error)?.message ?? e));
-    return false;
+    return "failed";
+  } finally { store.close(); }
+}
+
+/** Highest seq already recorded for one order key (restart / same-broadcast continuation base). */
+export function rollingQueueMaxSeq(orderKey: string): number {
+  const store = openQueue();
+  if (!store) return 0;
+  try {
+    let max = 0;
+    for (const r of store.list({ kind: PART_KINDS.upload, limit: 10_000 })) {
+      if (r.orderKey === orderKey && typeof r.seq === "number") max = Math.max(max, r.seq);
+    }
+    return max;
+  } catch {
+    return 0;
   } finally { store.close(); }
 }

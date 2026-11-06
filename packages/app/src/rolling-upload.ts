@@ -84,7 +84,7 @@ import { sanitizePathSegment } from "@drec/record-engine";
 import type { RollingUploadHook } from "@drec/manager";
 // Plan 046 PR6 queue adapters (方案 A). No cycle: rolling-queue imports store/paths/node-enqueue only.
 import {
-  enqueueRollingUploadPart, enqueueRollingSkipPart, importRollingConfirmedPart,
+  enqueueRollingUploadPart, enqueueRollingSkipPart, importRollingConfirmedPart, rollingQueueMaxSeq,
 } from "./rolling-queue.js";
 
 /** 一个会话的持久化确认状态(防重启后重复投稿)。 */
@@ -106,6 +106,10 @@ interface RollingState {
   ambiguous?: number[];
   /** plan 046 PR7: sealed parts whose upload is owned by the hub; source is retained for master. */
   hubSkipped?: number[];
+  /** Plan 046 PR6: same-broadcast queue order key (all sessions of one broadcast share it). */
+  queueOrderKey?: string;
+  /** Plan 046 PR6: first queue seq for this session (continues across same-broadcast sessions). */
+  queueSeqBase?: number;
   /**
    * **WAL 意图标记**:开始上传前先落盘(`create` = P1 建稿中,`append` = 追加第 index 段中)。
    * 进程崩溃后凭它恢复:create 无 BV 可查 → 保守转人工(绝不自动重创建稿);append 用分 P 数核对。
@@ -328,7 +332,7 @@ export interface RollingUploaderOpts {
   uploadOwner?: () => UploadOwner;
   /** Test/production seam for the queue skip write; omitted = no queue write (tests/back-compat). */
   enqueueHubSkipped?: (input: {
-    file: string; index: number; streamKey: string; title?: string; expectedDurationSec?: number; confirmedAt?: number;
+    file: string; index: number; seq?: number; streamKey: string; title?: string; expectedDurationSec?: number; confirmedAt?: number;
   }) => void;
   /**
    * Plan 046 PR6 (方案 A): when on, the recorder only enqueues upload-part rows; the serve runner uploads and
@@ -337,16 +341,23 @@ export interface RollingUploaderOpts {
   queueMode?: boolean;
   /** Test seam for the enqueue adapter; production resolves it lazily (module cycle avoidance). */
   enqueueQueuePart?: (input: {
-    file: string; index: number; orderKey: string; bv?: string; title?: string; expectedDurationSec?: number; taskId?: number;
-  }) => boolean;
+    file: string; index: number; seq?: number; orderKey: string; bv?: string; expectedDurationSec?: number; taskId?: number;
+    meta: { cookies: string; title: string; tid: number; tag: string; desc?: string; public: boolean; seasonSectionId?: number };
+  }) => "queued" | "already" | "failed";
   /** Test seam for the skipped placeholder (empty/fragment parts). */
   enqueueQueueSkip?: (input: {
-    file: string; index: number; orderKey: string; title?: string; expectedDurationSec?: number; taskId?: number;
-  }) => boolean;
+    file: string; index: number; seq?: number; orderKey: string; expectedDurationSec?: number; taskId?: number;
+    meta: { cookies: string; title: string; tid: number; tag: string; desc?: string; public: boolean; seasonSectionId?: number };
+  }) => "queued" | "already" | "failed";
   /** Test seam for the legacy-sidecar import (confirmed part => done row). */
   importQueueConfirmed?: (input: {
-    file: string; index: number; orderKey: string; bv: string; title?: string; expectedDurationSec?: number; taskId?: number;
-  }) => boolean;
+    file: string; index: number; seq?: number; orderKey: string; bv: string; expectedDurationSec?: number; taskId?: number;
+    meta: { cookies: string; title: string; tid: number; tag: string; desc?: string; public: boolean; seasonSectionId?: number };
+  }) => "queued" | "already" | "failed";
+  /** Highest seq already present for one order key (restart/same-broadcast continuation). */
+  queueMaxSeq?: (orderKey: string) => number;
+  /** Delay before retrying a failed queue enqueue (tests pass 0). */
+  queueRetryMs?: number;
   /** Task id stamped onto queue rows (owner routing for alerts). */
   taskId?: number;
 }
@@ -397,6 +408,8 @@ export class RollingUploader {
   uploadSlot(): UploadSlot | null { return this.slot; }
   /** Plan 046 PR6: indices already enqueued (or placeholder-queued) in queue mode; in-memory only. */
   private readonly queuedIndices = new Set<number>();
+  /** Pending queue-enqueue retry timer (PR6 MEDIUM 7: session-end flush is one-shot). */
+  private queueRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(o: RollingUploaderOpts) {
     this.o = o;
@@ -760,16 +773,24 @@ export class RollingUploader {
     const confirmed = new Set(this.state.confirmed);
     const ambiguous = new Set(this.state.ambiguous ?? []);
     const { rolling, sealed } = this.planPendingFrom(recordingActive, this.now(), confirmed, ambiguous);
-    const orderKey = this.state.streamKey || this.state.sessionBase;
-    const meta = {
-      ...(typeof this.o.uploadMeta.partTitleTemplate === "string" ? { title: this.o.uploadMeta.partTitleTemplate } : {}),
-      ...(this.o.taskId !== undefined ? { taskId: this.o.taskId } : {}),
-    };
-    // Legacy sidecar import: parts confirmed by the old path become done rows so later parts inherit their bv.
+    const orderKey = this.queueOrderKey();
+    if (orderKey === null) {
+      // Unreadable same-broadcast predecessor: fail closed (no upload / no delete), keep sources for a human.
+      this.o.notify?.("边录边传队列模式:无法确认同场前序会话,本会话暂不上传,保留源");
+      return { uploaded: [], deleted: [], ambiguous: [...ambiguous] };
+    }
+    const seqBase = this.queueSeqBase(orderKey);
+    const hubOwned = this.o.uploadOwner?.() === "master";
+    // Legacy sidecar import: parts confirmed by the old path become done rows so later parts inherit their bv,
+    // and a still-present source gets a cleanup-part row (normal deletion path; never delete here).
     if (this.state.bv) {
       for (const seg of rolling) {
         if (!confirmed.has(seg.index)) continue;
-        this.o.importQueueConfirmed?.({ file: seg.path, index: seg.index, orderKey, bv: this.state.bv, ...meta });
+        const r = this.o.importQueueConfirmed?.({
+          file: seg.path, index: seg.index, seq: seqBase + seg.index + 1, orderKey, bv: this.state.bv,
+          ...(this.o.taskId !== undefined ? { taskId: this.o.taskId } : {}), meta: this.queueMetaFor(seg),
+        });
+        if (r === "failed") this.queueFailed(seg.index, "兼容导入失败");
       }
     }
     const queued: number[] = [];
@@ -777,18 +798,32 @@ export class RollingUploader {
       if (this.queuedIndices.has(seg.index)) continue;
       if (!sealed.has(seg.index)) continue;
       if (this.state.hubSkipped?.includes(seg.index)) continue;
-      const skip = this.isEmptySegment(seg) || this.isFragment(seg, rolling);
-      const ok = skip
-        ? this.o.enqueueQueueSkip?.({ file: seg.path, index: seg.index, orderKey, ...meta })
-        : this.o.enqueueQueuePart?.({
-          file: seg.path, index: seg.index, orderKey, ...meta,
-          ...(seg.index > 0 && this.state.bv ? { bv: this.state.bv } : {}),
+      const seq = seqBase + seg.index + 1;
+      const meta = this.queueMetaFor(seg);
+      if (hubOwned) {
+        // PR7 single owner decision: hub-owned parts write only skipped(hub-owned), never an upload row.
+        this.o.enqueueHubSkipped?.({
+          file: seg.path, index: seg.index, seq, streamKey: orderKey,
+          ...(this.o.taskId !== undefined ? { taskId: this.o.taskId } : {}),
+          ...(this.state.startMs !== undefined ? { confirmedAt: this.state.startMs } : {}),
         });
-      if (ok === false) {
-        this.log("[rolling-queue] part " + seg.index + " enqueue rejected; keeping the source and retrying next flush");
-        break;
+        this.queuedIndices.add(seg.index);
+        queued.push(seg.index);
+        continue;
       }
-      if (ok !== undefined) {
+      const skip = this.isEmptySegment(seg) || this.isFragment(seg, rolling);
+      const r = skip
+        ? this.o.enqueueQueueSkip?.({ file: seg.path, index: seg.index, seq, orderKey, ...(this.o.taskId !== undefined ? { taskId: this.o.taskId } : {}), meta })
+        : this.o.enqueueQueuePart?.({
+          file: seg.path, index: seg.index, seq, orderKey,
+          ...(seg.index > 0 && this.state.bv ? { bv: this.state.bv } : {}),
+          ...(this.o.taskId !== undefined ? { taskId: this.o.taskId } : {}), meta,
+        });
+      if (r === "failed") {
+        this.queueFailed(seg.index, skip ? "空/碎片段占位失败" : "入队失败");
+        break; // head-of-line: later parts wait so seq stays gapless
+      }
+      if (r !== undefined) {
         this.queuedIndices.add(seg.index);
         queued.push(seg.index);
       }
@@ -798,6 +833,73 @@ export class RollingUploader {
       noteRecorderProgress();
     }
     return { uploaded: queued, deleted: [], ambiguous: [...ambiguous] };
+  }
+
+  /** Same-broadcast order key; null = a predecessor exists but cannot be judged safely (fail closed). */
+  private queueOrderKey(): string | null {
+    if (this.state.queueOrderKey) return this.state.queueOrderKey;
+    const link = this.findPredecessor();
+    let key = this.state.streamKey || this.state.sessionBase;
+    if (link.kind === "uncertain") {
+      this.log("[rolling-queue] 同场前序无法判定,保留源且不入队: " + link.reason);
+      return null;
+    }
+    if (link.kind === "inherit") {
+      const prev = readState(this.segDir, link.from);
+      // Old sidecars carry no queueOrderKey: their streamKey is the shared same-broadcast key.
+      key = (prev?.queueOrderKey && prev.queueOrderKey) || prev?.streamKey || key;
+    }
+    this.state = { ...this.state, queueOrderKey: key, updatedAt: this.now() };
+    this.persist();
+    return key;
+  }
+
+  /** First queue seq for this session: continues after the parts already present in the same order. */
+  private queueSeqBase(orderKey: string): number {
+    if (typeof this.state.queueSeqBase === "number" && this.state.queueSeqBase >= 0) return this.state.queueSeqBase;
+    let base = 0;
+    try { base = Math.max(0, this.o.queueMaxSeq?.(orderKey) ?? 0); } catch { base = 0; }
+    this.state = { ...this.state, queueSeqBase: base, updatedAt: this.now() };
+    this.persist();
+    return base;
+  }
+
+  /** Fully resolved biliup metadata for one part (same values the legacy path sends). */
+  private queueMetaFor(seg: RollingSegment): {
+    cookies: string; title: string; tid: number; tag: string; desc?: string; public: boolean; seasonSectionId?: number;
+  } {
+    const cookies = this.o.cookies ?? process.env.BILIUP_COOKIE ?? rootBiliupCookies();
+    const base = segmentSessionBase(path.basename(seg.path)) ?? this.state.sessionBase;
+    const startMs = this.firstSegMtimeMs || this.state.startMs || this.now();
+    const stem = resolveOutputStem({
+      template: this.o.uploadMeta.titleTemplate, sessionBase: base, startMs,
+      timeZone: this.o.timeZone ?? processTimeZone(),
+    });
+    const title = resolveSubmissionTitle({
+      submissionTemplate: this.o.uploadMeta.submissionTitleTemplate,
+      template: this.o.uploadMeta.titleTemplate, stem,
+      ctx: { sessionBase: base, startMs, timeZone: this.o.timeZone ?? processTimeZone() },
+    });
+    return {
+      cookies, title, tid: this.o.uploadMeta.tid, tag: this.o.uploadMeta.tag,
+      ...(this.o.uploadMeta.desc ? { desc: this.o.uploadMeta.desc } : {}),
+      public: this.o.uploadPrivate === false,
+      ...(this.o.uploadMeta.seasonSectionId ? { seasonSectionId: this.o.uploadMeta.seasonSectionId } : {}),
+    };
+  }
+
+  /** Enqueue failure must be visible and retried: session-end flush is one-shot (TODO(?): no orphan scan yet). */
+  private queueFailed(index: number, what: string): void {
+    const msg = "边录边传队列模式:段 " + index + " " + what + ",保留源并稍后重试(孤儿文件扫描尚未实现)";
+    this.log("[rolling-queue] " + msg);
+    try { this.o.notify?.(msg); } catch { /* alert is best-effort */ }
+    if (this.queueRetryTimer) return;
+    const timer = setTimeout(() => {
+      this.queueRetryTimer = null;
+      void this.flush({ recordingActive: false }).catch(() => undefined);
+    }, this.o.queueRetryMs ?? 60_000);
+    timer.unref?.();
+    this.queueRetryTimer = timer;
   }
 
   private planPendingFrom(
@@ -1444,6 +1546,8 @@ export function makeRollingUploadHookFactory(o: {
   enqueueQueuePart?: RollingUploaderOpts["enqueueQueuePart"];
   enqueueQueueSkip?: RollingUploaderOpts["enqueueQueueSkip"];
   importQueueConfirmed?: RollingUploaderOpts["importQueueConfirmed"];
+  /** Test seam for the highest seq already present in one order. */
+  queueMaxSeq?: RollingUploaderOpts["queueMaxSeq"];
   timeZone?: string;
   uploadPrivate?: boolean;
   cookies?: string;
@@ -1491,6 +1595,7 @@ export function makeRollingUploadHookFactory(o: {
       enqueueQueuePart: o.enqueueQueuePart ?? enqueueRollingUploadPart,
       enqueueQueueSkip: o.enqueueQueueSkip ?? enqueueRollingSkipPart,
       importQueueConfirmed: o.importQueueConfirmed ?? importRollingConfirmedPart,
+      queueMaxSeq: o.queueMaxSeq ?? rollingQueueMaxSeq,
       // One slot per node process, shared with the queue's biliup processor (plan 038 PR4).
       // Queue mode must never take the upload slot (the runner owns the only uploader).
       slot: o.queueMode === true ? null : (o.slot ?? sharedNodeUploadSlot(o.log)),

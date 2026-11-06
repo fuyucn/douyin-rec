@@ -10,6 +10,8 @@ import { PART_KINDS, jobIdOf, type PartCtx } from "@drec/core";
 import {
   enqueueRollingUploadPart, enqueueRollingSkipPart, importRollingConfirmedPart, rollingQueueModeEnabled,
 } from "./rolling-queue.js";
+import { makeUploadPartProcessor } from "@drec/processors";
+import { enqueueHubOwnedSkip } from "./hub-owner.js";
 
 // Fake draft ids are built from parts: the privacy gate rejects bare BV-shaped literals.
 const FAKE_BV1 = ["B", "V", "legacy", "0001"].join("");
@@ -64,9 +66,9 @@ function queueUploader(over: Partial<ConstructorParameters<typeof RollingUploade
   const u = new RollingUploader({
     room, uploadMeta, minSegmentSec: 0, now: () => NOW_MS,
     queueMode: true,
-    enqueueQueuePart: (i) => { enq.push({ ...i }); return true; },
-    enqueueQueueSkip: (i) => { skips.push({ ...i }); return true; },
-    importQueueConfirmed: (i) => { imports.push({ ...i }); return true; },
+    enqueueQueuePart: (i) => { enq.push({ ...i }); return "queued"; },
+    enqueueQueueSkip: (i) => { skips.push({ ...i }); return "queued"; },
+    importQueueConfirmed: (i) => { imports.push({ ...i }); return "already"; },
     // Legacy seams must never be reached in queue mode: they would be a second uploader.
     uploadPlainRaw: vi.fn(async () => { throw new Error("biliup must not run in queue mode"); }),
     appendGroupRaw: vi.fn(async () => { throw new Error("biliup must not run in queue mode"); }),
@@ -126,7 +128,7 @@ describe("rolling queue mode (方案 A)", () => {
         imports.push({ ...i });
         // Real adapter is idempotent; here we exercise the store import directly once per index.
         importRollingConfirmedPart(i as Parameters<typeof importRollingConfirmedPart>[0]);
-        return true;
+        return "already";
       },
     });
     paths.forEach((p) => u.noteSegment(p));
@@ -172,7 +174,7 @@ describe("rolling queue mode (方案 A)", () => {
 describe("rolling-queue store adapters", () => {
   it("enqueue writes one deterministic pending upload-part row with rolling workflow", () => {
     const p = segs(1)[0]!;
-    expect(enqueueRollingUploadPart({ file: p, index: 0, orderKey: orderKeyOf() })).toBe(true);
+    expect(enqueueRollingUploadPart({ file: p, index: 0, orderKey: orderKeyOf(), meta: { cookies: "c", title: "t", tid: 21, tag: "tag", public: false } })).toBe("queued");
     const rows = rowsOf(PART_KINDS.upload);
     expect(rows).toHaveLength(1);
     const ctx = rows[0]!.params as unknown as { ctx: PartCtx };
@@ -180,26 +182,26 @@ describe("rolling-queue store adapters", () => {
     expect((rows[0]!.params as Record<string, unknown>).partWorkflow).toBe("rolling");
     expect(rows[0]!.jobId).toBe(jobIdOf(PART_KINDS.upload, orderKeyOf() + ":part:1", 1));
     // 重复入队幂等:同一 jobId,不新增行。
-    expect(enqueueRollingUploadPart({ file: p, index: 0, orderKey: orderKeyOf() })).toBe(true);
+    expect(enqueueRollingUploadPart({ file: p, index: 0, orderKey: orderKeyOf(), meta: { cookies: "c", title: "t", tid: 21, tag: "tag", public: false } })).toBe("queued");
     expect(rowsOf(PART_KINDS.upload)).toHaveLength(1);
   });
 
   it("skip adapter writes a skipped placeholder; import adapter writes a done row with the bv", () => {
     const p = segs(1)[0]!;
-    expect(enqueueRollingSkipPart({ file: p, index: 0, orderKey: orderKeyOf() })).toBe(true);
+    expect(enqueueRollingSkipPart({ file: p, index: 0, orderKey: orderKeyOf(), meta: { cookies: "c", title: "t", tid: 21, tag: "tag", public: false } })).toBe("already");
     expect(rowsOf(PART_KINDS.upload)[0]!.state).toBe("skipped");
 
     const q = segs(2)[1]!;
-    expect(importRollingConfirmedPart({ file: q, index: 1, orderKey: orderKeyOf(), bv: FAKE_BV3 })).toBe(true);
+    expect(importRollingConfirmedPart({ file: q, index: 1, orderKey: orderKeyOf(), bv: FAKE_BV3, meta: { cookies: "c", title: "t", tid: 21, tag: "tag", public: false } })).toBe("already");
     const done = rowsOf(PART_KINDS.upload).find((r) => r.seq === 2);
     expect(done).toMatchObject({ state: "done", bv: FAKE_BV3 });
   });
 
   it("later parts inherit the bv from the imported done row (same order + generation)", () => {
     const p = segs(1)[0]!;
-    importRollingConfirmedPart({ file: p, index: 0, orderKey: orderKeyOf(), bv: FAKE_BV4 });
+    importRollingConfirmedPart({ file: p, index: 0, orderKey: orderKeyOf(), bv: FAKE_BV4, meta: { cookies: "c", title: "t", tid: 21, tag: "tag", public: false } });
     const q = segs(2)[1]!;
-    enqueueRollingUploadPart({ file: q, index: 1, orderKey: orderKeyOf() });
+    enqueueRollingUploadPart({ file: q, index: 1, orderKey: orderKeyOf(), meta: { cookies: "c", title: "t", tid: 21, tag: "tag", public: false } });
     const s = openQueue();
     try {
       const row = s.list({ kind: PART_KINDS.upload }).find((r) => r.seq === 2)!;
@@ -214,8 +216,8 @@ describe("rolling-queue store adapters", () => {
     const enq: number[] = [];
     const hook = makeRollingUploadHookFactory({
       enabled: true, platform: room.platform, roomSlug: room.roomSlug, queueMode: true,
-      enqueueQueuePart: (i) => { enq.push(i.index); return true; },
-      enqueueQueueSkip: () => true, importQueueConfirmed: () => true,
+      enqueueQueuePart: (i) => { enq.push(i.index); return "queued"; },
+      enqueueQueueSkip: () => "queued", importQueueConfirmed: () => "already",
       slot: slot as never,
     })!;
     const mkHook = hook as unknown as () => { onSegment(p: string): void; onSessionEnd(): Promise<void> };
@@ -235,7 +237,7 @@ describe("rolling-queue store adapters", () => {
     try {
       const p = path.join(outside, "a_000.ts");
       writeFileSync(p, "x");
-      expect(enqueueRollingUploadPart({ file: p, index: 0, orderKey: orderKeyOf() })).toBe(false);
+      expect(enqueueRollingUploadPart({ file: p, index: 0, orderKey: orderKeyOf(), meta: { cookies: "c", title: "t", tid: 21, tag: "tag", public: false } })).toBe("failed");
     } finally { rmSync(outside, { recursive: true, force: true }); }
   });
 
@@ -251,4 +253,123 @@ describe("rolling-queue store adapters", () => {
       expect(rollingQueueModeEnabled(path.join(root, "db", "douyin-rec.db"))).toBe(false);
     } finally { s.close(); }
   });
+});
+
+describe("rework findings (PR6 round 1)", () => {
+  const meta = { cookies: "c", title: "rendered title", tid: 21, tag: "tag", public: false };
+
+  it("CRITICAL 1: rows carry full biliup metadata and pass upload-part validate", () => {
+    const p = segs(1)[0]!;
+    expect(enqueueRollingUploadPart({ file: p, index: 0, orderKey: orderKeyOf(), meta })).toBe("queued");
+    const row = openQueue().list({ kind: PART_KINDS.upload })[0]!;
+    expect(row.params).toMatchObject({ cookies: "c", title: "rendered title", tid: 21, tag: "tag", public: false });
+    const v = makeUploadPartProcessor().validate(row);
+    expect(v).toBeNull();
+  });
+
+  it("CRITICAL 3: hub-owned segments write only skipped(hub-owned), no upload row", async () => {
+    const paths = segs(2);
+    const skipped: number[] = [];
+    const enq: number[] = [];
+    const u = queueUploader({
+      uploadOwner: () => "master",
+      enqueueHubSkipped: (i) => { skipped.push(i.index); },
+      enqueueQueuePart: (i) => { enq.push(i.index); return "queued"; },
+    });
+    paths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(skipped).toEqual([0, 1]);
+    expect(enq).toEqual([]);
+  });
+
+  it("CRITICAL 3: hub skip and upload producer share one logical key (one job id per segment)", () => {
+    const p = segs(1)[0]!;
+    expect(enqueueHubOwnedSkip({ file: p, index: 0, streamKey: orderKeyOf(), taskId: 1 })).toBe(true);
+    const ids = openQueue().list({ kind: PART_KINDS.upload }).map((r) => r.jobId);
+    expect(ids).toHaveLength(1);
+    // The upload producer for the same segment hits the same deterministic job id and must not add a row.
+    expect(enqueueRollingUploadPart({ file: p, index: 0, orderKey: orderKeyOf(), meta })).toBe("already");
+    expect(openQueue().list({ kind: PART_KINDS.upload })).toHaveLength(1);
+  });
+
+  it("HIGH 4: a done row no longer blocks later parts (restart flush continues)", async () => {
+    const paths = segs(2);
+    expect(enqueueRollingUploadPart({ file: paths[0]!, index: 0, orderKey: orderKeyOf(), meta })).toBe("queued");
+    // Simulate an already-finished part on restart.
+    const s = openQueue();
+    const id = s.list({ kind: PART_KINDS.upload })[0]!.jobId;
+    s.acquireLease("upload-part", "A", { pid: process.pid });
+    s.claim({ kinds: ["upload-part"], owner: "A" });
+    s.finish(id, "A", { state: "done", outputs: [] });
+    s.releaseLease("upload-part", "A");
+    s.close();
+
+    const u = queueUploader();
+    paths.forEach((p) => u.noteSegment(p));
+    const r = await u.flush({ recordingActive: false });
+    expect(r.uploaded).toEqual([0, 1]); // done part counted as handled; new part still enqueued
+  });
+
+  it("HIGH 6: a misspelled switch value is OFF (explicit on-list)", () => {
+    const s = new TaskStore(path.join(root, "db", "douyin-rec.db"));
+    try {
+      s.setSetting("rollingQueueMode", "ofl");
+      expect(rollingQueueModeEnabled(path.join(root, "db", "douyin-rec.db"))).toBe(false);
+      s.setSetting("rollingQueueMode", "true");
+      expect(rollingQueueModeEnabled(path.join(root, "db", "douyin-rec.db"))).toBe(true);
+    } finally { s.close(); }
+  });
+
+  it("MEDIUM 7: a failed enqueue notifies and does not mark the part handled", async () => {
+    const paths = segs(2);
+    const notify = vi.fn();
+    const u = queueUploader({
+      notify,
+      queueRetryMs: 0,
+      enqueueQueuePart: () => "failed",
+    });
+    paths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(notify).toHaveBeenCalled();
+    expect(seen(u, "__enq")).toEqual([]);
+  });
+
+  it("MEDIUM 8: sidecar import of a still-present source also enqueues cleanup-part", () => {
+    const paths = segs(1);
+    expect(importRollingConfirmedPart({ file: paths[0]!, index: 0, orderKey: orderKeyOf(), bv: FAKE_BV1, meta })).toBe("already");
+    const rows = openQueue().list({ kind: PART_KINDS.cleanup });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.state).toBe("pending");
+    expect((rows[0]!.params.ctx as PartCtx).bv).toBe(FAKE_BV1);
+  });
+
+  it("MEDIUM 9: a same-broadcast successor reuses the predecessor order key and seq base", async () => {
+    const prevBase = "主播_2026-06-27_07-00-00";
+    const prevPath = path.join(rec, prevBase + "_000.ts");
+    writeFileSync(prevPath, "abcdefgh");
+    utimesSync(prevPath, new Date(BASE_MS - 30 * 60_000), new Date(BASE_MS - 30 * 60_000));
+    writeFileSync(path.join(rec, prevBase + ".rolling.json"), JSON.stringify({
+      streamKey: "douyin:123:" + prevBase, sessionBase: prevBase,
+      segments: [{ index: 0, path: prevPath }], confirmed: [0], bv: FAKE_BV2,
+      room, startMs: BASE_MS - 30 * 60_000, updatedAt: BASE_MS - 30 * 60_000,
+    }));
+    // Predecessor's row already used seq 1 in that order.
+    expect(enqueueRollingUploadPart({ file: prevPath, index: 0, orderKey: "douyin:123:" + prevBase, meta })).toBe("queued");
+    const paths = segs(1);
+    const u = queueUploader({ queueMaxSeq: () => 1 });
+    u.noteSegment(paths[0]!);
+    await u.flush({ recordingActive: false });
+    const first = seen(u, "__enq")[0]!;
+    expect(first.orderKey).toBe("douyin:123:" + prevBase);
+    expect(first.seq).toBe(2); // continues after the predecessor's part
+  });
+
+  it("CRITICAL 2: providers-register wires upload-part with the shared gate/slot/account key", () => {
+    const src = readFileSync(path.join(import.meta.dirname, "..", "..", "cli", "src", "providers-register.ts"), "utf-8");
+    expect(src).toContain("registerProcessor(makeUploadPartProcessor({");
+    expect(src).toContain("accountKey: resolveUploadAccountKey");
+    expect(src).toContain("nodeUploadSlot");
+    expect(src).not.toContain("registerProcessor(uploadPartProcessor)");
+  });
+
 });

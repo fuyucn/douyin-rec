@@ -30,6 +30,14 @@ export type PartChainKind = (typeof PART_KINDS)[keyof typeof PART_KINDS];
  */
 export const ROLLING_QUEUE_MODE_SETTING = "rollingQueueMode";
 
+/**
+ * The single logical key for one part row: every producer (recorder enqueue, hub-owned skip, runner
+ * bv inheritance) must use this so a segment can never have two job ids.
+ */
+export function partLogicalKey(orderKey: string, seq: number): string {
+  return orderKey + ":part:" + String(seq);
+}
+
 /** Persisted in `params.ctx`; one upload/reconcile row points at exactly one video part. */
 export interface PartCtx {
   v: 1;
