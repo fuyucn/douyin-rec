@@ -5,7 +5,6 @@
  * without importing platform vendor bundles.
  */
 import type { RemoteTaskSpec } from "@drec/core";
-import { STREAM_UPLOAD_SPOOL_REQUIRED } from "@drec/core";
 import { applyRemoteTasks, type ApplyTasksOptions } from "./task-sync.js";
 import type { TaskStore } from "./store.js";
 
