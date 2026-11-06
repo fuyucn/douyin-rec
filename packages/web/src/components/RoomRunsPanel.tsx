@@ -38,6 +38,7 @@ export function RoomRunsPanel({
   collapsed = false,
   task,
   rolling = [],
+  readOnly = false,
 }: {
   room: RoomDTO;
   /** 节点 id→友好名(与本页配置半边共用同一份,查不到回落 id)。 */
@@ -47,6 +48,11 @@ export function RoomRunsPanel({
   /** Live-upload / rolling progress of the running broadcast (shown as a per-part tree above the history). */
   task?: Task;
   rolling?: RollingDeliveryDTO[];
+  /**
+   * 只读(受管房间,plan §3.3):运行历史照常看,但**一个写操作都不出** —— 立即执行 / 重跑 /
+   * 单节点重试 / 停止全部收敛。数据与日志照旧,所以这里只摘掉按钮,不摘面板。
+   */
+  readOnly?: boolean;
 }): ReactNode {
   const t = useT();
   const toast = useToast();
@@ -169,6 +175,14 @@ export function RoomRunsPanel({
   const [historyRows, setHistoryRows] = useState(0);
   const liveRows = currentRows + historyRows;
 
+  // 只读时写操作一律传 undefined:RunCard 对这三个回调都是可选(没有就不渲染按钮),
+  // 所以「受管房间没有写入口」只有这一处判定,不在卡片内部各写一份。
+  const write = {
+    onRetry: readOnly ? undefined : retryNode,
+    onStop: readOnly ? undefined : stopJob,
+    onRunNow: readOnly ? undefined : rerun,
+  };
+
   // cfg 交给 RunCard 画「计划图」(进行中 run 还没写 steps 时靠它画出待办节点)。
   const cfg = useMemo(() => (room.processing?.pipeline ?? undefined) as FlowCfg | undefined, [room.key, room.processing]);
 
@@ -179,9 +193,11 @@ export function RoomRunsPanel({
         <span className="section-label">{t("rooms.runsHeading")}</span>
         <div className="flex items-center gap-2">
           <span className="font-mono text-[11px] text-muted-soft">{listedRunCount({ hubRuns: total, liveRows })}</span>
-          <Button small variant="secondary" onClick={() => setRunOpen(true)}>
-            {t("hub.jobs.runNow")}
-          </Button>
+          {!readOnly && (
+            <Button small variant="secondary" onClick={() => setRunOpen(true)}>
+              {t("hub.jobs.runNow")}
+            </Button>
+          )}
         </div>
       </div>
       <div className="p-1.5">
@@ -212,9 +228,7 @@ export function RoomRunsPanel({
               cfg={cfg}
               expanded={isExpanded(j.streamKey)}
               onToggle={toggleRun}
-              onRetry={retryNode}
-              onStop={stopJob}
-              onRunNow={rerun}
+              {...write}
             />
           ))}
         {runs.length < total && (
@@ -227,30 +241,36 @@ export function RoomRunsPanel({
         )}
       </div>
       <JobLogDialog logKey={logKey} onClose={() => setLogKey(null)} />
-      <RunNowDialog
-        open={runOpen}
-        onClose={() => setRunOpen(false)}
-        runs={runs}
-        workers={workers}
-        roomPrefix={`${room.platform}:${room.roomSlug}`}
-        roomWorkerIds={room.processing?.workers}
-        today={todayYmdInTz(serverTz)}
-        busy={runBusy}
-        onSubmit={runNow}
-      />
-      <ConfirmDialog
-        open={forceRun !== null}
-        title={t("hub.jobs.runForceTitle")}
-        message={<><span className="block">{forceRun?.message}</span><span className="block mt-2">{t("hub.jobs.runForceHint")}</span></>}
-        confirmLabel={t("hub.jobs.runForceConfirm")}
-        destructive
-        onConfirm={() => {
-          const f = forceRun;
-          setForceRun(null);
-          if (f) void forceRerun(f.streamKey);
-        }}
-        onCancel={() => setForceRun(null)}
-      />
+      {/* 只读时「立即执行」的弹窗根本打不开,也就不挂载 —— 不留一个永远关着的写操作入口。 */}
+      {!readOnly && (
+        <RunNowDialog
+          open={runOpen}
+          onClose={() => setRunOpen(false)}
+          runs={runs}
+          workers={workers}
+          roomPrefix={`${room.platform}:${room.roomSlug}`}
+          roomWorkerIds={room.processing?.workers}
+          today={todayYmdInTz(serverTz)}
+          busy={runBusy}
+          onSubmit={runNow}
+        />
+      )}
+      {/* 「强制重跑」只由上面两处写操作触发;只读时永远不会弹。 */}
+      {!readOnly && (
+        <ConfirmDialog
+          open={forceRun !== null}
+          title={t("hub.jobs.runForceTitle")}
+          message={<><span className="block">{forceRun?.message}</span><span className="block mt-2">{t("hub.jobs.runForceHint")}</span></>}
+          confirmLabel={t("hub.jobs.runForceConfirm")}
+          destructive
+          onConfirm={() => {
+            const f = forceRun;
+            setForceRun(null);
+            if (f) void forceRerun(f.streamKey);
+          }}
+          onCancel={() => setForceRun(null)}
+        />
+      )}
       {/* 推送失效提示(与队列页/Hub 页同款),不静默停在旧值。 */}
       {stream.stale && (
         <div className="px-3 py-2 text-[11px]" style={{ color: "var(--warning-fg)" }}>

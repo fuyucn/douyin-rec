@@ -49,6 +49,11 @@ const shared = {
   minify: true,
 };
 
+// Test builds (test/cli/record-spool-flag.test.ts) point DREC_BUNDLE_MAIN_OUT at a private temp
+// directory so a spawned-CLI test never races other test files over the shared dist/. When it is
+// set we stop after the main bundle: the TUI and the launcher are not used by that test.
+const MAIN_OUT = process.env.DREC_BUNDLE_MAIN_OUT || "dist/douyin-rec.mjs";
+
 // ── Main bundle: CLI + serve (single file; docker runs this; NO TUI/React/Ink) ──
 // The `task tui` action loads ./tui.mjs via a VARIABLE dynamic import, so esbuild
 // can't statically follow it → the TUI (and its react/ink/yoga deps) stay OUT of
@@ -56,7 +61,7 @@ const shared = {
 await build({
   ...shared,
   entryPoints: ["packages/cli/src/cli.ts"],
-  outfile: "dist/douyin-rec.mjs",
+  outfile: MAIN_OUT,
   // - ws optional native speedups — not present, keep external so they no-op.
   // - playwright is heavy + ships native browser binaries; lazy-imported in QR login.
   external: ["bufferutil", "utf-8-validate", "playwright", "playwright-core"],
@@ -67,6 +72,7 @@ await build({
   banner: { js: "#!/usr/bin/env node\n" + REQUIRE_SHIM },
 });
 
+if (!process.env.DREC_BUNDLE_MAIN_OUT) {
 // ── TUI bundle: separate file, contains JSX; ink/react/yoga stay external and
 // resolve from node_modules at runtime (TUI only runs on a host, never in docker). ──
 await build({
@@ -86,3 +92,4 @@ const launcher =
   'exec node "$(dirname "$0")/douyin-rec.mjs" "$@"\n';
 writeFileSync("dist/douyin-rec", launcher);
 chmodSync("dist/douyin-rec", 0o755);
+}

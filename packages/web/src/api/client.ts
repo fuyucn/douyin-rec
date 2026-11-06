@@ -51,6 +51,12 @@ import type {
 } from "@drec/contracts";
 export type { Task, TaskDetail, TaskRuntime, CookieStatus, BiliupAuthStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobNodeStateDTO, HubJobCandidateDTO, HubJobEventDTO, HubJobsDTO, HubQueueDTO, RollingDeliveryDTO, QueueItemDTO, NodeUploadStatusDTO, HubPoolSnapshotDTO, HubBlockedBroadcastDTO, QueuePhase, HubJobStepDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, NotifWebhookToggles, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult, WorkerStatus, NodeTasksDTO, NodeTaskLogsDTO, RoomDTO, RoomPayload, HubResources, ProcActiveDTO, StatsDTO };
 
+/**
+ * POST /api/rooms 的入参:与 PUT 同一份 `RoomPayload`,但 `recording.room` 必填
+ * (新建必须能从房间地址判定平台与房间号;其余字段缺省 = 服务端默认值)。
+ */
+export type CreateRoomInput = RoomPayload & { recording: { room: string } };
+
 /** POST /api/login/qr → start a QR-login session. */
 export interface QrStart {
   sessionId: string;
@@ -141,6 +147,8 @@ export const api = {
   // ── 统一房间(T9):一次读写「录制 + 处理」两半 ────────────────────────────────
   listRooms: (): Promise<RoomDTO[]> => request("GET", "/api/rooms"),
   getRoom: (key: string): Promise<RoomDTO> => request("GET", `/api/rooms/${encodeURIComponent(key)}`),
+  /** 一次新建一个房间(录制任务默认停用,需手动开启);重复房间 409。 */
+  createRoom: (input: CreateRoomInput): Promise<RoomDTO> => request("POST", "/api/rooms", input),
   /** 一次改两半(各自可选);后端第二步失败会回滚第一步,不会留半成功。 */
   updateRoom: (key: string, input: RoomPayload): Promise<RoomDTO> =>
     request("PUT", `/api/rooms/${encodeURIComponent(key)}`, input),
