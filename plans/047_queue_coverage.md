@@ -32,7 +32,7 @@
 
 | | **边录边传**（rolling） | **直播直传**（0 落盘 + spool） | **整场上传** |
 |---|---|---|---|
-| 前提 | 需 `rollingQueueMode=on` **且** `uploadOwner=node` | 任务 `streamUpload=true`（spool 默认开） | 需 `nodeUpload.mode=queue`（或 opt-in `partChain`） |
+| 前提 | 需 `rollingQueueMode=on` **且** `uploadOwner=node` | 任务 `streamUpload=true`（spool 默认开，`#537` 后恒开） | 需 `nodeUpload.mode=queue`；其中 `partChain=true` 且节点广播该能力时才走**分 P 链** |
 | 数据源 | 分段文件（`segmentSec` 封口） | ffmpeg stdout（按字节/时间切 P） | 收播后的文件集合 |
 | 上传时机 | 段封口**后** | **边写边传**（块与 ffmpeg 并行） | 收播 + settle 后 |
 | 上传入队 | ✅ `upload-part`（`rolling-queue.ts:142`） | ❌ 不入队（现状，进程绑定） | ⚠️ 条件能力：`nodeUpload.mode` 默认 `blocking`（`node-upload-config.ts:27`），`partChain` 默认 `false` |
@@ -45,13 +45,13 @@
 
 ## 3. 已合并能力（三列）
 
-| 能力 | 已合并 | 默认启用 | 生产接通 |
+| 能力 | 已合并 | 默认启用 | 生产启用状态 |
 |---|---|---|---|
-| 每节点持久队列（租约/fencing/保序/notBefore/场间游标/原子批量） | ✅ 036+038 | 是 | 是 |
-| `upload-part`（单 P 上传 + 确认后同事务链出 cleanup） | ✅ 046 PR1/PR5 | 否（需 `rollingQueueMode`） | **否**（开关默认 off） |
-| `cleanup-part`（唯一队列删除者 + 架构守护） | ✅ PR2 #515 | 否（无行则空转） | 是（作为链的下一环） |
+| 每节点持久队列（租约/fencing/保序/notBefore/场间游标/原子批量） | ✅ 036+038 | 是 | 是（serve 启动即持有租约） |
+| `upload-part`（单 P 上传 + 确认后同事务链出 cleanup） | ✅ 046 PR1/PR5 | 否 | **未核验**：需 `rollingQueueMode=on` **或** `nodeUpload.mode=queue && partChain`（两条生产来源，`rolling-queue.ts:54`、`node-upload-queue.ts:144`） |
+| `cleanup-part`（唯一队列删除者 + 架构守护） | ✅ PR2 #515 | 否（无行则空转） | 条件生效（仅作为 upload-part 的下一环；2026-11-06 手动开 rolling 测试时观测到 `done` 行） |
 | `reconcile-part`（对账，**影子模式**） | ✅ PR3 #516 | 否 | **否**（`startReconciliation` 无调用方、`reconcileQuery` 生产未注入） |
-| 重试策略统一（去 3 次即停/确定性即停/告警去重） | ✅ PR4 #514 | 是 | 是 |
+| 重试策略统一（去 3 次即停/确定性即停/告警去重） | ✅ PR4 #514 | 是 | 直接生效（无开关） |
 | 对账解析器适配真实 `biliup list` | ✅ PR0 #513 | 是 | 是（默认 `trustNo=false`，保守） |
 | 边录边传只入队模式 | ✅ PR6 #529 | **否**（默认 off） | 否 |
 | hub 托管写 `skipped(hub-owned)` + `uploadOwner` 单点 | ✅ PR7 #520 | 是 | 是 |
@@ -81,7 +81,14 @@
 ### G4（先做）master 看不到节点散任务的 proc-job 级状态
 - 现状：`/queue` 只渲染 hub 台账（`sync_jobs`）；页面已轮询 tasks/worker status 并显示直传 lane（`QueuePage.tsx:651,802`、`queue-live.ts:30`），
   但**没有 proc-job 级列表**（`upload-part`/`cleanup-part` 行）。节点上的散任务在 master 端不可观察。
-- 最小方案：master 侧只读聚合各节点 `_proc-status`/`/api/proc/active`（不写、不派发），队列页增加「节点队列」区块。
+- **现有接口做不到行级枚举**（这是本缺口的关键）：
+  节点 `_proc-status` 只接受**已知 jobIds** 并逐个 `get`（`app/src/node-enqueue.ts:215,227`）；
+  `/api/proc/active` 只返回按 kind 聚合的 `running/pending/leaseAlive`（`app/src/web/api/proc.ts:4,24`）。
+  两者**都无法凭空发现 master 不知道的节点散任务**。
+- 因此分两步：
+  1. **第一步（只读、可行）**：只做**聚合计数**（在队列页显示各节点的 upload-part/cleanup-part 运行/待办数），用于量化风险发生率；
+  2. **第二步（需新接口）**：行级列表必须新增节点侧的**只读分页枚举接口**（如 `_proc-list <root> --kind --state --limit --cursor`，不出 cookies、不派发）
+     或由节点事件索引提供；否则 `jobIds` 无处可来。
 
 ### G3（次之）`reconciling` 未闭环
 - 现状：入边 `startReconciliation` 与出边 `settleReconciling` 已落地（`store.ts:785`），但**无生产调用方**（`upload-part.ts:235` 仍返回 `uncertain`），
@@ -137,7 +144,7 @@
 **口径限制（重要）**：
 1. master 与各节点有**同步副本**，三行相加 ≠ 独立业务对象数；
 2. `streamUpload` 与 `rollingEffective` **不是互斥列**（CLI 只在传 flag 时互斥，`cli.ts:322`），相加不能当出处总数；
-3. 因此本文只能得出：**配置记录里 `streamUpload` 占多数**（约 62%，按 master 的 28 条计），
+3. 因此本文只能得出：**master 的配置记录里 `streamUpload` 占多数**（18/28 ≈ 64%），
    **不能**推出「录制时长/流量占多数」「plan 046 只覆盖少数任务」（后者还要扣除 `rollingQueueMode=off`、`hubOwned`、`skipped`）。
 4. **#533 的适用范围**：它的字节判据只在 `upload-part`，不在 `live-pump` 上传路径；这**不等于** spool 无其他确认风险
    （直传有自己的 WAL/pending 恢复与「create 查不到即清 pending 可重试」语义，与 proc-queue 的 settle 窗口不同）。
