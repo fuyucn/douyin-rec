@@ -169,6 +169,8 @@ const DEFAULT_MIN_SEGMENT_SEC = 2;
 const LEGACY_OWNER_QUIET_MS = 10 * 60_000;
 /** Longest a successor waits for a predecessor's (identity-checked) live owner before failing closed. */
 const DEFAULT_OWNER_WAIT_MS = 30 * 60_000;
+/** How long a failed legacy-import archive proof is cached before the next flush measures it again. */
+const DEFAULT_PROOF_RETRY_MS = 60_000;
 /** The predecessor's last segment must keep the same size across this pause before it counts as sealed. */
 const DEFAULT_STABLE_CHECK_MS = 2_000;
 
@@ -377,6 +379,8 @@ export interface RollingUploaderOpts {
   queueOrderHasRows?: (orderKey: string) => boolean;
   /** Delay before retrying a failed queue enqueue (tests pass 0). */
   queueRetryMs?: number;
+  /** How long a failed legacy-import archive proof is cached before it is measured again (default 60s). */
+  queueProofRetryMs?: number;
   /** Task id stamped onto queue rows (owner routing for alerts). */
   taskId?: number;
 }
@@ -435,6 +439,10 @@ export class RollingUploader {
   private readonly queueBlocked = new Set<number>();
   /** Cached archive proof for the legacy sidecar import (one query per session). */
   private queueImportProof: number | null = null;
+  /** When queueImportProof was measured (0 = never); a failed proof is re-measured after a bounded window. */
+  private queueImportProofAt = 0;
+  /** Indices blocked only because the archive proof failed; released once a later proof succeeds. */
+  private readonly queueBlockedByProof = new Set<number>();
   /** Alerts already sent for this session (one per reason/index, not per flush). */
   private readonly queueNotified = new Set<string>();
   /** True when this session loaded an existing sidecar from disk (the only safe trigger for legacy import). */
@@ -879,10 +887,13 @@ export class RollingUploader {
     const plan = this.planPendingFrom(recordingActive, this.now(), confirmed, ambiguous);
     const rolling = plan.rolling;
     const sealed = plan.sealed;
-    const orderKey = this.queueOrderKey();
-    if (orderKey === null) return { uploaded: [], deleted: [], ambiguous: [...ambiguous] };
-    const seqBase = this.queueSeqBase(orderKey);
     const hubOwned = this.o.uploadOwner?.() === "master";
+    // Master-owned rooms upload on the master, not here. Their order key must stay LOCAL: persisting
+    // queueOrderKey would make the master's rolling short-circuit read "node queue still uploading"
+    // and hold the whole broadcast forever (plan 046 PR6 addendum 8, P1).
+    const orderKey = this.queueOrderKey(!hubOwned);
+    if (orderKey === null) return { uploaded: [], deleted: [], ambiguous: [...ambiguous] };
+    const seqBase = this.queueSeqBase(orderKey, !hubOwned);
     if (ambiguous.size > 0) {
       // Ambiguous legacy segments are never retried automatically (duplicate append risk).
       this.notifyOnce("ambiguous", "边录边传队列模式:存在结果不确定的段,该段及之后不入队,保留源待人工");
@@ -891,16 +902,31 @@ export class RollingUploader {
     // archive proof (a sidecar alone must not authorize a delete).
     if (this.state.bv && this.loadedExistingSidecar && !hubOwned) {
       const cookies = this.o.cookies ?? process.env.BILIUP_COOKIE ?? rootBiliupCookies();
+      // A failed lookup (0) is only cached for a bounded window: a transient archive error must not
+      // block every confirmed legacy part for the rest of the session, and a later good proof must win.
+      const proofRetryMs = this.o.queueProofRetryMs ?? DEFAULT_PROOF_RETRY_MS;
+      const proofDue = this.queueImportProofAt > 0 && this.now() - this.queueImportProofAt >= proofRetryMs;
       let proof = this.queueImportProof;
-      if (proof === null) {
+      if (proof === null || ((proof ?? 0) <= 0 && proofDue)) {
         try { proof = await this.countPartsInner(this.state.bv, cookies) ?? 0; } catch { proof = 0; }
         this.queueImportProof = proof;
+        this.queueImportProofAt = this.now();
       }
       if (proof <= 0) {
         this.notifyOnce("import-proof", "边录边传队列模式:老 sidecar 的已确认段无法在稿件侧核对,保留源待人工");
         // Never fall through to a fresh upload of an already-confirmed legacy part.
-        for (const seg of rolling) if (confirmed.has(seg.index)) this.queueBlocked.add(seg.index);
+        for (const seg of rolling) {
+          if (!confirmed.has(seg.index)) continue;
+          this.queueBlocked.add(seg.index);
+          this.queueBlockedByProof.add(seg.index);
+        }
+        // A transient archive failure must be re-checked: the session-end flush is one-shot, so
+        // schedule the ordinary queue retry instead of waiting for the next seal.
+        this.scheduleQueueRetry(recordingActive);
       } else {
+        // The proof recovered: parts blocked only by it may be imported now.
+        for (const i of this.queueBlockedByProof) this.queueBlocked.delete(i);
+        this.queueBlockedByProof.clear();
         for (const seg of rolling) {
           if (!confirmed.has(seg.index)) continue;
           try {
@@ -986,7 +1012,7 @@ export class RollingUploader {
    * Same-broadcast order key. Queue-mode predecessors have no bv, so this deliberately uses
    * locatePredecessor (gap/live-id rule) instead of findPredecessor (which demands a bv). Null = fail closed.
    */
-  private queueOrderKey(): string | null {
+  private queueOrderKey(persist: boolean): string | null {
     if (this.state.queueOrderKey) return this.state.queueOrderKey;
     const found = this.locatePredecessor();
     let key = this.state.streamKey || this.state.sessionBase;
@@ -1022,6 +1048,7 @@ export class RollingUploader {
         })();
       if (same) {
         key = (prev.s.queueOrderKey && prev.s.queueOrderKey) || prev.s.streamKey || key;
+        if (!persist) return key; // master-owned: local key only, nothing durable (see _flushQueue)
         const parts = (prev.s.inheritedParts ?? 0) + prev.s.confirmed.length;
         this.state = {
           ...this.state,
@@ -1040,6 +1067,7 @@ export class RollingUploader {
         return key;
       }
     }
+    if (!persist) return key; // master-owned: the skip rows still need a stable key, but never a queued sidecar
     this.state = { ...this.state, queueOrderKey: key, updatedAt: this.now() };
     if (!this.persist()) {
       this.stateUntrusted = true;
@@ -1049,13 +1077,18 @@ export class RollingUploader {
     return key;
   }
 
-  /** First queue seq for this session: continues after queue rows and inherited predecessor parts. */
-  private queueSeqBase(orderKey: string): number {
+  /**
+   * First queue seq for this session: continues after queue rows and inherited predecessor parts.
+   * `persist=false` (master-owned rooms) recomputes from the store each flush instead of writing the
+   * baseline into the sidecar.
+   */
+  private queueSeqBase(orderKey: string, persist = true): number {
     let queueMax = 0;
     try { queueMax = Math.max(0, this.o.queueMaxSeq?.(orderKey) ?? 0); } catch { queueMax = 0; }
     const inherited = Math.max(0, this.state.inheritedParts ?? 0);
     const base = Math.max(queueMax, inherited);
     if (typeof this.state.queueSeqBase === "number" && this.state.queueSeqBase >= base) return this.state.queueSeqBase;
+    if (!persist) return base;
     this.state = { ...this.state, queueSeqBase: base, updatedAt: this.now() };
     if (!this.persist()) {
       this.stateUntrusted = true;
@@ -1094,6 +1127,11 @@ export class RollingUploader {
     // A later failure may know that recording has finished; the retry must use the LATEST state, never
     // the first failure's: an active failure followed by a session-end failure must retry with
     // recordingActive=false, otherwise the tail segment is never sealed and never enqueued.
+    this.scheduleQueueRetry(recordingActive);
+  }
+
+  /** Schedule (at most one) delayed queue flush; the timer reads the LATEST recording state. */
+  private scheduleQueueRetry(recordingActive: boolean): void {
     this.queueRetryActive = recordingActive;
     if (this.queueRetryTimer) return;
     const timer = setTimeout(() => {

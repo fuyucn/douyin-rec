@@ -841,3 +841,54 @@ describe("rework addenda 5-7", () => {
     expect(up).not.toHaveBeenCalled();
   });
 });
+
+describe("rework addendum 8", () => {
+  const meta = { cookies: "c", title: "rendered title", tid: 21, tag: "tag", public: false };
+
+  it("H1: a master-owned room never claims a node queue in the sidecar (the master must not hold)", async () => {
+    const paths = segs(2);
+    const skips: Array<Record<string, unknown>> = [];
+    const u = queueUploader({
+      uploadOwner: () => "master",
+      enqueueHubSkipped: (i) => { skips.push({ ...i }); return true; },
+    });
+    paths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    const sc = JSON.parse(readFileSync(sidecar(), "utf-8")) as Record<string, unknown>;
+    // queueOrderKey/queueSeqBase are what tryRollingShortCircuit reads as "node queue still uploading".
+    expect(sc.queueOrderKey).toBeUndefined();
+    expect(sc.queueSeqBase).toBeUndefined();
+    // The timeline rows still exist, under a stable key (so seq stays gap-free across sessions).
+    expect(skips.map((s) => s.seq)).toEqual([1, 2]);
+    expect(skips[0]!.streamKey).toBe(orderKeyOf());
+  });
+
+  it("H1b: a node-owned room still persists the queue key (behaviour unchanged)", async () => {
+    const paths = segs(1);
+    const u = queueUploader({ uploadOwner: () => "node" });
+    paths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    const sc = JSON.parse(readFileSync(sidecar(), "utf-8")) as Record<string, unknown>;
+    expect(sc.queueOrderKey).toBe(orderKeyOf());
+  });
+
+  it("P8-4: a failed import proof is re-measured after the bounded window and then imports", async () => {
+    const paths = segs(1);
+    writeFileSync(sidecar(), JSON.stringify({
+      streamKey: orderKeyOf(), sessionBase: SESSION_BASE,
+      segments: paths.map((p, i) => ({ index: i, path: p })), confirmed: [0], bv: FAKE_BV1, updatedAt: BASE_MS,
+    }));
+    let clock = NOW_MS;
+    let calls = 0;
+    const count = vi.fn(async () => { calls += 1; return calls === 1 ? null : 3; });
+    const u = queueUploader({ countPartsRaw: count, queueProofRetryMs: 30_000, now: () => clock });
+    paths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(count).toHaveBeenCalledTimes(1);
+    expect(seen(u, "__imports")).toEqual([]); // first proof failed: nothing imported, source kept
+    clock += 31_000;
+    await u.flush({ recordingActive: false });
+    expect(count).toHaveBeenCalledTimes(2);
+    expect(seen(u, "__imports")).toHaveLength(1); // the later good proof wins
+  });
+});

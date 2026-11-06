@@ -79,16 +79,32 @@ describe("plan 046 PR6: a queue-mode session without a bv holds the whole-order 
     },
   }) as never;
 
-  it("sidecar queue-pending, no bv -> needs_manual, nothing is merged or uploaded", () => {
+  it("sidecar queue-pending, no bv -> retryable hold, nothing is merged or uploaded", () => {
     const { r, notify, jlog } = run(undefined, [queued("same-broadcast")]);
-    expect(r).toEqual({ state: "needs_manual" });
-    expect(ledger.get(KEY)?.state).toBe("needs_manual");
+    expect(r).toEqual({ state: "pending" });
+    // Retryable on purpose: the reconciler only re-enters pending/failed (needs_manual is skipped),
+    // so a terminal state here would strand a healthy queue session.
+    expect(ledger.get(KEY)?.state).toBe("pending");
     expect(ledger.get(KEY)?.error).toContain("队列");
     expect(ledger.get(KEY)?.bv).toBeFalsy();
     expect(jlog).toHaveBeenCalledWith(expect.stringContaining("队列"));
     expect(notify).toHaveBeenCalledWith(expect.objectContaining({ kind: "error", message: expect.stringContaining("队列") }));
     // No uploadDone: the master never uploaded anything for this broadcast.
     expect(notify.mock.calls.some(([e]) => (e as { kind: string }).kind === "uploadDone")).toBe(false);
+    // A second pass without new information repeats the hold but does not re-alert.
+    const again = run(undefined, [queued("same-broadcast")]);
+    expect(again.r).toEqual({ state: "pending" });
+    expect(again.notify.mock.calls.some(([e]) => (e as { kind: string }).kind === "error")).toBe(false);
+  });
+
+  it("queue completes after the hold -> the next pass uploads nothing but closes the job", () => {
+    // Pass 1: node queue still uploading => hold (retryable, job stays pending).
+    expect(run(undefined, [queued("same-broadcast")]).r).toEqual({ state: "pending" });
+    // Pass 2 (next reconcile tick): the runner wrote the bv and cleanup deleted every source.
+    const done = run(undefined, [queued("same-broadcast", "BV1", [])]);
+    expect(done.r).toEqual({ state: "done", bv: "BV1" });
+    expect(ledger.get(KEY)?.state).toBe("done");
+    expect(ledger.get(KEY)?.bv).toBe("BV1");
   });
 
   it("once the node queue confirmed a bv the hold is gone (normal rolling short-circuit)", () => {

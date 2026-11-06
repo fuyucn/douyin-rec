@@ -1,4 +1,4 @@
-import { closeSync, fsyncSync, openSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 
 /**
@@ -27,42 +27,102 @@ function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+/** Defaults: an abandoned lock is taken over before a waiter gives up (stale < timeout). */
+const LOCK_TIMEOUT_MS = 20_000;
+const LOCK_STALE_MS = 15_000;
+
+function defaultHolderAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException)?.code === "EPERM"; // exists but not ours
+  }
+}
+
+/** Who holds the lock, and is it still worth waiting for? */
+function lockState(lock: string, staleMs: number, alive: (pid: number) => boolean): "live" | "stale" | "gone" {
+  let text: string;
+  let mtimeMs: number;
+  try {
+    text = readFileSync(lock, "utf-8").trim();
+    mtimeMs = statSync(lock).mtimeMs;
+  } catch {
+    return "gone"; // released between open() and this read: retry immediately
+  }
+  const pid = /^\d+$/.test(text) ? Number(text) : 0;
+  // A known holder that is still alive is never considered stale (slow writer, not a dead one).
+  if (pid > 0) return alive(pid) ? "live" : "stale";
+  // Unknown owner (old lock files / unreadable pid): only the stale window decides.
+  return Date.now() - mtimeMs > staleMs ? "stale" : "live";
+}
+
 /**
- * Run `fn` while holding the exclusive cross-process lock `<file>.lock` (O_EXCL create).
+ * Take over an abandoned lock without ever deleting a live one: move it to a unique name first
+ * (atomic), re-check the holder, and only unlink when it is still abandoned. A lock refreshed by a
+ * live holder in the meantime is moved back instead of being dropped (no TOCTOU deletion).
+ */
+function takeOverStaleLock(lock: string, staleMs: number, alive: (pid: number) => boolean): boolean {
+  const grab = lock + ".stale." + process.pid + "." + randomBytes(4).toString("hex");
+  try { renameSync(lock, grab); } catch { return false; } // somebody else won the race: just retry
+  try {
+    const text = readFileSync(grab, "utf-8").trim();
+    const pid = /^\d+$/.test(text) ? Number(text) : 0;
+    const abandoned = pid > 0 ? !alive(pid) : Date.now() - statSync(grab).mtimeMs > staleMs;
+    if (abandoned) { unlinkSync(grab); return true; }
+    try { if (!existsSync(lock)) renameSync(grab, lock); } catch { /* stray file, harmless */ }
+    return false;
+  } catch {
+    try { unlinkSync(grab); } catch { /* best-effort */ }
+    return true;
+  }
+}
+
+/**
+ * Run the callback while holding the exclusive cross-process lock <file>.lock (O_EXCL create).
  *
  * Why: two processes own one sidecar (the recorder's persist() and the queue processor's merge).
  * A plain read-modify-write in both loses whichever update lands between the other's read and the
  * atomic rename. Both writers therefore wrap their read+write in this lock.
  *
- * A lock older than `staleMs` is assumed abandoned (writer crashed) and taken over, so a killed
- * process can never wedge a session. Waiting is bounded by `timeoutMs` and then throws: callers
- * treat a lock failure like any other sidecar write failure (alert, keep sources).
+ * Waiting is bounded by timeoutMs and then throws: callers treat a lock failure like any other
+ * sidecar write failure (alert, keep sources). An abandoned lock is taken over after staleMs, or
+ * immediately when the recorded holder pid is dead; staleMs < timeoutMs so a waiter that is still
+ * inside its budget always gets its turn. The deadline is checked in every retry branch, so a
+ * persistent stat error can never spin.
  */
-export function withFileLockSync<T>(file: string, fn: () => T, opts: { timeoutMs?: number; staleMs?: number } = {}): T {
+export function withFileLockSync<T>(
+  file: string, fn: () => T,
+  opts: { timeoutMs?: number; staleMs?: number; isHolderAlive?: (pid: number) => boolean } = {},
+): T {
   const lock = file + ".lock";
-  const timeoutMs = Math.max(0, opts.timeoutMs ?? 2_000);
-  const staleMs = Math.max(1, opts.staleMs ?? 10_000);
+  const timeoutMs = Math.max(0, opts.timeoutMs ?? LOCK_TIMEOUT_MS);
+  const staleMs = Math.max(1, opts.staleMs ?? LOCK_STALE_MS);
+  const alive = opts.isHolderAlive ?? defaultHolderAlive;
   const deadline = Date.now() + timeoutMs;
-  let fd: number | null = null;
   for (;;) {
+    let fd: number | null = null;
     try {
       fd = openSync(lock, "wx", 0o644);
-      break;
     } catch (e) {
       if ((e as NodeJS.ErrnoException)?.code !== "EEXIST") throw e;
-      try {
-        if (Date.now() - statSync(lock).mtimeMs > staleMs) { unlinkSync(lock); continue; }
-      } catch {
-        continue; // the holder released it between open and stat: retry immediately
+      const state = lockState(lock, staleMs, alive);
+      if (state === "gone") {
+        // Released between our open() and the read: retry at once, but never past the deadline.
+        if (Date.now() >= deadline) throw new Error("file lock busy: " + lock);
+        continue;
       }
+      if (state === "stale" && takeOverStaleLock(lock, staleMs, alive)) continue;
       if (Date.now() >= deadline) throw new Error("file lock busy: " + lock);
       sleepSync(5);
+      continue;
     }
-  }
-  try {
-    return fn();
-  } finally {
-    try { closeSync(fd); } catch { /* best-effort */ }
-    try { unlinkSync(lock); } catch { /* best-effort */ }
+    try {
+      writeSync(fd, String(process.pid), null, "utf-8");
+      return fn();
+    } finally {
+      try { closeSync(fd); } catch { /* best-effort */ }
+      try { unlinkSync(lock); } catch { /* best-effort */ }
+    }
   }
 }

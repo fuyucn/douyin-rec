@@ -1,6 +1,6 @@
 // issue #223: writeFileAtomicSync — atomic replace via unique temp + rename, never deletes.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { existsSync, linkSync, mkdirSync, statSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, statSync, mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withFileLockSync, writeFileAtomicSync } from "@drec/core";
@@ -65,9 +65,10 @@ describe("writeFileAtomicSync", () => {
 });
 
 describe("withFileLockSync (two sidecar writers: the recorder and the queue processor)", () => {
-  it("is exclusive, bounded, and takes over a stale lock", () => {
-    const f = join(dir, "s.rolling.json");
-    writeFileSync(f, "{}");
+  const file = (): string => { const f = join(dir, "s.rolling.json"); writeFileSync(f, "{}"); return f; };
+
+  it("is exclusive, bounded, and takes over an owner-less stale lock", () => {
+    const f = file();
     const lock = f + ".lock";
     writeFileSync(lock, "");
     // A fresh lock held by someone else: bounded wait, then a clear failure (never a silent overwrite).
@@ -80,6 +81,47 @@ describe("withFileLockSync (two sidecar writers: the recorder and the queue proc
     // Not re-entrant: a nested acquire of the same file waits (proves mutual exclusion).
     expect(() => withFileLockSync(f, () => withFileLockSync(f, () => 1, { timeoutMs: 10 }), { timeoutMs: 50 }))
       .toThrow(/lock busy/);
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  it("never steals a lock whose holder pid is alive, even when its mtime looks old", () => {
+    const f = file();
+    const lock = f + ".lock";
+    writeFileSync(lock, String(process.pid));
+    const old = Date.now() - 600_000;
+    utimesSync(lock, new Date(old), new Date(old));
+    expect(() => withFileLockSync(f, () => 1, { timeoutMs: 20, staleMs: 1_000 })).toThrow(/lock busy/);
+    expect(readFileSync(lock, "utf-8")).toBe(String(process.pid)); // untouched: no TOCTOU delete
+    unlinkSync(lock);
+  });
+
+  it("takes over a dead holder immediately (no need to wait out the stale window)", () => {
+    const f = file();
+    const lock = f + ".lock";
+    writeFileSync(lock, "424242");
+    expect(withFileLockSync(f, () => 7, { timeoutMs: 50, staleMs: 600_000, isHolderAlive: () => false })).toBe(7);
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  it("exactly one winner when several waiters race for the same stale lock", () => {
+    const f = file();
+    const lock = f + ".lock";
+    writeFileSync(lock, "424242"); // dead holder => stale right away
+    let depth = 0;
+    let maxDepth = 0;
+    const enter = (): void => { depth += 1; maxDepth = Math.max(maxDepth, depth); };
+    const leave = (): void => { depth -= 1; };
+    withFileLockSync(f, () => {
+      enter();
+      try {
+        // Every other waiter (same tick) must time out while the winner holds the lock.
+        for (let i = 0; i < 3; i += 1) {
+          expect(() => withFileLockSync(f, () => { enter(); try { return 1; } finally { leave(); } },
+            { timeoutMs: 10, staleMs: 600_000, isHolderAlive: (pid) => pid === process.pid })).toThrow(/lock busy/);
+        }
+      } finally { leave(); }
+    }, { timeoutMs: 200, staleMs: 0, isHolderAlive: () => false });
+    expect(maxDepth).toBe(1);
     expect(existsSync(lock)).toBe(false);
   });
 });

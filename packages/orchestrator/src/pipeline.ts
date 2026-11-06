@@ -732,12 +732,20 @@ export function tryRollingShortCircuit(o: {
   const queued = members.filter((m) => m.rec.rolling?.queueOrderKey && !m.rec.rolling?.bv);
   if (queued.length > 0) {
     const detail = queued.map((m) => m.workerId + ":" + m.rec.sessionBase).join(";");
-    jlog("边录边传队列模式:节点队列尚未确认任何分 P [" + detail + "] → 暂不建稿/上传(保留源,等队列收口后重试)");
-    ledger.setState(streamKey, "needs_manual", {
-      error: "边录边传队列模式:节点队列仍在上传分 P(" + detail + "),master 未上传;等队列收口后重试本场",
-    });
-    o.notify({ kind: "error", stage: "上传", message: streamKey + " 边录边传:节点队列仍在上传,已暂缓整场上传(未重复投稿)" });
-    return { state: "needs_manual" };
+    const holdError = "边录边传队列模式:节点队列仍在上传分 P(" + detail + "),master 暂不上传;队列收口后自动重试";
+    // Hold, never a terminal verdict: the reconciler only re-enters the retryable states pending /
+    // failed (reconciler.ts RETRYABLE). needs_manual would skip every later pass and strand a
+    // healthy queue session until a human retries, so the hold lands on pending. force is required
+    // because the whitelist has no syncing/uploading -> pending edge, and this only moves the row
+    // back to "not started" (nothing was uploaded by this pass).
+    const prev = ledger.get(streamKey);
+    const firstHold = (prev?.error ?? "") !== holdError;
+    ledger.setState(streamKey, "pending", { error: holdError }, { force: prev?.state !== "pending" });
+    if (firstHold) {
+      jlog("边录边传队列模式:节点队列尚未确认任何分 P [" + detail + "] → 暂不建稿/上传(保留源,队列收口后自动重试)");
+      o.notify({ kind: "error", stage: "上传", message: streamKey + " 边录边传:节点队列仍在上传,已暂缓整场上传(未重复投稿)" });
+    }
+    return { state: "pending" };
   }
   // #57 R1 止血(检查与动作见 blockUnsettledWithoutBv):先于 rolled/bvs 判定。
   if (blockUnsettledWithoutBv({ streamKey, members, ledger, jlog, notify: o.notify })) return { state: "needs_manual" };
