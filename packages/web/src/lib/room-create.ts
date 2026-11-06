@@ -45,6 +45,15 @@ export type NewRoomRulePlan =
   | { kind: "create"; payload: HubRulePayload }
   | { kind: "bindOnly"; taskId: number };
 
+/**
+ * Post-create action for the add-room dialog. A new room is created **paused**: starting a live
+ * recording is an explicit user action (the room list / detail play button), never a side effect of
+ * filling in the form. `partial` means the hub rule half failed → no success toast at all.
+ */
+export function planNewRoomFinish(o: { partial: boolean }): { successToast?: string } {
+  return o.partial ? {} : { successToast: "room.addedPaused" };
+}
+
 export function planNewRoomRule(o: {
   taskId: number;
   mode: NewRoomMode;
