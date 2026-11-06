@@ -270,7 +270,7 @@ const DICT = {
         failed: "失败(详情见任务日志)", unsupported: "节点版本过旧,不支持直播直传(升级后自动恢复)", offline: "节点不可达,状态未知",
         blocked: "主控暂不能下发(详情见提示)", refused: "已拒绝启动",
         refusedAccountMismatch: "已拒绝启动:节点上传账号与主控配置不一致", refusedAccountUnknown: "已拒绝启动:无法确认上传账号",
-        refusedCredential: "已拒绝启动:节点上没有 B 站上传登录", refusedDelivery: "已拒绝启动:主控未下发上传设置",
+        refusedCredential: "已拒绝启动:节点上没有 B 站上传登录", refusedCredentialUnreadable: "已拒绝启动:节点的 B 站登录文件读不出可用账号（属主/权限,或内容缺账号 ID,且没有可用的其他登录）", refusedDelivery: "已拒绝启动:主控未下发上传设置",
         live: {
           title: "直播直传进度", empty: "暂无直播直传数据", currentPart: "正在处理 P{n}", phaseLabel: "阶段", updated: "更新于 {time}",
           noEvents: "暂无事件",
@@ -865,7 +865,7 @@ const DICT = {
         failed: "Failed (see the task log)", unsupported: "Node is too old for live direct upload (resumes after an upgrade)", offline: "Node unreachable, status unknown",
         blocked: "Master cannot push this yet (see tooltip)", refused: "Refused to start",
         refusedAccountMismatch: "Refused: the node's upload account differs from the master's", refusedAccountUnknown: "Refused: the upload account cannot be identified",
-        refusedCredential: "Refused: no Bilibili upload login on the node", refusedDelivery: "Refused: the master did not deliver upload settings",
+        refusedCredential: "Refused: no Bilibili upload login on the node", refusedCredentialUnreadable: "Refused: the node's Bilibili login yields no usable account (ownership/permissions, or no account ID, and no other usable login)", refusedDelivery: "Refused: the master did not deliver upload settings",
         live: {
           title: "Live upload progress", empty: "No live-upload data yet", currentPart: "Working on P{n}", phaseLabel: "Phase", updated: "Updated {time}",
           noEvents: "No events yet",
