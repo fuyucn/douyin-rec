@@ -40,6 +40,7 @@ export * from "./rolling-policy.js";
 export * from "./node-side-upload-policy.js";
 export * from "./bool-flag.js";
 export * from "./zero-disk-policy.js";
+export * from "./stream-upload-spool.js";
 // Zero-disk on a side node (issue #331): delivery contract, strict parsers, receipts/status shapes.
 export * from "./zero-disk-delivery.js";
 export * from "./live-upload.js";

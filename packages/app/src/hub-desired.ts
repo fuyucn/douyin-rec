@@ -13,7 +13,7 @@
  *     不一致时只告警,绝不让房间缺席)。
  */
 import {
-  isWorkerTargeted, resolveSpecAssignment, zeroDiskRuleError,
+  isWorkerTargeted, resolveSpecAssignment, STREAM_UPLOAD_SPOOL_REQUIRED, zeroDiskRuleError,
   type RemoteTaskSpec, type ZeroDiskDelivery,
 } from "@drec/core";
 import { resolveRuleSyncRoom, type HubRule } from "./hub-store.js";
@@ -147,7 +147,8 @@ export function desiredSpecsForWorker(workerId: string, ctx: HubDesiredCtx): Rem
       assigned,
       ...rollingFields,
       streamUpload: src.streamUpload,
-      streamUploadSpool: src.streamUploadSpool,
+      // Pinned by the core constant: workers never receive the forbidden no-spool value.
+      streamUploadSpool: STREAM_UPLOAD_SPOOL_REQUIRED,
       ...(zd.delivery ? { zeroDiskDelivery: zd.delivery } : {}),
     });
   }

@@ -229,7 +229,7 @@ function uploadMethod(t: ReturnType<typeof useT>, r: RoomDTO): { label: string; 
   const kind = roomMethodKind(r);
   const privateFlag = r.processing?.pipeline?.upload?.private;
   const priv = privateFlag === false ? t("room.publicShort") : t("room.privateShort");
-  if (kind === "live") return { label: t("room.methodLiveStream"), title: t("room.methodLiveStream") + " · " + (r.recording?.streamUploadSpool ? "spool" : "0-disk"), tone: "var(--status-fg)", kind: "zero-disk" };
+  if (kind === "live") return { label: t("room.methodLiveStream"), title: t("room.methodLiveStream") + " · spool", tone: "var(--status-fg)", kind: "zero-disk" };
   if (kind === "rolling") return { label: t("room.methodRolling"), title: `${t("room.methodRolling")} · ${priv}`, tone: "var(--status-fg)", kind: "segment" };
   if (kind === "upload") return { label: t("room.methodUpload"), title: `${t("room.methodUpload")} · ${priv}`, tone: "var(--status-fg)", kind: "bilibili" };
   if (kind === "archive") return { label: t("room.methodStage"), title: t("room.archiveMode"), kind: "archive" };

@@ -161,7 +161,7 @@ describe("room editor form ↔ payload", () => {
     const f = { ...formFromRoom(mkRoom({ recording: { streamUpload: true, streamUploadSpool: false } })), method: "rolling" as const, burnDanmu: false, burnLivechat: false };
     const p = ok(payloadFromForm(f, ctx));
     expect(p.processing?.pipeline?.upload?.mode).toBe("rolling");
-    expect(p.recording).toMatchObject({ streamUpload: true, streamUploadSpool: false });
+    expect(p.recording).toMatchObject({ streamUpload: true, streamUploadSpool: true });
     const q = ok(payloadFromForm({ ...f, method: "after" }, ctx));
     expect(q.recording).toMatchObject({ streamUpload: false });
   });

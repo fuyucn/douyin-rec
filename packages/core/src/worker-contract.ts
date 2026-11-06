@@ -54,4 +54,11 @@ export interface ApplyTasksResult {
    * unchanged success shape.
    */
   skipped?: Array<{ index: number; room?: string; reason: string }>;
+  /**
+   * 兼容告警(向后兼容:缺省 undefined)。
+   * 旧 master 下发了已废弃的真 0 落盘(`streamUploadSpool=false`):节点已按
+   * 保留本地回退文件运行并归一存储。经结构化回执上抛,由 master sync 日志打印;
+   * 每条含 taskId/platform,不含房间号/主播名。
+   */
+  warnings?: string[];
 }

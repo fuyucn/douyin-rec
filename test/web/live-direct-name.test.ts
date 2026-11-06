@@ -10,13 +10,13 @@ describe("live direct upload naming", () => {
   it("uses the user-facing 直播直传 name in the main UI surfaces", () => {
     expect(I18N_SOURCE).toContain('name: "直播直传"');
     expect(I18N_SOURCE).toContain('streamUpload: "直播直传"');
-    expect(I18N_SOURCE).toContain('zeroDisk: "直播直传（不写本地视频）"');
-    expect(I18N_SOURCE).toContain('zeroDiskSpool: "保留本地回退文件（推荐开启）"');
+    expect(I18N_SOURCE).toContain('zeroDisk: "直播直传（临时落盘分 P，上传成功后清理）"');
+    expect(I18N_SOURCE).toContain('zeroDiskSpool: "始终保留本地回退文件"');
     expect(I18N_SOURCE).toContain('title: "直播直传节点"');
     expect(I18N_SOURCE).toContain('name: "Live upload"');
     expect(I18N_SOURCE).toContain('streamUpload: "Live upload"');
-    expect(I18N_SOURCE).toContain('zeroDisk: "Live upload (no local video)"');
-    expect(I18N_SOURCE).toContain('zeroDiskSpool: "Keep a local fallback file (recommended)"');
+    expect(I18N_SOURCE).toContain('zeroDisk: "Live upload (temporary local parts, cleaned after upload)"');
+    expect(I18N_SOURCE).toContain('zeroDiskSpool: "Always keep a local fallback file"');
     expect(I18N_SOURCE).toContain('title: "Live upload node"');
   });
 

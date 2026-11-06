@@ -11,7 +11,7 @@
  */
 import { Dialog as BaseDialog } from "@base-ui/react/dialog";
 import { useAtomValue } from "jotai";
-import { X } from "lucide-react";
+import { Check, X } from "lucide-react";
 import { useEffect, useMemo, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { OUTPUT_FORMATS, stageExt } from "@drec/output-format";
 import { api, type PlatformDTO, type RoomDTO, type WorkerDTO } from "../api/client";
@@ -366,24 +366,14 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                           lockedChecked={false}
                           badge={<ExperimentalBadge id="stream-upload" />}
                         />
-                        {form.streamUpload && c.streamUpload.locked && (
-                          <ToggleRow
-                            nested
-                            label={t("room.editor.zeroDiskSpool")}
-                            hint={t("room.editor.zeroDiskSpoolHint")}
-                            checked={form.streamUploadSpool}
-                            onChange={(streamUploadSpool) => update({ streamUploadSpool })}
-                            lock={c.streamUpload}
-                          />
-                        )}
-                        {form.streamUpload && !c.streamUpload.locked && (
-                          <ToggleRow
-                            nested
-                            label={t("room.editor.zeroDiskSpool")}
-                            hint={t("room.editor.zeroDiskSpoolHint")}
-                            checked={form.streamUploadSpool}
-                            onChange={(streamUploadSpool) => update({ streamUploadSpool })}
-                          />
+                        {form.streamUpload && (
+                          <div className="flex items-start gap-2 rounded-lg border border-line px-3 py-2 text-sm text-ink">
+                            <Check className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                            <div>
+                              <div>{t("room.editor.zeroDiskSpool")}</div>
+                              <div className="text-xs text-muted">{t("room.editor.zeroDiskSpoolHint")}</div>
+                            </div>
+                          </div>
                         )}
                       </>
                     )}
