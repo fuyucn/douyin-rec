@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseDanmuFlag } from "../../packages/cli/src/cli-flags.js";
+import { parseDanmuFlag, rejectsNoSpoolFlag } from "../../packages/cli/src/cli-flags.js";
 
 describe("--danmu flag (issue #472)", () => {
   it("absent / blank keeps the historical default (on)", () => {
@@ -19,5 +19,17 @@ describe("--danmu flag (issue #472)", () => {
 
   it("legacy provider names / unknown values still mean on", () => {
     for (const v of ["flv", "webcast", "auto"]) expect(parseDanmuFlag(v), v).toBe(true);
+  });
+});
+
+describe("--stream-upload-spool none (issue #537)", () => {
+  it("rejects an explicit none even without --stream-upload 1", () => {
+    // The v1 gate only fired when both flags were present, so a lone `none` was silently
+    // ignored and the pump still kept a fallback while the operator thought otherwise.
+    for (const v of ["none", "NONE", " none "]) expect(rejectsNoSpoolFlag(v), v).toBe(true);
+  });
+
+  it("keeps accepting full and absent values", () => {
+    for (const v of ["full", "FULL", "", undefined]) expect(rejectsNoSpoolFlag(v), String(v)).toBe(false);
   });
 });
