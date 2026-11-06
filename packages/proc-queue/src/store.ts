@@ -352,6 +352,52 @@ export class ProcQueueStore {
    * untouched (a real upload row must not be converted into a skip).
    */
   enqueueSkipped(job: ProcessJob, opts: { allowedRoots: readonly string[]; reason?: "skip-hub-owned" }): EnqueueResult {
+    return this.enqueueTerminalSkip(job, opts);
+  }
+
+  /** Plan 046 PR6: empty/discarded sealed parts keep a skipped placeholder so seq never gaps. */
+  enqueueSourceGone(job: ProcessJob, opts: { allowedRoots: readonly string[] }): EnqueueResult {
+    return this.enqueueTerminalSkip(job, { ...opts, reason: "skip-source-gone" });
+  }
+
+  /**
+   * Plan 046 PR6 sidecar import: a segment the legacy rolling uploader already confirmed becomes a done
+   * row so later parts can inherit its bv. Idempotent: an existing row is reported, never rewritten.
+   */
+  importConfirmedPart(job: ProcessJob, opts: { allowedRoots: readonly string[]; bv: string }): EnqueueResult {
+    try {
+      assertJobInvariants(job, { allowedRoots: opts.allowedRoots });
+    } catch (e) {
+      return { jobId: job.jobId, state: "rejected", error: (e as Error).message };
+    }
+    return this.tx(() => {
+      const existing = this.get(job.jobId);
+      if (existing) {
+        if (existing.state === "done") return { jobId: job.jobId, state: "done" };
+        return {
+          jobId: job.jobId, state: "rejected", error: "已存在且 state=" + existing.state,
+          existingState: existing.state as Exclude<JobState, "pending" | "running" | "done">,
+        };
+      }
+      const t = this.now();
+      this.db.prepare(
+        "INSERT INTO proc_jobs(jobId, kind, logicalKey, generation, state, inputs, outputs, params, replaceInputs, " +
+        "ownerTaskId, ownerStreamKey, createdAt, updatedAt, finishedAt, resultOutputs, bv, orderKey, seq, prepJobId) " +
+        "VALUES(?, ?, ?, ?, 'done', ?, '[]', ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?)",
+      ).run(
+        job.jobId, job.kind, job.logicalKey, job.generation, JSON.stringify(job.inputs),
+        JSON.stringify(job.params), job.replaceInputs ? 1 : 0,
+        job.owner.taskId ?? null, job.owner.streamKey ?? null, t, t, t, opts.bv,
+        job.orderKey ?? null, job.seq ?? null, job.prepJobId ?? null,
+      );
+      return { jobId: job.jobId, state: "done" };
+    });
+  }
+
+  private enqueueTerminalSkip(
+    job: ProcessJob,
+    opts: { allowedRoots: readonly string[]; reason?: "skip-hub-owned" | "skip-source-gone" },
+  ): EnqueueResult {
     try {
       assertJobInvariants(job, { allowedRoots: opts.allowedRoots });
     } catch (e) {

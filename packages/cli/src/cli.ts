@@ -280,11 +280,15 @@ program
     let makeRolling: (() => import("@drec/manager").RollingUploadHook) | undefined;
     if (rollingEnabled) {
       const { makeRollingUploadHookFactory } = await import("@drec/app");
+      const { rollingQueueModeEnabled } = await import("@drec/app");
       const slug = platform.extractRoomSlug(roomToUrl(o.room));
       makeRolling = makeRollingUploadHookFactory({
         enabled: true,
         platform: platform.id,
         roomSlug: slug,
+        // Plan 046 PR6 (方案 A): settings switch, default off => this path stays unchanged.
+        queueMode: rollingQueueModeEnabled(),
+        ...(o.taskId !== undefined && /^\d+$/.test(o.taskId) ? { taskId: Number(o.taskId) } : {}),
         log: (m: string) => console.log(m),
         notify: (message: string) => { void notifier.notify({ kind: "error", stage: "边录边传", message }).catch(() => {}); },
       });

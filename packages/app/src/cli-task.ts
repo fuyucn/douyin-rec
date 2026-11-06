@@ -67,6 +67,7 @@ import { TaskDaemon } from "./daemon.js";
 import { TaskManager } from "./task-manager.js";
 import { NodeRecordSpawner } from "./process/spawner.js";
 import { makeRollingUploadHookFactory } from "./rolling-upload.js";
+import { rollingQueueModeEnabled } from "./rolling-queue.js";
 import { makeNodeRemuxHookFactory, resolveNodeOutputFormat } from "./node-remux.js";
 import { uploadOwnerForTask } from "./hub-rule-match.js";
 import { enqueueHubOwnedSkip } from "./hub-owner.js";
@@ -128,6 +129,9 @@ export function buildSessionForTask(
     enabled: task.rollingEffective, // 只读 master 派生的生效值(issue #40)
     platform: task.platform,
     roomSlug: platformForRoom(task.room).extractRoomSlug(task.room),
+    // Plan 046 PR6 (方案 A): settings switch, default off => recorder-side upload path unchanged.
+    queueMode: rollingQueueModeEnabled(),
+    taskId: task.id,
     // plan 046 PR7: master-owned rooms keep a skipped(hub-owned) timeline row per sealed part.
     uploadOwner: () => uploadOwnerForTask(task, rootHubDir()),
     enqueueHubSkipped: (info) => enqueueHubOwnedSkip({ ...info, taskId: task.id }),

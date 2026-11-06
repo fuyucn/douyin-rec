@@ -82,6 +82,10 @@ import { rootHubConfig, rootHubDir } from "./paths.js";
 import { effectiveHubConfig } from "./disk-gate.js";
 import { sanitizePathSegment } from "@drec/record-engine";
 import type { RollingUploadHook } from "@drec/manager";
+// Plan 046 PR6 queue adapters (方案 A). No cycle: rolling-queue imports store/paths/node-enqueue only.
+import {
+  enqueueRollingUploadPart, enqueueRollingSkipPart, importRollingConfirmedPart,
+} from "./rolling-queue.js";
 
 /** 一个会话的持久化确认状态(防重启后重复投稿)。 */
 interface RollingState {
@@ -326,6 +330,25 @@ export interface RollingUploaderOpts {
   enqueueHubSkipped?: (input: {
     file: string; index: number; streamKey: string; title?: string; expectedDurationSec?: number; confirmedAt?: number;
   }) => void;
+  /**
+   * Plan 046 PR6 (方案 A): when on, the recorder only enqueues upload-part rows; the serve runner uploads and
+   * cleanup-part deletes. Default off => the legacy path is used unchanged (byte-identical behaviour).
+   */
+  queueMode?: boolean;
+  /** Test seam for the enqueue adapter; production resolves it lazily (module cycle avoidance). */
+  enqueueQueuePart?: (input: {
+    file: string; index: number; orderKey: string; bv?: string; title?: string; expectedDurationSec?: number; taskId?: number;
+  }) => boolean;
+  /** Test seam for the skipped placeholder (empty/fragment parts). */
+  enqueueQueueSkip?: (input: {
+    file: string; index: number; orderKey: string; title?: string; expectedDurationSec?: number; taskId?: number;
+  }) => boolean;
+  /** Test seam for the legacy-sidecar import (confirmed part => done row). */
+  importQueueConfirmed?: (input: {
+    file: string; index: number; orderKey: string; bv: string; title?: string; expectedDurationSec?: number; taskId?: number;
+  }) => boolean;
+  /** Task id stamped onto queue rows (owner routing for alerts). */
+  taskId?: number;
 }
 
 /**
@@ -370,6 +393,10 @@ export class RollingUploader {
   private recoveryDone = false;
   /** 已记过「碎片段跳过」日志的段号(避免每轮 flush 刷屏)。 */
   private readonly loggedSkipped = new Set<number>();
+  /** The node-wide upload slot this instance may take (null in queue mode: the runner is the only uploader). */
+  uploadSlot(): UploadSlot | null { return this.slot; }
+  /** Plan 046 PR6: indices already enqueued (or placeholder-queued) in queue mode; in-memory only. */
+  private readonly queuedIndices = new Set<number>();
 
   constructor(o: RollingUploaderOpts) {
     this.o = o;
@@ -380,7 +407,8 @@ export class RollingUploader {
     this.pidAlive = o.isPidAlive ?? ((pid: number): boolean => isPidAlive(pid, o.procCmdline));
     const cookiesPath = o.cookies ?? process.env.BILIUP_COOKIE ?? rootBiliupCookies();
     this.gate = o.gate ?? openNodeUploadGate({ warn: this.log });
-    this.slot = o.slot ?? null;
+    // Plan 046 PR6 (方案 A): in queue mode the runner owns the only uploader; never take the node slot.
+    this.slot = o.queueMode === true ? null : (o.slot ?? null);
     this.accountKey = resolveUploadAccountKey(cookiesPath);
     this.segDir = "";
     // 初始 state 占位;真正的 sessionBase 由首个段确定(见 noteSegment)。
@@ -631,6 +659,9 @@ export class RollingUploader {
   }
 
   private async _flush(recordingActive: boolean): Promise<{ uploaded: number[]; deleted: string[]; ambiguous: number[] }> {
+    // Plan 046 PR6 (方案 A): queue mode only enqueues; the serve runner uploads and cleanup-part deletes.
+    // The legacy implementation below is untouched, so the default (off) path stays byte-identical.
+    if (this.o.queueMode) return this._flushQueue(recordingActive);
     const nowMs = this.now();
     if (this.stateUntrusted) {
       // 失败已在 persist() 日志明示;此后不做任何上传/删源(保留源,转人工)。
@@ -712,6 +743,64 @@ export class RollingUploader {
 
   /** Seal + head-of-line + skip filters shared by the own flush and the successor's readiness check. */
   private planPending(
+    recordingActive: boolean,
+    nowMs: number,
+    confirmed: ReadonlySet<number>,
+    ambiguous: ReadonlySet<number>,
+  ): { rolling: RollingSegment[]; sealed: Set<number>; pending: RollingSegment[]; hubOwned: RollingSegment[] } {
+    return this.planPendingFrom(recordingActive, nowMs, confirmed, ambiguous);
+  }
+
+  /**
+   * Plan 046 PR6 queue-mode flush: enqueue one upload-part per sealed, non-skipped segment.
+   * Nothing is uploaded or deleted here: no biliup spawn, no slot, no gate, no unlink.
+   */
+  private async _flushQueue(recordingActive: boolean): Promise<{ uploaded: number[]; deleted: string[]; ambiguous: number[] }> {
+    if (this.stateUntrusted) return { uploaded: [], deleted: [], ambiguous: this.ambiguousIndices };
+    const confirmed = new Set(this.state.confirmed);
+    const ambiguous = new Set(this.state.ambiguous ?? []);
+    const { rolling, sealed } = this.planPendingFrom(recordingActive, this.now(), confirmed, ambiguous);
+    const orderKey = this.state.streamKey || this.state.sessionBase;
+    const meta = {
+      ...(typeof this.o.uploadMeta.partTitleTemplate === "string" ? { title: this.o.uploadMeta.partTitleTemplate } : {}),
+      ...(this.o.taskId !== undefined ? { taskId: this.o.taskId } : {}),
+    };
+    // Legacy sidecar import: parts confirmed by the old path become done rows so later parts inherit their bv.
+    if (this.state.bv) {
+      for (const seg of rolling) {
+        if (!confirmed.has(seg.index)) continue;
+        this.o.importQueueConfirmed?.({ file: seg.path, index: seg.index, orderKey, bv: this.state.bv, ...meta });
+      }
+    }
+    const queued: number[] = [];
+    for (const seg of rolling) {
+      if (this.queuedIndices.has(seg.index)) continue;
+      if (!sealed.has(seg.index)) continue;
+      if (this.state.hubSkipped?.includes(seg.index)) continue;
+      const skip = this.isEmptySegment(seg) || this.isFragment(seg, rolling);
+      const ok = skip
+        ? this.o.enqueueQueueSkip?.({ file: seg.path, index: seg.index, orderKey, ...meta })
+        : this.o.enqueueQueuePart?.({
+          file: seg.path, index: seg.index, orderKey, ...meta,
+          ...(seg.index > 0 && this.state.bv ? { bv: this.state.bv } : {}),
+        });
+      if (ok === false) {
+        this.log("[rolling-queue] part " + seg.index + " enqueue rejected; keeping the source and retrying next flush");
+        break;
+      }
+      if (ok !== undefined) {
+        this.queuedIndices.add(seg.index);
+        queued.push(seg.index);
+      }
+    }
+    if (queued.length > 0) {
+      this.log("[rolling-queue] queued parts " + queued.join(",") + " (runner uploads, cleanup-part deletes after confirmation)");
+      noteRecorderProgress();
+    }
+    return { uploaded: queued, deleted: [], ambiguous: [...ambiguous] };
+  }
+
+  private planPendingFrom(
     recordingActive: boolean,
     nowMs: number,
     confirmed: ReadonlySet<number>,
@@ -1347,6 +1436,14 @@ export function makeRollingUploadHookFactory(o: {
   enabled: boolean;
   platform: string;
   roomSlug: string;
+  /** Plan 046 PR6 switch; default off keeps the legacy recorder-side upload path. */
+  queueMode?: boolean;
+  /** Task id stamped onto queue rows (alerts route to it). */
+  taskId?: number;
+  /** Test seams for the queue adapters; production resolves them lazily inside the hook. */
+  enqueueQueuePart?: RollingUploaderOpts["enqueueQueuePart"];
+  enqueueQueueSkip?: RollingUploaderOpts["enqueueQueueSkip"];
+  importQueueConfirmed?: RollingUploaderOpts["importQueueConfirmed"];
   timeZone?: string;
   uploadPrivate?: boolean;
   cookies?: string;
@@ -1389,8 +1486,14 @@ export function makeRollingUploadHookFactory(o: {
       gate: o.gate,
       uploadOwner: o.uploadOwner,
       enqueueHubSkipped: o.enqueueHubSkipped,
+      queueMode: o.queueMode === true,
+      ...(o.taskId !== undefined ? { taskId: o.taskId } : {}),
+      enqueueQueuePart: o.enqueueQueuePart ?? enqueueRollingUploadPart,
+      enqueueQueueSkip: o.enqueueQueueSkip ?? enqueueRollingSkipPart,
+      importQueueConfirmed: o.importQueueConfirmed ?? importRollingConfirmedPart,
       // One slot per node process, shared with the queue's biliup processor (plan 038 PR4).
-      slot: o.slot ?? sharedNodeUploadSlot(o.log),
+      // Queue mode must never take the upload slot (the runner owns the only uploader).
+      slot: o.queueMode === true ? null : (o.slot ?? sharedNodeUploadSlot(o.log)),
     });
     return {
       onSegment: (p: string): void => {
