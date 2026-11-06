@@ -1,5 +1,7 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { findCreatedRoom, findExistingRoom, newRoomRulePayload, newRoomTaskPayload, planNewRoomRule, type NewRoomForm } from "../../packages/web/src/lib/room-create.js";
+import { findCreatedRoom, findExistingRoom, newRoomRulePayload, newRoomTaskPayload, planNewRoomFinish, planNewRoomRule, type NewRoomForm } from "../../packages/web/src/lib/room-create.js";
 import type { RoomDTO } from "../../packages/web/src/api/client.js";
 
 const form: NewRoomForm = {
@@ -12,6 +14,8 @@ describe("newRoomTaskPayload", () => {
     expect(newRoomTaskPayload(form, "archive")).toMatchObject({
       room: "https://live.example.com/100001", name: "主播A", schedule: "20:00-02:00", quality: "origin", engine: "ffmpeg", danmu: 1,
     });
+    // enabled is omitted → TaskStore.addTask defaults to false (created paused).
+    expect(newRoomTaskPayload(form, "archive")).not.toHaveProperty("enabled");
   });
   it("output format only travels in archive mode; blank name/schedule become null", () => {
     expect(newRoomTaskPayload(form, "archive").outputFormat).toBe("mp4");
@@ -39,6 +43,20 @@ describe("newRoomRulePayload", () => {
   it("never enables cleanup that deletes the source or the stage copy", () => {
     const c = newRoomRulePayload({ ...base, mode: "upload" }).pipeline?.cleanup;
     expect(c).toEqual({ stageSourceAfterMerge: false, sourceAfterDone: false, stageAfterDone: false });
+  });
+});
+
+describe("planNewRoomFinish — new rooms are created paused", () => {
+  it("never starts recording; a fully configured room gets an explicit paused-state toast", () => {
+    expect(planNewRoomFinish({ partial: false })).toEqual({ successToast: "room.addedPaused" });
+    expect(planNewRoomFinish({ partial: true })).toEqual({});
+  });
+  it("the dialog has no startTask call and the toast key exists in both dictionaries", () => {
+    const add = readFileSync(join(__dirname, "..", "..", "packages", "web", "src", "modals", "AddRoomDialog.tsx"), "utf-8");
+    expect(add).toContain("planNewRoomFinish({ partial })");
+    expect(add).not.toContain("api.startTask(");
+    const dict = readFileSync(join(__dirname, "..", "..", "packages", "web", "src", "lib", "i18n.tsx"), "utf-8");
+    expect(dict.match(/\baddedPaused\s*:/g) ?? []).toHaveLength(2); // zh + en
   });
 });
 
