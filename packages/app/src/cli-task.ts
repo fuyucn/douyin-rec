@@ -69,7 +69,7 @@ import { NodeRecordSpawner } from "./process/spawner.js";
 import { makeRollingUploadHookFactory } from "./rolling-upload.js";
 import { rollingQueueModeEnabled } from "./rolling-queue.js";
 import { makeNodeRemuxHookFactory, resolveNodeOutputFormat } from "./node-remux.js";
-import { uploadOwnerForTask } from "./hub-rule-match.js";
+import { shouldDecideUploadOwner, uploadOwnerForTask } from "./hub-rule-match.js";
 import { enqueueHubOwnedSkip } from "./hub-owner.js";
 import { effectiveHubConfig, makeNewBroadcastGate } from "./disk-gate.js";
 import { effectiveTimezone } from "./timezone.js";
@@ -133,7 +133,11 @@ export function buildSessionForTask(
     queueMode: rollingQueueModeEnabled(),
     taskId: task.id,
     // plan 046 PR7: master-owned rooms keep a skipped(hub-owned) timeline row per sealed part.
-    uploadOwner: () => uploadOwnerForTask(task, rootHubDir()),
+    // Same gate as the production record path (rework addendum 10): only a hub-managed task or a hub
+    // master decides ownership; a machine with leftover rule files keeps uploading on the node.
+    ...(shouldDecideUploadOwner(task, process.env.DOUYIN_REC_HUB_MASTER === "1")
+      ? { uploadOwner: () => uploadOwnerForTask(task, rootHubDir()) }
+      : {}),
     enqueueHubSkipped: (info) => enqueueHubOwnedSkip({ ...info, taskId: task.id }),
     // Queue-mode enqueue/metadata failures must reach the notifier, exactly like the serve-spawned
     // record path (cli.ts). Without it they are log-only and a lost part is invisible.

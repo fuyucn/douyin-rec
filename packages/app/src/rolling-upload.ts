@@ -110,6 +110,11 @@ interface RollingState {
   hubSkipped?: number[];
   /** Plan 046 PR6: same-broadcast queue order key (all sessions of one broadcast share it). */
   queueOrderKey?: string;
+  /**
+   * Plan 046 PR6: same-broadcast key for a MASTER-owned session's skip rows. Local only: the master's
+   * hold keys off queueOrderKey, which a hub-owned session must never write.
+   */
+  hubOrderKey?: string;
   /** Plan 046 PR6: first queue seq for this session (continues across same-broadcast sessions). */
   queueSeqBase?: number;
   /**
@@ -528,6 +533,20 @@ export class RollingUploader {
       if (s && typeof s.path === "string" && typeof s.index === "number") this.indexByPath.set(s.path, s.index);
     }
     this.segDir = dir;
+    // Owner flip (node -> master) or a sidecar left by an older build: a hub-owned session must not keep
+    // claiming a node queue, or the master holds the broadcast forever. Drop it at load time (and write it
+    // out) when the queue has no open rows left; with open rows the claim is still true and stays.
+    if (this.o.uploadOwner?.() === "master" && this.state.queueOrderKey) {
+      let openRows: boolean;
+      try { openRows = this.o.queueOrderHasRows?.(this.state.queueOrderKey) ?? false; } catch { openRows = true; }
+      if (!openRows) {
+        const next: RollingState = { ...this.state };
+        delete next.queueOrderKey;
+        delete next.queueSeqBase;
+        this.state = next;
+        this.persist();
+      }
+    }
   }
 
   /** 当前 BV(建稿后;诊断/回传用)。 */
@@ -609,6 +628,11 @@ export class RollingUploader {
         `[rolling] ⚠️ sidecar 原子写失败(${target}),会话幂等状态不可信 → 停止自动上传并保留源(转人工): ` +
         String((e as Error)?.message ?? e).slice(0, 200),
       );
+      // Queue mode: losing the sidecar silently stops every enqueue, which must reach a human
+      // (rework addendum 10). Same dedupe key as the flush-time alert.
+      if (this.o.queueMode === true) {
+        this.notifyOnce("untrusted", "边录边传队列模式:sidecar 落盘失败(写盘),停止入队并保留源(转人工)");
+      }
       return false;
     }
   }
@@ -629,13 +653,27 @@ export class RollingUploader {
   private mergeSidecarState(state: RollingState, disk: RollingState | null): RollingState {
     if (!disk) return state;
     const confirmed = [...new Set([...(state.confirmed ?? []), ...(disk.confirmed ?? [])])].sort((a, b) => a - b);
-    return {
+    const merged: RollingState = {
       ...state,
       ...(state.bv ? {} : disk.bv ? { bv: disk.bv } : {}),
       ...(state.queueOrderKey ? {} : disk.queueOrderKey ? { queueOrderKey: disk.queueOrderKey } : {}),
+      ...(state.hubOrderKey ? {} : disk.hubOrderKey ? { hubOrderKey: disk.hubOrderKey } : {}),
       confirmed,
       updatedAt: state.updatedAt,
     };
+    // Owner flip (node -> master) or a sidecar left by an older build: a hub-owned session must not keep
+    // claiming a node queue, or the master holds the broadcast forever. Only drop the key when the queue
+    // has no open rows left (otherwise the runner may still be uploading and the hold is correct).
+    const key = merged.queueOrderKey;
+    if (this.o.uploadOwner?.() === "master" && key) {
+      let openRows: boolean;
+      try { openRows = this.o.queueOrderHasRows?.(key) ?? false; } catch { openRows = true; } // unknown: keep holding
+      if (!openRows) {
+        delete merged.queueOrderKey;
+        delete merged.queueSeqBase;
+      }
+    }
+    return merged;
   }
 
   /** 查询 BV 当前分 P 数(append 幂等核对 / 崩溃恢复)。 */
@@ -1027,7 +1065,8 @@ export class RollingUploader {
    * locatePredecessor (gap/live-id rule) instead of findPredecessor (which demands a bv). Null = fail closed.
    */
   private queueOrderKey(persist: boolean): string | null {
-    if (this.state.queueOrderKey) return this.state.queueOrderKey;
+    const existing = persist ? this.state.queueOrderKey : (this.state.queueOrderKey ?? this.state.hubOrderKey);
+    if (existing) return existing;
     const found = this.locatePredecessor();
     let key = this.state.streamKey || this.state.sessionBase;
     if (found.kind === "uncertain") {
@@ -1061,8 +1100,19 @@ export class RollingUploader {
           return isSameBroadcastGap(startMs - ref);
         })();
       if (same) {
-        key = (prev.s.queueOrderKey && prev.s.queueOrderKey) || prev.s.streamKey || key;
-        if (!persist) return key; // master-owned: local key only, nothing durable (see _flushQueue)
+        key = (prev.s.queueOrderKey || prev.s.hubOrderKey) || prev.s.streamKey || key;
+        if (!persist) {
+          // Master-owned: persist ONE local key per broadcast so consecutive sessions keep the same
+          // skip-row order key and seq baseline (timeline stays continuous), while never writing
+          // queueOrderKey - that field is the master's "node queue in flight" signal.
+          this.state = { ...this.state, hubOrderKey: key, updatedAt: this.now() };
+          if (!this.persist()) {
+            this.stateUntrusted = true;
+            this.notifyOnce("persist-key", "边录边传队列模式:场键落盘失败,停止入队并保留源");
+            return null;
+          }
+          return key;
+        }
         const parts = (prev.s.inheritedParts ?? 0) + prev.s.confirmed.length;
         this.state = {
           ...this.state,
@@ -1081,7 +1131,15 @@ export class RollingUploader {
         return key;
       }
     }
-    if (!persist) return key; // master-owned: the skip rows still need a stable key, but never a queued sidecar
+    if (!persist) {
+      this.state = { ...this.state, hubOrderKey: key, updatedAt: this.now() };
+      if (!this.persist()) {
+        this.stateUntrusted = true;
+        this.notifyOnce("persist-key", "边录边传队列模式:场键落盘失败,停止入队并保留源");
+        return null;
+      }
+      return key;
+    }
     this.state = { ...this.state, queueOrderKey: key, updatedAt: this.now() };
     if (!this.persist()) {
       this.stateUntrusted = true;

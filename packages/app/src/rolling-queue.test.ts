@@ -10,7 +10,7 @@ import { TaskStore } from "./store.js";
 import { PART_KINDS, jobIdOf, partLogicalKey, type PartCtx, type ProcessJob } from "@drec/core";
 import {
   enqueueRollingUploadPart, enqueueRollingSkipPart, importRollingConfirmedPart, rollingQueueModeEnabled,
-  queueOrderHasRows,
+  queueOrderHasRows, rollingQueueMaxSeq,
 } from "./rolling-queue.js";
 import { makeUploadPartProcessor } from "@drec/processors";
 import { enqueueHubOwnedSkip } from "./hub-owner.js";
@@ -550,9 +550,11 @@ describe("rework round 2", () => {
     expect(src).toContain("masterOwnedWithoutRule");
   });
 
-  it("B2b: task run passes the notifier into the rolling factory (static)", () => {
+  it("B2b: task run passes the notifier and gates the owner decision (static)", () => {
     const src = readFileSync(path.join(import.meta.dirname, "cli-task.ts"), "utf-8");
     expect(src).toContain("notify: (message: string)");
+    // Same gate as the record path: leftover rule files on a non-hub machine must not stop node uploads.
+    expect(src).toContain("shouldDecideUploadOwner(task, process.env.DOUYIN_REC_HUB_MASTER");
   });
 });
 
@@ -961,7 +963,8 @@ describe("rework addendum 9", () => {
     } finally {
       chmodSync(rec, 0o755);
     }
-    expect(notify).toHaveBeenCalledWith(expect.stringContaining("队列模式"));
+    // The alert fires at the write itself (not only on the next flush): the queue stops here.
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining("写盘"));
   });
 
   it("A9-3: a fully drained queue no longer blocks the legacy path", async () => {
@@ -972,6 +975,9 @@ describe("rework addendum 9", () => {
       queueOrderKey: orderKeyOf(), startMs: BASE_MS, updatedAt: NOW_MS,
     }));
     expect(importRollingConfirmedPart({ file: paths[0]!, index: 0, orderKey: orderKeyOf(), bv: FAKE_BV1, meta })).toBe("already");
+    // Runtime proof of the guard: the row exists, but it is terminal => the queue owns nothing here.
+    expect(openQueue().list({ kind: PART_KINDS.upload })).toHaveLength(1);
+    expect(queueOrderHasRows(orderKeyOf())).toBe(false);
     const up = vi.fn(async () => FAKE_BV2);
     const remove = vi.fn(() => true);
     const notes: string[] = [];
@@ -1016,5 +1022,83 @@ describe("rework addendum 9", () => {
     const proc = makeUploadPartProcessor();
     expect(proc.validate(jobFrom(f, { ...params, sidecarIndex: -1 }))).toMatch(/sidecarIndex/);
     expect(proc.validate(jobFrom(f, params))).toBeNull();
+  });
+});
+
+describe("rework addendum 10", () => {
+  const meta = { cookies: "c", title: "rendered title", tid: 21, tag: "tag", public: false };
+
+  it("A10-1: hub-owned sessions of one broadcast share one local order key and keep seq continuity", async () => {
+    const s1File = path.join(rec, SESSION_BASE + "_000.ts");
+    writeFileSync(s1File, "abcdefgh");
+    utimesSync(s1File, new Date(BASE_MS), new Date(BASE_MS));
+    const u1 = queueUploader({
+      uploadOwner: () => "master",
+      enqueueHubSkipped: (i) => enqueueHubOwnedSkip({ ...i, taskId: 1 }),
+      queueMaxSeq: rollingQueueMaxSeq,
+      queueOrderHasRows,
+    });
+    u1.noteSegment(s1File);
+    await u1.flush({ recordingActive: false });
+
+    const base2 = "主播_2026-06-27_09-05-00";
+    const s2File = path.join(rec, base2 + "_000.ts");
+    writeFileSync(s2File, "abcdefgh");
+    utimesSync(s2File, new Date(BASE_MS + 300_000), new Date(BASE_MS + 300_000));
+    const u2 = queueUploader({
+      uploadOwner: () => "master",
+      enqueueHubSkipped: (i) => enqueueHubOwnedSkip({ ...i, taskId: 1 }),
+      queueMaxSeq: rollingQueueMaxSeq,
+      queueOrderHasRows,
+      now: () => BASE_MS + 360_000,
+    });
+    u2.noteSegment(s2File);
+    await u2.flush({ recordingActive: false });
+
+    const rows = rowsOf(PART_KINDS.upload).filter((r) => r.state === "skipped");
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.seq)).toEqual([1, 2]);
+    expect(new Set(rows.map((r) => r.orderKey)).size).toBe(1);
+    // One local key per broadcast is DURABLE (that is what keeps consecutive sessions on one key),
+    // and it is never the queueOrderKey the master's hold reads.
+    const sc1 = JSON.parse(readFileSync(path.join(rec, SESSION_BASE + ".rolling.json"), "utf-8")) as Record<string, unknown>;
+    expect(typeof sc1.hubOrderKey).toBe("string");
+    expect(sc1.queueOrderKey).toBeUndefined();
+    const sc2 = JSON.parse(readFileSync(path.join(rec, base2 + ".rolling.json"), "utf-8")) as Record<string, unknown>;
+    expect(sc2.hubOrderKey).toBe(sc1.hubOrderKey);
+    expect((readSidecar() ?? {}).queueOrderKey).toBeUndefined();
+  });
+
+  it("A10-2: a stale queueOrderKey is dropped for a hub-owned session once the queue has no open rows", async () => {
+    const p = segs(1)[0]!;
+    writeFileSync(sidecar(), JSON.stringify({
+      streamKey: orderKeyOf(), sessionBase: SESSION_BASE, room,
+      segments: [{ index: 0, path: p }], confirmed: [],
+      queueOrderKey: orderKeyOf(), startMs: BASE_MS, updatedAt: BASE_MS,
+    }));
+    const u = queueUploader({
+      uploadOwner: () => "master", enqueueHubSkipped: () => true, queueOrderHasRows, queueMaxSeq: rollingQueueMaxSeq,
+    });
+    u.noteSegment(p);
+    await u.flush({ recordingActive: false });
+    const sc = JSON.parse(readFileSync(sidecar(), "utf-8")) as Record<string, unknown>;
+    expect(sc.queueOrderKey).toBeUndefined();
+  });
+
+  it("A10-3: the queue key is KEPT while the queue still has open rows (hold stays correct)", async () => {
+    const p = segs(1)[0]!;
+    writeFileSync(sidecar(), JSON.stringify({
+      streamKey: orderKeyOf(), sessionBase: SESSION_BASE, room,
+      segments: [{ index: 0, path: p }], confirmed: [],
+      queueOrderKey: orderKeyOf(), startMs: BASE_MS, updatedAt: BASE_MS,
+    }));
+    expect(enqueueRollingUploadPart({ file: p, index: 0, orderKey: orderKeyOf(), meta })).toBe("queued");
+    const u = queueUploader({
+      uploadOwner: () => "master", enqueueHubSkipped: () => true, queueOrderHasRows, queueMaxSeq: rollingQueueMaxSeq,
+    });
+    u.noteSegment(p);
+    await u.flush({ recordingActive: false });
+    const sc = JSON.parse(readFileSync(sidecar(), "utf-8")) as Record<string, unknown>;
+    expect(sc.queueOrderKey).toBe(orderKeyOf());
   });
 });

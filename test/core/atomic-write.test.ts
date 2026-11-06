@@ -84,14 +84,30 @@ describe("withFileLockSync (two sidecar writers: the recorder and the queue proc
     expect(existsSync(lock)).toBe(false);
   });
 
-  it("never steals a lock whose holder pid is alive, even when its mtime looks old", () => {
+  it("takes over an AGED lock even when its pid looks alive (pid reuse / leaked lock)", () => {
     const f = file();
     const lock = f + ".lock";
-    writeFileSync(lock, String(process.pid));
+    // Our own pid is definitely alive; the lock is old, so it must be treated as abandoned (a real
+    // holder only keeps it for milliseconds, and the OS reuses pids).
+    writeFileSync(lock, String(process.pid) + ".deadbeef");
     const old = Date.now() - 600_000;
     utimesSync(lock, new Date(old), new Date(old));
-    expect(() => withFileLockSync(f, () => 1, { timeoutMs: 20, staleMs: 1_000 })).toThrow(/lock busy/);
-    expect(readFileSync(lock, "utf-8")).toBe(String(process.pid)); // untouched: no TOCTOU delete
+    expect(withFileLockSync(f, () => 1, { timeoutMs: 200, staleMs: 1_000 })).toBe(1);
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  it("a FRESH lock is never stolen, and the lock file records pid + instance token", () => {
+    const f = file();
+    const lock = f + ".lock";
+    let content = "";
+    expect(withFileLockSync(f, () => { content = readFileSync(lock, "utf-8"); return 3; }, { timeoutMs: 200 })).toBe(3);
+    const [pidPart, tokenPart] = content.split(".");
+    expect(Number(pidPart)).toBe(process.pid);
+    expect(tokenPart).toMatch(/^[0-9a-f]{12}$/);
+    // Fresh lock held by someone else => bounded wait, no steal.
+    writeFileSync(lock, String(process.pid) + ".0123456789ab");
+    expect(() => withFileLockSync(f, () => 1, { timeoutMs: 30 })).toThrow(/lock busy/);
+    expect(readFileSync(lock, "utf-8")).toBe(String(process.pid) + ".0123456789ab"); // untouched
     unlinkSync(lock);
   });
 

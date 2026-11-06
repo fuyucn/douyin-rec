@@ -723,15 +723,34 @@ export function tryRollingShortCircuit(o: {
   countParts?: (bv: string) => Promise<number | null>;
   /** 延后回读的总窗口(ms,缺省 = {@link DEFAULT_SIDE_CHECK_DELAY_MS})与等待注入(测试免真等)。 */
   readback?: { windowMs?: number; sleep?: (ms: number) => Promise<void> };
+  /** Clock for the bounded queue hold (test seam); default Date.now. */
+  nowMs?: () => number;
 }): { state: JobState; bv?: string } | null {
   const { streamKey, members, ledger, jlog, cfg } = o;
+  const nowMs = o.nowMs ?? Date.now;
   if (ledger.get(streamKey)?.bv) return null; // 已有 BV(续跑) → 交给既有续跑路径
-  // plan 046 PR6 hold: a queue-mode session (sidecar carries queueOrderKey) with no bv yet is still being
-  // uploaded part by part by the node's runner. Running the whole-order pipeline now would merge/pull and
-  // upload a second archive for the same broadcast (irreversible). Hold: no select/pull/merge/upload.
-  const queued = members.filter((m) => m.rec.rolling?.queueOrderKey && !m.rec.rolling?.bv);
+  // #57 R1 止血(检查与动作见 blockUnsettledWithoutBv):先于 rolled/bvs 判定,也先于下面的队列 hold -
+  // 建稿意图/不确定段是人工案,不是「队列还在传」,被 hold 遮住就永远停在 pending(rework addendum 10)。
+  if (blockUnsettledWithoutBv({ streamKey, members, ledger, jlog, notify: o.notify })) return { state: "needs_manual" };
+  // plan 046 PR6 hold: a queue-mode session (sidecar carries queueOrderKey) is still being uploaded part by
+  // part by the node's runner - before the first bv AND while it still has segments on disk (parts 2..N).
+  // Running the whole-order pipeline now would pull/merge and upload a SECOND archive for this broadcast
+  // (irreversible), so the master waits. The wait is bounded: a sidecar that stopped being written for
+  // longer than QUEUE_HOLD_MAX_WAIT_MS means a wedged queue, and the case goes to a human instead of
+  // holding forever (never a silent re-upload: needs_manual has no automatic path back into the pipeline).
+  const queued = members.filter((m) => m.rec.rolling?.queueOrderKey
+    && (!m.rec.rolling?.bv || m.rec.tsFiles.length > 0));
   if (queued.length > 0) {
     const detail = queued.map((m) => m.workerId + ":" + m.rec.sessionBase).join(";");
+    const lastWrite = Math.max(...queued.map((m) => m.rec.rolling?.updatedAt ?? 0));
+    const expired = lastWrite > 0 && nowMs() - lastWrite > QUEUE_HOLD_MAX_WAIT_MS;
+    if (expired) {
+      const why = "边录边传队列模式:节点队列超过 " + Math.round(QUEUE_HOLD_MAX_WAIT_MS / 3600_000) + " 小时无进展(" + detail + ")";
+      jlog(why + " → 转人工(不重传,请核对队列后重试)");
+      ledger.setState(streamKey, "needs_manual", { error: why + ",请人工核对队列/分段后处理" });
+      o.notify({ kind: "error", stage: "上传", message: streamKey + " " + why + ",已转人工核对" });
+      return { state: "needs_manual" };
+    }
     const holdError = "边录边传队列模式:节点队列仍在上传分 P(" + detail + "),master 暂不上传;队列收口后自动重试";
     // Hold, never a terminal verdict: the reconciler only re-enters the retryable states pending /
     // failed (reconciler.ts RETRYABLE). needs_manual would skip every later pass and strand a
@@ -742,13 +761,11 @@ export function tryRollingShortCircuit(o: {
     const firstHold = (prev?.error ?? "") !== holdError;
     ledger.setState(streamKey, "pending", { error: holdError }, { force: prev?.state !== "pending" });
     if (firstHold) {
-      jlog("边录边传队列模式:节点队列尚未确认任何分 P [" + detail + "] → 暂不建稿/上传(保留源,队列收口后自动重试)");
+      jlog("边录边传队列模式:节点队列尚未收口 [" + detail + "] → 暂不建稿/上传(保留源,队列收口后自动重试)");
       o.notify({ kind: "error", stage: "上传", message: streamKey + " 边录边传:节点队列仍在上传,已暂缓整场上传(未重复投稿)" });
     }
     return { state: "pending" };
   }
-  // #57 R1 止血(检查与动作见 blockUnsettledWithoutBv):先于 rolled/bvs 判定。
-  if (blockUnsettledWithoutBv({ streamKey, members, ledger, jlog, notify: o.notify })) return { state: "needs_manual" };
   const rolled = members.filter((m) => m.rec.rolling?.bv);
   if (rolled.length === 0) return null;
   const bvs = [...new Set(rolled.map((m) => m.rec.rolling!.bv!))];
@@ -857,6 +874,12 @@ function blockUnsettledWithoutBv(o: {
   o.notify({ kind: "error", stage: "上传", message: `${streamKey} 边录边传:建稿中断/结果不确定且无稿件号,已转人工核对(未走常规管线)` });
   return true;
 }
+
+/**
+ * Upper bound on the queue hold (plan 046 PR6): how long the master waits on a node queue that has
+ * stopped writing its sidecar before handing the case to a human. Well above a real long-part upload.
+ */
+export const QUEUE_HOLD_MAX_WAIT_MS = 6 * 3600_000;
 
 /** 无稿件号、但留有建稿意图(create)或不确定段 = 建稿可能已提交而稿件号丢失。 */
 function rollingUnsettledWithoutBv(r: NodeRecording["rolling"]): boolean {

@@ -27,9 +27,16 @@ function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-/** Defaults: an abandoned lock is taken over before a waiter gives up (stale < timeout). */
-const LOCK_TIMEOUT_MS = 20_000;
-const LOCK_STALE_MS = 15_000;
+/**
+ * Defaults. A lock only guards a small JSON read-modify-write (milliseconds), so a lock older than a few
+ * seconds is abandoned - even when its pid happens to be alive again (pid reuse) or was leaked before a
+ * crash. Keep stale < timeout: a waiter that is still inside its budget always gets its turn, and the
+ * total blocking wait stays short (it holds the recorder/serve thread synchronously).
+ */
+const LOCK_TIMEOUT_MS = 5_000;
+const LOCK_STALE_MS = 3_000;
+/** Identifies this process instance inside the lock file (pid alone is reused by the OS). */
+const LOCK_TOKEN = randomBytes(6).toString("hex");
 
 function defaultHolderAlive(pid: number): boolean {
   try {
@@ -38,6 +45,12 @@ function defaultHolderAlive(pid: number): boolean {
   } catch (e) {
     return (e as NodeJS.ErrnoException)?.code === "EPERM"; // exists but not ours
   }
+}
+
+/** Holder pid from the lock file (<pid>.<instance token>); plain <pid> from older builds; 0 when unreadable. */
+function lockHolderPid(text: string): number {
+  const m = /^(\d+)/.exec(text);
+  return m ? Number(m[1]) : 0;
 }
 
 /** Who holds the lock, and is it still worth waiting for? */
@@ -50,11 +63,12 @@ function lockState(lock: string, staleMs: number, alive: (pid: number) => boolea
   } catch {
     return "gone"; // released between open() and this read: retry immediately
   }
-  const pid = /^\d+$/.test(text) ? Number(text) : 0;
-  // A known holder that is still alive is never considered stale (slow writer, not a dead one).
-  if (pid > 0) return alive(pid) ? "live" : "stale";
-  // Unknown owner (old lock files / unreadable pid): only the stale window decides.
-  return Date.now() - mtimeMs > staleMs ? "stale" : "live";
+  const pid = lockHolderPid(text);
+  const aged = Date.now() - mtimeMs > staleMs;
+  // Dead holder => abandoned at once. A live pid with an aged lock is either a leaked lock or a reused
+  // pid: the real holder only ever holds for milliseconds, so age wins over "pid looks alive".
+  if (pid > 0 && !alive(pid)) return "stale";
+  return aged ? "stale" : "live";
 }
 
 /**
@@ -67,8 +81,8 @@ function takeOverStaleLock(lock: string, staleMs: number, alive: (pid: number) =
   try { renameSync(lock, grab); } catch { return false; } // somebody else won the race: just retry
   try {
     const text = readFileSync(grab, "utf-8").trim();
-    const pid = /^\d+$/.test(text) ? Number(text) : 0;
-    const abandoned = pid > 0 ? !alive(pid) : Date.now() - statSync(grab).mtimeMs > staleMs;
+    const pid = lockHolderPid(text);
+    const abandoned = (pid > 0 && !alive(pid)) || Date.now() - statSync(grab).mtimeMs > staleMs;
     if (abandoned) { unlinkSync(grab); return true; }
     try { if (!existsSync(lock)) renameSync(grab, lock); } catch { /* stray file, harmless */ }
     return false;
@@ -87,9 +101,10 @@ function takeOverStaleLock(lock: string, staleMs: number, alive: (pid: number) =
  *
  * Waiting is bounded by timeoutMs and then throws: callers treat a lock failure like any other
  * sidecar write failure (alert, keep sources). An abandoned lock is taken over after staleMs, or
- * immediately when the recorded holder pid is dead; staleMs < timeoutMs so a waiter that is still
- * inside its budget always gets its turn. The deadline is checked in every retry branch, so a
- * persistent stat error can never spin.
+ * immediately when the recorded holder pid is dead. A live pid alone never protects a lock forever:
+ * the holder only holds for milliseconds, so age is the authoritative signal (covers pid reuse and
+ * locks leaked by a crash). staleMs < timeoutMs so a waiter that is still inside its budget always
+ * gets its turn, and the deadline is checked in every retry branch (a persistent stat error cannot spin).
  */
 export function withFileLockSync<T>(
   file: string, fn: () => T,
@@ -118,7 +133,7 @@ export function withFileLockSync<T>(
       continue;
     }
     try {
-      writeSync(fd, String(process.pid), null, "utf-8");
+      writeSync(fd, String(process.pid) + "." + LOCK_TOKEN, null, "utf-8");
       return fn();
     } finally {
       try { closeSync(fd); } catch { /* best-effort */ }

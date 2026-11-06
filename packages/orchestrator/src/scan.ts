@@ -114,6 +114,7 @@ function readRolling(dir: string, base: string): NodeRollingProgress | undefined
       confirmed: Array.isArray(d.confirmed) ? d.confirmed.filter((n): n is number => typeof n === "number") : undefined,
       ambiguous: Array.isArray(d.ambiguous) ? d.ambiguous.filter((n): n is number => typeof n === "number") : undefined,
       ...(typeof d.queueOrderKey === "string" && d.queueOrderKey ? { queueOrderKey: d.queueOrderKey } : {}),
+      ...(typeof d.updatedAt === "number" && Number.isFinite(d.updatedAt) ? { updatedAt: d.updatedAt } : {}),
     };
   } catch {
     return undefined;

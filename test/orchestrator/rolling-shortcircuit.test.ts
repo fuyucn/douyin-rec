@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SyncLedger } from "../../packages/orchestrator/src/ledger.js";
-import { tryRollingShortCircuit } from "../../packages/orchestrator/src/pipeline.js";
+import { QUEUE_HOLD_MAX_WAIT_MS, tryRollingShortCircuit } from "../../packages/orchestrator/src/pipeline.js";
 
 const KEY = "douyin:123:2026-10-13";
 let dir: string;
@@ -23,10 +23,12 @@ afterEach(() => {
 const member = (rolling: { bv: string; confirmed?: string[]; ambiguous?: string[] }, tsFiles: string[] = []) =>
   ({ workerId: "w1", rec: { tsFiles, rolling: { confirmed: [], ambiguous: [], ...rolling } } }) as never;
 
-function run(steps: { burnDanmu?: boolean; burnLivechat?: boolean } | undefined, members: never[]) {
+function run(steps: { burnDanmu?: boolean; burnLivechat?: boolean } | undefined, members: never[], nowMs?: () => number) {
   const notify = vi.fn();
   const jlog = vi.fn();
-  const r = tryRollingShortCircuit({ streamKey: KEY, cfg: { steps }, members, ledger, transports: new Map(), notify, jlog });
+  const r = tryRollingShortCircuit({
+    streamKey: KEY, cfg: { steps }, members, ledger, transports: new Map(), notify, jlog, ...(nowMs ? { nowMs } : {}),
+  });
   return { r, notify, jlog };
 }
 
@@ -72,10 +74,10 @@ describe("tryRollingShortCircuit records the broadcast span (issue #292)", () =>
 });
 
 describe("plan 046 PR6: a queue-mode session without a bv holds the whole-order pipeline", () => {
-  const queued = (queueOrderKey: string, bv?: string, tsFiles: string[] = ["/r/s1_000.ts"]) => ({
+  const queued = (queueOrderKey: string, bv?: string, tsFiles: string[] = ["/r/s1_000.ts"], updatedAt?: number) => ({
     workerId: "w1", rec: {
       sessionBase: "s1", tsFiles,
-      rolling: { confirmed: [0], ambiguous: [], queueOrderKey, ...(bv ? { bv } : {}) },
+      rolling: { confirmed: [0], ambiguous: [], queueOrderKey, ...(bv ? { bv } : {}), ...(updatedAt ? { updatedAt } : {}) },
     },
   }) as never;
 
@@ -111,6 +113,36 @@ describe("plan 046 PR6: a queue-mode session without a bv holds the whole-order 
     // Every confirmed segment was already deleted by cleanup-part: the residual check passes too.
     const { r } = run(undefined, [queued("same-broadcast", "BV1", [])]);
     expect(r).toEqual({ state: "done", bv: "BV1" });
+  });
+
+  it("bv confirmed but segments still on disk -> hold, never needs_manual (parts 2..N still uploading)", () => {
+    const { r } = run(undefined, [queued("same-broadcast", "BV1", ["/r/s1_001.ts"])]);
+    expect(r).toEqual({ state: "pending" });
+    expect(ledger.get(KEY)?.state).toBe("pending");
+    // Once the queue deleted the last source the same pass closes the job.
+    expect(run(undefined, [queued("same-broadcast", "BV1", [])]).r).toEqual({ state: "done", bv: "BV1" });
+  });
+
+  it("a hold with no sidecar write for the whole window hands the case to a human", () => {
+    const staleAt = 1_000_000;
+    const { r, notify } = run(undefined, [queued("same-broadcast", "BV1", ["/r/s1_001.ts"], staleAt)],
+      () => staleAt + QUEUE_HOLD_MAX_WAIT_MS + 60_000);
+    expect(r).toEqual({ state: "needs_manual" });
+    expect(ledger.get(KEY)?.state).toBe("needs_manual");
+    expect(ledger.get(KEY)?.error).toContain("无进展");
+    expect(notify).toHaveBeenCalledWith(expect.objectContaining({ kind: "error", message: expect.stringContaining("无进展") }));
+  });
+
+  it("an unsettled create/ambiguous queue session is NOT masked by the hold (needs_manual)", () => {
+    const unsettled = {
+      workerId: "w1", rec: {
+        sessionBase: "s1", tsFiles: ["/r/s1_000.ts"],
+        rolling: { confirmed: [], ambiguous: [], queueOrderKey: "same-broadcast", uploading: { index: 0, kind: "create" } },
+      },
+    } as never;
+    const { r } = run(undefined, [unsettled]);
+    expect(r).toEqual({ state: "needs_manual" });
+    expect(ledger.get(KEY)?.state).toBe("needs_manual");
   });
 
   it("a legacy session without queueOrderKey is untouched", () => {
