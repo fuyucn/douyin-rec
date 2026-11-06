@@ -1,123 +1,150 @@
 # 048 0 落盘 spool 清理入队（cleanup-spool）
 
-> 状态：设计（待实现）。上游：issue #538、`plans/047_queue_coverage.md` §5 G1。前置已合并：plan 046（按分 P 任务链）、#540。
-> 术语：**runner** = 每节点 serve 进程内的 ProcRunner；**spool** = 直传时每个分 P 的临时落盘文件；**state** = `live-pump-<room>.json` 会话状态（含 `parts` 与 `pending`）。
+> 状态：**设计 v2（按独立评审重写，尚未实现）**。上游：issue #538、`plans/047_queue_coverage.md` §5 G1。
+> v1 的 11 处事实/设计错误由评审逐条指出并对照源码修正，见 §0。
 
-## Goal
+## §0 v1 错在哪（保留记录，避免重犯）
 
-0 落盘直播直传的 spool 清理从「录制进程内 `rmSync`」改为「入队 `cleanup-spool`」，同时**不放弃**两条既有安全性质：
+| v1 说法 | 实际 |
+|---|---|
+| `inputs` 必须为空数组 | `assertJobInvariants` **直接拒空 inputs**（`processor.ts:375`）；且 `enqueue` 无条件 `fileTagOf(inputs[0])`（`store.ts:333`）、runner 磁盘准入取 `dirname(inputs[0])`（`runner.ts:514`）→ 空 inputs 根本入不了队 |
+| `statePath` 派生 + `roomSlug`/`platform`/`confirmedAt` 校验 | state 字段是 `room` / `createdAt` / `updatedAt`，**没有** `platform`、`confirmedAt`（`live-pump.ts:306-345`）；文件名是 `livePumpStatePath` 派生的会话状态文件名（`:366`） |
+| 「state mtime 晚于确认」证明确认已落盘 | 没有确认时间戳；mtime 受时钟/元数据影响，不可作为证据 |
+| `partIndex >= 1`，用 `parts[partIndex]` 定位 | index 是 **0 基**（`nextPartIndex` = max(index+1)，`live-pump.ts:634`），且 parts 可能稀疏 → 位置 ≠ index |
+| spool「没有 bv、不是视频扩展名」 | spool 用的是**视频扩展名**（录制中转态，`:2900`），state 里已有 `bvid`/`aid` |
+| `jobId = cleanup-spool:{statePath}:{partIndex}` | 绕过 `#g` 视图契约（`processor.ts:318`）；state 按房间复用、归档后新场 index 从头 → 撞旧行 |
+| `unavailable` → 回退本地 `rmSync` + 告警 | 这等于队列故障时删除回到**无租约/无重验/无排斥**的旧路径，与「无法判定即留存」冲突 |
+| 「孤儿补偿在下次启动重试」 | `cleanupConfirmed()` 只在**恢复/确认**时调用（`:916/:948/:1032`），**finalize 无调用**；最后一段失败后长跑进程无机会 |
+| 「队列页自动出现，无需前端改动」 | 047 已确认 `/queue` 没有节点散任务的 proc-job 列表（`plans/047:81`）；`/api/proc/active` 只有按 kind 的计数 |
+| `estimateDiskBytes = 0` 即不受准入影响 | runner 低水位时**即使 need=0 也不认领**（`runner.ts:510`）→ 最需要释放空间时反而不删 |
 
-1. 队列不可用时**仍能清理**（回退本地删除 + 告警），不能因为队列故障把磁盘占满；
-2. 删除授权**不低于**现状——现状是「确认已持久化后才删」，队列化不能放宽这一点。
+仍未解决、必须在新设计里回答的一条：**没有 writer 排斥协议**。租约只约束队列持有者，不约束 `live-pump`、手动 CLI、另一个 state 写进程。
 
-## 为什么不是直接把 `cleanup-part` 复用
+## §1 分三个交付阶段（不一次上删除）
 
-`cleanup-part` 的契约是「单个视频输入 + `params.ctx.file === inputs[0]` + `bv` 非空 + `fp` 匹配 + 视频扩展名」（`packages/processors/src/cleanup-part.ts:54-73`）。spool 是**临时文件**：它没有 `bv` 语义（bv 属于稿件，不是这个文件）、扩展名是录制期间使用的临时中间扩展名（不是正式产物名）、且它不在 `recordings/` 视频清单里。
+| 阶段 | 内容 | 是否删文件 | 上线门槛 |
+|---|---|---|---|
+| **A. 观察 + shadow** | 只读统计「confirmed 且 spool 仍存在」的条目：数量 / 字节 / 最老年龄 / 拒绝原因分布；shadow 模式下记录 `would-delete` 而不删 | **否** | 无（纯只读） |
+| **B. 真删** | `cleanup-spool` kind + 所有权协议 + outbox 补偿 + 状态机 | 是 | A 阶段数据证明「全部 would-delete 都有可信 confirmed/session/文件身份证据」，且拒绝原因可解释 |
+| **C. canary** | 单节点、少量任务开启 | 是 | B 阶段零误删、零漏清理 |
 
-强行复用会要求放宽 `bv` 校验或伪造 bv，等于把「删除证据」变成调用方自证——这正是 047 G1 指出的真实障碍。
+本文件描述 A 与 B 的设计；C 是运营动作。
 
-> 注意：早期说法「不能复用是因为 `assertSidecarPath` 命名冲突」**是错的**：`assertSidecarPath` 只在 `kind ∈ {upload, reconcile}` 时调用（`packages/core/src/processor.ts:401-403`），`cleanup-part` 走 `assertJobInvariants` 并不校验 sidecar。真实障碍只是上述契约。
+## §2 事实基线（写代码前必须先对照确认）
 
-## 设计
-
-### 1. 新 kind：`cleanup-spool`
-
-- `PART_KINDS.cleanupSpool = "cleanup-spool"`（`packages/core/src/processor.ts`）。
-- 输入：`params.spoolPath`（绝对路径，**唯一输入**，`inputs` 必须为空数组，避免与 `replaceInputs` 混淆）。
-- 证据（全部必需，缺一不删）：
-  - `params.statePath`：会话状态文件绝对路径（canonical，处理器**自己**派生并重读，不信调用方给的 parts 快照）；
-  - `params.partIndex`：≥1 整数，用于在 state 里定位该 part；
-  - `params.fp = { size, mtimeMs }`：入队时快照，执行时比对。
-- 附加校验（对应 047 G1 的 7 条前置）：
-
-| # | 前置 | 实现 |
-|---|---|---|
-| 1 | canonical statePath 派生 | `statePath` 必须是 `<dataRoot>/recordings/<...>/live-pump-<room>.json` 形状，且 `spoolPath` 必须与 state 内该 part 的 `spoolPath` **逐字相同**（不信任调用方另给的路径） |
-| 2 | room/session 匹配 | `state.roomSlug` / `state.platform` 与 job 的键一致；session 变化（重连新场）不得命中旧 state |
-| 3 | 精确 confirmed 且已持久化 | 重读 state，`parts[partIndex].confirmed === true`；state 文件 mtime 必须晚于确认（或含 `confirmedAt`），证明确认已落盘而不是内存态 |
-| 4 | 非 pending 引用 | `state.pending?.spoolPath` 若等于该路径 → **不删**（未决上传的唯一恢复副本） |
-| 5 | 受限根 realpath | `realpath(spoolPath)` 与 `realpath(statePath)` 都在 `allowedRoots` 内；拒符号链接逃逸 |
-| 6 | fp 防路径复用 | 执行前 stat 比对 `size`/`mtimeMs`；不符 → 保留 + 抛错（runner 告警一次） |
-| 7 | 执行前重验 + 租约 | `ctx.assertLease()`，且在 assertLease **之后**再读一次 state（缩小 TOCTOU 窗口） |
-
-- 幂等：spool 已不存在 → 成功；state 已不存在 → **不删**（无法证明确认，抛错让 runner 标 failed 并告警）。
-- `resource: "cpu"`、`lane: "copy"`、`retryable: true`、`interruptible: true`（与 `cleanup-part` 一致，不与上传抢槽）。
-- `estimateDiskBytes()` 返回 0（删除只释放空间）。
-
-### 2. 注入点：`live-pump` 新增可交付回调（不是 observer）
-
-现状：`packages/zero-upload/src/live-pump.ts:2503` 的 `onPartConfirmed?: (info: { count: number; bvid?: string }) => void` 是 **display-only**（载荷不含路径、抛错被吞、CLI 已用于进度，`cli.ts:638`）。**不能**把它改成不可丢投递——那会改变既有语义。
-
-新增**独立**可选回调：
-
-```ts
-/** 交付式清理钩子：返回 "queued" 表示队列已接手（本进程不再删）；"unavailable" 表示回退本地删除。 */
-cleanupSpool?: (info: { statePath: string; spoolPath: string; partIndex: number; fp: { size: number; mtimeMs: number } }) =>
-  "queued" | "unavailable";
+```
+state 文件：<spoolDir>/<livePumpStatePath 派生的会话状态文件>   (live-pump.ts:366)
+归档文件：  <state path>.archived-<epoch ms>                   (:412)
+state: { schemaVersion:1, room, createdAt, title, tid, tag, desc?, private,
+         bvid?, aid?, parts[], pending?, seasonState?, updatedAt }
+parts[]: { index(0 基), spoolPath, filename, stem, title, bytes, durationSec, confirmed }
+pending?: { kind:"create"|"append", partIndex, stem, title, bytes, durationSec, spoolPath }
+spool 文件：录制期间的临时中间扩展名（视频容器）              (:2900)
 ```
 
-- 注入方：`packages/cli/src/cli.ts`（与 `--task-id` 同一处，仅在 task/serve 场景注入），`@drec/zero-upload` **不依赖** `@drec/proc-queue`（保持现有依赖集合；rank 允许但设计上仍走回调倒置）。
-- `cleanupConfirmed()`（`live-pump.ts:1173`）改为：对每个 confirmed 且 spool 存在的 part，先调 `cleanupSpool`：
-  - `"queued"` → 不删（等队列）；
-  - `"unavailable"` / 未注入 → 现有 `rmSync` 路径 + 一条告警日志（本机队列不可用，已回退本地删除）。
-- `cleanupConfirmedSpool === false` 的既有开关语义不变。
+- `updatedAt` 仅在 `persist()` 时更新（确认/恢复/标记 pending），**没有周期心跳** → 不能用「state 陈旧」判定会话已死。
+- `parts` 里的条目是**封口后**写入的（`noteUnconfirmedPart`），即 `parts[].spoolPath` 指向的文件此时已不再被 `live-pump` 写入。**活跃写者（正在写的 spool）不在 `parts` 中**——这是本设计最重要的安全依据。
+- `state.parts` 与 `state.pending` 是「保留集」的唯一定义（`spoolPathsToKeep`，`:359`）。
 
-### 3. 队列不可用与入队失败的区分
+## §3 所有权协议（解决「谁有权删」）
 
-| 情况 | 行为 |
-|---|---|
-| 未注入 / 返回 `unavailable`（任务表打不开） | 回退本地 `rmSync` + 告警一次（每 part） |
-| 入队抛出（如契约校验失败） | **不删**，告警一次；由孤儿补偿在下次启动时重试 |
-| 入队成功 | 本进程不再删；行由 runner 执行 |
+删除证据必须同时满足，任何一条不满足 → **留存 + 记录原因**：
 
-回退是**安全兜底**，不是主路径：主路径必须让队列成为唯一删除者（047 §4 的局部不变量）。
+1. **同一会话**：`state.room === job.room` 且 `state.createdAt === job.sessionCreatedAt`（sessionId = `room + createdAt`，不可变）。当前 state 不匹配 → 尝试匹配归档 state；归档也找不到 → 留存并标注 `stale-session`。
+2. **会话已结束**：当前 state 不匹配即视为会话已结束（新场会复用 statePath 但 `createdAt` 必不同）。这项替代「活跃写者排斥」：**活跃会话的 parts 全部记在当前 state 里，永远走不到第 1 条**。
+3. **精确 confirmed**：`find(p => p.index === job.partIndex)?.confirmed === true`（0 基，稀疏数组按 `find` 而非下标）。
+4. **路径身份**：`resolve(p.spoolPath) === resolve(job.inputs[0])`；且 `params.spoolPath` 逐字等于 `inputs[0]`。
+5. **唯一引用**：把 `parts` 与 `pending` 的全部 `spoolPath` 做 `resolve` 后统计，该路径**必须恰好出现 1 次**（自身那条）；出现 ≥2 次（含 pending 别名指向）→ 留存 `ambiguous-reference`。
+6. **根校验**：`realpath(inputs[0])` 与 `realpath(statePath)` 都在 `allowedRoots` 内（拒绝符号链接逃逸；`realpath` 失败 → 留存）。
+7. **文件指纹**：入队时快照 `{size, mtimeMs}`，执行时比对；不符 → 留存 `fingerprint-mismatch`（路径被复用）。
+8. **执行临界区**：`ctx.assertLease()` **之后**重新读一遍 state 并重跑第 1–7 条，再 `unlink`。窗口无法完全消除（无跨进程锁），但把「读旧快照 → 删」压缩到「紧邻 unlink 的重验」；且第 2 条决定了**只有非活跃会话**才会进入。
 
-### 4. 孤儿补偿（不新增扫描器）
+**明确不做**：不引入新的跨进程锁协议（`live-pump` 不参与，单边锁只会制造虚假安全感）。代价：仍存在极窄 TOCTOU 窗口——用第 2/5/7/8 条把窗口内容限定为「同一非活跃会话内、路径唯一、指纹未变」。这个残余风险在 A 阶段用 shadow 数据量化。
 
-复用现有底座：`live-pump` 启动时已经按 state 的 `parts` / `pending` 判定保留集（`spoolPathsToKeep`）。补偿点就是**同一处**：
+## §4 阶段 A：观察 + shadow（先做，零风险）
 
-- 启动后遍历 state 中 `confirmed === true` 且 spool 存在、但队列中无对应 jobId 的条目 → 入队（幂等 jobId）。
-- 与 `sweepOrphanSpools`（`packages/app/src/live-pump-spool.ts:24`，凭名字 + mtime>10 分钟 + keep-set）**分工明确**：
-  - **本 PR 不动 sweep**（它没有 active-writer 锁，属于 047 G1 的独立风险项）；
-  - 补偿只处理 **state 明确 referenced + confirmed** 的 spool，不碰「名字像 spool 但 state 不认识」的文件。
+- 新增只读汇总函数（`@drec/zero-upload` 或 `app`，纯函数，不做 IO 之外的事）：
+  ```ts
+  inspectConfirmedSpools(state): Array<{
+    partIndex; spoolPath; bytes; ageMs;
+    verdict: "would-delete" | "stale-session" | "ambiguous-reference" | "not-confirmed" | "missing-file";
+    reason: string;
+  }>
+  ```
+  规则即 §3 的 1–7（不含 8，因为不删）。
+- 指标暴露：节点 `/api/proc/active` 增 `cleanupSpool` 段（`inspected` / `wouldDelete` / `wouldBytes` / `oldestAgeMs` / `reasons`），**按 kind 聚合计数**（与现有形态一致，不加行级枚举）。
+- shadow 模式：`recordNodeRemux` 风格的 dry-run —— 只写日志（脱敏，不写房间号/主播名/BV/文件名），不删。
+- **A 阶段不上队列行**，因此不需要 ProcRunner 改动。
 
-### 5. jobId 与去重
+## §5 阶段 B：真删（在 A 的数据支持下）
 
-`cleanup-spool:{statePath}:{partIndex}` —— 同一 (state, part) 永远同一个 jobId，重复入队由任务表幂等键吸收；spool 路径变化（同 part 重建）由 `partIndex` 相同但 `fp` 不同体现 → 执行时 fp 不符 → 保留 + 告警，不会误删新文件。
+### 5.1 kind 与契约
 
-### 6. 观察面
+- `PART_KINDS.cleanupSpool = "cleanup-spool"`。
+- `inputs = [spoolPath]`、`outputs = []`、`replaceInputs = false`。
+- `params = { spoolPath, room, sessionCreatedAt, partIndex, fp: { size, mtimeMs } }`；`params.spoolPath === inputs[0]`（与 `cleanup-part` 同一写法）。
+- `statePath` **不来自 params**：处理器用 `livePumpStatePath(dirname(spoolPath), params.room)` 自己派生，消除「调用方给错 state」这一整类风险。
+- jobId 走 `core.jobIdOf("cleanup-spool", logicalKey, generation)`；`logicalKey` = `${room}:${sessionCreatedAt}:${partIndex}`（含不可变会话身份，避免跨场撞行）。
+- `resource:"cpu"`、`lane:"copy"`、`retryable:true`、`interruptible:true`、`estimateDiskBytes(): 0`。
 
-- 队列页（`/queue`）与节点 `/api/proc/active` 已按 kind 聚合 → `cleanup-spool` 自动出现，无需前端改动。
-- 失败/保留事件走既有告警通道（`notify({kind:"error",stage:"清理"})`）。
+### 5.2 回执状态机（不是 queued/unavailable 二元）
 
-## Global Constraints
+| 入队结果 | 含义 | 行为 |
+|---|---|---|
+| `queued` | 已持久化、身份已验证、有 runner 会认领 | 本进程不再删 |
+| `deferred` | 当前 state 不匹配 / 会话仍活跃 / 指纹暂不一致（可恢复） | 写 outbox，`notBefore` 退避后重试（有界：最大重试次数 + 最大年龄后转 `stale`） |
+| `rejected` | 契约或确定性校验失败（如引用的 spool 从未 confirmed） | 终态，**留存文件**，告警一次 |
+| 入队抛出（IO/DB 临时失败） | 未落库 | 写 outbox，本地**不删**，按退避重试 |
 
-- **不依赖 `@drec/proc-queue`**：`zero-upload` 包依赖集合保持 `core` + `post-process`；队列能力只经回调注入。
-- **不改 `cleanup-part`**：它是源录像删除的唯一队列者，契约不放宽。
-- **不迁移**：不改 `cleanupConfirmedSpool` 开关语义、不改 state schema 版本（新增字段必须可选、向后兼容）。
-- **不新增扫描器**：孤儿补偿复用 `live-pump` 启动的既有 state 遍历。
-- **任何「无法判定」→ 保留文件**（不删）。
-- 版本 bump：触及 `packages/` → 0.0.311 → 0.0.312 + 重新 `pnpm bundle`。
+关键：`store.enqueue` 的 `rejected` 是**返回值**不是异常（`store.ts:328/333`），处理器必须按上表分派，不能统一当 queued。
 
-## 任务
+### 5.3 持久 outbox（解决「长跑进程不再重启」）
 
-- [ ] T1 `core`：`PART_KINDS.cleanupSpool` + `assertJobInvariants` 分支（校验 `params.spoolPath` 为绝对路径、`inputs` 为空、扩展名允许录制期间的临时中间扩展名）。
-- [ ] T2 `processors`：`makeCleanupSpoolProcessor`，按 §1 表 7 条前置实现；单测覆盖：happy path / spool 已不存在 / state 缺失 / 非 confirmed / pending 引用 / fp 不符 / realpath 逃逸 / 租约失效。
-- [ ] T3 `zero-upload`：`cleanupSpool` 可选回调 + `cleanupConfirmed()` 三路分派（queued / unavailable / 未注入）+ 回退告警；单测覆盖三路。
-- [ ] T4 `cli`/`app`：注入 `cleanupSpool`（taskId 场景），队列打开失败时明确返回 `"unavailable"`；日志脱敏（不写房间号/主播名/BV）。
-- [ ] T5 孤儿补偿：启动时对 confirmed+存在+队列无行 的 spool 幂等入队；测试「进程在入队后、执行前被杀 → 重启后仍会入队且不重复」。
-- [ ] T6 端到端：0 落盘任务跑一场，确认 `cleanup-spool` 行出现 → done → 文件消失；再模拟任务表打不开 → 回退删除 + 告警。
-- [ ] T7 文档：`plans/047` G1 标记为已交付；`plans/046 §4.2` 的模板表更新。
+- state 新增可选字段 `spoolCleanupOutbox?: Array<{ partIndex; spoolPath; fp; sessionCreatedAt; attempts; lastAttemptAt }>`（可选、缺省空 → 向后兼容，不改 `schemaVersion`）。
+- 写入点：`cleanupConfirmed()` 遇到 `deferred`/抛出时 append（同一 part 幂等）。
+- 重放点：①下一次 `persist()` 后；②`finalize()` 结束时**再跑一次**（v1 缺这一条）；③进程重启时（`recover` 已有入口）。三者都失败 → 保留 outbox，A/B 阶段的指标可见。
+- 成功入队即从 outbox 移除。**outbox 只记录意图，不删文件**。
 
-## 验收
+### 5.4 低水位豁免
 
-- `pnpm test`、`pnpm typecheck`、`pnpm bundle` 全过；动到前端则 `packages/web && pnpm build`。
-- 变异验证：撤掉「pending 引用检查」→ 对应用例红；撤掉「fp 比对」→ 用例红；撤掉「realpath 校验」→ 用例红；撤掉回退分支 → 队列不可用用例红。
-- 队列行与文件状态一致：done 后文件不存在；failed/保留时文件仍在且告警一次。
+`cleanup-spool` 必须在磁盘低于水位时**仍被认领**（它唯一的作用就是释放空间）。需要 runner 准入判断加一个按 kind 的豁免（`need === 0 && kind === "cleanup-spool"` 放行）；这条要单独测试，否则「最需要清理时反而不清理」。
 
-## 风险
+### 5.5 与 sweep 的分工（不变）
 
-- **误删**（最高）：靠 §1 的 7 条前置 + 「任何无法判定即保留」兜底；处理器拒绝路径**永不**删。
-- **TOCTOU**：assertLease 后重读 state；fp 比对在 unlink 前。
-- **队列故障导致磁盘涨**：回退本地删除 + 告警；孤儿补偿保证重试。
-- **与 sweep 重叠**：本 PR 不碰 sweep；若两者同时存在，sweep 的 keep-set 已包含 state referenced 的 spool，不会互相删。
+- `sweepOrphanSpools` **本设计不动**（它缺 active-writer 锁，是 047 G1 的独立风险项）。
+- 本设计只处理 **state 明确引用 + confirmed + 唯一引用** 的 spool。
+
+## §6 观察面（上线门槛，不是「自动出现」）
+
+- `/api/proc/active` 增 `cleanupSpool: { inspected, wouldDelete, wouldBytes, oldestAgeMs, queued, deferred, rejected, failed, reasons: Record<string,number> }`。
+- `/queue` 不改行级列表（那是 047 G4 的事）；先接入上面的聚合数字。
+- 告警：`rejected` 与 `stale` 各告警一次（去重）。
+
+## §7 任务（按阶段）
+
+**A 阶段（本 PR，可先只做这一半）**
+- [ ] A1 `inspectConfirmedSpools`（§4 判定表，纯函数）+ 单测矩阵：首段 index=0 / 稀疏 parts / pending 别名 / 非 confirmed / state 不匹配 / 文件缺失 / realpath 逃逸。
+- [ ] A2 `/api/proc/active` 增 `cleanupSpool` 聚合段 + 测试。
+- [ ] A3 shadow 日志（脱敏）+ 开关（默认只观察）。
+- [ ] A4 在一台节点上跑一天，汇总 `would-delete` 与拒绝原因分布。
+
+**B 阶段**
+- [ ] B1 `core`：`PART_KINDS.cleanupSpool` + 契约分支（`inputs` 必须恰 1 个、`params.spoolPath === inputs[0]`、`replaceInputs=false`）。
+- [ ] B2 `processors`：`makeCleanupSpoolProcessor`（§3 八条 + §5.2 状态机）；导出并注册（`providers-register.ts`）；同步精确删除站点白名单（`test/arch/processors-deletion-guard.test.ts`），**不放宽整个 guard**。
+- [ ] B3 `zero-upload`：`cleanupSpool` 交付式回调（与既有 display-only `onPartConfirmed` **分开**）+ `cleanupConfirmed()` 三路分派 + `finalize()` 重跑 + outbox。
+- [ ] B4 `runner`：低水位豁免（§5.4）。
+- [ ] B5 补偿：outbox 重放（persist 后 / finalize / 重启）；测试「确认落盘后、入队前崩溃」与「入队后、执行前崩溃」两个不同窗口。
+- [ ] B6 文档：`plans/047` G1 标记为「A 完成 / B 待 canary」，`plans/046 §4.2` 更新。
+
+## §8 验收
+
+- 变异验证：撤「唯一引用」→ 别名用例红；撤「会话匹配」→ 跨场复用用例红；撤「指纹」→ 路径复用用例红；撤「低水位豁免」→ 认领用例红；撤「finalize 重跑」→ 最后一段用例红。
+- A 阶段的 shadow 数据必须能解释**每一条** `would-delete`（有 confirmed + 会话匹配 + 唯一引用 + 指纹一致）。
+- B 阶段 on-canary：done 后文件消失；任何拒绝路径文件仍在且告警一次。
+- 全量 `pnpm test` / `typecheck` / `bundle`；版本 0.0.311 → 0.0.312。
+
+## §9 剩余风险（明示）
+
+- **无跨进程锁**：残留 TOCTOU 窗口，靠 §3 的条件组合收窄；A 阶段量化、B 阶段 canary 验证。
+- **state 归档后的证据**：只在归档 state 里匹配；找不到即留存（不猜）。
+- **旧版本节点**：不认识 `cleanup-spool` → 该 kind 的行在旧节点上不会被认领；上线顺序必须是「先升级节点，再开 shadow，再开真删」。
