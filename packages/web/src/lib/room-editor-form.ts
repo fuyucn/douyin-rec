@@ -8,10 +8,11 @@
  * required `recording.room` (create) and the node role (`withProcessing`).
  */
 import type { OutputFormat } from "@drec/output-format";
+import type { OutputFormatLock } from "@drec/contracts";
 import type { CreateRoomInput, PlatformDTO, RoomDTO, RoomPayload } from "../api/client";
 import { splitSchedule } from "./labels";
 import {
-  keepArchiveFromStored, methodFromStored, outputFormatFromStored, storedFromForm, type FormFacts, type UploadMethod,
+  keepArchiveFromStored, methodFromStored, outputFormatFromStored, storedFromForm, taskOutputFormatLock, type FormFacts, type UploadMethod,
 } from "./room-form-rules";
 
 export interface RoomForm {
@@ -43,6 +44,8 @@ export interface RoomForm {
   burnLivechat: boolean;
   tsDirect: boolean;
   outputFormat: OutputFormat;
+  /** 后端下发的输出格式锁(TaskDTO/RoomDTO 同一判定 `nodeOutputFormatLock`;未锁/旧后端 = null,降级不锁)。 */
+  outputFormatLock: OutputFormatLock | null;
   uploadPrivate: boolean;
   tid: string;
   tag: string;
@@ -140,6 +143,7 @@ export function formFromRoom(r: RoomDTO): RoomForm {
     burnLivechat: p.steps?.burnLivechat !== false,
     tsDirect: p.steps?.tsDirect === true,
     outputFormat: outputFormatFromStored(rec?.outputFormat),
+    outputFormatLock: rec?.outputFormatLock ?? null,
     uploadPrivate: p.upload?.private !== false,
     tid: String(p.upload?.tid ?? 21),
     tag: p.upload?.tag ?? "",
@@ -211,6 +215,9 @@ export function payloadFromForm(f: RoomForm, ctx: RoomContext): PayloadResult {
   if (f.uploadOn && !isValidSeasonSectionIdInput(f.seasonSectionId)) return { ok: false, error: "seasonSectionId" };
   if (f.uploadOn && !isValidPartSizeInput(f.partSizeMiB)) return { ok: false, error: "partSizeMiB" };
   const stored = storedFromForm(ruleFactsOf(f, ctx));
+  // 后端锁(managedBy/规则/边录边传/0 落盘)下的 outputFormat 不生效 → 省略(PATCH = 保持原值),
+  // 避免「改了但后端忽略」的静默无效。与表单依赖锁(投稿恒 mp4,`stored.outputFormat`)是两把锁,都要遵守。
+  const backendFormatLocked = taskOutputFormatLock({ outputFormatLock: f.outputFormatLock }).locked;
   const trimOrUndef = (s: string): string | undefined => s.trim() || undefined;
   // Zero-disk fields are owned by the rule: only a save that writes it may update them.
   // Write on an existing rule, a newly selected rolling mode, or an explicit delivery edit;
@@ -226,7 +233,7 @@ export function payloadFromForm(f: RoomForm, ctx: RoomContext): PayloadResult {
         quality: f.quality,
         engine: f.engine,
         segmentSec: Number(f.segmentSec) || 1800,
-        outputFormat: stored.outputFormat,
+        ...(backendFormatLocked ? {} : { outputFormat: stored.outputFormat }),
         danmu: f.danmu ? 1 : 0,
         useCookie: f.useCookie,
         ...zeroDisk,

@@ -35,7 +35,7 @@ import { useT } from "../lib/i18n";
 import { pickPlatform, qualityLabel } from "../lib/labels";
 import { findExistingRoom } from "../lib/room-create";
 import { blankForm, factsOf, formFromRoom, isValidPartSizeInput, isValidSeasonSectionIdInput, PART_SIZE_MIB_MAX, PART_SIZE_MIB_MIN, ruleFactsOf, submitPayload, type PayloadError, type RoomContext, type RoomForm } from "../lib/room-editor-form";
-import { burnVersionsApply, deriveConstraints, flowSummary, settledMethod, shownOutputFormat, type UploadMethod } from "../lib/room-form-rules";
+import { burnVersionsApply, deriveConstraints, flowSummary, settledMethod, shownOutputFormat, taskOutputFormatLock, type UploadMethod } from "../lib/room-form-rules";
 import { accountToggleCopy, cookieReadyFor } from "../lib/room-form-rules";
 
 interface Props {
@@ -210,15 +210,20 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
   const canSubmit = create ? form.room.trim() !== "" : hasRecording || caps.editPipeline;
 
   /** Archive format, shared by the master's process tab and the worker's record tab. */
+  // 锁判定「后端锁优先」:后端已明确不按所选格式处理(managedBy/规则/rolling/0 落盘)时,
+  // 即便表单依赖(投稿)未锁也不给改 —— 改了会被后端忽略。后端未锁时回退表单依赖锁(投稿恒 mp4)。
+  const backendFmtLock = taskOutputFormatLock({ outputFormatLock: form.outputFormatLock });
+  const fmtLock = backendFmtLock.locked ? backendFmtLock : c.outputFormat;
   const outputFormatField = (
     <label className="rm-ctx">
       <span className="field-label !mb-0">{t("rooms.outputFormat")}</span>
-      <select className="select" value={shownOutputFormat(facts)} disabled={!hasRecording || c.outputFormat.locked}
+      <select className="select" value={shownOutputFormat(facts)} disabled={!hasRecording || fmtLock.locked}
               onChange={(e) => update({ outputFormat: e.target.value as RoomForm["outputFormat"] })}>
         {OUTPUT_FORMATS.map((f) => (
           <option key={f} value={f}>{f === "original" ? t("rooms.outputFormatOriginal") : stageExt(f).slice(1).toUpperCase()}</option>
         ))}
       </select>
+      {fmtLock.reasonKey && <span className="text-xs text-muted">{t(fmtLock.reasonKey)}</span>}
     </label>
   );
 

@@ -15,6 +15,7 @@
  * 错误信息必须**明说哪半边可能已改**,让用户能自己核对(静默留半成功是不可接受的)。
  */
 import { parseOutputFormat, platformForRoom, redactTaskSecrets, streamUploadConflicts, type RoomDTO, type RoomPayload, type RoomRecordingDTO, type HubRulePayload } from "@drec/core";
+import { nodeOutputFormatLock } from "../../node-remux.js";
 import type { ApiCtx } from "./context.js";
 import type { ApiResult, CreateRoomInput } from "./types.js";
 import { refreshLocalRollingEffective } from "../../rolling-effective.js";
@@ -96,31 +97,34 @@ export function buildRooms(ctx: ApiCtx) {
     return { cookies, webhook, hasCookies, hasWebhook };
   };
 
-  const recordingOf = (t: Task | null): RoomRecordingDTO | null =>
-    t
-      ? {
-          taskId: t.id,
-          room: t.room,
-          name: t.name,
-          anchorName: t.anchorName,
-          quality: t.quality,
-          engine: t.engine,
-          danmu: t.danmu,
-          segmentSec: t.segmentSec,
-          scheduleStart: t.scheduleStart,
-          scheduleEnd: t.scheduleEnd,
-          enabled: t.enabled,
-          useCookie: t.useCookie,
-          // cookies / webhook 是凭证:DTO 恒不外发(redactTaskSecrets 单一出口),要改用 PUT。
-          ...secretsOf(t),
-          outDir: t.outDir,
-          rollingUpload: t.rollingUpload,
-          rollingEffective: t.rollingEffective,
-          streamUpload: t.streamUpload,
-          streamUploadSpool: t.streamUploadSpool,
-          outputFormat: t.outputFormat,
-        }
-      : null;
+  const recordingOf = (t: Task | null): RoomRecordingDTO | null => {
+    if (!t) return null;
+    // 输出格式锁:与 TaskDTO(`web/api/context.ts` view)同一判定 `nodeOutputFormatLock`、同一口径。
+    const lock = nodeOutputFormatLock(t, hubDir);
+    return {
+      ...(lock ? { outputFormatLock: lock } : {}),
+      taskId: t.id,
+      room: t.room,
+      name: t.name,
+      anchorName: t.anchorName,
+      quality: t.quality,
+      engine: t.engine,
+      danmu: t.danmu,
+      segmentSec: t.segmentSec,
+      scheduleStart: t.scheduleStart,
+      scheduleEnd: t.scheduleEnd,
+      enabled: t.enabled,
+      useCookie: t.useCookie,
+      // cookies / webhook 是凭证:DTO 恒不外发(redactTaskSecrets 单一出口),要改用 PUT。
+      ...secretsOf(t),
+      outDir: t.outDir,
+      rollingUpload: t.rollingUpload,
+      rollingEffective: t.rollingEffective,
+      streamUpload: t.streamUpload,
+      streamUploadSpool: t.streamUploadSpool,
+      outputFormat: t.outputFormat,
+    };
+  };
 
   /**
    * 找该房间的录制任务。**先按 sourceTaskId 精确找,再按 (platform, roomSlug) 反查** ——

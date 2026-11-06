@@ -1193,6 +1193,27 @@ describe("任务视图 outputFormatLock(后端判定下发,前端据此锁定;is
   });
 });
 
+describe("房间视图 outputFormatLock(与任务视图同判 `nodeOutputFormatLock`,#542)", () => {
+  type RoomLockDTO = { key: string; recording?: { outputFormatLock?: string } | null };
+  const recOf = (a: ReturnType<typeof makeApi>, key: string): { outputFormatLock?: string } | null | undefined =>
+    (a.listRooms().body as RoomLockDTO[]).find((r) => r.key === key)?.recording;
+
+  it("受管任务 → hub-managed;无锁任务 → 不带该字段", () => {
+    const a = makeApi({ store, manager, ...hubDeps("room-lock-none-") });
+    store.addTask({ room: "555", managedBy: "hub" });
+    store.addTask({ room: "556" });
+    expect(recOf(a, "douyin.555")?.outputFormatLock).toBe("hub-managed");
+    expect(recOf(a, "douyin.556") ?? {}).not.toHaveProperty("outputFormatLock");
+  });
+  it("规则仅按房间键命中(非源任务)→ hub-rule", () => {
+    const deps = hubDeps("room-lock-rule-");
+    const a = makeApi({ store, manager, ...deps });
+    a.createTask({ room: "557" });
+    upsertHubRule(deps.hubDir as string, { platform: "douyin", roomSlug: "557" });
+    expect(recOf(a, "douyin.557")?.outputFormatLock).toBe("hub-rule");
+  });
+});
+
 describe("streamUpload 作为 rolling 子选项的规则门禁", () => {
   it("worker 无规则房间里的旧零落盘任务只改 name → 200,直传保持开启", () => {
     const deps = hubDeps("su-worker-no-rule-");
