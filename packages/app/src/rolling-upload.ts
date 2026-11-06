@@ -240,6 +240,7 @@ function readState(dir: string, sessionBase: string): RollingState | null {
 function writeStateFile(
   dir: string, state: RollingState, pid: number, nowMs: number,
   merge?: (disk: RollingState | null) => RollingState,
+  lock?: { timeoutMs?: number; staleMs?: number },
 ): RollingState {
   const target = statePathFor(dir, state.sessionBase);
   return withFileLockSync(target, () => {
@@ -260,7 +261,7 @@ function writeStateFile(
       try { unlinkSync(tmp); } catch { /* best-effort 清理临时文件 */ }
       throw e;
     }
-  });
+  }, lock);
 }
 
 /** True when `s` still has an unconfirmed, non-empty segment file on disk. */
@@ -390,6 +391,12 @@ export interface RollingUploaderOpts {
   queueProofRetryMs?: number;
   /** How many archive-proof measurements a session makes before giving up (default 3). */
   queueProofMaxAttempts?: number;
+  /**
+   * Sidecar lock budget (two writers: the recorder and the queue processor). The default (5s) already
+   * outlives any realistic holder, but a loaded host can be configured higher instead of letting a
+   * single slow writer poison the whole session (rework addendum 13).
+   */
+  sidecarLock?: { timeoutMs?: number; staleMs?: number };
   /** Task id stamped onto queue rows (owner routing for alerts). */
   taskId?: number;
 }
@@ -533,20 +540,29 @@ export class RollingUploader {
       if (s && typeof s.path === "string" && typeof s.index === "number") this.indexByPath.set(s.path, s.index);
     }
     this.segDir = dir;
-    // Owner flip (node -> master) or a sidecar left by an older build: a hub-owned session must not keep
-    // claiming a node queue, or the master holds the broadcast forever. Drop it at load time (and write it
-    // out) when the queue has no open rows left; with open rows the claim is still true and stays.
-    if (this.o.uploadOwner?.() === "master" && this.state.queueOrderKey) {
-      let openRows: boolean;
-      try { openRows = this.o.queueOrderHasRows?.(this.state.queueOrderKey) ?? false; } catch { openRows = true; }
-      if (!openRows) {
-        const next: RollingState = { ...this.state };
-        delete next.queueOrderKey;
-        delete next.queueSeqBase;
-        this.state = next;
-        this.persist();
-      }
-    }
+    // Owner flip (node -> master) or a sidecar left by an older build (addendum 10/11).
+    this.dropStaleQueueClaim();
+  }
+
+  /**
+   * A master-owned session must never keep claiming a node queue: the master's hold keys off exactly that
+   * field, so a leftover queueOrderKey would hold the broadcast with nobody uploading. Cleared only when the
+   * queue owns nothing any more (no pending/running/reconciling/failed/uncertain rows) - with open rows the
+   * claim is still true (the runner is uploading them) and must stay.
+   */
+  private dropStaleQueueClaim(): void {
+    if (this.o.uploadOwner?.() !== "master") return;
+    const key = this.state.queueOrderKey;
+    if (!key) return;
+    let openRows: boolean;
+    try { openRows = this.o.queueOrderHasRows?.(key) ?? false; } catch { openRows = true; } // unknown: keep holding
+    if (openRows) return;
+    const next: RollingState = { ...this.state };
+    delete next.queueOrderKey;
+    delete next.queueSeqBase;
+    this.state = next;
+    // Write it out now: the master reads the file, and a finished session may never persist again.
+    this.persist();
   }
 
   /** 当前 BV(建稿后;诊断/回传用)。 */
@@ -644,7 +660,7 @@ export class RollingUploader {
   private writeSidecar(patch: Partial<RollingState> = {}): RollingState {
     const base = { ...this.state, ...patch };
     const merged = writeStateFile(this.segDir, base, this.pid, this.now(),
-      (disk) => this.mergeSidecarState(base, disk));
+      (disk) => this.mergeSidecarState(base, disk), this.o.sidecarLock);
     this.state = merged;
     return merged;
   }
@@ -932,6 +948,8 @@ export class RollingUploader {
     const rolling = plan.rolling;
     const sealed = plan.sealed;
     const hubOwned = this.o.uploadOwner?.() === "master";
+    // A mid-session owner flip must take effect on the very next flush, even when no new segment arrives.
+    if (hubOwned) this.dropStaleQueueClaim();
     // Master-owned rooms upload on the master, not here. Their order key must stay LOCAL: persisting
     // queueOrderKey would make the master's rolling short-circuit read "node queue still uploading"
     // and hold the whole broadcast forever (plan 046 PR6 addendum 8, P1).

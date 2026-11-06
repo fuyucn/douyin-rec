@@ -145,6 +145,39 @@ describe("plan 046 PR6: a queue-mode session without a bv holds the whole-order 
     expect(ledger.get(KEY)?.state).toBe("needs_manual");
   });
 
+  it("H1c: after a rebind to hub-owned the sidecar carries hubOrderKey only -> no hold (master uploads)", () => {
+    const flipped = {
+      workerId: "w1", rec: {
+        sessionBase: "s1", tsFiles: ["/r/s1_000.ts"],
+        rolling: { confirmed: [], ambiguous: [], hubOrderKey: "douyin:123:b" },
+      },
+    } as never;
+    // null = not short-circuited: the normal master pipeline runs (select/pull/merge/upload).
+    expect(run(undefined, [flipped]).r).toBeNull();
+  });
+
+  it("a hold never reopens a done or needs_manual row", () => {
+    const queuedMember = () => queued("same-broadcast");
+    // needs_manual from another cause must keep its verdict and message.
+    ledger.setState(KEY, "needs_manual", { error: "人工决定:保持现状" });
+    const manualRun = run(undefined, [queuedMember()]);
+    expect(manualRun.r).toEqual({ state: "needs_manual" });
+    expect(ledger.get(KEY)?.state).toBe("needs_manual");
+    expect(ledger.get(KEY)?.error).toBe("人工决定:保持现状");
+    // done (no bv) must stay done (done has no out-edges; a hold must not reopen it).
+    ledger.setState(KEY, "done");
+    const doneRun = run(undefined, [queuedMember()]);
+    expect(doneRun.r).toEqual({ state: "done" });
+    expect(ledger.get(KEY)?.state).toBe("done");
+  });
+
+  it("a repeated identical hold appends no further state events", () => {
+    expect(run(undefined, [queued("same-broadcast")]).r).toEqual({ state: "pending" });
+    const before = ledger.getEvents(KEY).length;
+    expect(run(undefined, [queued("same-broadcast")]).r).toEqual({ state: "pending" });
+    expect(ledger.getEvents(KEY).length).toBe(before);
+  });
+
   it("a legacy session without queueOrderKey is untouched", () => {
     const { r } = run(undefined, [member({ bv: "BV1", confirmed: ["a"] })]);
     expect(r).toEqual({ state: "done", bv: "BV1" });

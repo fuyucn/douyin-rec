@@ -1,6 +1,7 @@
 // plan 046 PR6 (方案 A): queue mode only enqueues; the legacy path stays byte-identical when off.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync, existsSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -1102,3 +1103,77 @@ describe("rework addendum 10", () => {
     expect(sc.queueOrderKey).toBe(orderKeyOf());
   });
 });
+
+describe("rework addenda 11-13", () => {
+  const meta = { cookies: "c", title: "rendered title", tid: 21, tag: "tag", public: false };
+
+  it("H1c: an existing queueOrderKey does not survive a rebind to hub-owned (master must upload)", async () => {
+    const p = segs(1)[0]!;
+    // The sidecar was written while the room was node-owned (queue mode): key + seq base, nothing uploaded.
+    writeFileSync(sidecar(), JSON.stringify({
+      streamKey: orderKeyOf(), sessionBase: SESSION_BASE, room,
+      segments: [{ index: 0, path: p }], confirmed: [], queueOrderKey: orderKeyOf(), queueSeqBase: 4,
+      startMs: BASE_MS, updatedAt: BASE_MS,
+    }));
+    const skips: Array<Record<string, unknown>> = [];
+    const u = queueUploader({
+      uploadOwner: () => "master",
+      enqueueHubSkipped: (i) => { skips.push({ ...i }); return true; },
+      queueOrderHasRows, queueMaxSeq: rollingQueueMaxSeq,
+    });
+    u.noteSegment(p);
+    await u.flush({ recordingActive: false });
+    const sc = JSON.parse(readFileSync(sidecar(), "utf-8")) as Record<string, unknown>;
+    expect(sc.queueOrderKey).toBeUndefined();   // no claim => the master's hold cannot fire
+    expect(sc.queueSeqBase).toBeUndefined();
+    expect(typeof sc.hubOrderKey).toBe("string");
+    expect(skips).toHaveLength(1);              // the node still writes its timeline row
+    // What scan would hand the master: no queueOrderKey => no hold, normal pipeline uploads.
+    expect(skips[0]!.streamKey).toBe(orderKeyOf());
+  });
+
+  it("A11-1: a briefly held sidecar lock is waited out, not treated as a write failure", async () => {
+    const paths = segs(1);
+    const notify = vi.fn();
+    const u = queueUploader({ notify, sidecarLock: { timeoutMs: 5_000 } });
+    const lock = sidecar() + ".lock";
+    writeFileSync(lock, String(process.pid) + ".abcdef012345");
+    // A separate live process holds the lock and releases it after 150ms (a slow peer writer).
+    const child = spawn(process.execPath, [
+      "-e",
+      "setTimeout(function(){try{require('fs').unlinkSync(process.argv[1])}catch(e){}},150)",
+      lock,
+    ], { stdio: "ignore" });
+    try {
+      u.noteSegment(paths[0]!); // persist waits for the peer instead of marking the session untrusted
+      await u.flush({ recordingActive: false });
+    } finally {
+      await new Promise((resolve) => child.on("exit", resolve));
+    }
+    expect(notify).not.toHaveBeenCalled();
+    expect(seen(u, "__enq")).toHaveLength(1);
+    expect(existsSync(lock)).toBe(false);
+  });
+});
+
+
+  it("A13-1: the sidecar lock budget is configurable (a too-short budget fails loudly, not silently)", async () => {
+    const paths = segs(1);
+    const notify = vi.fn();
+    const u = queueUploader({ notify, sidecarLock: { timeoutMs: 20 } });
+    const lock = sidecar() + ".lock";
+    writeFileSync(lock, String(process.pid) + ".abcdef012345");
+    const child = spawn(process.execPath, [
+      "-e",
+      "setTimeout(function(){try{require('fs').unlinkSync(process.argv[1])}catch(e){}},150)",
+      lock,
+    ], { stdio: "ignore" });
+    try {
+      u.noteSegment(paths[0]!); // lock held past the 20ms budget => write failure => untrusted + alert
+      await u.flush({ recordingActive: false });
+    } finally {
+      await new Promise((resolve) => child.on("exit", resolve));
+    }
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining("写盘"));
+    expect(seen(u, "__enq")).toEqual([]); // nothing enqueued: the session stopped safely
+  });

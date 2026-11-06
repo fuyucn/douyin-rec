@@ -1,6 +1,7 @@
 // issue #223: writeFileAtomicSync — atomic replace via unique temp + rename, never deletes.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync, linkSync, mkdirSync, statSync, mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withFileLockSync, writeFileAtomicSync } from "@drec/core";
@@ -105,10 +106,27 @@ describe("withFileLockSync (two sidecar writers: the recorder and the queue proc
     expect(Number(pidPart)).toBe(process.pid);
     expect(tokenPart).toMatch(/^[0-9a-f]{12}$/);
     // Fresh lock held by someone else => bounded wait, no steal.
-    writeFileSync(lock, String(process.pid) + ".0123456789ab");
+    writeFileSync(lock, String(process.pid) + ".abcdef012345");
     expect(() => withFileLockSync(f, () => 1, { timeoutMs: 30 })).toThrow(/lock busy/);
-    expect(readFileSync(lock, "utf-8")).toBe(String(process.pid) + ".0123456789ab"); // untouched
+    expect(readFileSync(lock, "utf-8")).toBe(String(process.pid) + ".abcdef012345"); // untouched
     unlinkSync(lock);
+  });
+
+  it("waits out a slow live writer that releases inside the budget (lock timeout is honored, no steal)", async () => {
+    const f = file();
+    const lock = f + ".lock";
+    writeFileSync(lock, String(process.pid) + ".abcdef012345");
+    // A separate live process holds the lock and releases it after ~150ms.
+    const child = spawn(process.execPath, [
+      "-e", "setTimeout(function(){try{require('fs').unlinkSync(process.argv[1])}catch(e){}},150)", lock,
+    ], { stdio: "ignore" });
+    try {
+      const started = Date.now();
+      expect(withFileLockSync(f, () => 1, { timeoutMs: 5_000 })).toBe(1);
+      expect(Date.now() - started).toBeGreaterThanOrEqual(100); // it really waited, not stole
+    } finally {
+      await new Promise((resolve) => child.on("exit", resolve));
+    }
   });
 
   it("takes over a dead holder immediately (no need to wait out the stale window)", () => {

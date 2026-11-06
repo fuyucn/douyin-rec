@@ -758,8 +758,18 @@ export function tryRollingShortCircuit(o: {
     // because the whitelist has no syncing/uploading -> pending edge, and this only moves the row
     // back to "not started" (nothing was uploaded by this pass).
     const prev = ledger.get(streamKey);
+    // Never reopen a terminal or human-decided row from a hold (addendum 13 P2): done has no out-edges,
+    // and needs_manual carries a decision a hold must not overwrite.
+    if (prev?.state === "needs_manual" || prev?.state === "done") {
+      jlog("边录边传队列模式:本场当前为 " + prev.state + " → 保持原状,不因队列 hold 重开");
+      return { state: prev.state, ...(prev.bv ? { bv: prev.bv } : {}) };
+    }
     const firstHold = (prev?.error ?? "") !== holdError;
-    ledger.setState(streamKey, "pending", { error: holdError }, { force: prev?.state !== "pending" });
+    // Do not rewrite an unchanged hold: every reconcile pass would otherwise bump updatedAt and append a
+    // state event for a long-running hold (addendum 12 low).
+    if (firstHold || prev?.state !== "pending") {
+      ledger.setState(streamKey, "pending", { error: holdError }, { force: prev?.state !== "pending" });
+    }
     if (firstHold) {
       jlog("边录边传队列模式:节点队列尚未收口 [" + detail + "] → 暂不建稿/上传(保留源,队列收口后自动重试)");
       o.notify({ kind: "error", stage: "上传", message: streamKey + " 边录边传:节点队列仍在上传,已暂缓整场上传(未重复投稿)" });
