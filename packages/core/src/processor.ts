@@ -467,7 +467,7 @@ export interface EnqueueRequest {
   batch?: boolean;
 }
 
-export type EnqueueState = "pending" | "running" | "reconciling" | "done" | "stale" | "rejected";
+export type EnqueueState = "pending" | "running" | "reconciling" | "skipped" | "done" | "stale" | "rejected";
 
 export interface EnqueueResult {
   jobId: string;

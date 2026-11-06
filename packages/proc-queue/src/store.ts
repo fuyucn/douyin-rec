@@ -314,6 +314,14 @@ export class ProcQueueStore {
     return (r.g == null ? 0 : Number(r.g)) + 1;
   }
 
+  /** Generation used by a live order; 1 when no rows exist. Unlike nextGeneration, repeated calls stay stable. */
+  currentOrderGeneration(orderKey: string): number {
+    const r = this.db
+      .prepare("SELECT MAX(generation) AS g FROM proc_jobs WHERE orderKey=?")
+      .get(orderKey) as Row;
+    return r.g == null ? 1 : Number(r.g);
+  }
+
   // ───────────────────────── 入队 ─────────────────────────
 
   /**
@@ -336,6 +344,49 @@ export class ProcQueueStore {
     }
     const logicalKey = job.logicalKey.endsWith(FILE_TAG_PLACEHOLDER) ? `${job.logicalKey}${tag}` : job.logicalKey;
     return this.tx(() => this.enqueueTx(job, logicalKey));
+  }
+
+  /**
+   * plan 046 PR7: write a terminal skipped(hub-owned) history row at seal time. It is never claimable
+   * and never chains cleanup; repeated calls are idempotent. Any existing non-skipped row is left
+   * untouched (a real upload row must not be converted into a skip).
+   */
+  enqueueSkipped(job: ProcessJob, opts: { allowedRoots: readonly string[]; reason?: "skip-hub-owned" }): EnqueueResult {
+    try {
+      assertJobInvariants(job, { allowedRoots: opts.allowedRoots });
+    } catch (e) {
+      return { jobId: job.jobId, state: "rejected", error: (e as Error).message };
+    }
+    let tag: string;
+    try {
+      tag = fileTagOf(job.inputs[0]);
+    } catch (e) {
+      return { jobId: job.jobId, state: "rejected", error: "inputs[0] cannot be stat-ed: " + (e as Error).message };
+    }
+    const logicalKey = job.logicalKey.endsWith(FILE_TAG_PLACEHOLDER) ? job.logicalKey + tag : job.logicalKey;
+    const jobId = jobIdOf(job.kind, logicalKey, job.generation);
+    return this.tx(() => {
+      const existing = this.get(jobId);
+      if (existing) {
+        if (existing.state === "skipped") return { jobId, state: "skipped" };
+        return {
+          jobId, state: "rejected", error: "已存在且 state=" + existing.state + "(需人工处理)",
+          existingState: existing.state as Exclude<JobState, "pending" | "running" | "done">,
+        };
+      }
+      const t = this.now();
+      this.db.prepare(
+        "INSERT INTO proc_jobs(jobId, kind, logicalKey, generation, state, inputs, outputs, params, replaceInputs, " +
+        "ownerTaskId, ownerStreamKey, createdAt, updatedAt, finishedAt, error, orderKey, seq, notBefore, prepJobId) " +
+        "VALUES(?, ?, ?, ?, 'skipped', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run(
+        jobId, job.kind, logicalKey, job.generation, JSON.stringify(job.inputs),
+        job.outputs ? JSON.stringify(job.outputs) : null, JSON.stringify(job.params), job.replaceInputs ? 1 : 0,
+        job.owner.taskId ?? null, job.owner.streamKey ?? null, t, t, t,
+        opts.reason ?? "skip-hub-owned", job.orderKey ?? null, job.seq ?? null, job.notBefore ?? null, job.prepJobId ?? null,
+      );
+      return { jobId, state: "skipped" };
+    });
   }
 
   private enqueueTx(job: ProcessJob, logicalKey: string): EnqueueResult {
@@ -559,7 +610,7 @@ export class ProcQueueStore {
            AND (j.orderKey IS NULL OR NOT EXISTS (
              SELECT 1 FROM proc_jobs p
              WHERE p.orderKey=j.orderKey AND p.generation=j.generation
-               AND p.seq<j.seq AND p.state<>'done'))
+               AND p.seq<j.seq AND p.state NOT IN ('done','skipped')))
            AND (j.prepJobId IS NULL OR EXISTS (
              SELECT 1 FROM proc_jobs q WHERE q.jobId=j.prepJobId AND q.state='done'))
          ORDER BY COALESCE((SELECT c.lastClaimedAt FROM proc_order_cursor c

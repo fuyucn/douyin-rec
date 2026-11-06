@@ -87,3 +87,5 @@ export { readFleetConfig, writeFleetConfig, startFleetAgent, watchFleetAgent, ty
 
 export { zeroDiskRoom, resolveZeroDiskPumpDirs, zeroDiskHasUnconfirmedParts, recordNameArg, probeRoomLiving } from "./live-gate.js";
 export type { ZeroDiskPumpDirs } from "./live-gate.js";
+export { enabledHubRuleForTask, uploadOwnerForTask } from "./hub-rule-match.js";
+export { enqueueHubOwnedSkip } from "./hub-owner.js";

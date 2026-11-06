@@ -64,6 +64,7 @@ import {
   isValidPartSizeMiB,
   type UploadSlot,
   type RollingSegment,
+  type UploadOwner,
 } from "@drec/core";
 import { appendGroup, countVideoParts, uploadPlain, type BiliupHooks } from "./upload/biliup.js";
 import { readTcpAckedAsync, type AckSample } from "@drec/processors";
@@ -99,6 +100,8 @@ interface RollingState {
   bv?: string;
   /** 结果不确定的段号(append 失败但可能已提交)—— 转人工,绝不自动重传。 */
   ambiguous?: number[];
+  /** plan 046 PR7: sealed parts whose upload is owned by the hub; source is retained for master. */
+  hubSkipped?: number[];
   /**
    * **WAL 意图标记**:开始上传前先落盘(`create` = P1 建稿中,`append` = 追加第 index 段中)。
    * 进程崩溃后凭它恢复:create 无 BV 可查 → 保守转人工(绝不自动重创建稿);append 用分 P 数核对。
@@ -317,6 +320,12 @@ export interface RollingUploaderOpts {
   notify?: (message: string) => void;
   /** Pause between the two size checks of a predecessor's last segment (default 2s; tests pass 0). */
   stableCheckMs?: number;
+  /** Plan 046 PR7: evaluated at each seal; master = write skipped(hub-owned) instead of uploading. */
+  uploadOwner?: () => UploadOwner;
+  /** Test/production seam for the queue skip write; omitted = no queue write (tests/back-compat). */
+  enqueueHubSkipped?: (input: {
+    file: string; index: number; streamKey: string; title?: string; expectedDurationSec?: number; confirmedAt?: number;
+  }) => void;
 }
 
 /**
@@ -632,7 +641,24 @@ export class RollingUploader {
     if (this.stateUntrusted) return { uploaded: [], deleted: [], ambiguous: this.ambiguousIndices };
     const confirmed = new Set(this.state.confirmed);
     const ambiguous = new Set(this.state.ambiguous ?? []);
-    const { rolling, sealed, pending } = this.planPending(recordingActive, nowMs, confirmed, ambiguous);
+    const { rolling, sealed, pending, hubOwned } = this.planPending(recordingActive, nowMs, confirmed, ambiguous);
+    const hubSkipped = new Set(this.state.hubSkipped ?? []);
+    for (const seg of hubOwned) {
+      if (hubSkipped.has(seg.index)) continue;
+      try {
+        this.o.enqueueHubSkipped?.({
+          file: seg.path, index: seg.index, streamKey: this.state.streamKey,
+          ...(typeof this.o.uploadMeta.partTitleTemplate === "string" ? { title: this.o.uploadMeta.partTitleTemplate } : {}),
+          ...(this.state.startMs !== undefined ? { confirmedAt: this.state.startMs } : {}),
+        });
+        hubSkipped.add(seg.index);
+        this.state = { ...this.state, hubSkipped: [...hubSkipped], updatedAt: this.now() };
+        if (!this.persist()) return { uploaded: [], deleted: [], ambiguous: [...ambiguous] };
+        this.log("[rolling] 段 " + seg.index + " 归 master 上传:写 skipped(hub-owned),保留源");
+      } catch (e) {
+        this.log("[rolling] 段 " + seg.index + " hub-owned skip 写队列失败(保留源,下轮重试): " + String((e as Error)?.message ?? e).slice(0, 200));
+      }
+    }
     // Issue #46: a successor must settle and upload its predecessor's leftover segments before its own first
     // upload to the inherited submission (part order = A's parts, then B's).
     if (pending.length > 0 && !this.state.bv && (await this.takeOverPredecessor()) === "wait") {
@@ -690,7 +716,7 @@ export class RollingUploader {
     nowMs: number,
     confirmed: ReadonlySet<number>,
     ambiguous: ReadonlySet<number>,
-  ): { rolling: RollingSegment[]; sealed: Set<number>; pending: RollingSegment[] } {
+  ): { rolling: RollingSegment[]; sealed: Set<number>; pending: RollingSegment[]; hubOwned: RollingSegment[] } {
     const rolling: RollingSegment[] = [...this.indexByPath.entries()].map(([p, index]) => {
       let mtimeMs = 0;
       try { mtimeMs = statSync(p).mtimeMs; } catch { mtimeMs = 0; }
@@ -707,10 +733,14 @@ export class RollingUploader {
     const sealOpts = { recordingActive, nowMs, sealGraceMs: 0 };
     const sealed = sealedSegmentIndices(rolling, sealOpts);
     const planned = planRollingUploads(rolling, sealOpts, confirmed);
+    const hubOwned = planned.filter(() => this.o.uploadOwner?.() === "master");
+    const hubOwnedIndices = new Set(hubOwned.map((s) => s.index));
     // 头阻塞:ambiguous 段及其后的段一律不外发(B 站 append 只能追加末尾,缺口不可逆)。
-    const headBlocked = headOfLineFilter(planned, ambiguous);
+    const headBlocked = headOfLineFilter(planned.filter((s) => !hubOwnedIndices.has(s.index)), ambiguous);
+    const hubSkipped = new Set(this.state.hubSkipped ?? []);
     const pending: RollingSegment[] = [];
     for (const s of headBlocked) {
+      if (hubSkipped.has(s.index)) continue;
       if (this.isEmptySegment(s)) {
         if (this.loggedSkipped.has(s.index)) continue;
         this.loggedSkipped.add(s.index);
@@ -725,7 +755,7 @@ export class RollingUploader {
       }
       pending.push(s);
     }
-    return { rolling, sealed, pending };
+    return { rolling, sealed, pending, hubOwned };
   }
 
   /** 上传一个封口段:P1(无 bv)建稿 → 落 BV;其余 append。 */
@@ -1332,7 +1362,13 @@ export function makeRollingUploadHookFactory(o: {
   gate?: UploadGate;
   /** Node-wide upload slot (plan 038 PR4); undefined = open the node's own slot, null = do not use one. */
   slot?: UploadSlot | null;
+  /** plan 046 PR7: evaluated per seal; master skips node upload and writes the queue placeholder. */
+  uploadOwner?: () => UploadOwner;
+  enqueueHubSkipped?: RollingUploaderOpts["enqueueHubSkipped"];
 }): (() => RollingUploadHook) | undefined {
+  // TODO(?): plan 046 PR6 will move the seal hook into the queue path; until then this hub-owned
+  // branch only covers sessions where rolling upload is enabled. Non-rolling hub rooms get their
+  // skip rows when PR6 wires the shared seal hook.
   if (!o.enabled) return undefined;
   return () => {
     const { meta, private: isPrivate } = resolveRollingUploadMeta(o.platform, o.roomSlug);
@@ -1351,6 +1387,8 @@ export function makeRollingUploadHookFactory(o: {
       removeFile: o.removeFile,
       now: o.now,
       gate: o.gate,
+      uploadOwner: o.uploadOwner,
+      enqueueHubSkipped: o.enqueueHubSkipped,
       // One slot per node process, shared with the queue's biliup processor (plan 038 PR4).
       slot: o.slot ?? sharedNodeUploadSlot(o.log),
     });

@@ -516,7 +516,52 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     } finally {
       chmodSync(recDir, 0o755); // 恢复权限,留待系统清理 tmp
     }
+  });  it("hub-owned seal writes skipped rows and never uploads/deletes (plan 046 PR7)", async () => {
+    const { paths } = mkSession(segNames(2));
+    const up = vi.fn(async () => "BAD");
+    const ap = vi.fn(async () => {});
+    const remove = vi.fn(noRemove);
+    const skipped: number[] = [];
+    const u = new RollingUploader({
+      room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: ap, removeFile: remove,
+      now: futureNow, minSegmentSec: 0,
+      uploadOwner: () => "master",
+      enqueueHubSkipped: (info) => { skipped.push(info.index); },
+    });
+    for (const p of paths) u.noteSegment(p);
+    const r = await u.flush({ recordingActive: false });
+    expect(skipped).toEqual([0, 1]);
+    expect(r.uploaded).toEqual([]);
+    expect(up).not.toHaveBeenCalled();
+    expect(ap).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    await u.flush({ recordingActive: false });
+    expect(skipped).toEqual([0, 1]);
   });
+
+  it("binding change applies to the next sealed part, not retroactively", async () => {
+    const { paths } = mkSession(segNames(2));
+    let owner: "node" | "master" = "master";
+    const up = vi.fn(async () => "BAD2");
+    const skipped: number[] = [];
+    const u = new RollingUploader({
+      room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove,
+      now: futureNow, minSegmentSec: 0, uploadOwner: () => owner,
+      enqueueHubSkipped: (info) => { skipped.push(info.index); },
+    });
+    u.noteSegment(paths[0]);
+    await u.flush({ recordingActive: false });
+    expect(skipped).toEqual([0]);
+    owner = "node";
+    u.noteSegment(paths[1]);
+    const r = await u.flush({ recordingActive: false });
+    expect(r.uploaded).toEqual([1]);
+    expect(up).toHaveBeenCalledTimes(1);
+    expect(skipped).toEqual([0]);
+  });
+
+
+
 });
 
 // Issue #148: reconnect sessions of one broadcast continue the same submission.
