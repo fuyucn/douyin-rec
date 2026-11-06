@@ -23,7 +23,7 @@ import { registerRecoverOrderCommands } from "./hub-recover-order-commands.js";
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 import { ZERO_DISK_DELIVERY_ENV, biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, normalizeSeasonSectionId, parseBoolFlag, parseOutputFormat, resolveSeasonSectionId, stageExt, resolveDiskMinGB, resolveJobLogPath, stageSessionDir, ttlMemoAsync, sanitizePathSegment, zonedStamp } from "@drec/core";
-import { parseDanmuFlag } from "./cli-flags.js";
+import { parseDanmuFlag, rejectsNoSpoolFlag } from "./cli-flags.js";
 import type { EnqueueRequest, HubResources, OutputFormat, StageFormat } from "@drec/core";
 import { RecordingSession, XmlDanmuWriter } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
@@ -219,7 +219,9 @@ program
   .option("--config <path>", "YAML 配置文件 (命令行选项优先覆盖)")
   .action(async (o: RecordCliOpts) => {
     const cfg = loadConfig(o.config);
-    if (o.streamUpload === "1" && o.streamUploadSpool === "none") {
+    // Reject a lone `--stream-upload-spool none` too: it used to be silently ignored, so the
+    // operator could believe the flag took effect while the pump still kept a local fallback.
+    if (rejectsNoSpoolFlag(o.streamUploadSpool)) {
       console.error("[rec] --stream-upload-spool none 已禁用:直播直传必须保留本地回退文件");
       process.exit(2);
     }
