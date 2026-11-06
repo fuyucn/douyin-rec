@@ -17,7 +17,7 @@
  * `describe.skipIf(existsSync(dist))` guards, and keeping it let a reverted wiring fix pass against
  * a stale artifact. A per-run path has neither problem and needs no lock.
  */
-import { execSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,9 +31,11 @@ let ENTRY = "";
 beforeAll(() => {
   const dir = mkdtempSync(join(tmpdir(), "drec-cli-entry-"));
   ENTRY = join(dir, "douyin-rec.mjs");
-  // ~200ms locally. DREC_BUNDLE_MAIN_OUT also tells esbuild to stop after the main bundle
-  // (no TUI, no launcher), so this touches nothing under dist/.
-  execSync("pnpm bundle", {
+  // Run the esbuild script directly, never `pnpm bundle`: that script ends with
+  // `chmod +x dist/douyin-rec.mjs`, which would fail on a clean CI checkout (no dist/) and
+  // would touch shared state even when dist exists. The env var also makes esbuild skip the
+  // TUI and launcher outputs, so this build writes only to the private temp directory.
+  execFileSync(process.execPath, ["esbuild.config.mjs"], {
     cwd: ROOT,
     stdio: "pipe",
     timeout: 120_000,
