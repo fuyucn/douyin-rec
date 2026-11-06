@@ -112,7 +112,6 @@ export function nodeCaps(hubEnabled: boolean | null): NodeCaps;
     也就没有"开启后真的会跑"的配置。强行放开 = "看起来配了、实际永不生效"的假配置。
   - 投稿元数据（时机/tid/tag/描述/分 P 大小）本身就是 `processing` 里的字段，节点更无从写。
 - 因此 worker 实现为：**存档格式可写**；直播直传/边录边传/投稿在录制 tab 里给一行只读提示（`room.editor.deliveryByMaster`）。
-- 因此 worker 实现为：**存档格式可写**；直播直传/边录边传/投稿在录制 tab 里给一行只读提示（`room.editor.deliveryByMaster`）。
 - **既有值不会被本次编辑清掉，用户改了就必须写回**：`payloadFromForm` 只在本次保存**确实会写规则**（`ctx.writesRule`）且
   （已有规则 或 本次结算为 rolling 或 **用户改过交付字段**（`ctx.deliveryTouched`））时才包含 `streamUpload`/`streamUploadSpool`；
   其余省略（PUT/POST 是 patch 语义 = 保持不动）。这覆盖四件事：主控同一次保存里新开直传会写入；主控编辑无规则旧任务只改名字不会悄悄关掉；

@@ -135,7 +135,8 @@ update_node() {
   if wait_idle "$node" "$MAXS"; then
     if [[ $DRY == 1 ]]; then say "  [dry] 跳过"; return 0; fi
     scp -q dist/douyin-rec.mjs "$target":/tmp/drec-new.mjs \
-      && ssh -o ConnectTimeout=10 "$target" 'sudo cp /tmp/drec-new.mjs /home/ubuntu/drec/dist/douyin-rec.mjs && sudo systemctl restart video-screenshot && sleep 3 && systemctl is-active video-screenshot && grep -c _node-id /home/ubuntu/drec/dist/douyin-rec.mjs' \
+      && rsync -az --delete packages/web/dist/ "$target":/tmp/drec-web-new/ \
+      && ssh -o ConnectTimeout=10 "$target" 'sudo cp /tmp/drec-new.mjs /home/ubuntu/drec/dist/douyin-rec.mjs && sudo rsync -a --delete /tmp/drec-web-new/ /home/ubuntu/drec/web/dist/ && sudo chown -R ubuntu:ubuntu /home/ubuntu/drec/web/dist && sudo systemctl restart video-screenshot && sleep 3 && systemctl is-active video-screenshot && grep -c _node-id /home/ubuntu/drec/dist/douyin-rec.mjs' \
       && say "  ✓ $node 已更新" || { say "  ✗ $node 更新失败"; note "$node 未更新"; }
   else
     say "  ✗ $node 等待超时 → 跳过(不改动)"; note "$node 未更新(超时)"

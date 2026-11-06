@@ -343,10 +343,19 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                                      checked={form.useCookie} onChange={(useCookie) => update({ useCookie })} lock={c.cookie} />
                         </section>
                       ) : null}
-                      {/* Archive format is a task field, so a worker keeps it; the master shows it under process. */}
+                      {/* Live upload and archive format are task fields, so a worker keeps them. */}
+                      {!caps.editPipeline && hasRecording && (
+                        <ToggleRow
+                          icon={<ModeLogo kind="zero-disk" className="w-[15px] h-[15px]" />}
+                          label={t("room.editor.zeroDisk")}
+                          hint={t("room.editor.zeroDiskHint")}
+                          checked={form.streamUpload}
+                          onChange={(streamUpload) => update({ streamUpload, ...(streamUpload ? { streamUploadSpool: true } : {}) })}
+                        />
+                      )}
                       {!caps.editPipeline && outputFormatField}
                       {!caps.editPipeline && (
-                        <p className="text-xs text-muted">{t("room.editor.deliveryByMaster")}</p>
+                        <p className="text-xs text-muted">{t("room.editor.rollingByMaster")}</p>
                       )}
                     </>
                   )}
