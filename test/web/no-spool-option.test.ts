@@ -27,3 +27,13 @@ describe("no-spool option is not selectable", () => {
     expect(source).toContain("room.editor.zeroDiskSpoolHint");
   });
 });
+
+describe("UI copy describes the mandatory spool", () => {
+  it("zero-disk label no longer claims no local video is written", () => {
+    const dict = readFileSync(join(ROOT, "packages", "web", "src", "lib", "i18n.tsx"), "utf-8");
+    expect(dict).toContain('zeroDisk: "直播直传（临时落盘分 P，上传成功后清理）"');
+    expect(dict).toContain('zeroDisk: "Live upload (temporary local parts, cleaned after upload)"');
+    expect(dict).not.toContain('zeroDisk: "直播直传（不写本地视频）"');
+    expect(dict).not.toContain('zeroDisk: "Live upload (no local video)"');
+  });
+});

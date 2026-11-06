@@ -6,7 +6,7 @@
  * 编辑、删除。删除走两阶段：先在录/启用的只置 enabled=false，等 daemon 自然停录后
  * 下一轮再 removeTask。
  */
-import { platformForRoom, readOutputFormat, type ApplyTasksResult, type NodeTaskDTO, type RemoteTaskSpec } from "@drec/core";
+import { platformForRoom, readOutputFormat, STREAM_UPLOAD_SPOOL_REQUIRED, type ApplyTasksResult, type NodeTaskDTO, type RemoteTaskSpec } from "@drec/core";
 import { writeManagedState } from "./managed-state.js";
 import { APP_VERSION } from "./version.js";
 import type { TaskStore } from "./store.js";
@@ -149,6 +149,11 @@ export interface ApplyTasksOptions {
    */
   adopt?: boolean;
   /**
+   * 每房间 key 的「旧 master 下发已废弃的真 0 落盘」去重集合；跨调用持久，同一房间
+   * 反复下发 false 也只告警一次。省略 = 每次调用独立（测试/单批场景行为不变）。
+   */
+  noSpoolWarnedKeys?: Set<string>;
+  /**
    * 「上次成功应用」审计快照的落盘目录（`<dir>/rooms.json`）。
    *
    * **必须由调用方显式传入**：远端 `_apply-tasks <dataRoot>` 只带 dataRoot、不带
@@ -196,6 +201,8 @@ export function applyRemoteTasks(
   opts: ApplyTasksOptions = {},
 ): ApplyTasksResult {
   const adopt = opts.adopt !== false;
+  /** One-shot compatibility warning per room key for a legacy no-spool delivery. */
+  const warnedNoSpool = opts.noSpoolWarnedKeys ?? new Set<string>();
   const applied: string[] = [];
   const removed: string[] = [];
   const pending: string[] = [];
@@ -274,6 +281,12 @@ export function applyRemoteTasks(
       const s = trySlugOf(t.room);
       return !!s && s.platform === spec.platform && s.roomSlug === spec.roomSlug;
     });
+      // Historical false from an old master must not silently disappear: warn once per room
+      // (dedup across sync rounds via the injected set), without leaking the room identity.
+      if ((spec.streamUpload ?? false) && spec.streamUploadSpool === false && !warnedNoSpool.has(key)) {
+        warnedNoSpool.add(key);
+        log?.(`[task-sync] 任务 ${existing?.id ?? "新建"}(${spec.platform}) 旧 master 下发了已废弃的真 0 落盘,已按保留回退文件运行`);
+      }
     if (existing) {
       // 远端:收编为受管;master 本地:保持用户可编辑(顺带清掉历史遗留的 hub 标记)。
       // 保留 node 本地 cookies/useCookie/outDir/webhook。
@@ -298,7 +311,7 @@ export function applyRemoteTasks(
         rollingEffective: spec.rollingEffective ?? spec.rollingUpload,
         // 0 落盘边录边传(plans/039):普通用户开关,旧 master 不带 → false(行为不变)。
         streamUpload: spec.streamUpload ?? false,
-        streamUploadSpool: true,
+        streamUploadSpool: STREAM_UPLOAD_SPOOL_REQUIRED,
         // Zero-disk metadata (issue #331): store what the master ships as-is (raw JSON, parsed strictly at the use
         // site); not shipped -> null. Overwritten every round, so a rule change (visibility / title template)
         // reaches the node on the next sync.
@@ -336,7 +349,7 @@ export function applyRemoteTasks(
         anchorName: spec.anchorName ?? null,
         rollingUpload: spec.rollingUpload,
         streamUpload: spec.streamUpload ?? false,
-        streamUploadSpool: true,
+        streamUploadSpool: STREAM_UPLOAD_SPOOL_REQUIRED,
         zeroDiskDelivery: deliveryJson(spec),
         outputFormat: readOutputFormat(spec.outputFormat),
       });

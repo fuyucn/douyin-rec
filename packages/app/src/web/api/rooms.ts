@@ -185,10 +185,6 @@ export function buildRooms(ctx: ApiCtx) {
       if (input.recording === undefined && input.processing === undefined) {
         return err(400, "recording 与 processing 至少传一个");
       }
-      if (forbidsStreamUploadSpool(input.recording?.streamUploadSpool)) {
-        return err(400, STREAM_UPLOAD_NO_SPOOL_ERROR);
-      }
-
       const before = view(key);
       if (!before) return err(404, `未找到房间 ${key}`);
       const proc = input.processing;
@@ -198,6 +194,11 @@ export function buildRooms(ctx: ApiCtx) {
       const streamUploadNext = recInput && "streamUpload" in recInput
         ? recInput.streamUpload === true
         : existingStreamUpload;
+      // Only a live upload must keep the spool; a no-spool value on any other request is
+      // normalised to true below, so a task that is switching off streaming can still be saved.
+      if (streamUploadNext && forbidsStreamUploadSpool(input.recording?.streamUploadSpool)) {
+        return err(400, STREAM_UPLOAD_NO_SPOOL_ERROR);
+      }
       // The editor sends `streamUpload:false` when it leaves rolling. A partial API write that
       // only changes the mode still has to be rejected, not silently reinterpreted.
       const zeroDiskNext = streamUploadNext;

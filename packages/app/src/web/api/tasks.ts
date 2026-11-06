@@ -29,7 +29,9 @@ export function buildTasks(ctx: ApiCtx) {
     createTask(input: CreateTaskInput): ApiResult {
       const room = (input.room ?? "").trim();
       if (!room) return err(400, "room 必填");
-      if (forbidsStreamUploadSpool(input.streamUploadSpool)) return err(400, STREAM_UPLOAD_NO_SPOOL_ERROR);
+      if (input.streamUpload === true && forbidsStreamUploadSpool(input.streamUploadSpool)) {
+        return err(400, STREAM_UPLOAD_NO_SPOOL_ERROR);
+      }
 
       let scheduleStart = input.scheduleStart ?? null;
       let scheduleEnd = input.scheduleEnd ?? null;
@@ -83,9 +85,12 @@ export function buildTasks(ctx: ApiCtx) {
     updateTask(id: number, input: UpdateTaskInput): ApiResult {
       const existing = store.getTask(id);
       if (!existing) return err(404, `未找到任务 id=${id}`);
-      if (forbidsStreamUploadSpool(input.streamUploadSpool)) return err(400, STREAM_UPLOAD_NO_SPOOL_ERROR);
       if (existing.managedBy === "hub") {
         return err(403, `任务 id=${id} 由 hub 管理，请在 master 上修改`);
+      }
+      const nextStreamUpload = "streamUpload" in input ? input.streamUpload === true : existing.streamUpload;
+      if (nextStreamUpload && forbidsStreamUploadSpool(input.streamUploadSpool)) {
+        return err(400, STREAM_UPLOAD_NO_SPOOL_ERROR);
       }
 
       // Build a patch with ONLY the keys the client actually sent, so omitted

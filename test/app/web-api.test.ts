@@ -408,10 +408,16 @@ describe("startTask 磁盘水位准入(issue #96)", () => {
 
 describe("createTask", () => {
   it("rejects streamUploadSpool=false and creates no task", () => {
-    const r = api.createTask({ room: "222", streamUploadSpool: false });
+    const r = api.createTask({ room: "222", streamUpload: true, streamUploadSpool: false });
     expect(r.status).toBe(400);
     expect((r.body as { error: string }).error).toContain("必须保留本地回退文件");
     expect(store.listTasks()).toHaveLength(0);
+  });
+
+  it("a non-streaming task may carry streamUploadSpool=false; it is normalised to true", () => {
+    const r = api.createTask({ room: "off-with-false", streamUpload: false, streamUploadSpool: false });
+    expect(r.status).toBe(201);
+    expect((r.body as { streamUploadSpool: boolean }).streamUploadSpool).toBe(true);
   });
 
   it("creates a task and returns it (201)", () => {
@@ -469,10 +475,18 @@ describe("createTask", () => {
 
 describe("updateTask", () => {
   it("rejects streamUploadSpool=false without changing the stored value", () => {
-    const a = store.addTask({ room: "111", streamUploadSpool: true });
+    const a = store.addTask({ room: "111", streamUploadSpool: true, streamUpload: true });
     const r = api.updateTask(a.id, { streamUploadSpool: false });
     expect(r.status).toBe(400);
     expect((r.body as { error: string }).error).toContain("必须保留本地回退文件");
+    expect(store.getTask(a.id)!.streamUploadSpool).toBe(true);
+  });
+
+  it("switching a legacy live task off accepts streamUploadSpool=false and normalises it", () => {
+    const a = store.addTask({ room: "111", streamUpload: true, streamUploadSpool: true });
+    const r = api.updateTask(a.id, { streamUpload: false, streamUploadSpool: false });
+    expect(r.status).toBe(200);
+    expect(store.getTask(a.id)!.streamUpload).toBe(false);
     expect(store.getTask(a.id)!.streamUploadSpool).toBe(true);
   });
 
@@ -1991,10 +2005,19 @@ describe("rooms 域(T9 统一房间视图)", () => {
     const { s, a } = setup();
     const id = bindRoom(a, "123456");
     const before = s.getTask(id)!;
-    const r = a.updateRoom("douyin.123456", { recording: { streamUploadSpool: false } });
+    const r = a.updateRoom("douyin.123456", { recording: { streamUpload: true, streamUploadSpool: false } });
     expect(r.status).toBe(400);
     expect((r.body as { error: string }).error).toContain("必须保留本地回退文件");
     expect(s.getTask(id)!.name).toBe(before.name);
+    expect(s.getTask(id)!.streamUploadSpool).toBe(true);
+  });
+
+  it("a room save with streamUploadSpool=false but streaming off succeeds and normalises to true", () => {
+    const { s, a } = setup();
+    const id = bindRoom(a, "123456");
+    const r = a.updateRoom("douyin.123456", { recording: { streamUpload: false, streamUploadSpool: false } });
+    expect(r.status).toBe(200);
+    expect(s.getTask(id)!.streamUpload).toBe(false);
     expect(s.getTask(id)!.streamUploadSpool).toBe(true);
   });
 
