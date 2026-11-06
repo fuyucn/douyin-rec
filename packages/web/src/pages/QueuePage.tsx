@@ -28,7 +28,9 @@ import {
 } from "../lib/nodes-summary";
 import { HubStreamBanner } from "../components/HubStreamBanner";
 import { AttentionCard, FleetPulse, LiveLane, LivePool, LiveUploadLanes, StageReadyRow } from "../components/QueueLive";
+import { PartChainLine } from "../components/QueueBadges";
 import { liveUploadLanes, queueSummary, splitQueue } from "../lib/queue-live";
+import { nodeUploadPhaseLabel, nodeUploadStateLabel, queueText, stepLabel } from "../lib/queue-chain";
 import { useT } from "../lib/i18n";
 import { fmtTimeInTz } from "../lib/tz";
 
@@ -49,46 +51,6 @@ function sessionTime(streamKey: string, t: TFunc): string {
   if (zd) return `${short} ${hh}:${mm} · ${t("queue.live.directTag")}`;
   // _HHMM 是录制端按**本地时区**写的,直接用字符串,不再转时区(避免二次偏移)。
   return `${short} ${hh}:${mm}`;
-}
-
-/**
- * 步骤名 → 展示标签(与 HubJobs 的 stepNode 同源)。
- * 未知步骤名(新版本加的步骤、旧前端没这条 i18n)→ 安全回落成**步骤名原文**,
- * 不渲染成空白、也不把 `hub.jobs.stepNode.xxx` 这种键名糊到 UI 上。
- */
-function stepLabel(t: TFunc, step: string): string {
-  const key = `hub.jobs.stepNode.${step}`;
-  const label = t(key);
-  return label === key ? step : label;
-}
-
-/** A poll snapshot older than this is shown as stale (the master polls every minute). */
-const NODE_UPLOAD_STALE_MS = 3 * 60_000;
-
-/**
- * Queued node upload line (plan 038 PR5): node · phase/step · bytes · rate · heartbeat · attempt.
- * Times come from the node and the master; small clock skew only shifts the "ago" texts.
- */
-function nodeUploadLine(s: NodeUploadStatusDTO, now: number, t: TFunc): ReactNode {
-  const ago = (at: number): string => humanSec(Math.max(0, Math.round((now - at) / 1000)));
-  const stepKey = s.step === "gate_wait" || s.step === "transfer" || s.step === "submit" ? s.step : null;
-  const parts: string[] = [t("queue.nodeUpload.node", { node: s.nodeId }), t(`queue.nodeUpload.${s.phase}`)];
-  if (s.phase === "biliup" && s.state === "running" && stepKey) parts.push(t(`queue.nodeUpload.step.${stepKey}`));
-  else if (s.state) parts.push(s.state);
-  if (s.progress && s.progress.totalBytes > 0) {
-    parts.push(`${fmtBytes(s.progress.doneBytes)} / ${fmtBytes(s.progress.totalBytes)}`);
-    if (s.progress.bps) parts.push(t("queue.nodeUpload.rate", { rate: fmtBytes(s.progress.bps) }));
-  }
-  if (s.heartbeatAt) parts.push(t("queue.nodeUpload.heartbeat", { time: ago(s.heartbeatAt) }));
-  if (s.attempts && s.attempts > 1) parts.push(t("queue.nodeUpload.attempt", { n: s.attempts }));
-  if (s.notBefore && s.notBefore > now) parts.push(t("queue.nodeUpload.retryIn", { time: humanSec(Math.round((s.notBefore - now) / 1000)) }));
-  const stale = now - s.polledAt > NODE_UPLOAD_STALE_MS;
-  return (
-    <div className="text-[11px] mt-0.5 font-mono" style={{ color: stale ? "var(--warning-fg)" : "var(--muted-soft)" }} title={s.error ?? undefined}>
-      {parts.join(" · ")}
-      {stale && <span> · {t("queue.nodeUpload.stale", { time: ago(s.polledAt) })}</span>}
-    </div>
-  );
 }
 
 /** 行内计时:已运行 / 预计剩余,本地每秒递增(快照只在下一次重拉时刷新)。 */
@@ -246,6 +208,32 @@ function FilterBar({
   );
 }
 
+/**
+ * Table row node-upload telemetry; phase/state/step labels all go through the dictionary.
+ * Polled time is stated as a fact; the frontend does not infer that a snapshot is stale.
+ */
+function NodeUploadLine({ s, now, t }: { s: NodeUploadStatusDTO; now: number; t: TFunc }): ReactNode {
+  const ago = (at: number): string => humanSec(Math.max(0, Math.round((now - at) / 1000)));
+  const stepKey = s.step === "gate_wait" || s.step === "transfer" || s.step === "submit" ? s.step : null;
+  const parts: string[] = [
+    s.nodeId,
+    nodeUploadPhaseLabel(t, s.phase),
+  ];
+  if (s.phase === "biliup" && s.state === "running" && stepKey) parts.push(queueText(t, `queue.nodeUpload.step.${stepKey}`, stepKey));
+  else if (s.state) parts.push(nodeUploadStateLabel(t, s.state));
+  if (s.progress && s.progress.totalBytes > 0) parts.push(`${fmtBytes(s.progress.doneBytes)} / ${fmtBytes(s.progress.totalBytes)}`);
+  if (s.progress?.bps) parts.push(`${fmtBytes(s.progress.bps)}/s`);
+  if (s.heartbeatAt) parts.push(queueText(t, "queue.nodeUpload.heartbeat", `heartbeat ${ago(s.heartbeatAt)} ago`, { time: ago(s.heartbeatAt) }));
+  if (s.attempts != null && s.attempts > 1) parts.push(queueText(t, "queue.nodeUpload.attempt", `attempt ${s.attempts}`, { n: s.attempts }));
+  if (s.notBefore && s.notBefore > now) parts.push(`retry in ${humanSec(Math.round((s.notBefore - now) / 1000))}`);
+  return (
+    <div className="text-[11px] mt-0.5 font-mono text-muted-soft" title={s.error ?? undefined}>
+      {parts.join(" · ")}
+      <span> · {queueText(t, "queue.nodeUpload.polledAgo", `status updated ${ago(s.polledAt)} ago`, { time: ago(s.polledAt) })}</span>
+    </div>
+  );
+}
+
 /** 相位派生(行与卡片共用,避免两份漂移):返回展示文案 key、图标种类、是否终态/需人工。 */
 function phaseInfo(item: QueueItemDTO): {
   textKey: string;
@@ -390,7 +378,13 @@ function QueueRow({ item, index, tz, now, dataAt, onOpenLog, onAck }: { item: Qu
           {rowTiming(item, now, dataAt, t)}
           {finished && item.winnerWorker && <span> · {t("hub.jobs.selected", { worker: item.winnerWorker })}</span>}
         </div>
-        {!finished && item.nodeUpload && nodeUploadLine(item.nodeUpload, now, t)}
+        {item.nodeUpload && (
+          <div className="mt-0.5">
+            {item.nodeUpload.phase === "part-chain"
+              ? <PartChainLine upload={item.nodeUpload} now={now} tz={tz} t={t} />
+              : <NodeUploadLine s={item.nodeUpload} now={now} t={t} />}
+          </div>
+        )}
         {/* 真故障/已停止:把台账里的 error 亮出来(否则只看到「待人工」不知为何)。
             两行截断 + 完整内容进 title:错误文本可能很长,不截断会把整行撑成小作文、挤掉同屏其它场次。 */}
         {((manual || stopped) && item.error) && (
@@ -800,7 +794,7 @@ export function QueuePage(): ReactNode {
           ) : (
             <div className="space-y-2 mb-5">
               {sections.live.map((item) => (
-                <LiveLane key={item.streamKey} item={item} now={now} dataAt={dataAt} onOpenLog={setLogKey} />
+                <LiveLane key={item.streamKey} item={item} now={now} dataAt={dataAt} tz={tz} onOpenLog={setLogKey} />
               ))}
             </div>
           )}

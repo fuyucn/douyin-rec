@@ -37,8 +37,19 @@ const missing = new Map();
 const expSrc = readFileSync(pjoin(WEB, "..", "..", "core", "src", "experimental.ts"), "utf-8");
 for (const mm of expSrc.matchAll(/\b\w+Key:\s*"([^"]+)"/g))
   if (!known.has(mm[1])) { if (!missing.has(mm[1])) missing.set(mm[1], []); missing.get(mm[1]).push("core/src/experimental.ts"); }
-for (const f of files) for (const mm of readFileSync(f, "utf-8").matchAll(/\bt\(\s*"([^"]+)"\s*[,)]/g))
-  if (!known.has(mm[1])) { if (!missing.has(mm[1])) missing.set(mm[1], []); missing.get(mm[1]).push(f); }
+// Phase labels are stored in an object literal, not as queueText calls; keep them guarded explicitly.
+const PHASE_LABEL_KEYS = ["queue.nodeUpload.partChain"];
+for (const key of PHASE_LABEL_KEYS) if (!known.has(key)) missing.set(key, ["packages/web/src/lib/queue-chain.ts"]);
+const KEY_CALL_RES = [
+  /\bt\(\s*"([^"]+)"\s*[,)]/g,
+  // queueText(t, "key", fallback) is the fallback-aware wrapper introduced for queue display.
+  /\bqueueText\(\s*t\s*,\s*"([^"]+)"\s*[,)]/g,
+];
+for (const f of files) {
+  const text = readFileSync(f, "utf-8");
+  for (const re of KEY_CALL_RES) for (const mm of text.matchAll(re))
+    if (!known.has(mm[1])) { if (!missing.has(mm[1])) missing.set(mm[1], []); missing.get(mm[1]).push(f); }
+}
 for (const k of ["experimental.badge","experimental.riskPrefix","experimental.defaultPrefix","experimental.defaultOff","experimental.defaultOn","experimental.truthNote","experimental.graduationPrefix","experimental.trackingPrefix"]) if (!known.has(k)) missing.set(k, ["ExperimentalBadge.tsx"]);
 console.log("检查文件数:", files.length, "| key 总数:", zh.size);
 const onlyZh2 = [...zh].filter(k => !en.has(k) && !en.has(base(k)));
@@ -52,6 +63,9 @@ if (onlyZh2.length || onlyEn2.length) {
 process.exit(missing.size ? 1 : 0);
 // 顺带列出 i18n 里定义但**从未被引用**的 key(死文案),供清理参考
 const used = new Set();
-for (const f of files) for (const mm of readFileSync(f, "utf-8").matchAll(/\bt\(\s*"([^"]+)"\s*[,)]/g)) used.add(mm[1]);
+for (const f of files) {
+  const text = readFileSync(f, "utf-8");
+  for (const re of KEY_CALL_RES) for (const mm of text.matchAll(re)) used.add(mm[1]);
+}
 const dead = [...zh].filter(k => !used.has(k) && !used.has(base(k)) && !k.endsWith("_one") && !k.endsWith("_other"));
 console.log("定义但未被 t(\"...\") 直接引用:", dead.length, "(含动态拼接的会误报)");
