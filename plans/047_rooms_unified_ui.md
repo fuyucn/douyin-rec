@@ -113,9 +113,10 @@ export function nodeCaps(hubEnabled: boolean | null): NodeCaps;
   - 投稿元数据（时机/tid/tag/描述/分 P 大小）本身就是 `processing` 里的字段，节点更无从写。
 - 因此 worker 实现为：**存档格式可写**；直播直传/边录边传/投稿在录制 tab 里给一行只读提示（`room.editor.deliveryByMaster`）。
 - 因此 worker 实现为：**存档格式可写**；直播直传/边录边传/投稿在录制 tab 里给一行只读提示（`room.editor.deliveryByMaster`）。
-- **既有值不会被本次编辑清掉**：`payloadFromForm` 只在本次保存**确实会写规则**（`ctx.writesRule`）且
-  （已有规则 或 本次结算为 rolling）时才包含 `streamUpload`/`streamUploadSpool`；其余省略（PUT/POST 是 patch 语义 = 保持不动）。
-  这覆盖三件事：主控同一次保存里新开直传会写入、主控编辑无规则旧任务不会悄悄关掉、worker（不写规则）永不动它的值。
+- **既有值不会被本次编辑清掉，用户改了就必须写回**：`payloadFromForm` 只在本次保存**确实会写规则**（`ctx.writesRule`）且
+  （已有规则 或 本次结算为 rolling 或 **用户改过交付字段**（`ctx.deliveryTouched`））时才包含 `streamUpload`/`streamUploadSpool`；
+  其余省略（PUT/POST 是 patch 语义 = 保持不动）。这覆盖四件事：主控同一次保存里新开直传会写入；主控编辑无规则旧任务只改名字不会悄悄关掉；
+  用户在无规则旧任务上**主动关掉直传**会写回 false（否则后端会拿旧 true 拒掉合法的新配置）；worker（不写规则）永不动它的值。
 - 若之后确实要让节点本地配置直传/边录边传，需要独立的"节点本地规则"设计（把规则文件或等价的本地状态落在节点），
   不是本计划的放开范围。
 

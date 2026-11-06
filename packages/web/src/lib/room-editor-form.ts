@@ -166,6 +166,8 @@ export interface RoomContext {
   hasRule: boolean;
   /** This save also writes the rule half (master). A worker never does, even if a stale local rule exists. */
   writesRule: boolean;
+  /** The user changed delivery fields in this edit; a stale zero-disk value must then be written back. */
+  deliveryTouched: boolean;
   danmuAvailable: boolean;
   cookieReady: boolean;
   cookieForStream: boolean;
@@ -210,10 +212,11 @@ export function payloadFromForm(f: RoomForm, ctx: RoomContext): PayloadResult {
   if (f.uploadOn && !isValidPartSizeInput(f.partSizeMiB)) return { ok: false, error: "partSizeMiB" };
   const stored = storedFromForm(ruleFactsOf(f, ctx));
   const trimOrUndef = (s: string): string | undefined => s.trim() || undefined;
-  // Zero-disk fields are owned by the rule: write them only when this save writes the rule
-  // and either it already exists or the new rolling mode needs the override. Otherwise omit
-  // (PATCH = keep) so a task-only room keeps its stored value; leaving rolling still sends false.
-  const writesZeroDisk = ctx.writesRule && (ctx.hasRule || stored.mode === "rolling");
+  // Zero-disk fields are owned by the rule: only a save that writes it may update them.
+  // Write on an existing rule, a newly selected rolling mode, or an explicit delivery edit;
+  // otherwise omit (PATCH = keep) so stale values are not silently rewritten.
+  const writesZeroDisk = ctx.writesRule
+    && (ctx.hasRule || stored.mode === "rolling" || ctx.deliveryTouched);
   const zeroDisk = writesZeroDisk
     ? { streamUpload: stored.mode === "rolling" && f.streamUpload, streamUploadSpool: f.streamUploadSpool }
     : {};

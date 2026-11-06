@@ -72,7 +72,8 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
   const caps = nodeCaps(useAtomValue(hubEnabledAtom));
   const douyinReady = !!useAtomValue(cookieStatusAtom)?.hasSession;
   const cookieStatuses = usePlatformCookieStatuses(true);
-  const [form, setForm] = useState<RoomForm>(() => (room ? formFromRoom(room) : blankForm()));
+  const [initialForm] = useState<RoomForm | null>(() => (room ? formFromRoom(room) : null));
+  const [form, setForm] = useState<RoomForm>(() => initialForm ? { ...initialForm } : blankForm());
   const [busy, setBusy] = useState(false);
   const [step, setStep] = useState<StepId>("record");
   const [platforms, setPlatforms] = useState<PlatformDTO[]>([]);
@@ -109,12 +110,18 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
   // Create always writes a recording half; managed tasks are read-only here → treat as "no half".
   const hasRecording = create || (!!room.recording && !managed);
   const platformId = create ? plat?.id : room.platform;
+  const deliveryTouched = create || (initialForm !== null && (
+    form.uploadOn !== initialForm.uploadOn
+    || form.method !== initialForm.method
+    || form.streamUpload !== initialForm.streamUpload
+  ));
   const ctx: RoomContext = {
     hasRecording,
     // A rule existed when the editor opened only when the API returned a processing half.
     // This save writes one on the master (both create and edit); a worker creates the recording half only.
     hasRule: create ? caps.editPipeline : !!room.processing,
     writesRule: caps.editPipeline,
+    deliveryTouched,
     danmuAvailable: plat ? plat.hasDanmu : true,
     cookieReady: cookieReadyFor(platformId, cookieStatuses, douyinReady),
     // Douyin streams anonymously; its cookie only serves danmu. Other platforms stream with it.

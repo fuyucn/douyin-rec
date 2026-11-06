@@ -5,7 +5,7 @@ import { DEFAULT_TITLE_TEMPLATES, blankForm, factsOf, formFromRoom, isValidPartS
 import { deriveConstraints, settledMethod } from "../../packages/web/src/lib/room-form-rules.js";
 import type { RoomDTO } from "../../packages/web/src/api/client.js";
 
-const ctx: RoomContext = { hasRecording: true, hasRule: true, writesRule: true, danmuAvailable: true, cookieReady: true, cookieForStream: false };
+const ctx: RoomContext = { hasRecording: true, hasRule: true, writesRule: true, deliveryTouched: false, danmuAvailable: true, cookieReady: true, cookieForStream: false };
 
 describe("factsOf carries the room's rule presence (#284)", () => {
   it("task-only room (no processing half) → hasRule false, so VERSIONS stays hidden", () => {
@@ -284,7 +284,7 @@ describe("新增 = 编辑同一弹窗:create 与 edit 共用一条提交路径",
       processing,
     });
     const workerRoom = { ...room, processing: null };
-    const workerCtx: RoomContext = { ...ctx, hasRule: false, writesRule: false };
+    const workerCtx: RoomContext = { ...ctx, hasRule: false, writesRule: false, deliveryTouched: true };
     const workerForm = formFromRoom(workerRoom);
     const worker = submitPayload(workerForm, workerCtx, { mode: "edit", withProcessing: false });
     if (!worker.ok) throw new Error("expected worker ok");
@@ -301,13 +301,29 @@ describe("新增 = 编辑同一弹窗:create 与 edit 共用一条提交路径",
 
   it("master 编辑无规则但直传开启的任务,不写回规则拥有的字段", () => {
     const room = mkRoom({ recording: { streamUpload: true, streamUploadSpool: false }, processing: null });
-    const noRuleCtx: RoomContext = { ...ctx, hasRule: false, writesRule: true };
+    const noRuleCtx: RoomContext = { ...ctx, hasRule: false, writesRule: true, deliveryTouched: false };
     const master = submitPayload(formFromRoom(room), noRuleCtx, { mode: "edit", withProcessing: true });
     if (!master.ok) throw new Error("expected master ok");
     expect(master.payload.recording).not.toHaveProperty("streamUpload");
     expect(master.payload.recording).not.toHaveProperty("streamUploadSpool");
     expect(master.payload.recording).toMatchObject({ quality: "origin", engine: "ffmpeg" });
     expect(master.payload.processing).toBeDefined();
+  });
+
+  it("master 无规则保存且主动关掉旧直传 → 写回 false,不再卡在新规则校验", () => {
+    const room = mkRoom({ recording: { streamUpload: true, streamUploadSpool: false }, processing: null });
+    const form = formFromRoom(room);
+    const turnedOff = { ...form, uploadOn: true, method: "after" as const, streamUpload: false };
+    const payload = ok(payloadFromForm(turnedOff, { ...ctx, hasRule: false, deliveryTouched: true }));
+    expect(payload.processing?.pipeline?.upload?.mode).toBe("upload");
+    expect(payload.recording).toMatchObject({ streamUpload: false });
+  });
+
+  it("master 无规则保存且未改交付 → 两键省略,保持存量 true", () => {
+    const room = mkRoom({ recording: { streamUpload: true, streamUploadSpool: false }, processing: null });
+    const payload = ok(payloadFromForm(formFromRoom(room), { ...ctx, hasRule: false }));
+    expect(payload.recording).not.toHaveProperty("streamUpload");
+    expect(payload.recording).not.toHaveProperty("streamUploadSpool");
   });
 
   it("worker 即使有陈旧本地规则也不写回直播直传两键", () => {
@@ -320,7 +336,7 @@ describe("新增 = 编辑同一弹窗:create 与 edit 共用一条提交路径",
       },
     };
     const room = mkRoom({ recording: { streamUpload: true, streamUploadSpool: false }, processing });
-    const workerCtx: RoomContext = { ...ctx, hasRule: true, writesRule: false };
+    const workerCtx: RoomContext = { ...ctx, hasRule: true, writesRule: false, deliveryTouched: true };
     const worker = submitPayload(formFromRoom(room), workerCtx, { mode: "edit", withProcessing: false });
     if (!worker.ok) throw new Error("expected worker ok");
     expect(worker.payload.recording).not.toHaveProperty("streamUpload");
