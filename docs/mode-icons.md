@@ -27,8 +27,8 @@ Run the full repository tests and type checks, web build, and bundle as required
 
 The browser regression uses the installed Playwright package and a local Vite development server:
 
-    pnpm --dir packages/web exec vite --host 127.0.0.1 --port 18766 --strictPort
-    MODE_ICONS_BASE_URL=http://127.0.0.1:18766 node test/web/mode-indicators.browser.mjs
+    pnpm --dir packages/web exec vite --host localhost --port 18766 --strictPort
+    MODE_ICONS_BASE_URL=http://localhost:18766 node test/web/mode-indicators.browser.mjs
 
 Install Playwright's Chromium beforehand, or set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH to an existing Chromium-family executable. The test opens isolated headless pages; it does not attach to a user's browser. It covers accessible names, hover, Tab, Escape, touch toggling, outside dismissal, and a 320-pixel viewport.
 

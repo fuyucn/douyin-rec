@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { chromium } from "playwright";
 
-const baseUrl = process.env.MODE_ICONS_BASE_URL ?? "http://127.0.0.1:18766";
+const baseUrl = process.env.MODE_ICONS_BASE_URL ?? "http://localhost:18766";
 const browser = await chromium.launch({
   headless: true,
   executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
