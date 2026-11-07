@@ -291,7 +291,7 @@ describe("新增 = 编辑同一弹窗:create 与 edit 共用一条提交路径",
     const form = { ...blankForm(plat), room: "100001", streamUpload: true };
     const result = submitPayload(form, workerCtx, { mode: "create", withProcessing: false });
     if (!result.ok) throw new Error("expected ok");
-    expect(result.payload.recording).toMatchObject({ streamUpload: true });
+    expect(result.payload.recording).toMatchObject({ streamUpload: true, streamUploadSpool: true });
     expect("processing" in result.payload).toBe(false);
   });
 
