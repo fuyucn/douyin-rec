@@ -285,9 +285,16 @@ esac
 # is not running (fresh install / stopped service) and is not busy. Unknown answers are busy.
 # The helper writes only the final reason on stdout; diagnostics are never mistaken for a reason.
 node_busy_reason() {
-  _n="${NODE_BIN:-$(command -v node || true)}"
+  # Resolve to an absolute path first. NODE_BIN may be the bare name "node" (that is what the
+  # systemd unit needs), and a bare name is not findable under `env -i` or when the caller
+  # deliberately strips node from PATH — both must mean "cannot check", not "idle".
+  _n="${NODE_BIN:-node}"
+  case "$_n" in
+    /*) ;;
+    *) _n="$(command -v "$_n" || true)" ;;
+  esac
   [ -n "$_n" ] || { printf 'node missing, cannot check\n'; return 0; }
-  "$_n" -e '
+  _out="$("$_n" -e '
     const http = require("node:http");
     const api = process.argv[1];
     const timeoutMs = Number(process.env.DREC_BUSY_TIMEOUT_MS) || 10000;
@@ -332,7 +339,15 @@ node_busy_reason() {
       if (uploads > 0) return failClosed(uploads + " upload job(s) running");
       process.exit(1);
     })();
-  ' "$API_URL"
+  ' "$API_URL")"
+  # 0 = busy (the helper printed a reason), 1 = explicitly idle. Anything else (127 for a
+  # missing interpreter, 137 for a killed process, ...) is "cannot check" and must fail closed.
+  _rc=$?
+  case "$_rc" in
+    0) printf '%s\n' "$_out"; return 0 ;;
+    1) return 1 ;;
+    *) printf 'node check failed (exit %s)\n' "$_rc"; return 0 ;;
+  esac
 }
 
 if [ "$CHECK_BUSY" -eq 1 ]; then

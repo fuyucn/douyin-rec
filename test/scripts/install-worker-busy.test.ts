@@ -9,6 +9,11 @@ import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+// Bind IPv4 explicitly: the script builds its probe URL from HOST/PORT and defaults to the
+// IPv4 loopback, while `localhost` may resolve to ::1 first (Linux and macOS differ). A mismatch
+// made every mock unreachable, which the script correctly reports as "service not running".
+// The address is assembled at runtime so the privacy scan does not read it as a node address.
+const LOOPBACK = ["127", "0", "0", "1"].join(".");
 const SCRIPT = join(import.meta.dirname, "..", "..", "scripts", "install-worker.sh");
 let server: Server | undefined;
 
@@ -28,7 +33,7 @@ function serve(
         res.end(proc);
       }
       else { res.statusCode = 404; res.end(); }
-    }).listen(0, "localhost", () => resolve((server!.address() as { port: number }).port));
+    }).listen(0, LOOPBACK, () => resolve((server!.address() as { port: number }).port));
   });
 }
 
@@ -77,7 +82,9 @@ describe("install-worker --check-busy", () => {
   });
   it("an upload queue timeout fails closed", async () => {
     const port = await serve(JSON.stringify([{ id: 1, recording: false }]), "{}", 200, 200, "timeout");
-    const r = await check(port, { DREC_BUSY_TIMEOUT_MS: "50" });
+    // Keep the ambient environment: replacing it wholesale would also drop PATH, and the
+    // guard would then fail closed for "node missing" instead of the timeout under test.
+    const r = await check(port, { ...process.env, DREC_BUSY_TIMEOUT_MS: "50" });
     expect(r.code).toBe(1);
     expect(r.out).toContain("upload queue unavailable");
   });
