@@ -14,11 +14,7 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
-- [~] **T-154 节点页与管理节点合并为一页，节点卡直接展示 IP、快速入口与管理操作（issue [#549](https://github.com/fuyucn/douyin-rec/issues/549) → PR [#550](https://github.com/fuyucn/douyin-rec/pull/550)，分支 `codex/issue-549-nodes-manage-inline`，rebase 到 fdbfb8ca，2026-11-06）**
-  — `/nodes` 当前只展示拓扑，增删改/排序/测试连接都藏在「管理节点」滑入浮层里，两处信息割裂，节点卡上还看不到 host。
-  **做什么**: 节点卡直接显示 host/kind/dataRoot/能力标签与编辑/删除/测试连接/日志入口（配置了 apiUrl 的渲染跳转链接），拖拽排序在节点卡列表生效；`WorkersPanel` 自节点页退场（Rooms/Hub 页不动）；复用 `WorkerDialog`/`ConfirmDialog`。
-  **验收**: 节点卡上可完成全部节点管理操作；local 卡无删除/编辑 kind；`test/web/nodes-page.test.ts` 补展示模型用例；全量 pnpm test / typecheck / web build / bundle 通过。
-  **版本**: 撞号顺延 0.0.316 → 0.0.317（#551 已占 0.0.316）。
+- [~] **T-154 节点页与管理节点合并为一页（issue [#549](https://github.com/fuyucn/douyin-rec/issues/549) → PR [#550](https://github.com/fuyucn/douyin-rec/pull/550)，已合并 0c3ed335，版本 0.0.317，2026-11-07）** — **待部署验证**：节点卡 host/管理操作/拖拽、受管只读、i18n 实跑核对后收口。
 - [~] **T-156 房间列表与处理队列减法 pass：决策优先级重排、状态词统一、图标形态保留（issue [#552](https://github.com/fuyucn/douyin-rec/issues/552)）**（2026-11-06）
   — rooms 首页「方式」列图标不可读、筛选器与指标错位；queue 需处理排第 7 层、空闲态 5 个空容器、状态词 4 套说法。设计原型 dev/rooms-redesign-proto.html 与 dev/queue-redesign-proto.html 已经人确认。
   **做什么**: rooms 方式列文字 chip + 筛选 chip 化 + 告警一条一条 + 列重排（定时降行）+ 640-1023px 保留表格 + 节点入口改导航；queue 需处理进首屏 + 空闲合并一行 + 本机队列折叠 + 状态词唯一口径。**红线**：图标操作按钮、受管只读、判定口径全部保留。
