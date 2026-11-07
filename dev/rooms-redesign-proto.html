@@ -340,7 +340,7 @@ td.c-actions{text-align:right}
     <span class="s"><span class="dot idle"></span>等开播</span>
     <span class="s"><span class="dot off"></span>已停用 / 尚无场次</span>
   </section>
-  <p class="footnote">设计原型 · 示意数据。房间名、节点主机（vps-1.ts.example / vps-2.ts.example / home-nas.ts.example）、稿件号（BV1DEMO*）与场次时间均为占位，不含真实主机、IP、房间号或主播名；controller 为本机内置主控。页头「节点 · 4」是纯导航链接（/nodes），不再打开浮层；筛选 chip 可真实过滤行，「预览空态」可查看按筛选区分的空文案；640–1023px 保留表格，仅 <span class="num">640</span>px 以下才切紧凑卡。</p>
+  <p class="footnote">设计原型 · 示意数据。房间名、节点主机（vps-1.example / vps-2.example / home-nas.example）、稿件号（DEMO-0001 占位）与场次时间均为占位，不含真实主机、IP、房间号或主播名；controller 为本机内置主控。页头「节点 · 4」是纯导航链接（/nodes），不再打开浮层；筛选 chip 可真实过滤行，「预览空态」可查看按筛选区分的空文案；640–1023px 保留表格，仅 <span class="num">640</span>px 以下才切紧凑卡。</p>
 </div>
 
 <script>
@@ -369,12 +369,12 @@ td.c-actions{text-align:right}
     { key:"bili_demo01", name:"主播A · B站房间", platform:"B站", slug:"bili_demo01", schedule:"全天",
       kind:"recording", status:"录制中", dot:"ok", reason:"vps-1 · vps-2 双录中 · 已录 01:42:18",
       mode:"收播后上传", modeNote:"投稿 B站 · 仅自己可见",
-      deliver:"已投稿", deliverTone:"ok", deliverDot:"ok", deliverMeta:"2 小时前 · ", bv:"BV1DEMO0001",
+      deliver:"已投稿", deliverTone:"ok", deliverDot:"ok", deliverMeta:"2 小时前 · ", bv:"稿件 DEMO-0001",
       nodes:["vps-1","vps-2"], actions:[["stop","warn","停止录制：当前分段完整封口"]] },
     { key:"dy_demo02", name:"主播B · 抖音房间", platform:"抖音", slug:"dy_demo02", schedule:"20:00–02:00",
       kind:"recording", status:"录制中", dot:"ok", reason:"controller · 直播直传 P4 · 已确认 3 个分 P · 心跳 2s 前",
       mode:"直播直传", modeNote:"投稿 B站 · 保留本地回退文件",
-      deliver:"处理中", deliverTone:"", deliverDot:"run", deliverMeta:"12 分钟前 · ", bv:"BV1DEMO0002",
+      deliver:"处理中", deliverTone:"", deliverDot:"run", deliverMeta:"12 分钟前 · ", bv:"稿件 DEMO-0001",
       nodes:["controller"], actions:[["stop","warn","停止录制：当前分段完整封口"]] },
     { key:"dy_demo03", name:"主播C · 抖音房间", platform:"抖音", slug:"dy_demo03", schedule:"全天",
       kind:"processing", status:"处理中", dot:"run", reason:"排队中 · 等 CPU · 第 2 位 · 已等 04:12", reasonTone:"",
@@ -390,7 +390,7 @@ td.c-actions{text-align:right}
       kind:"attention", status:"需处理", dot:"warn", reasonTone:"w",
       reason:"分 P 待核对 · P3 回读分 P 数未变化，本地回退文件已保留",
       mode:"直播直传", modeNote:"投稿 B站 · 保留本地回退文件",
-      deliver:"交付失败", deliverTone:"err", deliverDot:"err", deliverMeta:"42 分钟前 · ", bv:"BV1DEMO0003",
+      deliver:"交付失败", deliverTone:"err", deliverDot:"err", deliverMeta:"42 分钟前 · ", bv:"稿件 DEMO-0001",
       nodes:["controller"], actions:[["logs","","打开房间日志"]] },
       managed:true },
     { key:"bili_demo06", name:"主播F · B站房间", platform:"B站", slug:"bili_demo06", schedule:"全天",
@@ -403,7 +403,7 @@ td.c-actions{text-align:right}
     { key:"dy_demo07", name:"主播G · 抖音房间", platform:"抖音", slug:"dy_demo07", schedule:"22:00–01:30",
       kind:"waiting", status:"等开播", dot:"idle", reason:"定时窗口未到 · 判活闸门中，未占用录制进程",
       mode:"收播后上传", modeNote:"投稿 B站 · 仅自己可见",
-      deliver:"已投稿", deliverTone:"ok", deliverDot:"ok", deliverMeta:"昨天 · ", bv:"BV1DEMO0004",
+      deliver:"已投稿", deliverTone:"ok", deliverDot:"ok", deliverMeta:"昨天 · ", bv:"稿件 DEMO-0001",
       nodes:["vps-1","vps-2"], nodesExtra:"+1", actions:[["stop","warn","停止录制：当前分段完整封口"]] },
     { key:"bili_demo08", name:"主播H · B站房间", platform:"B站", slug:"bili_demo08", schedule:"全天",
       kind:"paused", status:"已停用", dot:"off", reason:"规则已暂停 · 任务与配置保留，不再录制也不再处理",

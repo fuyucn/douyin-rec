@@ -321,7 +321,7 @@ body.is-managed .fold .chev{margin-left:auto}
       </div>
       <div class="health-line">
         <span class="health"><span class="dot ok" id="healthDot" data-rec-on="ok" data-rec-off="off"></span><span id="healthText" data-rec-on="录制中" data-rec-off="已停用">录制中</span></span>
-        <p class="reason" id="healthReason" data-rec-on="vps-1 在录 · 边录边传会话已确认 8/12 段 · 稿件 BV1DEMO0001 · 心跳 2s 前" data-rec-off="录制任务已停用 · 配置与历史保留，当前分 P 不会被删">vps-1 在录 · 边录边传会话已确认 8/12 段 · 稿件 BV1DEMO0001 · 心跳 2s 前</p>
+        <p class="reason" id="healthReason" data-rec-on="vps-1 在录 · 边录边传会话已确认 8/12 段 · 稿件 稿件 DEMO-0001 · 心跳 2s 前" data-rec-off="录制任务已停用 · 配置与历史保留，当前分 P 不会被删">vps-1 在录 · 边录边传会话已确认 8/12 段 · 稿件 稿件 DEMO-0001 · 心跳 2s 前</p>
       </div>
       <div class="freshness">实时推送已连接<span class="sep">·</span>任务状态 5s 前<span class="sep">·</span>规则 4m 前<span class="sep">·</span>节点探测 12s 前<span class="sep">·</span>时区 <span class="mono">Asia/Shanghai</span> <span class="sep">·</span><a class="textlink" href="#open-live" id="openLive">打开直播间 <svg class="ico"><use href="#i-external"/></svg></a></div>
     </div>
@@ -378,7 +378,7 @@ body.is-managed .fold .chev{margin-left:auto}
         <span class="sum-title">10-26 20:00 · 当前场次</span>
         <span class="mode-chip">边录边传</span>
         <span class="state"><span id="runStateText" data-rec-on="执行中 · 录制并上传" data-rec-off="已停用 · 等待重新启用">执行中 · 录制并上传</span></span>
-        <span class="sum-meta">稿件 <span class="mono">BV1DEMO0001</span></span>
+        <span class="sum-meta">稿件 <span class="mono">稿件 DEMO-0001</span></span>
         <span class="chev" aria-hidden="true"></span>
       </summary>
       <div class="fold-body">
@@ -481,25 +481,25 @@ body.is-managed .fold .chev{margin-left:auto}
           <tr id="recent-1">
             <td class="date" data-label="日期">10-26 20:00</td><td class="dur" data-label="时长">01:42:18</td>
             <td data-label="结果"><span class="result"><span class="dot run" id="recentDot" data-rec-on="run" data-rec-off="off"></span><span id="recentText" data-rec-on="进行中" data-rec-off="已停用">进行中</span></span></td>
-            <td class="bv" data-label="稿件号">BV1DEMO0001</td>
+            <td class="bv" data-label="稿件号">稿件 DEMO-0001</td>
             <td class="view" data-label="操作"><a class="textlink" href="#recent-1" data-view="10-26 20:00">查看</a></td>
           </tr>
           <tr>
             <td class="date" data-label="日期">10-25 19:30</td><td class="dur" data-label="时长">03:12:44</td>
             <td data-label="结果"><span class="result"><span class="dot ok"></span>已完成</span></td>
-            <td class="bv" data-label="稿件号">BV1DEMO0007</td>
+            <td class="bv" data-label="稿件号">稿件 DEMO-0001</td>
             <td class="view" data-label="操作"><a class="textlink" href="#recent-2" data-view="10-25 19:30">查看</a></td>
           </tr>
           <tr>
             <td class="date" data-label="日期">10-24 20:00</td><td class="dur" data-label="时长">02:48:10</td>
             <td data-label="结果"><span class="result"><span class="dot warn"></span>需人工处理</span></td>
-            <td class="bv" data-label="稿件号">BV1DEMO0006</td>
+            <td class="bv" data-label="稿件号">稿件 DEMO-0001</td>
             <td class="view" data-label="操作"><a class="textlink" href="#recent-3" data-view="10-24 20:00">查看</a></td>
           </tr>
           <tr>
             <td class="date" data-label="日期">10-23 19:45</td><td class="dur" data-label="时长">04:05:32</td>
             <td data-label="结果"><span class="result"><span class="dot ok"></span>已完成</span></td>
-            <td class="bv" data-label="稿件号">BV1DEMO0005</td>
+            <td class="bv" data-label="稿件号">稿件 DEMO-0001</td>
             <td class="view" data-label="操作"><a class="textlink" href="#recent-4" data-view="10-23 19:45">查看</a></td>
           </tr>
         </tbody>
@@ -606,7 +606,7 @@ body.is-managed .fold .chev{margin-left:auto}
       <div class="fold-body">
         <p class="fold-note">日志常驻房间页：展开才轮询，收起状态不请求；列表页 ?logs=1 进来直接展开。</p>
         <div class="logs" aria-label="日志示意">
-          <div class="log-line"><span class="k">21:42:16</span> 检测到开播 · 房间 <span class="mono">douyin:demo-a</span></div>
+          <div class="log-line"><span class="k">21:42:16</span> 检测到开播 · 房间 <span class="mono">场次键 demo-a(示意)</span></div>
           <div class="log-line"><span class="k">21:42:18</span> 分段 <span class="mono">P9</span> 开始录制上传 · <span class="mono">vps-1</span></div>
           <div class="log-line"><span class="k">21:42:19</span> 弹幕已连接 · liveId 解析成功</div>
           <div class="log-line"><span class="k">21:42:20</span> 心跳正常 · 已确认 <span class="mono">8 / 12</span> 段</div>
@@ -623,7 +623,7 @@ body.is-managed .fold .chev{margin-left:auto}
     <span class="s"><span class="dot warn"></span>需人工处理</span>
     <span class="s"><span class="dot off"></span>已停用</span>
   </section>
-  <p class="footnote">设计原型 · 示意数据。主播名、房间号（demo-a）、节点（vps-1 / vps-2 / controller）、稿件号（BV1DEMO*）、地址、日期、时长、字节与事件时间均为占位，不含任何真实主机、IP、房间号、主播名或凭据；Cookie 与 Webhook 原文按现有口径不回显。配置字段取自 RoomEditor 四步 tab、room-editor-form.ts 的 RoomForm 与 core/api-types.ts 的 RoomDTO / HubRuleDTO，未设置项显式写「未设置」；示意值不构成一份经过后端校验的组合。亮暗切换与 /rooms、/nodes、/queue 原型共用 <span class="mono">drec-proto-theme</span>；本页不改动其它文件。</p>
+  <p class="footnote">设计原型 · 示意数据。主播名、房间号（demo-a）、节点（vps-1 / vps-2 / controller）、稿件号（DEMO-0001 占位）、地址、日期、时长、字节与事件时间均为占位，不含任何真实主机、IP、房间号、主播名或凭据；Cookie 与 Webhook 原文按现有口径不回显。配置字段取自 RoomEditor 四步 tab、room-editor-form.ts 的 RoomForm 与 core/api-types.ts 的 RoomDTO / HubRuleDTO，未设置项显式写「未设置」；示意值不构成一份经过后端校验的组合。亮暗切换与 /rooms、/nodes、/queue 原型共用 <span class="mono">drec-proto-theme</span>；本页不改动其它文件。</p>
 </main>
 
 <script>
