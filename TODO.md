@@ -28,7 +28,7 @@
   **做什么**: 当前场次运行树默认展开进首屏 + 直传时间线提为一等区块 + 配置按录制/处理/投稿/通知与清理四域重组补齐、未设置显式标注。**红线**：全部图标操作入口与受管只读语义保留。
   **验收**: 见 issue；全量门禁通过。
 - [~] **T-163 Queue 页信息架构重做（已由 PR [#551](https://github.com/fuyucn/douyin-rec/pull/551) 合并，2026-11-07 实际收口）**
-  **版本**: 撞号顺延 0.0.316 → 0.0.317（#551 已占 0.0.316）。
+  — 与 T-156 的 queue 部分重叠：#552 实现时基于 #551 产物只做视觉走查残余差异（dev/queue-visual-review.html 的 9 条修订）。
 - [~] **T-126 worker 按 Release 部署:main 为 stable,开发分支按需 prerelease（issue [#392](https://github.com/fuyucn/douyin-rec/issues/392)）**（2026-10-29）
   — worker 升级靠手动换文件,流程不在仓库里;已有安装脚本和发布流程但从未发过 Release。
   **做什么**: 发布流程按 tag 所指提交是否在 main 区分正式版/prerelease,且不覆盖已有 Release;安装脚本升级前检查无录制/上传、升级后核对版本;文档与 AGENTS 写明流程。
