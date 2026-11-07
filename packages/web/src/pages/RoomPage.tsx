@@ -21,7 +21,7 @@ import { Button, IconButton } from "../components/Button";
 import { HubStreamBanner } from "../components/HubStreamBanner";
 import { TaskLogPanel } from "../components/LogTerminal";
 import { MergePanel } from "../components/MergePanel";
-import { RollingProgressRows, useRoomRolling } from "../components/RollingProgress";
+import { useRoomRolling } from "../components/RollingProgress";
 import { RoomRunsPanel } from "../components/RoomRunsPanel";
 import { Tooltip } from "../components/Tooltip";
 import { usePolling } from "../lib/hooks";
@@ -206,29 +206,20 @@ export function RoomPage(): ReactNode {
         <span className="room-fact"><span className="room-fact-label">{t("tasks.schedule")}</span><b>{rec ? sched ?? t("room.allDay") : "-"}</b></span>
       </div>
 
-      {/* ── 「正在录制」区:边录边传会话进度 / 直传时间线 = 首屏动态时刻(#557) ── */}
-      {vis.liveUpload && task?.streamUpload && task.zeroDisk?.length ? (
-        <section className="room-live-section mb-5">
-          <div className="section-head"><h2>{t("room.cfg.liveTitle")}</h2></div>
-          <div className="card p-4">
+      {/* ── 「当前场次」区:运行树(默认展开,含边录边传/直传的实时进度树)+ 日志(默认展开,正在录时) ──
+          注:不另设「正在录制」独立区——CurrentRunTree 已用同一份 rolling/直传快照渲染实时进度树,
+          再画一遍是重复(#557 用户反馈)。动态内容都在 Processing runs 面板顶部。 ── */}
+      <section className="mb-6">
+        {vis.runs && <RoomRunsPanel room={room} workers={data.workers} task={task} rolling={rolling} readOnly={view.readOnly} />}
+        {/* worker 上没有 runs 面板(vis.runs=false),直传时间线在这里兜底展示 */}
+        {!vis.runs && vis.liveUpload && task?.streamUpload && task.zeroDisk?.length && (
+          <div className="mt-4">
             <LiveUploadTimeline
               taskId={task.id}
               summaries={task.zeroDisk.flatMap((z) => z.live ? [{ workerId: z.workerId, summary: z.live }] : [])}
             />
           </div>
-        </section>
-      ) : vis.processing && rolling.length > 0 ? (
-        <section className="room-live-section mb-5">
-          <div className="section-head"><h2>{t("room.cfg.liveTitle")}</h2></div>
-          <div className="card p-4">
-            <RollingProgressRows rolling={rolling} />
-          </div>
-        </section>
-      ) : null}
-
-      {/* ── 「当前场次」区:运行树(默认展开)+ 日志(默认展开,正在录时) ── */}
-      <section className="mb-6">
-        {vis.runs && <RoomRunsPanel room={room} workers={data.workers} task={task} rolling={rolling} readOnly={view.readOnly} />}
+        )}
         {taskId !== null && (
           <div className="mt-4" id="logs">
             <TaskLogPanel taskId={taskId} running={!!task?.running} open={logsOpen} onToggle={toggleLogs} />
