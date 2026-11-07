@@ -129,6 +129,10 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
   };
   const facts = ruleFactsOf(form, ctx);
   const c = deriveConstraints(facts);
+  // 开关锁必须按「打开后」的假设算:zeroDiskRuleError(false) 恒放行,用当前值算会永远不锁。
+  const streamUploadEnableLock = ctx.hasRule
+    ? deriveConstraints(ruleFactsOf({ ...form, streamUpload: true }, ctx)).streamUpload
+    : undefined;
   // Re-settle the upload method after every change: turning burn on / adding nodes can invalidate it.
   const update = (patch: Partial<RoomForm>): void =>
     setForm((f) => {
@@ -351,7 +355,7 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                           hint={t("room.editor.zeroDiskHint")}
                           checked={form.streamUpload}
                           onChange={(streamUpload) => update({ streamUpload, ...(streamUpload ? { streamUploadSpool: true } : {}) })}
-                          lock={ctx.hasRule && c.streamUpload.locked && !form.streamUpload ? c.streamUpload : undefined}
+                          lock={form.streamUpload ? undefined : streamUploadEnableLock}
                           lockedChecked={false}
                           badge={<ExperimentalBadge id="stream-upload" />}
                         />

@@ -18,6 +18,26 @@ describe("factsOf carries the room's rule presence (#284)", () => {
   });
 });
 
+describe("worker 直传开关的锁按「打开后」假设计算(T-160/#547)", () => {
+  const f = () => ({ ...formFromRoom({ room: "1", platform: "douyin", processing: null } as never), uploadOn: true, method: "rolling" as const });
+  it("无效规则(多节点)即便当前是关,开启也被锁", () => {
+    const bad = { ...f(), workers: ["a", "b"], streamUpload: false };
+    expect(deriveConstraints(ruleFactsOf({ ...bad, streamUpload: true }, ctx)).streamUpload.locked).toBe(true);
+  });
+  it("有效规则(单节点)可开启", () => {
+    const ok = { ...f(), workers: ["a"], streamUpload: false };
+    expect(deriveConstraints(ruleFactsOf({ ...ok, streamUpload: true }, ctx)).streamUpload.locked).toBe(false);
+  });
+});
+
+describe("RoomEditor 直传锁用开启态约束", () => {
+  it("源码取 streamUpload:true 的约束,而不是当前值", () => {
+    const src = readFileSync(join(__dirname, "../../packages/web/src/modals/RoomEditor.tsx"), "utf8");
+    expect(src).toContain("streamUpload: true }, ctx)).streamUpload");
+    expect(src).toContain("lock={form.streamUpload ? undefined : streamUploadEnableLock}");
+  });
+});
+
 describe("task-only room save judges rolling as if the rule exists (#284)", () => {
   const taskOnly = () => formFromRoom({
     room: "1", platform: "douyin", processing: null,

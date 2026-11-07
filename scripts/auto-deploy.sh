@@ -139,7 +139,7 @@ update_node() {
     if [[ ! -f packages/web/dist/index.html ]]; then
       sync_web=0
       say "  [$node] packages/web/dist/index.html 缺失 → 跳过 web 同步(仅更新 bundle)"
-    elif [[ -n "$(find packages/web/src -type f -newer packages/web/dist/index.html -print -quit 2>/dev/null)" ]]; then
+    elif [[ -n "$(find packages/web -path packages/web/dist -prune -o -type f -newer packages/web/dist/index.html -print -quit 2>/dev/null)" ]]; then
       sync_web=0
       say "  [$node] packages/web/dist 比 src 旧 → 跳过 web 同步(先 cd packages/web && pnpm build)"
     fi
