@@ -135,12 +135,16 @@ update_node() {
   if wait_idle "$node" "$MAXS"; then
     if [[ $DRY == 1 ]]; then say "  [dry] 跳过"; return 0; fi
     local sync_web=1
-    local remote_cmd="ROOT=\$(systemctl show -p WorkingDirectory --value video-screenshot); OWNER=\$(systemctl show -p User --value video-screenshot); test -n \"\$ROOT\" && test -n \"\$OWNER\" && sudo cp /tmp/drec-new.mjs \"\$ROOT/dist/douyin-rec.mjs\""
-    if [[ -f packages/web/dist/index.html ]]; then
-      remote_cmd+=" && sudo rsync -a --delete /tmp/drec-web-new/ \"\$ROOT/web/dist/\" && sudo chown -R \"\$OWNER:\$OWNER\" \"\$ROOT/web/dist\""
-    else
+    local remote_cmd="ROOT=\$(systemctl show -p WorkingDirectory --value video-screenshot); OWNER=\$(systemctl show -p User --value video-screenshot); GROUP=\$(id -gn \"\$OWNER\" 2>/dev/null || echo \"\$OWNER\"); test -n \"\$ROOT\" && test -n \"\$OWNER\" && sudo cp /tmp/drec-new.mjs \"\$ROOT/dist/douyin-rec.mjs\""
+    if [[ ! -f packages/web/dist/index.html ]]; then
       sync_web=0
       say "  [$node] packages/web/dist/index.html 缺失 → 跳过 web 同步(仅更新 bundle)"
+    elif [[ -n "$(find packages/web/src -type f -newer packages/web/dist/index.html -print -quit 2>/dev/null)" ]]; then
+      sync_web=0
+      say "  [$node] packages/web/dist 比 src 旧 → 跳过 web 同步(先 cd packages/web && pnpm build)"
+    fi
+    if [[ $sync_web == 1 ]]; then
+      remote_cmd+=" && sudo rsync -a --delete /tmp/drec-web-new/ \"\$ROOT/web/dist/\" && sudo chown -R \"\$OWNER:\$GROUP\" \"\$ROOT/web/dist\""
     fi
     remote_cmd+=" && sudo systemctl restart video-screenshot && sleep 3 && systemctl is-active video-screenshot && grep -c _node-id \"\$ROOT/dist/douyin-rec.mjs\""
     if ! scp -q dist/douyin-rec.mjs "$target":/tmp/drec-new.mjs; then
