@@ -14,15 +14,21 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
-- [~] **T-163 Queue 页信息架构重做:一条任务流 + 步骤流水线(用户需求,分支 `feat/queue-redesign`,2026-11-06)**
-  — 用户反馈「看不出来是队列,也看不出来干了什么/在干什么」。旧页把数据拆成 9 段纵向面板,
-  同一场任务在不同阶段跳到不同区块,没有一条可读的任务流。
-  **做什么**: 收敛为概览带(计数 + 节点健康)+ 五个有序分组(需要你处理/正在跑/排队中/等收播/最近完成);
-  每条任务一行步骤流水线(✓ done / ▶ 当前 / ○ next / - skipped),当前步带已跑时长与 ETA;
-  已完成任务给结论(成品时长/BV/完成时间);失败行一行写明原因;本机节点队列与日志/确认动作保留。
-  **为什么**: 信息架构而不是字段缺失 —— 数据都在 `QueueItemDTO`,缺的是把它们拼成一条流。
-  **验收**: 新增分组/流水线/摘要纯函数(`queue-flow.ts` / `queue-summary.ts`)配单测;
-  既有 queue-live / queue-chain 测试不退化;web build + typecheck + i18n 中英对称通过;版本 bump 0.0.316。
+- [~] **T-154 节点页与管理节点合并为一页，节点卡直接展示 IP、快速入口与管理操作（issue [#549](https://github.com/fuyucn/douyin-rec/issues/549) → PR [#550](https://github.com/fuyucn/douyin-rec/pull/550)，分支 `codex/issue-549-nodes-manage-inline`，rebase 到 fdbfb8ca，2026-11-06）**
+  — `/nodes` 当前只展示拓扑，增删改/排序/测试连接都藏在「管理节点」滑入浮层里，两处信息割裂，节点卡上还看不到 host。
+  **做什么**: 节点卡直接显示 host/kind/dataRoot/能力标签与编辑/删除/测试连接/日志入口（配置了 apiUrl 的渲染跳转链接），拖拽排序在节点卡列表生效；`WorkersPanel` 自节点页退场（Rooms/Hub 页不动）；复用 `WorkerDialog`/`ConfirmDialog`。
+  **验收**: 节点卡上可完成全部节点管理操作；local 卡无删除/编辑 kind；`test/web/nodes-page.test.ts` 补展示模型用例；全量 pnpm test / typecheck / web build / bundle 通过。
+  **版本**: 撞号顺延 0.0.316 → 0.0.317（#551 已占 0.0.316）。
+- [~] **T-156 房间列表与处理队列减法 pass：决策优先级重排、状态词统一、图标形态保留（issue [#552](https://github.com/fuyucn/douyin-rec/issues/552)）**（2026-11-06）
+  — rooms 首页「方式」列图标不可读、筛选器与指标错位；queue 需处理排第 7 层、空闲态 5 个空容器、状态词 4 套说法。设计原型 dev/rooms-redesign-proto.html 与 dev/queue-redesign-proto.html 已经人确认。
+  **做什么**: rooms 方式列文字 chip + 筛选 chip 化 + 告警一条一条 + 列重排（定时降行）+ 640-1023px 保留表格 + 节点入口改导航；queue 需处理进首屏 + 空闲合并一行 + 本机队列折叠 + 状态词唯一口径。**红线**：图标操作按钮、受管只读、判定口径全部保留。
+  **验收**: 见 issue；全量 pnpm test / typecheck / web build / i18n / bundle 通过。
+- [~] **T-157 房间详情页重排：动态状态进首屏、配置按四域补齐重组（issue [#553](https://github.com/fuyucn/douyin-rec/issues/553)）**（2026-11-06）
+  — 详情页答不出「这场跑到哪了」，运行树默认折叠；配置散在 5 个 InfoGroup 且缺约 15 个编辑器字段（标题模板/合集 ID/每 P 大小/outputFormatLock 等）。设计原型 dev/room-detail-redesign-proto.html 已经人确认（52 字段清单已验证）。
+  **做什么**: 当前场次运行树默认展开进首屏 + 直传时间线提为一等区块 + 配置按录制/处理/投稿/通知与清理四域重组补齐、未设置显式标注。**红线**：全部图标操作入口与受管只读语义保留。
+  **验收**: 见 issue；全量门禁通过。
+- [~] **T-163 Queue 页信息架构重做（已由 PR [#551](https://github.com/fuyucn/douyin-rec/pull/551) 合并，2026-11-07 实际收口）**
+  — 与 T-156 的 queue 部分重叠：#552 实现时基于 #551 产物只做视觉走查残余差异（dev/queue-visual-review.html 的 9 条修订）。
 - [~] **T-126 worker 按 Release 部署:main 为 stable,开发分支按需 prerelease（issue [#392](https://github.com/fuyucn/douyin-rec/issues/392)）**（2026-10-29）
   — worker 升级靠手动换文件,流程不在仓库里;已有安装脚本和发布流程但从未发过 Release。
   **做什么**: 发布流程按 tag 所指提交是否在 main 区分正式版/prerelease,且不覆盖已有 Release;安装脚本升级前检查无录制/上传、升级后核对版本;文档与 AGENTS 写明流程。
