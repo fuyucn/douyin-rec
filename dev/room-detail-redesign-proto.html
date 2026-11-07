@@ -567,7 +567,7 @@ body.is-managed .fold .chev{margin-left:auto}
           <span class="chev" aria-hidden="true"></span>
         </summary>
         <div class="fold-body">
-          <p class="fold-note">专属 Webhook、通知开关口径与三个清理开关；源录像里的 .xml / .ass 永不删到最后一份。</p>
+          <p class="fold-note">专属推送地址、通知开关口径与三个清理开关；源录像里的 .xml / .ass 永不删到最后一份。</p>
           <dl class="cfg-grid" data-fields="finish"></dl>
         </div>
       </details>
@@ -623,7 +623,7 @@ body.is-managed .fold .chev{margin-left:auto}
     <span class="s"><span class="dot warn"></span>需人工处理</span>
     <span class="s"><span class="dot off"></span>已停用</span>
   </section>
-  <p class="footnote">设计原型 · 示意数据。主播名、房间号（demo-a）、节点（vps-1 / vps-2 / controller）、稿件号（DEMO-0001 占位）、地址、日期、时长、字节与事件时间均为占位，不含任何真实主机、IP、房间号、主播名或凭据；Cookie 与 Webhook 原文按现有口径不回显。配置字段取自 RoomEditor 四步 tab、room-editor-form.ts 的 RoomForm 与 core/api-types.ts 的 RoomDTO / HubRuleDTO，未设置项显式写「未设置」；示意值不构成一份经过后端校验的组合。亮暗切换与 /rooms、/nodes、/queue 原型共用 <span class="mono">drec-proto-theme</span>；本页不改动其它文件。</p>
+  <p class="footnote">设计原型 · 示意数据。主播名、房间号（demo-a）、节点（vps-1 / vps-2 / controller）、稿件号（DEMO-0001 占位）、地址、日期、时长、字节与事件时间均为占位，不含任何真实主机、IP、房间号、主播名或凭据；登录态与推送地址原文按现有口径不回显。配置字段取自 RoomEditor 四步 tab、room-editor-form.ts 的 RoomForm 与 core/api-types.ts 的 RoomDTO / HubRuleDTO，未设置项显式写「未设置」；示意值不构成一份经过后端校验的组合。亮暗切换与 /rooms、/nodes、/queue 原型共用 <span class="mono">drec-proto-theme</span>；本页不改动其它文件。</p>
 </main>
 
 <script>
@@ -704,10 +704,10 @@ body.is-managed .fold .chev{margin-left:auto}
       { k:"partSizeMiBStored", label:"每 P 大小存储状态", value:"未保存 · 留空继承默认" }
     ],
     finish: [
-      { k:"webhook", label:"通知 Webhook", value:"已设置（不回显）", note:"凭证不回显；留空 = 用全局 webhook" },
-      { k:"hasWebhook", label:"Webhook 存储状态", value:"已设置", note:"DTO 只给是否已设置标记" },
-      { k:"webhookClear", label:"清除已保存 Webhook", value:"未勾选", note:"勾选后保存为 null" },
-      { k:"notifyToggles", label:"通知开关（全局）", value:"开播 / 收播 / 合成 / hub / 出错 · 站内提醒开", note:"全局 NotifWebhookToggles，不是房间字段；房间只覆盖推送地址" },
+      { k:"pushUrl", label:"通知推送地址", value:"已设置（不回显）", note:"凭据不回显；留空 = 用全局配置" },
+      { k:"hasPushUrl", label:"推送地址存储状态", value:"已设置", note:"DTO 只给是否已设置标记" },
+      { k:"pushUrlClear", label:"清除已保存推送地址", value:"未勾选", note:"勾选后保存为 null" },
+      { k:"notifyToggles", label:"通知开关（全局）", value:"开播 / 收播 / 合成 / hub / 出错 · 站内提醒开", note:"全局通知开关 DTO，不是房间字段；房间只覆盖推送地址" },
       { k:"clStageSourceAfterMerge", label:"合并后删存档源 .ts", value:"开" },
       { k:"clSourceAfterDone", label:"完成后删源节点录制", value:"开", note:"源录像目录的 .xml / .ass 永不删到最后一份" },
       { k:"clKeepArchive", label:"投稿后保留存档", value:"开", note:"关闭 = 上传成功后删除存档里的合成 mp4" }
@@ -716,8 +716,8 @@ body.is-managed .fold .chev{margin-left:auto}
 
   /* RoomForm 字段全集 + DTO 派生字段：缺一个就在控制台报出（自审守卫） */
   var REQUIRED_KEYS = [
-    "room","name","quality","engine","segmentSec","schedule","webhook","hasWebhook","webhookClear",
-    "danmu","useCookie","procEnabled","uploadOn","method","streamUpload","streamUploadSpool",
+    "room","name","quality","engine","segmentSec","schedule","pushUrl","hasPushUrl","pushUrlClear",
+    "danmu","useLoginState","procEnabled","uploadOn","method","streamUpload","streamUploadSpool",
     "mergeSegments","burnDanmu","burnLivechat","tsDirect","outputFormat","outputFormatLock",
     "uploadPrivate","tid","tag","desc","titleTemplate","submissionTitleTemplate","partTitleTemplate",
     "seasonSectionId","seasonSectionIdStored","partSizeMiB","partSizeMiBStored",
