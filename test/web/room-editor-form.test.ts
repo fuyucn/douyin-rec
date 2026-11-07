@@ -18,6 +18,26 @@ describe("factsOf carries the room's rule presence (#284)", () => {
   });
 });
 
+describe("worker 直传开关的锁按「打开后」假设计算(T-160/#547)", () => {
+  const f = () => ({ ...formFromRoom({ room: "1", platform: "douyin", processing: null } as never), uploadOn: true, method: "rolling" as const });
+  it("无效规则(多节点)即便当前是关,开启也被锁", () => {
+    const bad = { ...f(), workers: ["a", "b"], streamUpload: false };
+    expect(deriveConstraints(ruleFactsOf({ ...bad, streamUpload: true }, ctx)).streamUpload.locked).toBe(true);
+  });
+  it("有效规则(单节点)可开启", () => {
+    const ok = { ...f(), workers: ["a"], streamUpload: false };
+    expect(deriveConstraints(ruleFactsOf({ ...ok, streamUpload: true }, ctx)).streamUpload.locked).toBe(false);
+  });
+});
+
+describe("RoomEditor 直传锁用开启态约束", () => {
+  it("源码取 streamUpload:true 的约束,而不是当前值", () => {
+    const src = readFileSync(join(__dirname, "../../packages/web/src/modals/RoomEditor.tsx"), "utf8");
+    expect(src).toContain("streamUpload: true }, ctx)).streamUpload");
+    expect(src).toContain("lock={form.streamUpload ? undefined : streamUploadEnableLock}");
+  });
+});
+
 describe("task-only room save judges rolling as if the rule exists (#284)", () => {
   const taskOnly = () => formFromRoom({
     room: "1", platform: "douyin", processing: null,
@@ -271,20 +291,41 @@ describe("新增 = 编辑同一弹窗:create 与 edit 共用一条提交路径",
     expect(r.payload.processing).toBeDefined();
   });
 
-  it("worker(无 editPipeline)create/edit 都不发 processing(规则只在主控生效)", () => {
-    const c = submitPayload({ ...blankForm(plat), room: "100001" }, ctx, { mode: "create", withProcessing: false });
+  it("worker(无 editPipeline)create/edit 都不发 processing,直传写任务字段", () => {
+    const workerCtx: RoomContext = { ...ctx, writesRule: false };
+    const c = submitPayload({ ...blankForm(plat), room: "100001" }, workerCtx, { mode: "create", withProcessing: false });
     if (!c.ok) throw new Error("expected ok");
     expect("processing" in c.payload).toBe(false);
-    expect(c.payload.recording).toBeDefined();
+    expect(c.payload.recording).toMatchObject({ streamUpload: false, streamUploadSpool: true });
 
-    const e = submitPayload(formFromRoom(mkRoom()), ctx, { mode: "edit", withProcessing: false });
+    const e = submitPayload(formFromRoom(mkRoom({ recording: { streamUpload: true } })), workerCtx, { mode: "edit", withProcessing: false });
     if (!e.ok) throw new Error("expected ok");
     expect("processing" in e.payload).toBe(false);
+    expect(e.payload.recording).toMatchObject({ streamUpload: true, streamUploadSpool: true });
     // worker 仍能写录制半边
     expect(e.payload.recording).toMatchObject({ quality: "origin", engine: "ffmpeg" });
   });
 
-  it("worker 编辑直播直传房间不回写规则拥有的字段;master 仍按表单语义写回", () => {
+  it("worker create with streamUpload enabled writes the task field", () => {
+    const workerCtx: RoomContext = { ...ctx, hasRule: false, writesRule: false };
+    const form = { ...blankForm(plat), room: "100001", streamUpload: true };
+    const result = submitPayload(form, workerCtx, { mode: "create", withProcessing: false });
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.payload.recording).toMatchObject({ streamUpload: true, streamUploadSpool: true });
+    expect("processing" in result.payload).toBe(false);
+  });
+
+  it("worker edit turning streamUpload off writes false", () => {
+    const workerCtx: RoomContext = { ...ctx, hasRule: false, writesRule: false };
+    const room = mkRoom({ recording: { streamUpload: true }, processing: null });
+    const form = { ...formFromRoom(room), streamUpload: false };
+    const result = submitPayload(form, workerCtx, { mode: "edit", withProcessing: false });
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.payload.recording).toMatchObject({ streamUpload: false });
+    expect("processing" in result.payload).toBe(false);
+  });
+
+  it("worker 编辑直播直传房间回写任务字段;master 仍按规则语义写回", () => {
     const processing: NonNullable<RoomDTO["processing"]> = {
       enabled: true, workers: ["vps1"], requires: [],
       pipeline: {
@@ -302,8 +343,7 @@ describe("新增 = 编辑同一弹窗:create 与 edit 共用一条提交路径",
     const workerForm = formFromRoom(workerRoom);
     const worker = submitPayload(workerForm, workerCtx, { mode: "edit", withProcessing: false });
     if (!worker.ok) throw new Error("expected worker ok");
-    expect(worker.payload.recording).not.toHaveProperty("streamUpload");
-    expect(worker.payload.recording).not.toHaveProperty("streamUploadSpool");
+    expect(worker.payload.recording).toMatchObject({ streamUpload: true, streamUploadSpool: true });
     expect(worker.payload.recording).toMatchObject({ quality: "origin", engine: "ffmpeg" });
     expect("processing" in worker.payload).toBe(false);
 
@@ -340,7 +380,7 @@ describe("新增 = 编辑同一弹窗:create 与 edit 共用一条提交路径",
     expect(payload.recording).not.toHaveProperty("streamUploadSpool");
   });
 
-  it("worker 即使有陈旧本地规则也不写回直播直传两键", () => {
+  it("worker 即使有陈旧本地规则也按任务字段写回直播直传两键", () => {
     const processing: NonNullable<RoomDTO["processing"]> = {
       enabled: true, workers: ["vps1"], requires: [],
       pipeline: {
@@ -353,8 +393,7 @@ describe("新增 = 编辑同一弹窗:create 与 edit 共用一条提交路径",
     const workerCtx: RoomContext = { ...ctx, hasRule: true, writesRule: false, deliveryTouched: true };
     const worker = submitPayload(formFromRoom(room), workerCtx, { mode: "edit", withProcessing: false });
     if (!worker.ok) throw new Error("expected worker ok");
-    expect(worker.payload.recording).not.toHaveProperty("streamUpload");
-    expect(worker.payload.recording).not.toHaveProperty("streamUploadSpool");
+    expect(worker.payload.recording).toMatchObject({ streamUpload: true, streamUploadSpool: true });
     expect("processing" in worker.payload).toBe(false);
   });
 

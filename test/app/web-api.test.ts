@@ -2623,6 +2623,19 @@ describe("POST /api/rooms(新建房间)", () => {
     s.close();
   });
 
+  it("worker(hubEnabled:false)无规则创建直播直传任务 → 201 且任务 streamUpload=true", () => {
+    const s = new TaskStore(":memory:");
+    const hub = hubDeps("rooms-create-w3-");
+    const a = makeApi({ store: s, manager: new MockManager(), ...hub, hubEnabled: false });
+    const res = a.createRoom({ recording: { room: "123456", streamUpload: true } });
+    expect(res.status).toBe(201);
+    const dto = res.body as RoomShape;
+    expect(dto.processing).toBeNull();
+    expect(s.getTask(dto.recording!.taskId)!.streamUpload).toBe(true);
+    expect(existsSync(ruleFile(hub.hubDir as string))).toBe(false);
+    s.close();
+  });
+
   it("PUT 在节点上带 processing → 400,且录制半边一字未改(闸门在任何写之前)", () => {
     const s = new TaskStore(":memory:");
     const hub = hubDeps("rooms-put-worker-");

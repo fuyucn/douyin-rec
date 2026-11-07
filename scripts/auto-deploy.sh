@@ -134,9 +134,34 @@ update_node() {
   say "[$node] 更新 bundle"
   if wait_idle "$node" "$MAXS"; then
     if [[ $DRY == 1 ]]; then say "  [dry] 跳过"; return 0; fi
-    scp -q dist/douyin-rec.mjs "$target":/tmp/drec-new.mjs \
-      && ssh -o ConnectTimeout=10 "$target" 'sudo cp /tmp/drec-new.mjs /home/ubuntu/drec/dist/douyin-rec.mjs && sudo systemctl restart video-screenshot && sleep 3 && systemctl is-active video-screenshot && grep -c _node-id /home/ubuntu/drec/dist/douyin-rec.mjs' \
-      && say "  ✓ $node 已更新" || { say "  ✗ $node 更新失败"; note "$node 未更新"; }
+    local sync_web=1
+    local remote_cmd="ROOT=\$(systemctl show -p WorkingDirectory --value video-screenshot); OWNER=\$(systemctl show -p User --value video-screenshot); GROUP=\$(id -gn \"\$OWNER\" 2>/dev/null || echo \"\$OWNER\"); test -n \"\$ROOT\" && test -n \"\$OWNER\" && sudo cp /tmp/drec-new.mjs \"\$ROOT/dist/douyin-rec.mjs\""
+    if [[ ! -f packages/web/dist/index.html ]]; then
+      sync_web=0
+      say "  [$node] packages/web/dist/index.html 缺失 → 跳过 web 同步(仅更新 bundle)"
+    elif [[ -n "$(find packages/web \
+        -path packages/web/node_modules -prune -o \
+        -path packages/web/dist -prune -o \
+        -path packages/web/.vite -prune -o \
+        -type f -newer packages/web/dist/index.html -print -quit 2>/dev/null)" ]]; then
+      sync_web=0
+      say "  [$node] packages/web/dist 比 src 旧 → 跳过 web 同步(先 cd packages/web && pnpm build)"
+    fi
+    if [[ $sync_web == 1 ]]; then
+      remote_cmd+=" && sudo rsync -a --delete /tmp/drec-web-new/ \"\$ROOT/web/dist/\" && sudo chown -R \"\$OWNER:\$GROUP\" \"\$ROOT/web/dist\""
+    fi
+    remote_cmd+=" && sudo systemctl restart video-screenshot && sleep 3 && systemctl is-active video-screenshot && grep -c _node-id \"\$ROOT/dist/douyin-rec.mjs\""
+    if ! scp -q dist/douyin-rec.mjs "$target":/tmp/drec-new.mjs; then
+      say "  ✗ $node 更新失败(bundle 上传失败)"; note "$node 未更新"; return 0
+    fi
+    if [[ $sync_web == 1 ]] && ! rsync -az --delete packages/web/dist/ "$target":/tmp/drec-web-new/; then
+      say "  ✗ $node 更新失败(web 上传失败)"; note "$node 未更新"; return 0
+    fi
+    if ssh -o ConnectTimeout=10 "$target" "$remote_cmd"; then
+      if [[ $sync_web == 1 ]]; then say "  ✓ $node 已更新"; else say "  ✓ $node bundle 已更新(web 未同步)"; fi
+    else
+      say "  ✗ $node 更新失败"; note "$node 未更新"
+    fi
   else
     say "  ✗ $node 等待超时 → 跳过(不改动)"; note "$node 未更新(超时)"
   fi

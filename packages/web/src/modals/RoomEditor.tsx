@@ -129,6 +129,10 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
   };
   const facts = ruleFactsOf(form, ctx);
   const c = deriveConstraints(facts);
+  // 开关锁必须按「打开后」的假设算:zeroDiskRuleError(false) 恒放行,用当前值算会永远不锁。
+  const streamUploadEnableLock = ctx.hasRule
+    ? deriveConstraints(ruleFactsOf({ ...form, streamUpload: true }, ctx)).streamUpload
+    : undefined;
   // Re-settle the upload method after every change: turning burn on / adding nodes can invalidate it.
   const update = (patch: Partial<RoomForm>): void =>
     setForm((f) => {
@@ -343,10 +347,22 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                                      checked={form.useCookie} onChange={(useCookie) => update({ useCookie })} lock={c.cookie} />
                         </section>
                       ) : null}
-                      {/* Archive format is a task field, so a worker keeps it; the master shows it under process. */}
+                      {/* Live upload and archive format are task fields, so a worker keeps them. */}
+                      {!caps.editPipeline && hasRecording && (
+                        <ToggleRow
+                          icon={<ModeLogo kind="zero-disk" className="w-[15px] h-[15px]" />}
+                          label={t("room.editor.zeroDisk")}
+                          hint={t("room.editor.zeroDiskHint")}
+                          checked={form.streamUpload}
+                          onChange={(streamUpload) => update({ streamUpload, ...(streamUpload ? { streamUploadSpool: true } : {}) })}
+                          lock={form.streamUpload ? undefined : streamUploadEnableLock}
+                          lockedChecked={false}
+                          badge={<ExperimentalBadge id="stream-upload" />}
+                        />
+                      )}
                       {!caps.editPipeline && outputFormatField}
                       {!caps.editPipeline && (
-                        <p className="text-xs text-muted">{t("room.editor.deliveryByMaster")}</p>
+                        <p className="text-xs text-muted">{t("room.editor.rollingByMaster")}</p>
                       )}
                     </>
                   )}

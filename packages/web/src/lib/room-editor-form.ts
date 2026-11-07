@@ -220,13 +220,16 @@ export function payloadFromForm(f: RoomForm, ctx: RoomContext): PayloadResult {
   // 避免「改了但后端忽略」的静默无效。与表单依赖锁(投稿恒 mp4,`stored.outputFormat`)是两把锁,都要遵守。
   const backendFormatLocked = taskOutputFormatLock({ outputFormatLock: f.outputFormatLock }).locked;
   const trimOrUndef = (s: string): string | undefined => s.trim() || undefined;
-  // Zero-disk fields are owned by the rule: only a save that writes it may update them.
-  // Write on an existing rule, a newly selected rolling mode, or an explicit delivery edit;
-  // otherwise omit (PATCH = keep) so stale values are not silently rewritten.
-  const writesZeroDisk = ctx.writesRule
-    && (ctx.hasRule || stored.mode === "rolling" || ctx.deliveryTouched);
+  // On the master, zero-disk is a rolling sub-mode owned by the rule: write it only when the rule
+  // is being saved (existing rule, newly selected rolling, or an explicit delivery edit); otherwise
+  // omit (PATCH = keep). A worker has no rule to derive rolling from, so its task field is the
+  // editable source of truth and is always written from the form.
+  const writesZeroDisk = !ctx.writesRule || ctx.hasRule || stored.mode === "rolling" || ctx.deliveryTouched;
   const zeroDisk = writesZeroDisk
-    ? { streamUpload: stored.mode === "rolling" && f.streamUpload, streamUploadSpool: true }
+    ? {
+        streamUpload: !ctx.writesRule ? f.streamUpload : stored.mode === "rolling" && f.streamUpload,
+        streamUploadSpool: true,
+      }
     : {};
   const recording: RoomPayload["recording"] = ctx.hasRecording
     ? {

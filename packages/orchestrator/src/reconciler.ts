@@ -553,14 +553,15 @@ export class Reconciler {
       }
       if (cfg.workers?.length) {
         const before = b.members.length;
+        const recordedBy = b.members.map((m) => m.workerId);
         b.members = b.members.filter((m) => isWorkerTargeted(cfg, m.workerId));
-        // 显式勾选却过滤到一个不剩:通常是规则里留着已删除的 worker id(API 已禁止新增/删除引用,
-        // 但手改文件绕过)。不静默 —— 否则表现为「录了却永远不合并/上传」。每个 streamKey 只报一次。
+        // 显式勾选却过滤到一个不剩:本场录制节点不在规则勾选内(勾选或节点 id 可能已变)。
+        // 不静默 —— 否则表现为「录了却永远不合并/上传」。每个 streamKey 只报一次。
         if (before > 0 && b.members.length === 0 && !this.warnedGhostWorkers.has(b.streamKey)) {
           this.warnedGhostWorkers.add(b.streamKey);
           console.warn(
-            `[reconciler] ${b.streamKey} 的规则 workers=[${cfg.workers.join(", ")}] 在节点清单里没有对应成员` +
-              `(疑似已删除的 worker id),本场不会进入后处理 —— 请检查该房间的 hub 规则。`,
+            `[reconciler] ${b.streamKey} 的规则 workers=[${cfg.workers.join(", ")}] 与本场实际录制节点 ` +
+              `[${recordedBy.join(", ")}] 不相交(规则勾选或节点 id 可能已变),本场不会进入后处理 —— 请检查该房间的 hub 规则。`,
           );
         }
       }

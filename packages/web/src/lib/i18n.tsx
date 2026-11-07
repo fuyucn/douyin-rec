@@ -247,7 +247,7 @@ const DICT = {
       addSubmit: "添加", addedPaused: "房间已添加(默认暂停,手动启用录制)",
       addExists: "该房间已存在,请在房间页编辑",
       editor: {
-        title: "编辑房间", roomRequired: "请填写直播间地址", hubOnly: "由主控配置", deliveryByMaster: "直播直传 / 边录边传 / 上传由主控配置", after: "录完之后", when: "什么时候录", whenPlaceholder: "留空 = 全天,如 20:00-02:00",
+        title: "编辑房间", roomRequired: "请填写直播间地址", hubOnly: "由主控配置", rollingByMaster: "边录边传 / 投稿由主控配置", after: "录完之后", when: "什么时候录", whenPlaceholder: "留空 = 全天,如 20:00-02:00",
         where: "在哪录", whereHint: "都不选 = 全部节点", timing: "上传时机",
         timingAfter: "收播后", timingRolling: "边录边传", timingNode: "节点直传", timingNodeHint: "优先由录制节点本地处理并上传,不可用时回退主控(节点需装 biliup + B站 cookie);需烧录弹幕/聊天版的房间不适用",
         timingNodeMergeHint: "已选合并:节点可将录像分段分组合并", timingNodeSplitHint: "逐段上传:符合条件的分段各为一个分 P,短碎片可能被过滤",
@@ -850,7 +850,7 @@ const DICT = {
       addSubmit: "Add", addedPaused: "Room added (paused; start recording manually)",
       addExists: "This room already exists; edit it from the room page",
       editor: {
-        title: "Edit room", roomRequired: "Enter the live room URL", hubOnly: "Configured by the master", deliveryByMaster: "Live and rolling upload are configured on the master", after: "After recording", when: "When", whenPlaceholder: "Empty = all day, e.g. 20:00-02:00",
+        title: "Edit room", roomRequired: "Enter the live room URL", hubOnly: "Configured by the master", rollingByMaster: "Rolling upload and submission are configured on the master", after: "After recording", when: "When", whenPlaceholder: "Empty = all day, e.g. 20:00-02:00",
         where: "Where", whereHint: "None selected = all nodes", timing: "Upload timing",
         timingAfter: "After broadcast", timingRolling: "Rolling", timingNode: "From node", timingNodeHint: "Prefer local processing and upload on the recording node; fall back to master if unavailable (node needs biliup + a Bilibili cookie); not applicable when danmu/chat burn-in is on",
         timingNodeMergeHint: "Merge selected: the node may combine recorded segments into groups", timingNodeSplitHint: "Per-segment upload: eligible segments become separate parts; short fragments may be filtered",

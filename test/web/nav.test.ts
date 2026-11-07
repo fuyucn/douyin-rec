@@ -55,8 +55,8 @@ describe("App routes (plans/047 §4.1)", () => {
     expect(EDITOR).toContain("void api.getPlatforms()");
     expect(EDITOR).toContain("}, [caps.nodes]);");
   });
-  it("worker 录制 tab 说明交付配置在主控", () => {
-    expect(EDITOR).toContain('t("room.editor.deliveryByMaster")');
+  it("worker 录制 tab 说明边录边传与投稿配置在主控", () => {
+    expect(EDITOR).toContain('t("room.editor.rollingByMaster")');
   });
   it("/tasks 重定向组件保留 search", () => {
     const body = APP.split("function TasksRedirect(): ReactNode {")[1]?.split("\n}")[0] ?? "";
