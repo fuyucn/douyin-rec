@@ -103,6 +103,13 @@ compose 固定跑 `task serve --port 7860 --hub`，即 **master 模式**：自�
 `<DATA_ROOT>/config/hub.config.json` 编排 worker；Web UI 端口绑在 tailscale sidecar 上
 （默认 `0.0.0.0:7860`）。VPS ssh key 挂载自 `./remote/vps.key`（只读）。
 
+### worker 的部署与升级（统一入口 = 安装脚本）
+
+worker 用 `scripts/install-worker.sh` 安装和升级,详见 `docs/worker-install.md`「版本与升级」:
+默认装 stable(main 的正式 Release),`--version x.y.z` 装指定版本。要部署非 main 的提交时,先给该分支发
+prerelease(版本须是 main 上未用过的 `x.y.z`),再 `--version` 安装,部署后报告「节点、版本、分支、提交」。
+升级前脚本会检查节点无录制/上传(与部署预检同口径),不要用 `--force` 绕过,除非用户明确 override。
+
 ### Docker worker（VPS / 额外节点）
 
 worker **不要带 `--hub`**：`node dist/douyin-rec.mjs task serve --port 7860`。数据根

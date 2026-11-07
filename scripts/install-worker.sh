@@ -35,6 +35,8 @@ PACKAGES_EXPLICIT=0
 ROLE_EXPLICIT=0
 DRY_RUN=0
 START=1
+FORCE=0
+CHECK_BUSY=0
 # 节点侧上传(experimental,见 plans/027):装 biliup 二进制到 <root>/bin。默认关(worker 保持轻量)。
 WITH_UPLOAD="${DREC_WITH_UPLOAD:-0}"
 
@@ -58,6 +60,9 @@ Options:
   --no-start              Install without starting the service
   --with-upload           Also install biliup (needed for node-side upload, experimental)
   --dry-run               Validate arguments and archive without writing to the system
+  --check-busy            Only check whether the running node is recording/uploading (exit 1 = busy)
+  --verify-version <a> <b> Internal: exit 0 if reported version <b> matches installed <a>
+  --force                 Install even if the running node is recording or uploading
   -h, --help              Show help
 EOF
 }
@@ -95,6 +100,15 @@ need_value() {
   [ "$#" -ge 2 ] || fail "$1 requires a value"
 }
 
+# The API reports "<x.y.z>-<6 hex sha>" (a bundle built without git says "-dev" and is rejected).
+# Succeeds only for exactly the installed version, bare or with that sha suffix.
+version_ok() {
+  _want="$1"; _got="$2"
+  [ "$_got" = "$_want" ] && return 0
+  case "$_got" in "$_want"-*) ;; *) return 1 ;; esac
+  printf '%s' "${_got#"$_want"-}" | grep -Eq '^[0-9a-f]{6}$'
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --version) need_value "$@"; VERSION="$2"; shift 2 ;;
@@ -111,6 +125,9 @@ while [ "$#" -gt 0 ]; do
     --with-upload) WITH_UPLOAD=1; shift ;;
     --no-start) START=0; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --check-busy) CHECK_BUSY=1; shift ;;
+    --force) FORCE=1; shift ;;
+    --verify-version) [ "$#" -ge 3 ] || fail "--verify-version needs <installed> <reported>"; version_ok "$2" "$3"; exit $? ;;
     -h|--help) usage; exit 0 ;;
     *) fail "Unknown argument: $1" ;;
   esac
@@ -221,7 +238,7 @@ case "$RAW_ARCH" in
   *) fail "Unsupported architecture: $RAW_ARCH (supported: amd64 / arm64)" ;;
 esac
 
-if [ "$DRY_RUN" -eq 0 ]; then
+if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_BUSY" -eq 0 ]; then
   [ "$OS" = "Linux" ] || fail "install-worker.sh currently supports Linux only"
   [ "$(id -u)" -eq 0 ] || fail "Root privileges required; run with sudo sh -s -- ..."
   command -v systemctl >/dev/null 2>&1 || fail "systemctl not found"
@@ -262,6 +279,85 @@ case "$API_HOST" in
   *:*) API_URL="http://[${API_HOST}]:${PORT}" ;;
   *) API_URL="http://${API_HOST}:${PORT}" ;;
 esac
+
+# Upgrade guard: restarting the service kills a recording in progress, so refuse while the
+# node reports a task recording or an upload job running. An unreachable API means the node
+# is not running (fresh install / stopped service) and is not busy. Unknown answers are busy.
+# The helper writes only the final reason on stdout; diagnostics are never mistaken for a reason.
+node_busy_reason() {
+  # Resolve to an absolute path first. NODE_BIN may be the bare name "node" (that is what the
+  # systemd unit needs), and a bare name is not findable under `env -i` or when the caller
+  # deliberately strips node from PATH — both must mean "cannot check", not "idle".
+  _n="${NODE_BIN:-node}"
+  case "$_n" in
+    /*) ;;
+    *) _n="$(command -v "$_n" || true)" ;;
+  esac
+  [ -n "$_n" ] || { printf 'node missing, cannot check\n'; return 0; }
+  _out="$("$_n" -e '
+    const http = require("node:http");
+    const api = process.argv[1];
+    const timeoutMs = Number(process.env.DREC_BUSY_TIMEOUT_MS) || 10000;
+    const uploadKinds = ["biliup", "upload-part", "upload-prep", "reconcile-part"];
+    const request = (path) => new Promise((resolve) => {
+      const req = http.get(api + path, { timeout: timeoutMs }, (res) => {
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => { body += chunk; });
+        res.on("end", () => resolve({ status: res.statusCode, body }));
+      });
+      req.on("timeout", () => req.destroy(new Error("timeout")));
+      req.on("error", (err) => resolve({ status: 0, error: err.code || err.message }));
+    });
+    const failClosed = (reason) => { console.log(reason); process.exit(0); };
+    const parseQueue = (answer) => {
+      if (answer.status === 404) return 0;
+      if (answer.status !== 200) return failClosed("upload queue unavailable (HTTP " + answer.status + ")");
+      let running;
+      try { running = JSON.parse(answer.body).running; } catch { return failClosed("unreadable upload queue"); }
+      if (!running || typeof running !== "object") return failClosed("unreadable upload queue");
+      let total = 0;
+      for (const kind of uploadKinds) {
+        const count = running[kind] ?? 0;
+        if (!Number.isInteger(count) || count < 0) return failClosed("unreadable upload queue");
+        total += count;
+      }
+      return total;
+    };
+    (async () => {
+      const tasks = await request("/api/tasks");
+      if (tasks.error === "ECONNREFUSED") process.exit(1);
+      if (tasks.status !== 200) return failClosed("task list unavailable (HTTP " + tasks.status + ")");
+      let recording = 0;
+      try {
+        const parsed = JSON.parse(tasks.body);
+        if (!Array.isArray(parsed)) throw new Error("not an array");
+        recording = parsed.filter((task) => task && task.recording === true).length;
+      } catch { return failClosed("unreadable task list"); }
+      const uploads = parseQueue(await request("/api/proc/active"));
+      if (recording > 0) return failClosed(recording + " task(s) recording");
+      if (uploads > 0) return failClosed(uploads + " upload job(s) running");
+      process.exit(1);
+    })();
+  ' "$API_URL")"
+  # 0 = busy (the helper printed a reason), 1 = explicitly idle. Anything else (127 for a
+  # missing interpreter, 137 for a killed process, ...) is "cannot check" and must fail closed.
+  _rc=$?
+  case "$_rc" in
+    0) printf '%s\n' "$_out"; return 0 ;;
+    1) return 1 ;;
+    *) printf 'node check failed (exit %s)\n' "$_rc"; return 0 ;;
+  esac
+}
+
+if [ "$CHECK_BUSY" -eq 1 ]; then
+  if reason="$(node_busy_reason)"; then
+    printf 'busy: %s\n' "$reason" >&2
+    exit 1
+  fi
+  printf 'idle\n'
+  exit 0
+fi
 
 if [ -z "$ARCHIVE" ]; then
   case "$VERSION" in
@@ -360,6 +456,17 @@ else
 fi
 INSTALLED_VERSION="$(cat "$TMP/VERSION" 2>/dev/null || printf '%s' "$VERSION")"
 
+if [ "$START" -eq 1 ]; then
+  case "$INSTALLED_VERSION" in
+    latest)
+      _resolved="$(basename "$(curl -fsSL -o /dev/null -w '%{url_effective}' -m 10 "https://github.com/${REPO}/releases/latest" 2>/dev/null)")"
+      case "$_resolved" in v*) VERSION="${_resolved#v}" ;; *) VERSION="" ;; esac
+      ;;
+    dev) VERSION="" ;;
+    *) VERSION="$INSTALLED_VERSION" ;;
+  esac
+fi
+
 if [ "$DRY_RUN" -eq 1 ]; then
   printf '✓ Dry run passed\n'
   printf '  version: %s\n' "$INSTALLED_VERSION"
@@ -370,6 +477,12 @@ if [ "$DRY_RUN" -eq 1 ]; then
   printf '  role:     %s\n' "$ROLE"
   printf '  tunnel:  %s (authentication must be configured separately)\n' "$TUNNEL"
   exit 0
+fi
+
+if [ "$START" -eq 1 ] && [ "$FORCE" -eq 0 ]; then
+  if reason="$(node_busy_reason)"; then
+    fail "Node is busy ($reason); not restarting. Retry when idle or pass --force"
+  fi
 fi
 
 SERVICE_GROUP="$(id -gn "$SERVICE_USER")"
@@ -544,8 +657,24 @@ printf '\nLocal self-check:\n'
 printf '  node %s/dist/douyin-rec.mjs _tasks %s\n' "$ROOT" "$ROOT"
 
 if [ "$START" -eq 1 ] && command -v curl >/dev/null 2>&1; then
-  sleep 1
-  curl -fsS "${API_URL}/api/version" >/dev/null \
-    && printf '✓ %s API responded at %s\n' "$ROLE" "$API_URL" \
-    || printf 'Warning: %s started but the API has not responded yet; check journalctl -u %s\n' "$ROLE" "$SERVICE" >&2
+  # The API reports "<x.y.z>-<sha>"; released versions must match exactly. Development
+  # archives (VERSION=dev / latest with no VERSION file) only require the API to respond.
+  _got=""
+  for _i in 1 2 3 4 5 6 7 8 9 10; do
+    sleep 2
+    _got="$(curl -fsS -m 5 "${API_URL}/api/version" 2>/dev/null | sed -n 's/.*"version" *: *"\([^"]*\)".*/\1/p')"
+    [ -n "$_got" ] && break
+  done
+  if [ -z "$_got" ]; then
+    printf '%s started but the API has not responded; check journalctl -u %s\n' "$ROLE" "$SERVICE" >&2
+    exit 1
+  fi
+  if [ -z "$VERSION" ]; then
+    printf '✓ %s running %s at %s\n' "$ROLE" "$_got" "$API_URL"
+  elif version_ok "$VERSION" "$_got"; then
+    printf '✓ %s running %s at %s\n' "$ROLE" "$_got" "$API_URL"
+  else
+    printf 'Version mismatch: installed %s but the node reports %s\n' "$VERSION" "$_got" >&2
+    exit 1
+  fi
 fi
