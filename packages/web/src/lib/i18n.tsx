@@ -287,6 +287,8 @@ const DICT = {
         editRecord: "编辑录制配置", editProcess: "编辑处理配置", editUpload: "编辑投稿配置", editNotify: "编辑通知与清理",
         stored: "已设置（不回显）", seasonOff: "未加入合集", partSizeDefault: "未设置 · 继承默认 1540",
         titleDefault: "未设置 · 编辑时预填统一默认值", submissionDefault: "未设置 · 编辑时预填统一默认值", partTitleDefault: "未设置 · 编辑时预填统一默认值",
+        burnDanmu: "烧录弹幕", burnLivechat: "烧录聊天", tsDirect: "TS 直存",
+        cleanupRow: "清理行为", editHint: "编辑此域",
         clStage: "合并后删存档源", clSource: "完成后删源节点录制", clArchive: "投稿后保留存档",
       },
       detail: {
@@ -922,6 +924,8 @@ const DICT = {
         editRecord: "Edit recording", editProcess: "Edit processing", editUpload: "Edit upload", editNotify: "Edit notify & cleanup",
         stored: "Stored (not echoed)", seasonOff: "Not in a season", partSizeDefault: "Unset · inherits default 1540",
         titleDefault: "Unset · editor prefills the shared default", submissionDefault: "Unset · editor prefills the shared default", partTitleDefault: "Unset · editor prefills the shared default",
+        burnDanmu: "Burn danmu", burnLivechat: "Burn livechat", tsDirect: "Direct .ts save",
+        cleanupRow: "Cleanup", editHint: "Edit this section",
         clStage: "Delete pulled source after merge", clSource: "Delete node recordings when done", clArchive: "Keep archive after upload",
       },
       detail: {

@@ -6,14 +6,13 @@
  *
  * Red lines (issue #553): every action keeps its existing form — icon buttons with title, managed
  * rooms stay read-only, data flow (`useRoomsData`/`statusOf`/`roomActionsFor`) untouched. The config
- * sections are a *presentation* of the same `RoomDTO` fields the editor edits (`formFromRoom` is the
- * projection used here), so nothing is invented: a field the editor has but the old page hid is now
- * rendered, and unset renders as「未设置」instead of disappearing.
+ * sections render the same `RoomDTO` fields the editor edits (nothing invented): a field the editor
+ * has but the old page hid is now rendered, and unset renders as「未设置」instead of disappearing.
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ChevronDown, ChevronLeft, Pencil, Play, Square } from "lucide-react";
-import { api, type RoomDTO, type TaskDetail } from "../api/client";
+import { api, type TaskDetail } from "../api/client";
 import { useAtomValue } from "jotai";
 import { serverTimezoneAtom } from "../atoms";
 import { Button, IconButton } from "../components/Button";
@@ -28,7 +27,6 @@ import { useT } from "../lib/i18n";
 import { QUALITY_FULL, fmtClock, fmtStartedAt, platformLabel, roomHref, roomId, scheduleText } from "../lib/labels";
 import { localTimeTooltip } from "../lib/tz";
 import { taskOutputFormatLock } from "../lib/room-form-rules";
-import { formFromRoom } from "../lib/room-editor-form";
 import { roomActionsFor, roomVisibilityFor, versionKeys } from "../lib/room-detail";
 import { zeroDiskView } from "../lib/zero-disk-status";
 import { LiveUploadTimeline } from "../components/LiveUploadTimeline";
@@ -200,9 +198,9 @@ export function RoomPage(): ReactNode {
               <Cfg label={t("room.detail.process")} value={proc.enabled ? t("room.detail.procOn") : t("room.pausedRule")} />
               <Cfg label={t("room.detail.merge")}
                    value={proc.pipeline.steps?.mergeSegments === false ? t("room.detail.mergeSplit") : t("room.detail.mergeOne")} />
-              <Cfg label="烧录弹幕" value={proc.pipeline.steps?.burnDanmu === false ? t("common.no") : t("common.yes")} />
-              <Cfg label="烧录聊天" value={proc.pipeline.steps?.burnLivechat === false ? t("common.no") : t("common.yes")} />
-              <Cfg label="TS 直存" value={proc.pipeline.steps?.tsDirect === true ? t("common.yes") : t("common.no")} />
+              <Cfg label={t("room.cfg.burnDanmu")} value={proc.pipeline.steps?.burnDanmu === false ? t("common.no") : t("common.yes")} />
+              <Cfg label={t("room.cfg.burnLivechat")} value={proc.pipeline.steps?.burnLivechat === false ? t("common.no") : t("common.yes")} />
+              <Cfg label={t("room.cfg.tsDirect")} value={proc.pipeline.steps?.tsDirect === true ? t("common.yes") : t("common.no")} />
               <Cfg label={t("room.editor.where")} value={nodesText(room, data.workers, t("room.allNodes"))} mono />
               <Cfg label={t("room.editor.versions")} value={versions || UNSET} />
               {(proc.requires?.length ?? 0) > 0 && <Cfg label={t("room.editor.caps")} value={proc.requires!.join(" · ")} mono />}
@@ -229,11 +227,14 @@ export function RoomPage(): ReactNode {
 
         <ConfigDomain id="notify" title={t("room.cfg.notify")} editHint={t("room.cfg.editNotify")} managed={managed} onEdit={view.edit ? () => actions.edit(room) : undefined}>
           <Cfg label={t("dialog.webhook")} value={rec?.hasWebhook === true ? t("room.cfg.stored") : UNSET} />
-          <Cfg label={t("room.cfg.notify")} value={[
-            proc?.pipeline.cleanup?.stageSourceAfterMerge === true ? t("room.cfg.clStage") : null,
-            proc?.pipeline.cleanup?.sourceAfterDone === true ? t("room.cfg.clSource") : null,
-            proc?.pipeline.cleanup?.stageAfterDone !== false ? t("room.cfg.clArchive") : null,
-          ].filter(Boolean).join(" · ") || UNSET} />
+          {/* 清理开关属于规则半边:没有 pipeline 时「!== false 默认保留」口径不成立,不渲染(#556 review P2) */}
+          {proc && (
+            <Cfg label={t("room.cfg.cleanupRow")} value={[
+              proc.pipeline.cleanup?.stageSourceAfterMerge === true ? t("room.cfg.clStage") : null,
+              proc.pipeline.cleanup?.sourceAfterDone === true ? t("room.cfg.clSource") : null,
+              proc.pipeline.cleanup?.stageAfterDone !== false ? t("room.cfg.clArchive") : null,
+            ].filter(Boolean).join(" · ") || UNSET} />
+          )}
           {rec && <Cfg label={t("tasks.createdAt")} value={task ? fmtStartedAt(Date.parse(task.createdAt) || null, serverTz) : UNSET} mono />}
         </ConfigDomain>
       </section>
@@ -308,31 +309,6 @@ export function RoomPage(): ReactNode {
 
 const UNSET = "-";
 
-function Cell({ label, value, icon, tone, valueClass = "telemetry-value-sm truncate" }: {
-  label: string; value: string; icon: ReactNode; tone?: string; valueClass?: string;
-}): ReactNode {
-  return (
-    <div className="telemetry-cell">
-      <div className="flex flex-col gap-1.5 min-w-0">
-        <span className="telemetry-label">{label}</span>
-        <span className={valueClass} style={tone ? { color: tone } : undefined} title={value}>{value}</span>
-      </div>
-      <span className="telemetry-icon" style={tone ? { color: tone } : undefined}>{icon}</span>
-    </div>
-  );
-}
-void Cell;
-
-function Row({ label, value, mono }: { label: string; value: ReactNode; mono?: boolean }): ReactNode {
-  return (
-    <div className="flex justify-between gap-3 py-2.5 first:pt-0 last:pb-0 border-b border-hairline last:border-0">
-      <dt className="text-muted">{label}</dt>
-      <dd className={`text-ink text-right break-all ${mono ? "font-mono" : ""}`}>{value}</dd>
-    </div>
-  );
-}
-void Row;
-
 /** One config domain: foldable card with a per-domain edit icon (→ the editor step; a hint, not a deep link). */
 function ConfigDomain({ id, title, children, editHint, managed, onEdit }: {
   id: string;
@@ -342,29 +318,28 @@ function ConfigDomain({ id, title, children, editHint, managed, onEdit }: {
   managed: boolean;
   onEdit?: () => void;
 }): ReactNode {
-  const [open, setOpen] = useState(true);
+  const t = useT();
+  // 非受控 details(reviewer P3):open 交给 DOM,onToggle 只驱动 CSS 箭头,不做双向同步。
   return (
-    <details className="cfg-domain" data-domain={id} open={open} onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
+    <details className="cfg-domain" data-domain={id} open>
       <summary className="cfg-domain-head">
         <span className="cfg-domain-title">{title}</span>
         <span className="cfg-domain-spacer" />
         {!managed && onEdit && (
           <IconButton
-            title={editHint ?? t_of_edit()}
-            aria-label={editHint ?? t_of_edit()}
+            title={editHint ?? t("room.cfg.editHint")}
+            aria-label={editHint ?? t("room.cfg.editHint")}
             onClick={(e) => { e.preventDefault(); e.stopPropagation(); onEdit(); }}
           >
             <Pencil className="w-4 h-4" />
           </IconButton>
         )}
-        <ChevronDown className="w-4 h-4 cfg-domain-chev" data-open={open} />
+        <ChevronDown className="w-4 h-4 cfg-domain-chev" />
       </summary>
       <dl className="cfg-domain-body">{children}</dl>
     </details>
   );
 }
-
-function t_of_edit(): string { return "编辑此域"; }
 
 /** A label/value pair; unset renders explicitly instead of disappearing. */
 function Cfg({ label, value, mono, href, note, unset }: {
@@ -397,9 +372,4 @@ function DomainCard({ title, children }: { title: string; children: ReactNode })
       {children}
     </div>
   );
-}
-
-/** The editor's RoomForm projection: proves every field below comes from the same source the editor edits. */
-export function roomFormFieldsOf(room: RoomDTO): ReturnType<typeof formFromRoom> {
-  return formFromRoom(room);
 }
