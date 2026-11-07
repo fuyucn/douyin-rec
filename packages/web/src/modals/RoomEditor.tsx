@@ -351,6 +351,8 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                           hint={t("room.editor.zeroDiskHint")}
                           checked={form.streamUpload}
                           onChange={(streamUpload) => update({ streamUpload, ...(streamUpload ? { streamUploadSpool: true } : {}) })}
+                          lock={ctx.hasRule ? c.streamUpload : undefined}
+                          lockedChecked={form.streamUpload}
                         />
                       )}
                       {!caps.editPipeline && outputFormatField}

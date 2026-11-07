@@ -1,8 +1,8 @@
 // lib/capabilities.ts — 节点角色能力矩阵(plans/047 §3.2)。纯函数,无 DOM/atom 依赖,可单测。
 //
 // **唯一真理**:页面不再各自判断 `hubEnabled`,而是问「本节点能不能做这件事」。
-// 录制半边(`editRecording` / `createRoom`)两端都有。直播直传 / 边录边传是 task 字段,
-// 但生效前提是主控的 rolling 规则;节点侧 UI 不提供可写开关(节点只写 task 字段的存档格式),
+// 录制半边(`editRecording` / `createRoom`)两端都有。
+// 直播直传是 task 字段,节点 UI 可开启(非 hub 任务);边录边传读主控派生的 rolling,节点不提供;
 // `editPipeline` 只管处理/投稿半边。
 // 处理半边(`editPipeline` / `hubRule`)与 master 专有页(`nodes` / `queue` / `stats` / `mergePanel` / `runs`)
 // 只在 hub master 上成立。

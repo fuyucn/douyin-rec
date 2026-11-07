@@ -286,6 +286,25 @@ describe("新增 = 编辑同一弹窗:create 与 edit 共用一条提交路径",
     expect(e.payload.recording).toMatchObject({ quality: "origin", engine: "ffmpeg" });
   });
 
+  it("worker create with streamUpload enabled writes the task field", () => {
+    const workerCtx: RoomContext = { ...ctx, hasRule: false, writesRule: false };
+    const form = { ...blankForm(plat), room: "100001", streamUpload: true };
+    const result = submitPayload(form, workerCtx, { mode: "create", withProcessing: false });
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.payload.recording).toMatchObject({ streamUpload: true });
+    expect("processing" in result.payload).toBe(false);
+  });
+
+  it("worker edit turning streamUpload off writes false", () => {
+    const workerCtx: RoomContext = { ...ctx, hasRule: false, writesRule: false };
+    const room = mkRoom({ recording: { streamUpload: true }, processing: null });
+    const form = { ...formFromRoom(room), streamUpload: false };
+    const result = submitPayload(form, workerCtx, { mode: "edit", withProcessing: false });
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.payload.recording).toMatchObject({ streamUpload: false });
+    expect("processing" in result.payload).toBe(false);
+  });
+
   it("worker 编辑直播直传房间回写任务字段;master 仍按规则语义写回", () => {
     const processing: NonNullable<RoomDTO["processing"]> = {
       enabled: true, workers: ["vps1"], requires: [],
