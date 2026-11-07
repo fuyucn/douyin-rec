@@ -11,26 +11,22 @@
  */
 import { useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { Activity, FileText, FolderOpen, LayoutGrid, Loader, Pencil, Play, Plus, Server, Square, TriangleAlert } from "lucide-react";
-import { api, type RoomDTO, type WorkerStatus } from "../api/client";
+import { FileText, FolderOpen, Pencil, Play, Plus, Server, Square } from "lucide-react";
+import { type RoomDTO } from "../api/client";
 import { Button, IconButton } from "../components/Button";
 import { ConnStatus } from "../components/ConnStatus";
 import { HubStreamBanner } from "../components/HubStreamBanner";
 import { ModeIndicators } from "../components/ModeIndicator";
 import { ModeLogo, type ModeLogoKind } from "../components/ModeLogo";
-import { WorkersPanel } from "../components/WorkersPanel";
 import { RoomEditor } from "../modals/RoomEditor";
 import { isUnassignedHidden } from "../lib/assigned";
 import { useTicker } from "../lib/hooks";
 import { useT } from "../lib/i18n";
-import { roomDisplayId, scheduleText } from "../lib/labels";
+import { platformLabel, roomDisplayId, scheduleText } from "../lib/labels";
 import { sortByStatus, type RoomStatusKind } from "../lib/room-status";
 import { DeliveryCell, deliverText, nodesText, roomName, RoomBadge, statusDetail, useRoomActions, useRoomsData } from "./rooms/shared";
 
 type Filter = "all" | Extract<RoomStatusKind, "recording" | "processing" | "attention">;
-const FILTER_TONE: Record<Filter, string | undefined> = {
-  all: undefined, recording: "var(--success-fg)", processing: "var(--status-fg)", attention: "var(--warning-fg)",
-};
 
 /** 一格「方式」的渲染数据:标签 + 悬浮说明 + 色调 + 角标图形。 */
 interface Method { label: string; title: string; tone?: string; kind: ModeLogoKind }
@@ -41,12 +37,11 @@ export function RoomsPage(): ReactNode {
   const actions = useRoomActions(data);
   const [filter, setFilter] = useState<Filter>("all");
   const [createOpen, setCreateOpen] = useState(false);
-  const [workersOpen, setWorkersOpen] = useState(false);
-  const [workerStatus, setWorkerStatus] = useState<Record<string, WorkerStatus>>({});
   const [showUnassigned, setShowUnassigned] = useState(false);
   // Relative times ("5 min ago") must keep moving even though the page is push-driven.
   const now = useTicker(30_000);
   const { rooms, loaded, statusOf } = data;
+  void showUnassigned;
   /**
    * master 视图 = 「节点」能力(plan §3.2)。它不是布局开关,而是事实来源的开关:节点表、交付方式、
    * 上次交付都只存在于 master,worker 上既不请求也不显示。
@@ -68,27 +63,16 @@ export function RoomsPage(): ReactNode {
   const shown = filter === "all" ? sorted : sorted.filter((r) => statusOf(r).kind === filter);
   const attention = sorted.filter((r) => statusOf(r).kind === "attention");
 
-  const openWorkers = (): void => {
-    setWorkersOpen(true);
-    void refreshWorkerStatus();
-  };
-  const refreshWorkerStatus = (): Promise<void> =>
-    api.getWorkersStatus()
-      .then((list) => setWorkerStatus(Object.fromEntries(list.map((s) => [s.id, s]))))
-      .catch(() => {});
-
-  const cell = (f: Filter, icon: ReactNode): ReactNode => (
-    <div role="tab" tabIndex={0} aria-selected={filter === f}
-         className={`telemetry-cell${filter === f ? " is-on" : ""}`}
-         onClick={() => setFilter(f)} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setFilter(f); } }}>
-      <div className="flex flex-col gap-1.5 min-w-0">
-        <span className="telemetry-label">{f === "all" ? t("room.all") : t(`room.status.${f}`)}</span>
-        <span className="telemetry-value tabular-nums" style={count(f) ? { color: FILTER_TONE[f] } : undefined}>
-          {loaded ? count(f) : "–"}
-        </span>
-      </div>
-      <span className="telemetry-icon" style={count(f) ? { color: FILTER_TONE[f] } : undefined}>{icon}</span>
-    </div>
+  const cell = (f: Filter): ReactNode => (
+    <button
+      type="button"
+      aria-pressed={filter === f}
+      className="room-filter-chip"
+      onClick={() => setFilter(f)}
+    >
+      <span>{f === "all" ? t("room.all") : t(`room.status.${f}`)}</span>
+      <span className="room-filter-count tabular-nums">{loaded ? count(f) : "–"}</span>
+    </button>
   );
 
   return (
@@ -106,10 +90,10 @@ export function RoomsPage(): ReactNode {
             </Button>
           )}
           {master && (
-            <Button small variant="secondary" onClick={openWorkers} className="min-w-0 flex-1 sm:flex-none">
+            <Link to="/nodes" className="btn-secondary btn-sm inline-flex items-center gap-1.5" title={t("nodes.subtitle")}>
               <Server className="w-4 h-4" />
               <span className="truncate">{t("hub.workers.pill", { count: data.workers.length })}</span>
-            </Button>
+            </Link>
           )}
           <Button onClick={() => setCreateOpen(true)} aria-label={t("room.add")} className="rm-add">
             <Plus className="w-4 h-4" />
@@ -121,23 +105,25 @@ export function RoomsPage(): ReactNode {
       {/* 推送失效提示讲的是主控的 hub 流:`useRoomsData` 在节点上不订阅,自然也不挂这条横幅。 */}
       {master && <HubStreamBanner handle={data.stream} />}
 
-      <div className="telemetry-bar mb-5" role="tablist">
-        {cell("all", <LayoutGrid className="w-4 h-4" />)}
-        {cell("recording", <Activity className="w-4 h-4" />)}
-        {cell("processing", <Loader className="w-4 h-4" />)}
-        {cell("attention", <TriangleAlert className="w-4 h-4" />)}
+      <div className="room-filters mb-4" role="group" aria-label={t("room.filterGroup")}>
+        {cell("all")}
+        {cell("recording")}
+        {cell("processing")}
+        {cell("attention")}
       </div>
 
-      {attention.length > 0 && filter !== "attention" && (
-        <div className="status-strip rm-alert mb-3 sm:mb-4">
-          <span className="dot" style={{ background: "var(--warning)" }} />
-          <span className="flex-1 min-w-0 truncate">
-            <b className="text-ink font-medium">{t("room.alertCount", { count: attention.length })}</b>
-            <span className="text-muted-soft">
-              {" · "}{roomName(attention[0])}{" · "}{statusDetail(t, attention[0], statusOf(attention[0]))}
-            </span>
-          </span>
-          <Button small variant="secondary" onClick={() => setFilter("attention")}>{t("room.view")}</Button>
+      {master && attention.length > 0 && filter !== "attention" && (
+        <div className="rm-alert-list mb-4" role="list">
+          {attention.slice(0, 3).map((r) => (
+            <div key={r.key} className="rm-alert-row" role="listitem">
+              <span className="dot" style={{ background: "var(--warning)" }} />
+              <Link to={`/rooms/${encodeURIComponent(r.key)}`} className="rm-alert-name" title={statusDetail(t, r, statusOf(r))}>
+                {roomName(r)}
+              </Link>
+              <span className="rm-alert-reason">{statusDetail(t, r, statusOf(r))}</span>
+              <Button small variant="secondary" className="rm-alert-go" onClick={() => setFilter("attention")}>{t("room.view")}</Button>
+            </div>
+          ))}
         </div>
       )}
 
@@ -149,7 +135,7 @@ export function RoomsPage(): ReactNode {
               <span className="skeleton block h-3 w-40 max-w-full mt-2" />
             </div>
           ))}
-          {loaded && shown.length === 0 && <Empty t={t} empty={rooms.length === 0} />}
+          {loaded && shown.length === 0 && <Empty t={t} empty={rooms.length === 0} attentionOnly={filter === "attention"} />}
           {loaded && shown.map((r) => <RoomCompactRow key={r.key} room={r} data={data} actions={actions} now={now} master={master} />)}
         </div>
 
@@ -157,13 +143,12 @@ export function RoomsPage(): ReactNode {
           <table className="tasks" style={{ tableLayout: "fixed" }}>
             <thead>
               <tr>
-                <th className={master ? "w-[212px]" : "w-[236px]"}>{t("room.colRoom")}</th>
-                <th className={master ? "w-[136px]" : "w-[132px]"}>{master ? t("room.colUploadMethod") : t("room.colRecordingMethod")}</th>
-                {master && <th className="w-[112px]">{t("room.colLastDeliver")}</th>}
-                {master && <th className="w-[132px]">{t("room.colNodes")}</th>}
-                <th className="w-[96px]">{t("room.colSchedule")}</th>
-                <th className="w-[168px]">{t("room.colStatus")}</th>
-                <th className="w-[146px] text-right">{t("room.colAction")}</th>
+                <th className={master ? "w-[232px]" : "w-[256px]"}>{t("room.colRoom")}</th>
+                <th className={master ? "w-[156px]" : "w-[152px]"}>{master ? t("room.colUploadMethod") : t("room.colRecordingMethod")}</th>
+                {master && <th className="w-[118px]">{t("room.colLastDeliver")}</th>}
+                {master && <th className="w-[138px]">{t("room.colNodes")}</th>}
+                <th className="w-[176px]">{t("room.colStatus")}</th>
+                <th className="w-[122px] text-right">{t("room.colAction")}</th>
               </tr>
             </thead>
             <tbody>
@@ -179,7 +164,7 @@ export function RoomsPage(): ReactNode {
                 </tr>
               ))}
               {loaded && shown.length === 0 && (
-                <tr><td colSpan={master ? 7 : 5} className="p-0"><Empty t={t} empty={rooms.length === 0} /></td></tr>
+                <tr><td colSpan={master ? 6 : 4} className="p-0"><Empty t={t} empty={rooms.length === 0} attentionOnly={filter === "attention"} /></td></tr>
               )}
               {loaded && shown.map((r) => (
                 <tr key={r.key}>
@@ -198,26 +183,22 @@ export function RoomsPage(): ReactNode {
                         {actions.managedOf(r) && <span className="badge badge-muted shrink-0">{t("tasks.managed")}</span>}
                       </div>
                       <div className="mt-1 flex items-center gap-1.5 min-w-0">
-                        <span className="badge badge-muted shrink-0 !h-[18px] !px-1.5 !text-[10px] uppercase">
-                          {r.platform}
-                        </span>
+                        <span className="room-plat-chip shrink-0">{platformLabel(r.platform)}</span>
                         <span className="font-mono text-xs text-muted truncate">{roomDisplayId(r)}</span>
+                        {scheduleText(scheduleOf(r)) && (
+                          <span className="room-sched font-mono tabular-nums">{scheduleText(scheduleOf(r))}</span>
+                        )}
                       </div>
                     </Link>
                   </td>
                   <td>{master ? <ModeIndicators room={r} /> : <RecordingMethodChip room={r} />}</td>
                   {/* 交付与节点是 master 规则/台账的投影:节点上没有规则,画出来永远是空值。 */}
                   {master && <td><DeliveryCell s={statusOf(r)} now={now} /></td>}
-                  {master && <td className="font-mono text-[11px] text-muted truncate max-w-0" title={nodesText(r, data.workers, t("room.allNodes"))}>{nodesText(r, data.workers, t("room.allNodes"))}</td>}
-                  <td>
-                    {scheduleText(scheduleOf(r)) ? (
-                      <span className="font-mono text-[12.5px] text-body tabular-nums whitespace-nowrap">{scheduleText(scheduleOf(r))}</span>
-                    ) : <span className="text-muted-soft">-</span>}
-                  </td>
+                  {master && <td className="font-mono text-[12px] text-muted truncate max-w-0" title={nodesText(r, data.workers, t("room.allNodes"))}>{nodesText(r, data.workers, t("room.allNodes"))}</td>}
                   <td>
                     <div className="min-w-0">
                       <RoomBadge s={statusOf(r)} />
-                      <div className="text-[11px] text-muted truncate mt-0.5" title={statusDetail(t, r, statusOf(r))}>
+                      <div className="status-detail" title={statusDetail(t, r, statusOf(r))}>
                         {statusDetail(t, r, statusOf(r))}
                       </div>
                     </div>
@@ -242,19 +223,7 @@ export function RoomsPage(): ReactNode {
           onSaved={() => { setCreateOpen(false); void data.refresh().catch(() => {}); }}
         />
       )}
-      {/* 节点面板是 master 的节点表:worker 连 worker 列表都不拉(`useRoomsData`.`refreshWorkers` 是 no-op)。 */}
-      {master && (
-        <WorkersPanel
-          open={workersOpen}
-          onClose={() => setWorkersOpen(false)}
-          workers={data.workers}
-          status={workerStatus}
-          onChanged={() => {
-            void data.refreshWorkers().catch(() => {});
-            void refreshWorkerStatus();
-          }}
-        />
-      )}
+      {/* 节点管理入口已改为页头纯导航(→ /nodes, #549/#550),内联管理在节点页完成;rooms 不再挂管理浮层。 */}
     </>
   );
 }
@@ -299,11 +268,13 @@ function scheduleOf(r: RoomDTO): Pick<NonNullable<RoomDTO["recording"]>, "schedu
   return r.recording ?? { scheduleStart: null, scheduleEnd: null };
 }
 
-function Empty({ t, empty }: { t: ReturnType<typeof useT>; empty: boolean }): ReactNode {
+function Empty({ t, empty, attentionOnly }: { t: ReturnType<typeof useT>; empty: boolean; attentionOnly: boolean }): ReactNode {
   return (
     <div className="empty-state">
       <FolderOpen className="w-10 h-10" style={{ color: "var(--muted-soft)" }} />
-      <div className="text-sm font-medium text-ink">{empty ? t("rooms.empty") : t("rooms.noMatch")}</div>
+      <div className="text-sm font-medium text-ink">
+        {empty ? t("rooms.empty") : attentionOnly ? t("rooms.noAttention") : t("rooms.noMatch")}
+      </div>
     </div>
   );
 }
@@ -368,23 +339,21 @@ function RoomCompactRow({ room, data, actions, now, master }: {
         <Link to={`/rooms/${encodeURIComponent(room.key)}`} className="min-w-0 group" title={room.room}>
           <div className="font-medium text-ink truncate group-hover:underline">{roomName(room)}</div>
           <div className="mt-1 flex items-center gap-1.5 min-w-0">
-            <span className="badge badge-muted shrink-0 !h-[18px] !px-1.5 !text-[10px] uppercase">
-              {room.platform}
-            </span>
+            <span className="room-plat-chip shrink-0">{platformLabel(room.platform)}</span>
             <span className="font-mono text-xs text-muted truncate">{roomDisplayId(room)}</span>
+            {sched && <span className="room-sched font-mono tabular-nums">{sched}</span>}
           </div>
         </Link>
         <RoomActions room={room} data={data} actions={actions} />
       </div>
       <div className="mt-2 max-w-full flex items-center gap-2 min-w-0">
         <RoomBadge s={s} />
-        <span className="text-[12px] text-muted truncate">{statusDetail(t, room, s)}</span>
+        <span className="status-detail max-w-full">{statusDetail(t, room, s)}</span>
       </div>
       {master && <div className="mt-2"><DeliveryCell s={s} now={now} /></div>}
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
         {master ? <ModeIndicators room={room} /> : <RecordingMethodChip room={room} />}
-        {sched && <span className="font-mono text-[11px] text-muted-soft tabular-nums">{sched}</span>}
-        {master && <span className="font-mono text-[11px] text-muted-soft truncate">{nodesText(room, data.workers, t("room.allNodes"))}</span>}
+        {master && <span className="font-mono text-[11.5px] text-muted-soft truncate">{nodesText(room, data.workers, t("room.allNodes"))}</span>}
       </div>
     </div>
   );

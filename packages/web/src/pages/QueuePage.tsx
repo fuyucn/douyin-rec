@@ -2,7 +2,7 @@
  * QueuePage — processing queue (/queue). Master shows one session stream plus this host's node queue;
  * workers show only the node queue. All session facts come from GET /api/hub/queue.
  */
-import { AlertTriangle, ArrowDownUp, Check, ChevronDown, ChevronRight, ClipboardCheck, ExternalLink, FileText, Hourglass, Loader2, RotateCcw, Search, X } from "lucide-react";
+import { AlertTriangle, ArrowDownUp, Check, ChevronDown, ChevronRight, ClipboardCheck, ExternalLink, FileText, RotateCcw, Search, X } from "lucide-react";
 import { useAtomValue } from "jotai";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Link } from "react-router-dom";
@@ -64,7 +64,7 @@ function NodeQueueCard(): ReactNode {
   const snapshot = state.available ? data : null;
   return (
     <section className="queue-support">
-      <div className="section-label mb-2.5">{t("queue.nodeQueue.title")}</div>
+      <div className="queue-support-title">{t("queue.nodeQueue.title")}</div>
       <div className="card p-3.5">
         <div className="flex flex-wrap items-center gap-2 mb-3">
           <span className="text-[12px] text-muted">{t("queue.nodeQueue.subtitle")}</span>
@@ -236,17 +236,16 @@ function OverviewBand({ counts, nodes, healthProbe, directoryLoaded, stale, t }:
   return (
     <section className="queue-overview" aria-label={t("queue.flow.overview")}>
       <div className="queue-overview-counts">
-        <span className="queue-overview-count" data-tone="primary"><Loader2 className="w-3.5 h-3.5" />{t("queue.flow.count.running", { n: counts.running })}</span>
-        <span className="queue-overview-count"><Hourglass className="w-3.5 h-3.5" />{t("queue.flow.count.queued", { n: counts.queued })}</span>
-        <span className="queue-overview-count" data-tone={counts.actions > 0 ? "danger" : undefined}><AlertTriangle className="w-3.5 h-3.5" />{t("queue.flow.count.actions", { n: counts.actions })}</span>
-        <span className="queue-overview-count"><Check className="w-3.5 h-3.5" />{t("queue.flow.count.done", { n: counts.done })}</span>
+        <span className="queue-overview-count" data-tone="primary"><b>{counts.running}</b>{t("queue.flow.count.running", { n: counts.running })}</span>
+        <span className="queue-overview-count"><b>{counts.queued}</b>{t("queue.flow.count.queued", { n: counts.queued })}</span>
+        <span className="queue-overview-count" data-tone={counts.actions > 0 ? "danger" : undefined}><b>{counts.actions}</b>{t("queue.flow.count.actions", { n: counts.actions })}</span>
+        <span className="queue-overview-count"><b>{counts.done}</b>{t("queue.flow.count.done", { n: counts.done })}</span>
       </div>
       <Link to="/nodes" className="queue-node-health" title={t("queue.fleet.open")}>
         <span className="dot" style={{ background: healthColor }} />
         <span>{healthText}</span>
         {offline > 0 && <span style={{ color: "var(--error-fg)" }}>{t("queue.fleet.offline", { n: offline })}</span>}
         {unknown > 0 && <span style={{ color: "var(--warning-fg)" }}>{t("queue.fleet.noStatus", { n: unknown })}</span>}
-        <ChevronRight className="w-3.5 h-3.5" />
       </Link>
     </section>
   );
@@ -439,7 +438,7 @@ function QueueGroup({ id, count, children, empty, emptyKey, t, defaultOpen = tru
     else onToggle?.();
   };
   return (
-    <section className="queue-group" data-group={id}>
+    <section className="queue-group" data-group={id} data-empty={empty || undefined}>
       <button type="button" className="queue-group-head" aria-expanded={open} onClick={toggle}>
         <ChevronDown className="w-3.5 h-3.5 queue-group-chevron" data-open={open} />
         <span className="queue-group-title">{t(`queue.flow.group.${id}`)}</span>
@@ -643,6 +642,10 @@ export function QueuePage(): ReactNode {
         </>
       ) : (
         <section className="queue-stream" aria-label={t("queue.flow.stream")}>
+          {/* 全空 = 一条空闲条(#552):空组由 CSS data-empty 隐藏,这里再给全空一个总状态,避免五条「没有…」堆叠 */}
+          {flow.actions.length === 0 && flow.counts.running === 0 && flow.delivering === 0 && flow.counts.queued === 0 && flow.counts.settling === 0 && (
+            <div className="queue-idle-bar">{t("queue.flow.idle", { n: flow.counts.done })}</div>
+          )}
           <QueueGroup id="attention" count={flow.actions.length} empty={flow.actions.length === 0} emptyKey={groupEmptyKey("attention")} t={t}>
             {flow.actions.map((action) => (
               <ActionRow key={action.key} action={action} now={now} tz={tz} t={t} onOpenLog={setLogKey} onAck={openAck} onRetry={requestRetry} />
