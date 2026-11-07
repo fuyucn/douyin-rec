@@ -2,7 +2,7 @@
  * QueuePage — processing queue (/queue). Master shows one session stream plus this host's node queue;
  * workers show only the node queue. All session facts come from GET /api/hub/queue.
  */
-import { AlertTriangle, Check, ChevronDown, ChevronRight, ClipboardCheck, ExternalLink, FileText, Hourglass, Loader2, RotateCcw, Search, X } from "lucide-react";
+import { AlertTriangle, ArrowDownUp, Check, ChevronDown, ChevronRight, ClipboardCheck, ExternalLink, FileText, Hourglass, Loader2, RotateCcw, Search, X } from "lucide-react";
 import { useAtomValue } from "jotai";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Link } from "react-router-dom";
@@ -22,11 +22,12 @@ import {
   type NodeSummary,
 } from "../lib/nodes-summary";
 import { HubStreamBanner } from "../components/HubStreamBanner";
-import { LiveUploadLanes } from "../components/QueueLive";
+import { LivePool, LiveUploadLanes } from "../components/QueueLive";
 import { liveUploadLanes } from "../lib/queue-live";
 import { stepLabel } from "../lib/queue-chain";
+import { NodeUploadLine, QueueStateBadges } from "../components/QueueBadges";
 import { buildQueueFlow, queueEmptyKey, type QueueAction, type QueueFlowRow, type QueueGroupId } from "../lib/queue-flow";
-import { queueRowSummary } from "../lib/queue-summary";
+import { queueRowSummary, type QueueRowGroup } from "../lib/queue-summary";
 import { useT } from "../lib/i18n";
 import { fmtTimeInTz } from "../lib/tz";
 
@@ -128,16 +129,18 @@ function chipStyle(on: boolean): CSSProperties {
 
 /** One compact search input plus status chips; all advanced chips stay behind a disclosure. */
 function CompactFilterBar({
-  phase, states, platform, q, onPhase, onStates, onPlatform, onQ, onReset,
+  phase, states, platform, q, sort, onPhase, onStates, onPlatform, onQ, onSort, onReset,
 }: {
   phase: string[];
   states: string[];
   platform: string[];
   q: string;
+  sort: "newest" | "oldest";
   onPhase: (v: string[]) => void;
   onStates: (v: string[]) => void;
   onPlatform: (v: string[]) => void;
   onQ: (v: string) => void;
+  onSort: (v: "newest" | "oldest") => void;
   onReset: () => void;
 }): ReactNode {
   const t = useT();
@@ -172,6 +175,15 @@ function CompactFilterBar({
           {c.on && <Check className="w-3 h-3" />}{c.label}
         </button>
       ))}
+      <button
+        type="button"
+        className="chip"
+        style={chipStyle(sort === "oldest")}
+        title={t(sort === "newest" ? "queue.sort.newestTip" : "queue.sort.oldestTip")}
+        onClick={() => onSort(sort === "newest" ? "oldest" : "newest")}
+      >
+        <ArrowDownUp className="w-3 h-3" />{t(sort === "newest" ? "queue.flow.sort.newest" : "queue.flow.sort.oldest")}
+      </button>
       <button type="button" onClick={() => setMore((v) => !v)} aria-expanded={more} className="chip" style={{ cursor: "pointer" }}>
         {more ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
         {t(more ? "queue.filter.less" : "queue.filter.more")}
@@ -245,8 +257,8 @@ function StepPipeline({ row, t }: { row: QueueFlowRow; t: TFunc }): ReactNode {
   return (
     <div className="queue-flow-line" role="group" aria-label={t("queue.flow.steps")}>
       {row.steps.map((step) => (
-        <span key={step.key} className="queue-flow-step" data-state={step.state} title={step.state === "skipped" ? t("queue.flow.skippedTip") : undefined}>
-          <span className="queue-flow-glyph" aria-hidden="true">{step.state === "done" ? "✓" : step.state === "current" ? "▶" : step.state === "skipped" ? "-" : "○"}</span>
+        <span key={step.key} className="queue-flow-step" data-state={step.state}>
+          <span className="queue-flow-glyph" aria-hidden="true">{step.state === "done" ? "✓" : step.state === "current" ? "▶" : "○"}</span>
           {stepLabel(t, step.step)}
         </span>
       ))}
@@ -309,7 +321,7 @@ function queueSummaryText(summary: { key: string; vars: Record<string, string | 
 
 function FlowRow({ row, group, tz, now, t, onOpenLog, onAck }: {
   row: QueueFlowRow;
-  group: QueueGroupId;
+  group: QueueRowGroup;
   tz: string;
   now: number;
   t: TFunc;
@@ -332,6 +344,7 @@ function FlowRow({ row, group, tz, now, t, onOpenLog, onAck }: {
             <div className="font-mono text-[11px] text-muted-soft truncate">{platformLabel(item.platform)} · {roomId(item.roomSlug)}</div>
           </div>
           <div className="queue-row-meta">
+            <QueueStateBadges item={item} t={t} />
             {group === "running" && row.elapsedSec != null && <span className="chip">{t("queue.flow.elapsed", { time: humanSec(row.elapsedSec) })}</span>}
             {group === "running" && row.etaSec != null && <span className="chip">{t("queue.flow.eta", { time: humanSec(row.etaSec) })}</span>}
             {group === "queued" && row.queuePosition != null && <span className="chip">{t("queue.flow.position", { n: row.queuePosition })}</span>}
@@ -344,15 +357,19 @@ function FlowRow({ row, group, tz, now, t, onOpenLog, onAck }: {
           <RowActions streamKey={item.streamKey} platform={item.platform} roomSlug={item.roomSlug} onOpenLog={onOpenLog} onAck={onAck} t={t} />
         </div>
         {group !== "done" && <StepPipeline row={row} t={t} />}
+        {group !== "done" && item.nodeUpload && (
+          <NodeUploadLine upload={item.nodeUpload} now={now} tz={tz} t={t} className="mt-2" />
+        )}
         <div className="queue-row-summary">{summary}</div>
       </div>
     </article>
   );
 }
 
-function ActionRow({ action, now, t, onOpenLog, onAck, onRetry }: {
+function ActionRow({ action, now, tz, t, onOpenLog, onAck, onRetry }: {
   action: QueueAction;
   now: number;
+  tz: string;
   t: TFunc;
   onOpenLog: (key: string) => void;
   onAck: (key: string) => void;
@@ -360,6 +377,7 @@ function ActionRow({ action, now, t, onOpenLog, onAck, onRetry }: {
 }): ReactNode {
   const reason = action.reason.startsWith("queue.flow.reason.") ? t(action.reason) : action.reason;
   const retries = action.item?.fails ?? (action.blocked ? action.blocked.rounds : 0);
+  const upload = action.item?.nodeUpload ?? null;
   return (
     <article className="queue-row" data-group="attention" data-severity={action.severity}>
       <div className="queue-rail" aria-hidden="true"><span /></div>
@@ -388,22 +406,25 @@ function ActionRow({ action, now, t, onOpenLog, onAck, onRetry }: {
             t={t}
           />
         </div>
-        <div className="queue-action-reason" title={reason}>{reason}</div>
-        <div className="queue-row-summary">
-          {action.blocked
-            ? t("queue.flow.summary.blocked", { workers: action.blocked.workers.join(", "), min: Math.max(0, Math.round((now - action.blocked.sinceMs) / 60_000)) })
-            : t("queue.flow.summary.action", { reason })}
-        </div>
+        {upload && <NodeUploadLine upload={upload} now={now} tz={tz} t={t} className="mt-2" />}
+        {action.blocked ? (
+          <div className="queue-row-summary">
+            {t("queue.flow.summary.blocked", { workers: action.blocked.workers.join(", "), min: Math.max(0, Math.round((now - action.blocked.sinceMs) / 60_000)) })}
+          </div>
+        ) : (
+          <div className="queue-action-reason" title={reason}>{reason}</div>
+        )}
       </div>
     </article>
   );
 }
 
-function QueueGroup({ id, count, children, empty, t, defaultOpen = true, extra, footer, open: controlledOpen, onToggle }: {
+function QueueGroup({ id, count, children, empty, emptyKey, t, defaultOpen = true, extra, footer, open: controlledOpen, onToggle }: {
   id: QueueGroupId;
   count: number;
   children: ReactNode;
   empty: boolean;
+  emptyKey?: string;
   t: TFunc;
   defaultOpen?: boolean;
   extra?: ReactNode;
@@ -428,7 +449,7 @@ function QueueGroup({ id, count, children, empty, t, defaultOpen = true, extra, 
       </button>
       {open && (
         <div className="queue-group-body">
-          {empty ? <div className="queue-empty">{t(queueEmptyKey(id))}</div> : children}
+          {empty ? <div className="queue-empty">{t(emptyKey ?? queueEmptyKey(id))}</div> : children}
           {footer && <div className="queue-group-footer">{footer}</div>}
         </div>
       )}
@@ -458,6 +479,7 @@ export function QueuePage(): ReactNode {
   const [states, setStates] = useState<string[]>([]);
   const [platform, setPlatform] = useState<string[]>([]);
   const [q, setQ] = useState("");
+  const [sort, setSort] = useState<"newest" | "oldest">("newest");
   const [showAllDone, setShowAllDone] = useState(false);
   const [doneOpen, setDoneOpen] = useState(false);
   const [logKey, setLogKey] = useState<string | null>(null);
@@ -475,8 +497,8 @@ export function QueuePage(): ReactNode {
     return () => clearTimeout(id);
   }, [q]);
   const query = useMemo(
-    () => ({ phase, states, platform, q: debouncedQ || undefined }),
-    [phase, states, platform, debouncedQ],
+    () => ({ phase, states, platform, q: debouncedQ || undefined, sort }),
+    [phase, states, platform, debouncedQ, sort],
   );
   const queryKey = useMemo(() => JSON.stringify(query), [query]);
   const poll = useMemo(
@@ -551,9 +573,10 @@ export function QueuePage(): ReactNode {
     }
   }, [poll, t, toast]);
   const rows = data?.rows ?? [];
+  const liveLanes = useMemo(() => liveUploadLanes(fleetTasks), [fleetTasks]);
   const flow = useMemo(
-    () => buildQueueFlow(rows, data?.blocked ?? [], data?.delivering ?? [], now, dataAt),
-    [rows, data?.blocked, data?.delivering, now, dataAt],
+    () => buildQueueFlow(rows, data?.blocked ?? [], liveLanes.length, now, dataAt, sort),
+    [rows, data?.blocked, liveLanes.length, now, dataAt, sort],
   );
   const fleetNodes = useMemo(
     () => summarizeNodes(fleetTasks, fleetStatus, data?.delivering ?? [], masterVersion, fleetWorkers),
@@ -565,10 +588,14 @@ export function QueuePage(): ReactNode {
     workersLoaded: fleetWorkersLoaded,
   });
   const filtered = phase.length + states.length + platform.length + (debouncedQ ? 1 : 0) > 0;
+  const groupEmptyKey = (id: QueueGroupId): string => (filtered ? "queue.filter.noMatch" : queueEmptyKey(id));
+  // Rolling sessions live outside the ledger rows; keep them visible as their own stat instead of
+  // inflating the running header (which must equal the rows + lanes actually rendered below).
+  const deliveringTotal = data?.delivering?.length ?? 0;
   const visibleDone = showAllDone || filtered ? flow.done : flow.done.slice(0, 5);
   const manualTotal = data?.manualTotal ?? 0;
   const manualShown = (data?.active ?? []).filter((r) => r.state === "needs_manual").length;
-  const renderFlowRow = (row: QueueFlowRow, group: QueueGroupId): ReactNode => (
+  const renderFlowRow = (row: QueueFlowRow, group: QueueRowGroup): ReactNode => (
     <FlowRow key={row.key} row={row} group={group} tz={tz} now={now} t={t} onOpenLog={setLogKey} onAck={openAck} />
   );
   const doneFooter = doneOpen && !filtered && flow.done.length > 5 ? (
@@ -600,13 +627,14 @@ export function QueuePage(): ReactNode {
       </div>
       <HubStreamBanner handle={stream} />
       <OverviewBand counts={flow.counts} nodes={fleetNodes} healthProbe={fleetHealthProbe} directoryLoaded={fleetWorkersLoaded} stale={stale} t={t} />
+      {data && <LivePool pool={data.pool} />}
       {!filtered && manualTotal > manualShown && (
         <div className="queue-manual-more" style={{ color: "var(--warning-fg)" }}>{t("queue.summary.manualMore", { total: manualTotal, shown: manualShown })}</div>
       )}
       {(data?.manualAcked ?? 0) > 0 && <div className="queue-manual-more">{t("queue.summary.acked", { n: data?.manualAcked ?? 0 })}</div>}
       <CompactFilterBar
-        phase={phase} states={states} platform={platform} q={q}
-        onPhase={setPhase} onStates={setStates} onPlatform={setPlatform} onQ={setQ} onReset={reset}
+        phase={phase} states={states} platform={platform} q={q} sort={sort}
+        onPhase={setPhase} onStates={setStates} onPlatform={setPlatform} onQ={setQ} onSort={setSort} onReset={reset}
       />
       {!loaded ? (
         <>
@@ -614,27 +642,34 @@ export function QueuePage(): ReactNode {
           <NodeQueueCard />
         </>
       ) : (
-        <main className="queue-stream" aria-label={t("queue.flow.stream")}>
-          <QueueGroup id="attention" count={flow.actions.length} empty={flow.actions.length === 0} t={t}>
+        <section className="queue-stream" aria-label={t("queue.flow.stream")}>
+          <QueueGroup id="attention" count={flow.actions.length} empty={flow.actions.length === 0} emptyKey={groupEmptyKey("attention")} t={t}>
             {flow.actions.map((action) => (
-              <ActionRow key={action.key} action={action} now={now} t={t} onOpenLog={setLogKey} onAck={openAck} onRetry={requestRetry} />
+              <ActionRow key={action.key} action={action} now={now} tz={tz} t={t} onOpenLog={setLogKey} onAck={openAck} onRetry={requestRetry} />
             ))}
           </QueueGroup>
-          <QueueGroup id="running" count={flow.counts.running} empty={flow.running.length === 0 && flow.delivering === 0} t={t}>
+          <QueueGroup
+            id="running"
+            count={flow.counts.running}
+            empty={flow.running.length === 0 && flow.delivering === 0}
+            emptyKey={groupEmptyKey("running")}
+            extra={deliveringTotal > 0 ? <span className="chip">{t("queue.fleet.delivering", { n: deliveringTotal })}</span> : undefined}
+            t={t}
+          >
             {flow.running.map((row) => renderFlowRow(row, "running"))}
-            <LiveUploadLanes lanes={liveUploadLanes(fleetTasks)} now={now} />
+            <LiveUploadLanes lanes={liveLanes} now={now} />
           </QueueGroup>
-          <QueueGroup id="queued" count={flow.queued.length} empty={flow.queued.length === 0} t={t}>
+          <QueueGroup id="queued" count={flow.queued.length} empty={flow.queued.length === 0} emptyKey={groupEmptyKey("queued")} t={t}>
             {flow.queued.map((row) => renderFlowRow(row, "queued"))}
           </QueueGroup>
-          <QueueGroup id="settling" count={flow.settling.length} empty={flow.settling.length === 0} t={t}>
+          <QueueGroup id="settling" count={flow.settling.length} empty={flow.settling.length === 0} emptyKey={groupEmptyKey("settling")} t={t}>
             {flow.settling.map((row) => renderFlowRow(row, "settling"))}
           </QueueGroup>
-          <QueueGroup id="done" count={flow.done.length} empty={visibleDone.length === 0} t={t} defaultOpen={false} open={doneOpen} onToggle={() => setDoneOpen((v) => !v)} footer={doneFooter}>
+          <QueueGroup id="done" count={flow.done.length} empty={visibleDone.length === 0} emptyKey={groupEmptyKey("done")} t={t} defaultOpen={false} open={doneOpen} onToggle={() => setDoneOpen((v) => !v)} footer={doneFooter}>
             {visibleDone.map((row) => renderFlowRow(row, "done"))}
           </QueueGroup>
           <NodeQueueCard />
-        </main>
+        </section>
       )}
       <JobLogDialog logKey={logKey} onClose={() => setLogKey(null)} />
       <ConfirmDialog

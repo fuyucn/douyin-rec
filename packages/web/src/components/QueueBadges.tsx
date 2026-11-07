@@ -1,8 +1,10 @@
 import type { ReactNode } from "react";
 import { Gauge } from "lucide-react";
+import type { NodeUploadStatusDTO } from "@drec/contracts";
 import { Tooltip } from "./Tooltip";
 import { fmtBytes } from "../lib/nodes-summary";
 import { fmtTimeInTz } from "../lib/tz";
+import { nodeUploadPhaseLabel, queueText } from "../lib/queue-chain";
 import {
   partChainFields,
   partChainPolledAgo,
@@ -57,6 +59,34 @@ export function PartChainLine({
         )}
         {progress?.bps != null && progress.bps > 0 && <span>{fmtBytes(progress.bps)}/s</span>}
         <span>{partChainPolledAgo(upload, t, now)}</span>
+      </div>
+      {pct != null && <div className="live-progress"><span style={{ width: `${pct}%` }} /></div>}
+    </div>
+  );
+}
+
+/** Node upload telemetry for any queue row: nodeId, phase/step, bytes, rate and attempts. */
+export function NodeUploadLine({ upload, now, tz, t, className = "" }: {
+  upload: NodeUploadStatusDTO;
+  now: number;
+  tz: string;
+  t: TFunc;
+  className?: string;
+}): ReactNode {
+  if (upload.phase === "part-chain") {
+    return <PartChainLine upload={upload} now={now} tz={tz} t={t} className={className} />;
+  }
+  const p = upload.progress;
+  const pct = p && p.totalBytes > 0 ? Math.min(100, Math.max(0, (p.doneBytes / p.totalBytes) * 100)) : null;
+  return (
+    <div className={`space-y-1 ${className}`.trim()}>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-muted">
+        <span className="inline-flex items-center gap-1"><Gauge className="w-3 h-3" />{t("queue.live.upload")}</span>
+        <span>{upload.nodeId}</span>
+        <span>{nodeUploadPhaseLabel(t, upload.phase)}{upload.step ? ` · ${queueText(t, `queue.nodeUpload.step.${upload.step}`, upload.step)}` : ""}</span>
+        {p && <span>{fmtBytes(p.doneBytes)} / {fmtBytes(p.totalBytes)}</span>}
+        {p?.bps != null && p.bps > 0 && <span>{fmtBytes(p.bps)}/s</span>}
+        {upload.attempts != null && upload.attempts > 1 && <span>{queueText(t, "queue.nodeUpload.attempt", `attempt ${upload.attempts}`, { n: upload.attempts })}</span>}
       </div>
       {pct != null && <div className="live-progress"><span style={{ width: `${pct}%` }} /></div>}
     </div>
