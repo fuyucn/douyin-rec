@@ -2349,9 +2349,6 @@ table.tasks tbody tr:last-child td {
 }
 
 /* ── Room detail v2 (#557): 摘要式四域 + 进度区 + field grid ──────────── */
-.section-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; margin-bottom: 10px; }
-.section-head h2 { margin: 0; font-size: 15px; line-height: 1.3; font-weight: 600; color: var(--ink); }
-.room-live-section > .card { border-left: 2px solid var(--accent); }
 .cfg-summary {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
