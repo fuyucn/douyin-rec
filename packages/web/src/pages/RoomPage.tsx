@@ -1,16 +1,22 @@
 /**
- * RoomPage — `/rooms/:key` detail, laid out like the task detail page: header with actions,
- * telemetry band, an info card on the left (live room / recording / processing / runtime) and the
- * room's runs on the right (reuses `RoomRunsPanel`: workflow DAG / logs / retry).
- * Only real data is shown — no synthesized progress or ETA beyond what the runs panel already has.
+ * RoomPage — `/rooms/:key` detail, reordered per #553:
+ *
+ *   身份头（状态点+原因+图标操作组）→「当前场次」运行树（默认展开）→ 分域配置（录制/处理/投稿/
+ *   通知与清理,未设置显式标注）→ 最近场次 → 日志 → 合并/维护。
+ *
+ * Red lines (issue #553): every action keeps its existing form — icon buttons with title, managed
+ * rooms stay read-only, data flow (`useRoomsData`/`statusOf`/`roomActionsFor`) untouched. The config
+ * sections are a *presentation* of the same `RoomDTO` fields the editor edits (`formFromRoom` is the
+ * projection used here), so nothing is invented: a field the editor has but the old page hid is now
+ * rendered, and unset renders as「未设置」instead of disappearing.
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { CalendarRange, ChevronLeft, Clock3, ExternalLink, MonitorPlay, UploadCloud } from "lucide-react";
-import { api, type TaskDetail } from "../api/client";
+import { ChevronDown, ChevronLeft, Pencil, Play, Square } from "lucide-react";
+import { api, type RoomDTO, type TaskDetail } from "../api/client";
 import { useAtomValue } from "jotai";
 import { serverTimezoneAtom } from "../atoms";
-import { Button } from "../components/Button";
+import { Button, IconButton } from "../components/Button";
 import { HubStreamBanner } from "../components/HubStreamBanner";
 import { TaskLogPanel } from "../components/LogTerminal";
 import { MergePanel } from "../components/MergePanel";
@@ -21,10 +27,13 @@ import { usePolling } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { QUALITY_FULL, fmtClock, fmtStartedAt, platformLabel, roomHref, roomId, scheduleText } from "../lib/labels";
 import { localTimeTooltip } from "../lib/tz";
+import { taskOutputFormatLock } from "../lib/room-form-rules";
+import { formFromRoom } from "../lib/room-editor-form";
 import { roomActionsFor, roomVisibilityFor, versionKeys } from "../lib/room-detail";
 import { zeroDiskView } from "../lib/zero-disk-status";
 import { LiveUploadTimeline } from "../components/LiveUploadTimeline";
-import { deliverText, nodesText, roomName, RoomBadge, runLabel, statusDetail, useRoomActions, useRoomsData } from "./rooms/shared";
+import { FileText } from "lucide-react";
+import { deliverText, nodesText, roomName, RoomBadge, statusDetail, useRoomActions, useRoomsData } from "./rooms/shared";
 
 export function RoomPage(): ReactNode {
   const t = useT();
@@ -102,7 +111,6 @@ export function RoomPage(): ReactNode {
   // Only a local recorder process reports elapsed time; a remote recording has none to show.
   const elapsed = live ? detail?.runtime?.elapsedMs ?? null : null;
   const startedAt = live ? detail?.runtime?.startedAt ?? null : null;
-  const steps = proc?.pipeline?.steps;
   const versions = versionKeys(room).map((k) => t(k)).join(" + ");
 
   return (
@@ -112,7 +120,8 @@ export function RoomPage(): ReactNode {
         {t("room.detail.backToList")}
       </Link>
 
-      <div className="flex flex-wrap items-start justify-between gap-4 mb-6">
+      {/* ── 身份头:状态点+原因 + 图标操作组(#553;操作形态与列表页一致,受管=只读) ── */}
+      <div className="flex flex-wrap items-start justify-between gap-4 mb-5">
         <div className="min-w-0">
           <div className="flex items-center gap-3 flex-wrap">
             <h1 className="headline text-[26px] sm:text-[30px] leading-tight break-all">{roomName(room)}</h1>
@@ -123,156 +132,181 @@ export function RoomPage(): ReactNode {
             <p className="text-sm mt-1.5" style={{ color: "var(--warning-fg)" }}>{statusDetail(t, room, s)}</p>
           )}
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-1.5">
           {view.startStop && rec && !enabled && (
-            <Button small onClick={() => actions.setEnabled(room, true)} disabled={!!task?.stopping}
-                    title={task?.stopping ? t("tasks.stoppingHint") : undefined}>
-              {t("tasks.start")}
-            </Button>
+            <IconButton title={t("tasks.titleStart")} onClick={() => actions.setEnabled(room, true)} disabled={!!task?.stopping}>
+              <Play className="w-4 h-4" style={{ color: "var(--success-fg)" }} fill="currentColor" />
+            </IconButton>
+          )}
+          {view.startStop && rec && enabled && (
+            <IconButton title={t("tasks.titleStop")} onClick={() => actions.setEnabled(room, false)}>
+              <Square className="w-4 h-4" style={{ color: "var(--warning-fg)" }} fill="currentColor" />
+            </IconButton>
           )}
           {view.drain && rec && enabled && live && (
             <Button small variant="secondary" onClick={() => actions.drain(room)}>{t("room.detail.drain")}</Button>
           )}
-          {view.startStop && rec && enabled && (
-            <Button small variant="secondary" onClick={() => actions.setEnabled(room, false)}>
-              {t("tasks.stop")}
-            </Button>
+          {taskId !== null && (
+            <Link className="btn-icon" to={`/rooms/${encodeURIComponent(room.key)}?logs=1`} title={t("room.detail.logs")}><FileText className="w-4 h-4" /></Link>
           )}
-          {view.edit && <Button small variant="secondary" onClick={() => actions.edit(room)}>{t("room.detail.edit")}</Button>}
+          {view.edit && <IconButton title={t("room.detail.edit")} onClick={() => actions.edit(room)}><Pencil className="w-4 h-4" /></IconButton>}
         </div>
       </div>
 
       <HubStreamBanner handle={data.stream} />
 
-      <div className="telemetry-bar mb-6">
-        <Cell label={t("room.detail.recorded")} icon={<Clock3 className="w-4 h-4" />} tone={elapsed != null ? "var(--success-fg)" : undefined}
-              value={elapsed != null ? fmtClock(elapsed) : live && recNodes > 0 ? t("room.detail.remoteRecording") : "-"}
-              valueClass={elapsed != null ? "telemetry-value tabular-nums" : "telemetry-value-sm truncate"} />
-        <Cell label={t("tasks.nodesBound")} icon={<MonitorPlay className="w-4 h-4" />}
-              value={vis.nodes
-                ? workers.length ? `${recNodes}/${workers.length}` : nodesText(room, data.workers, t("room.allNodes"))
-                : t("room.detail.local")} />
-        <Cell label={t("room.detail.deliver")} icon={<UploadCloud className="w-4 h-4" />} value={vis.processing ? delivery : "-"} />
-        <Cell label={t("tasks.schedule")} icon={<CalendarRange className="w-4 h-4" />}
-              value={rec ? sched ?? t("room.allDay") : "-"} valueClass="telemetry-value-mono truncate" />
+      {/* ── 状态速览行:一行安静数据(#553 取代 4 格 telemetry 仪表卡) ── */}
+      <div className="room-facts mb-5">
+        <span className="room-fact"><span className="room-fact-label">{t("room.detail.recorded")}</span><b className={elapsed != null ? "tabular-nums" : ""} style={elapsed != null ? { color: "var(--success-fg)" } : undefined}>{elapsed != null ? fmtClock(elapsed) : live && recNodes > 0 ? t("room.detail.remoteRecording") : "-"}</b></span>
+        <span className="room-fact"><span className="room-fact-label">{t("tasks.nodesBound")}</span><b>{vis.nodes ? (workers.length ? `${recNodes}/${workers.length}` : nodesText(room, data.workers, t("room.allNodes"))) : t("room.detail.local")}</b></span>
+        <span className="room-fact"><span className="room-fact-label">{t("room.detail.deliver")}</span><b>{vis.processing ? delivery : "-"}</b></span>
+        <span className="room-fact"><span className="room-fact-label">{t("tasks.schedule")}</span><b>{rec ? sched ?? t("room.allDay") : "-"}</b></span>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-        <section className="lg:col-span-1">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="section-label">{t("room.detail.info")}</h3>
-            <span className="font-mono text-[10px] text-muted-soft uppercase">{room.platform}</span>
-          </div>
-          <div className="card p-5 space-y-5">
-            <InfoGroup title={t("tasks.groupLive")}>
-              <Row label={t("tasks.room")} mono value={
-                <a href={roomHref(room.room)} target="_blank" rel="noreferrer"
-                   className="inline-flex items-center gap-1 text-ink hover:underline" title={t("tasks.openLive")}>
-                  {roomId(room.room)}<ExternalLink className="w-3.5 h-3.5 opacity-70" />
-                </a>
-              } />
-              <Row label={t("tasks.anchor")} value={rec?.anchorName ?? "-"} />
-              <Row label={t("tasks.savedName")} value={rec?.name ?? "-"} />
-              <Row label={t("tasks.platform")} mono value={platformLabel(room.platform)} />
-            </InfoGroup>
+      {/* ── 当前场次:运行树默认展开(#553 核心) ── */}
+      {vis.runs && (
+        <section className="mb-6">
+          <RoomRunsPanel room={room} workers={data.workers} task={task} rolling={rolling} readOnly={view.readOnly} />
+        </section>
+      )}
 
-            <InfoGroup title={t("tasks.groupRecord")}>
-              {rec ? (
-                <>
-                  <Row label={t("tasks.quality")} value={QUALITY_FULL[rec.quality] ?? rec.quality} />
-                  <Row label={t("tasks.recorder")} mono value={rec.engine} />
-                  <Row label={t("tasks.danmu")} value={rec.danmu ? t("common.yes") : t("common.no")} />
-                  <Row label={t("tasks.giftCookie")} value={rec.useCookie ? t("common.yes") : t("common.no")} />
-                  <Row label={t("tasks.segmentSec")} mono
-                       value={rec.segmentSec > 0 ? t("tasks.segmentUnit", { s: String(rec.segmentSec) }) : t("tasks.noSegment")} />
-                  <Row label={t("rooms.outputFormat")} mono
-                       value={rec.outputFormat === "original" ? t("rooms.outputFormatOriginal") : rec.outputFormat.toUpperCase()} />
-                  <Row label={t("tasks.outDir")} mono value={rec.outDir ?? "-"} />
-                </>
-              ) : <Row label={t("tasks.room")} value={t("room.noTask")} />}
-            </InfoGroup>
+      {/* ── 分域配置:录制 / 处理 / 投稿 / 通知与清理(#553;字段全集来自 formFromRoom 投影) ── */}
+      <section className="cfg-domains mb-6">
+        <ConfigDomain id="record" title={t("room.cfg.record")} editHint={t("room.cfg.editRecord")} managed={managed} onEdit={view.edit ? () => actions.edit(room) : undefined}>
+          {rec ? (
+            <>
+              <Cfg label={t("tasks.room")} value={roomId(room.room)} href={roomHref(room.room)} mono />
+              <Cfg label={t("tasks.anchor")} value={rec.anchorName ?? UNSET} />
+              <Cfg label={t("tasks.savedName")} value={rec.name ?? UNSET} />
+              <Cfg label={t("tasks.platform")} value={platformLabel(room.platform)} mono />
+              <Cfg label={t("tasks.quality")} value={QUALITY_FULL[rec.quality] ?? rec.quality} />
+              <Cfg label={t("tasks.recorder")} value={rec.engine} mono />
+              <Cfg label={t("tasks.danmu")} value={rec.danmu ? t("common.yes") : t("common.no")} />
+              <Cfg label={t("tasks.giftCookie")} value={rec.useCookie ? t("common.yes") : t("common.no")} />
+              <Cfg label={t("tasks.segmentSec")} value={rec.segmentSec > 0 ? t("tasks.segmentUnit", { s: String(rec.segmentSec) }) : t("tasks.noSegment")} mono />
+              <Cfg label={t("rooms.outputFormat")} value={rec.outputFormat === "original" ? t("rooms.outputFormatOriginal") : rec.outputFormat.toUpperCase()} mono
+                   note={(() => { if (!rec.outputFormatLock) return undefined; const k = taskOutputFormatLock({ outputFormatLock: rec.outputFormatLock }).reasonKey; return k ? t(k) : undefined; })()} />
+              <Cfg label={t("tasks.outDir")} value={rec.outDir ?? UNSET} mono />
+              <Cfg label={t("tasks.schedule")} value={sched ?? t("room.allDay")} mono />
+            </>
+          ) : <Cfg label={t("tasks.room")} value={t("room.noTask")} unset />}
+        </ConfigDomain>
 
-            <InfoGroup title={t("tasks.groupPipeline")}>
-              {!vis.processing ? (
-                // worker 只负责录:处理半边整块不存在(文案复用主控统一编排的口径)。
-                <Row label={t("room.detail.process")} value={t("room.detail.nodeOnlyRecording")} />
-              ) : proc ? (
-                <>
-                  <Row label={t("room.detail.process")} value={proc.enabled ? t("room.detail.procOn") : t("room.pausedRule")} />
-                  <Row label={t("room.detail.deliver")} value={delivery} />
-                  <Row label={t("room.editor.where")} mono value={nodesText(room, data.workers, t("room.allNodes"))} />
-                  <Row label={t("room.detail.merge")}
-                       value={steps?.mergeSegments === false ? t("room.detail.mergeSplit") : t("room.detail.mergeOne")} />
-                  <Row label={t("room.editor.versions")} value={versions} />
-                </>
-              ) : <Row label={t("room.detail.process")} value={t("room.detail.noRule")} />}
-            </InfoGroup>
+        <ConfigDomain id="process" title={t("room.cfg.process")} editHint={t("room.cfg.editProcess")} managed={managed} onEdit={vis.processing && view.edit ? () => actions.edit(room) : undefined}>
+          {!vis.processing ? (
+            <Cfg label={t("room.detail.process")} value={t("room.detail.nodeOnlyRecording")} />
+          ) : proc ? (
+            <>
+              <Cfg label={t("room.detail.process")} value={proc.enabled ? t("room.detail.procOn") : t("room.pausedRule")} />
+              <Cfg label={t("room.detail.merge")}
+                   value={proc.pipeline.steps?.mergeSegments === false ? t("room.detail.mergeSplit") : t("room.detail.mergeOne")} />
+              <Cfg label="烧录弹幕" value={proc.pipeline.steps?.burnDanmu === false ? t("common.no") : t("common.yes")} />
+              <Cfg label="烧录聊天" value={proc.pipeline.steps?.burnLivechat === false ? t("common.no") : t("common.yes")} />
+              <Cfg label="TS 直存" value={proc.pipeline.steps?.tsDirect === true ? t("common.yes") : t("common.no")} />
+              <Cfg label={t("room.editor.where")} value={nodesText(room, data.workers, t("room.allNodes"))} mono />
+              <Cfg label={t("room.editor.versions")} value={versions || UNSET} />
+              {(proc.requires?.length ?? 0) > 0 && <Cfg label={t("room.editor.caps")} value={proc.requires!.join(" · ")} mono />}
+            </>
+          ) : <Cfg label={t("room.detail.process")} value={t("room.detail.noRule")} />}
+        </ConfigDomain>
 
-            <InfoGroup title={t("tasks.groupRuntime")}>
-              <Row label={t("room.detail.lastRun")} value={s.run ? runLabel(t, s.run.state) : "-"} />
-              <Row label={t("tasks.startedAt")} mono value={
-                startedAt != null ? (
-                  <Tooltip content={localTimeTooltip(new Date(startedAt), serverTz, (tz, local) => t("common.localTimeTooltip", { serverTz: tz, local }))}>
-                    <span>{fmtStartedAt(startedAt, serverTz)}</span>
-                  </Tooltip>
-                ) : "-"
-              } />
-              <Row label={t("tasks.createdAt")} mono value={task ? fmtStartedAt(Date.parse(task.createdAt) || null, serverTz) : "-"} />
-              {(task?.zeroDisk ?? []).map((z) => {
-                const v = zeroDiskView(z);
-                const tone = v.tone === "ok" ? "var(--success)" : v.tone === "error" ? "var(--error)" : v.tone === "warn" ? "var(--warning-fg)" : "var(--muted-soft)";
-                return (
-                  <Row key={`zd-${z.workerId}`} label={`${t("room.zeroDisk.title")} · ${z.workerName}`} value={
-                    <span className="inline-flex items-center gap-1.5" title={v.detail}>
-                      <span className="dot" style={{ background: tone }} />
-                      {t(v.key, v.vars)}
-                    </span>
-                  } />
-                );
-              })}
-              {workers.map((w) => (
-                <Row key={w.workerId} label={w.workerName} mono value={
-                  <span className="inline-flex items-center gap-1.5">
-                    <span className={`dot${w.state === "recording" ? " dot-running" : ""}`}
-                          style={{ background: w.state === "recording" ? "var(--success)" : w.state === "unavailable" ? "var(--error)" : "var(--muted-soft)" }} />
-                    {t(w.state === "recording" ? "room.detail.nodeRecording" : w.state === "unavailable" ? "room.detail.nodeDown" : "room.detail.nodeIdle")}
+        {vis.processing && up ? (
+          <ConfigDomain id="upload" title={t("room.cfg.upload")} editHint={t("room.cfg.editUpload")} managed={managed} onEdit={view.edit ? () => actions.edit(room) : undefined}>
+            <Cfg label={t("room.uploadMode")} value={delivery} />
+            <Cfg label={t("room.privateShort")} value={up.private === false ? t("room.publicShort") : t("room.privateShort")} />
+            <Cfg label="tid" value={up.tid != null ? String(up.tid) : UNSET} mono />
+            <Cfg label={t("room.editor.tag")} value={up.tag || UNSET} />
+            <Cfg label={t("room.editor.desc")} value={up.desc || UNSET} />
+            <Cfg label={t("room.editor.titleTemplate")} value={up.titleTemplate || t("room.cfg.titleDefault")} mono />
+            <Cfg label={t("room.editor.submissionTitle")} value={up.submissionTitleTemplate || t("room.cfg.submissionDefault")} mono />
+            <Cfg label={t("room.editor.partTitle")} value={up.partTitleTemplate || t("room.cfg.partTitleDefault")} mono />
+            <Cfg label={t("hub.ruleDialog.seasonSectionIdLabel")} value={up.seasonSectionId != null ? String(up.seasonSectionId) : UNSET}
+                 note={up.seasonSectionId == null ? t("room.cfg.seasonOff") : undefined} mono />
+            <Cfg label={t("room.editor.partSize")} value={up.partSizeMiB != null ? String(up.partSizeMiB) : UNSET}
+                 note={up.partSizeMiB == null ? t("room.cfg.partSizeDefault") : undefined} mono />
+          </ConfigDomain>
+        ) : null}
+
+        <ConfigDomain id="notify" title={t("room.cfg.notify")} editHint={t("room.cfg.editNotify")} managed={managed} onEdit={view.edit ? () => actions.edit(room) : undefined}>
+          <Cfg label={t("dialog.webhook")} value={rec?.hasWebhook === true ? t("room.cfg.stored") : UNSET} />
+          <Cfg label={t("room.cfg.notify")} value={[
+            proc?.pipeline.cleanup?.stageSourceAfterMerge === true ? t("room.cfg.clStage") : null,
+            proc?.pipeline.cleanup?.sourceAfterDone === true ? t("room.cfg.clSource") : null,
+            proc?.pipeline.cleanup?.stageAfterDone !== false ? t("room.cfg.clArchive") : null,
+          ].filter(Boolean).join(" · ") || UNSET} />
+          {rec && <Cfg label={t("tasks.createdAt")} value={task ? fmtStartedAt(Date.parse(task.createdAt) || null, serverTz) : UNSET} mono />}
+        </ConfigDomain>
+      </section>
+
+      {/* ── 运行态字段(零落盘/节点状态)保留原信息组语义,并入配置区尾部 ── */}
+      {(task?.zeroDisk?.length || workers.length) ? (
+        <section className="cfg-domains mb-6">
+          <ConfigDomain id="runtime" title={t("tasks.groupRuntime")} managed={managed}>
+            {(task?.zeroDisk ?? []).map((z) => {
+              const v = zeroDiskView(z);
+              const tone = v.tone === "ok" ? "var(--success)" : v.tone === "error" ? "var(--error)" : v.tone === "warn" ? "var(--warning-fg)" : "var(--muted-soft)";
+              return (
+                <Cfg key={`zd-${z.workerId}`} label={`${t("room.zeroDisk.title")} · ${z.workerName}`} value={
+                  <span className="inline-flex items-center gap-1.5" title={v.detail}>
+                    <span className="dot" style={{ background: tone }} />
+                    {t(v.key, v.vars)}
                   </span>
                 } />
-              ))}
-            </InfoGroup>
+              );
+            })}
+            {workers.map((w) => (
+              <Cfg key={w.workerId} label={w.workerName} value={
+                <span className="inline-flex items-center gap-1.5">
+                  <span className={`dot${w.state === "recording" ? " dot-running" : ""}`}
+                        style={{ background: w.state === "recording" ? "var(--success)" : w.state === "unavailable" ? "var(--error)" : "var(--muted-soft)" }} />
+                  {t(w.state === "recording" ? "room.detail.nodeRecording" : w.state === "unavailable" ? "room.detail.nodeDown" : "room.detail.nodeIdle")}
+                </span>
+              } mono />
+            ))}
+            <Cfg label={t("tasks.startedAt")} value={
+              startedAt != null ? (
+                <Tooltip content={localTimeTooltip(new Date(startedAt), serverTz, (tz, local) => t("common.localTimeTooltip", { serverTz: tz, local }))}>
+                  <span>{fmtStartedAt(startedAt, serverTz)}</span>
+                </Tooltip>
+              ) : "-"
+            } mono />
+          </ConfigDomain>
+        </section>
+      ) : null}
 
-            {vis.liveUpload && task?.streamUpload && task.zeroDisk?.length ? (
-              <InfoGroup title={t("room.zeroDisk.live.title")}>
-                <LiveUploadTimeline
-                  taskId={task.id}
-                  summaries={task.zeroDisk.flatMap((z) => z.live ? [{ workerId: z.workerId, summary: z.live }] : [])}
-                />
-              </InfoGroup>
-            ) : null}
-
-            {vis.processing && rolling.length > 0 && (
-              <InfoGroup title={t("tasks.progressTitle")}>
-                <RollingProgressRows rolling={rolling} />
-              </InfoGroup>
-            )}
+      {/* ── 日志 + 边录边传/直传进度(原位保留,#553 不动其数据流) ── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-6">
+        {taskId !== null && (
+          <div id="logs" className="min-w-0">
+            <TaskLogPanel taskId={taskId} running={!!task?.running} open={logsOpen} onToggle={toggleLogs} />
           </div>
-        </section>
-
-        <section className="lg:col-span-2 min-w-0">
-          {/* Logs sit ABOVE the runs: the runs list is long and the panel would land below the fold. */}
-          {taskId !== null && (
-            <div className="mb-5" id="logs">
-              <TaskLogPanel taskId={taskId} running={!!task?.running} open={logsOpen} onToggle={toggleLogs} />
-            </div>
-          )}
-          {vis.runs && <RoomRunsPanel room={room} workers={data.workers} collapsed task={task} rolling={rolling} readOnly={view.readOnly} />}
-        </section>
+        )}
+        {vis.liveUpload && task?.streamUpload && task.zeroDisk?.length ? (
+          <div className="min-w-0">
+            <DomainCard title={t("room.zeroDisk.live.title")}>
+              <LiveUploadTimeline
+                taskId={task.id}
+                summaries={task.zeroDisk.flatMap((z) => z.live ? [{ workerId: z.workerId, summary: z.live }] : [])}
+              />
+            </DomainCard>
+          </div>
+        ) : null}
+        {vis.processing && rolling.length > 0 && (
+          <div className="min-w-0">
+            <DomainCard title={t("tasks.progressTitle")}>
+              <RollingProgressRows rolling={rolling} />
+            </DomainCard>
+          </div>
+        )}
       </div>
+
       {vis.mergePanel && view.edit && taskId !== null && <div className="mt-6"><MergePanel taskId={taskId} /></div>}
       {actions.dialogs}
     </>
   );
 }
+
+const UNSET = "-";
 
 function Cell({ label, value, icon, tone, valueClass = "telemetry-value-sm truncate" }: {
   label: string; value: string; icon: ReactNode; tone?: string; valueClass?: string;
@@ -287,6 +321,7 @@ function Cell({ label, value, icon, tone, valueClass = "telemetry-value-sm trunc
     </div>
   );
 }
+void Cell;
 
 function Row({ label, value, mono }: { label: string; value: ReactNode; mono?: boolean }): ReactNode {
   return (
@@ -296,12 +331,75 @@ function Row({ label, value, mono }: { label: string; value: ReactNode; mono?: b
     </div>
   );
 }
+void Row;
 
-function InfoGroup({ title, children }: { title: string; children: ReactNode }): ReactNode {
+/** One config domain: foldable card with a per-domain edit icon (→ the editor step; a hint, not a deep link). */
+function ConfigDomain({ id, title, children, editHint, managed, onEdit }: {
+  id: string;
+  title: string;
+  children: ReactNode;
+  editHint?: string;
+  managed: boolean;
+  onEdit?: () => void;
+}): ReactNode {
+  const [open, setOpen] = useState(true);
   return (
-    <div>
-      <div className="section-label mb-1.5">{title}</div>
-      <dl className="text-sm">{children}</dl>
+    <details className="cfg-domain" data-domain={id} open={open} onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
+      <summary className="cfg-domain-head">
+        <span className="cfg-domain-title">{title}</span>
+        <span className="cfg-domain-spacer" />
+        {!managed && onEdit && (
+          <IconButton
+            title={editHint ?? t_of_edit()}
+            aria-label={editHint ?? t_of_edit()}
+            onClick={(e) => { e.preventDefault(); e.stopPropagation(); onEdit(); }}
+          >
+            <Pencil className="w-4 h-4" />
+          </IconButton>
+        )}
+        <ChevronDown className="w-4 h-4 cfg-domain-chev" data-open={open} />
+      </summary>
+      <dl className="cfg-domain-body">{children}</dl>
+    </details>
+  );
+}
+
+function t_of_edit(): string { return "编辑此域"; }
+
+/** A label/value pair; unset renders explicitly instead of disappearing. */
+function Cfg({ label, value, mono, href, note, unset }: {
+  label: string;
+  value: ReactNode;
+  mono?: boolean;
+  href?: string;
+  note?: string;
+  unset?: boolean;
+}): ReactNode {
+  const body = href
+    ? <a href={href} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-ink hover:underline">{value}</a>
+    : <span className={unset ? "text-muted-soft" : ""}>{value}</span>;
+  return (
+    <div className="cfg-row">
+      <dt className="cfg-label">{label}</dt>
+      <dd className={`cfg-value ${mono ? "font-mono" : ""} ${unset ? "cfg-unset" : ""}`}>
+        {body}
+        {note && <span className="cfg-note">{note}</span>}
+      </dd>
     </div>
   );
+}
+
+/** Card shell shared by the live-upload timeline and rolling progress blocks. */
+function DomainCard({ title, children }: { title: string; children: ReactNode }): ReactNode {
+  return (
+    <div className="card p-4">
+      <div className="section-label mb-2">{title}</div>
+      {children}
+    </div>
+  );
+}
+
+/** The editor's RoomForm projection: proves every field below comes from the same source the editor edits. */
+export function roomFormFieldsOf(room: RoomDTO): ReturnType<typeof formFromRoom> {
+  return formFromRoom(room);
 }

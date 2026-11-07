@@ -282,6 +282,13 @@ const DICT = {
           },
         },
       },
+      cfg: {
+        record: "录制", process: "处理", upload: "投稿", notify: "通知与清理",
+        editRecord: "编辑录制配置", editProcess: "编辑处理配置", editUpload: "编辑投稿配置", editNotify: "编辑通知与清理",
+        stored: "已设置（不回显）", seasonOff: "未加入合集", partSizeDefault: "未设置 · 继承默认 1540",
+        titleDefault: "未设置 · 编辑时预填统一默认值", submissionDefault: "未设置 · 编辑时预填统一默认值", partTitleDefault: "未设置 · 编辑时预填统一默认值",
+        clStage: "合并后删存档源", clSource: "完成后删源节点录制", clArchive: "投稿后保留存档",
+      },
       detail: {
         back: "房间", edit: "编辑", drain: "录完这场再停", recorded: "已录", nodes: "节点", lastRun: "最近一场", deliver: "交付",
         logs: "录制日志", remoteRecording: "节点录制中", runs: "场次", notFound: "找不到这个房间", nodeRecording: "在录", nodeIdle: "未在录", nodeDown: "离线",
@@ -909,6 +916,13 @@ const DICT = {
             recovered: "Recovered part", stalled: "Source stalled", season_pending: "Season pending", season_done: "Season linked", season_failed: "Season failed", run_end: "Run ended",
           },
         },
+      },
+      cfg: {
+        record: "Recording", process: "Processing", upload: "Upload", notify: "Notify & cleanup",
+        editRecord: "Edit recording", editProcess: "Edit processing", editUpload: "Edit upload", editNotify: "Edit notify & cleanup",
+        stored: "Stored (not echoed)", seasonOff: "Not in a season", partSizeDefault: "Unset · inherits default 1540",
+        titleDefault: "Unset · editor prefills the shared default", submissionDefault: "Unset · editor prefills the shared default", partTitleDefault: "Unset · editor prefills the shared default",
+        clStage: "Delete pulled source after merge", clSource: "Delete node recordings when done", clArchive: "Keep archive after upload",
       },
       detail: {
         back: "Rooms", edit: "Edit", drain: "Stop after this stream", recorded: "Recorded", nodes: "Nodes", lastRun: "Last run", deliver: "Delivery",
