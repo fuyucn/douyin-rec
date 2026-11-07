@@ -1,0 +1,529 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>处理队列 · 设计原型（示意数据）</title>
+<style>
+/* =====================================================================
+   处理队列页 · 设计原型
+   设计令牌、状态点、卡片、字号系统全部沿用 dev/nodes-redesign-proto.html。
+   区块顺序按人的决策优先级：需处理 → 进行中 → 节点健康 → 本机队列（折叠）→ 历史（折叠）。
+   空闲时只留一条状态条；零值容器整体隐藏。真实计时 / 字节进度 / 心跳全部保留。
+   ===================================================================== */
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0;padding:0}
+:root{
+  --font-sans:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",sans-serif;
+  --font-mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --canvas:#101214;
+  --raised:#15181b;
+  --surface:#1b1f22;
+  --surface-soft:#22262a;
+  --hairline:rgba(255,255,255,.08);
+  --hairline-strong:rgba(255,255,255,.16);
+  --ink:#e9edf0;
+  --body:#a9b1b8;
+  --muted:#788088;
+  --accent:#4a9ede;
+  --accent-fg:#0d1116;
+  --success:#2f9e6e;
+  --success-fg:#4cc38a;
+  --warning:#c9932e;
+  --warning-fg:#d9a94a;
+  --error:#d84a4f;
+  --error-fg:#ef7a7d;
+  --state-idle:#8a939b;
+  --state-off:#565e66;
+  --r:6px;
+  --ease:cubic-bezier(.16,1,.3,1);
+}
+:root[data-theme="light"]{
+  --canvas:#fafafa;
+  --raised:#ffffff;
+  --surface:#f2f3f4;
+  --surface-soft:#e9ebec;
+  --hairline:rgba(15,19,23,.10);
+  --hairline-strong:rgba(15,19,23,.20);
+  --ink:#12161a;
+  --body:#43494f;
+  --muted:#70767c;
+  --accent:#1a6fb5;
+  --accent-fg:#ffffff;
+  --success:#1e7a4f;
+  --success-fg:#17724a;
+  --warning:#9a6b10;
+  --warning-fg:#8a5f0c;
+  --error:#c2373c;
+  --error-fg:#b32f34;
+  --state-idle:#7d858c;
+  --state-off:#b3b9be;
+}
+html{min-height:100%;background:var(--canvas)}
+body{min-height:100%;background:var(--canvas);color:var(--body);font-family:var(--font-sans);font-size:14px;line-height:1.55;-webkit-font-smoothing:antialiased}
+[hidden]{display:none !important}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+a{color:inherit}
+.sprite{position:absolute;width:0;height:0;overflow:hidden}
+.ico{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex:none;display:inline-block}
+.num{font-variant-numeric:tabular-nums}
+.mono{font-family:var(--font-mono)}
+
+/* 状态点：全站唯一的状态语言。.run 用既有 --accent，不引入新色。 */
+.dot{display:inline-block;width:7px;height:7px;border-radius:2px;flex:none}
+.dot.ok{background:var(--success)}
+.dot.err{background:var(--error)}
+.dot.warn{background:var(--warning)}
+.dot.idle{background:var(--state-idle)}
+.dot.off{background:transparent;border:1.5px solid var(--state-off)}
+.dot.run{background:var(--accent)}
+
+/* ── 页面骨架 ─────────────────────────────────────────────────────── */
+.shell{max-width:1180px;margin:0 auto;padding:32px 32px 72px}
+.page-head{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:20px}
+.eyebrow{margin:0 0 8px;font-size:11.5px;color:var(--muted)}
+h1{font-size:26px;line-height:1.2;font-weight:600;margin:0;color:var(--ink)}
+.subtitle{margin:6px 0 0;font-size:13px;color:var(--muted);max-width:680px}
+.freshness{margin-top:10px;font-size:12px;color:var(--muted)}
+.freshness .sep{margin:0 8px;color:var(--hairline-strong)}
+.head-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:32px;padding:0 12px;border-radius:var(--r);border:1px solid var(--hairline);background:transparent;color:var(--body);font:500 12.5px/1 var(--font-sans);cursor:pointer;white-space:nowrap;transition:color .14s var(--ease),background-color .14s var(--ease),border-color .14s var(--ease)}
+.btn:hover{color:var(--ink);border-color:var(--hairline-strong);background:var(--surface)}
+.proto-toggle{height:32px;padding:0 4px;border:0;background:transparent;color:var(--muted);font:400 12px/1 var(--font-sans);cursor:pointer;text-decoration:underline;text-underline-offset:3px;white-space:nowrap}
+.proto-toggle:hover{color:var(--accent)}
+.proto-toggle[aria-pressed="true"]{color:var(--warning-fg)}
+.textlink{color:var(--accent);text-decoration:none;font-size:12.5px;white-space:nowrap}
+.textlink:hover{text-decoration:underline}
+.textlink.dim{color:var(--muted)}
+.action{height:26px;padding:0 6px;border:0;border-radius:var(--r);background:transparent;color:var(--muted);font:400 12.5px/1 var(--font-sans);cursor:pointer;white-space:nowrap}
+.action:hover{color:var(--ink);background:var(--surface-soft)}
+
+/* ── 区块标题：14–15px 正常字重，不用 11px uppercase 微标签 ─────── */
+.sec-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 12px;margin-bottom:10px}
+.sec-head h2{margin:0;font-size:15px;line-height:1.3;font-weight:600;color:var(--ink)}
+.sec-head .count{font-family:var(--font-mono);font-size:12.5px;color:var(--muted)}
+.sec-head .note{font-size:11.5px;color:var(--muted)}
+
+/* ── 筛选 chip ───────────────────────────────────────────────────── */
+.filterbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;padding:11px 0;border-block:1px solid var(--hairline);margin-bottom:18px}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{display:inline-flex;align-items:center;gap:7px;height:30px;padding:0 11px;border:1px solid var(--hairline);border-radius:var(--r);background:transparent;color:var(--body);font:500 12.5px/1 var(--font-sans);cursor:pointer;white-space:nowrap;transition:color .14s var(--ease),background-color .14s var(--ease),border-color .14s var(--ease)}
+.chip:hover{color:var(--ink);border-color:var(--hairline-strong)}
+.chip.is-on{background:var(--surface-soft);border-color:var(--hairline-strong);color:var(--ink)}
+.chip .n{font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.chip.is-on .n{color:var(--ink)}
+.static-note{margin-left:auto;font-size:12px;color:var(--muted)}
+
+/* ── 需要处理：首屏第一块 ───────────────────────────────────────── */
+.attention{border:1px solid var(--hairline);border-radius:var(--r);background:var(--raised);margin-bottom:20px}
+.att-row{padding:12px 16px;border-bottom:1px solid var(--hairline)}
+.att-row:last-child{border-bottom:0}
+.att-top{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 12px}
+.att-name{font-size:13.5px;font-weight:600;color:var(--ink)}
+.att-slug{font-family:var(--font-mono);font-size:11.5px;color:var(--muted)}
+.att-tag{margin-left:auto;display:inline-flex;align-items:center;gap:7px;font-size:11.5px;color:var(--warning-fg)}
+.att-tag.e{color:var(--error-fg)}
+.att-reason{margin-top:5px;font-size:12.5px;line-height:1.45;color:var(--body);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.att-meta{margin-top:6px;display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 14px;font-size:11.5px;color:var(--muted)}
+.att-meta .bv{font-family:var(--font-mono);font-size:11.5px;color:var(--body)}
+.att-acts{margin-top:7px;display:flex;flex-wrap:wrap;gap:2px 10px}
+
+/* ── 进行中：资源池一行 + 场次 lane ─────────────────────────────── */
+.live{margin-bottom:20px}
+.pool-line{display:flex;flex-wrap:wrap;gap:4px 18px;padding:10px 14px;margin-bottom:10px;border:1px solid var(--hairline);border-radius:var(--r);background:var(--raised);font-size:12.5px;color:var(--muted)}
+.pool-line b{font-weight:500;color:var(--body);font-variant-numeric:tabular-nums}
+.lane{border:1px solid var(--hairline);border-radius:var(--r);background:var(--raised);padding:14px 16px;margin-bottom:10px}
+.lane:last-child{margin-bottom:0}
+.lane-head{display:flex;flex-wrap:wrap;align-items:flex-start;gap:6px 12px}
+.lane-title{font-size:13.5px;font-weight:600;color:var(--ink)}
+.lane-slug{font-family:var(--font-mono);font-size:11.5px;color:var(--muted)}
+.phase{margin-left:auto;display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:500;color:var(--ink);white-space:nowrap}
+.phase.wait{color:var(--body);font-weight:400}
+.lane-sub{margin-top:4px;font-size:11.5px;color:var(--muted)}
+.lane-meta{margin-top:9px;display:flex;flex-wrap:wrap;gap:4px 16px;font-family:var(--font-mono);font-size:11.5px;color:var(--body);font-variant-numeric:tabular-nums}
+.lane-meta .k{color:var(--muted)}
+/* 三段链：静态 hairline，无光环、无流动渐变；最小字号 11.5px */
+.flow{display:flex;flex-wrap:wrap;margin-top:12px;padding-top:11px;border-top:1px solid var(--hairline)}
+.flow-seg{flex:1 1 170px;min-width:150px;padding:0 14px;border-left:1px solid var(--hairline)}
+.flow-seg:first-child{border-left:0;padding-left:0}
+.flow-k{font-size:11.5px;color:var(--muted)}
+.flow-v{margin-top:4px;font-size:12.5px;line-height:1.45;color:var(--body)}
+.flow-seg.now .flow-v{color:var(--ink);font-weight:500}
+.flow-v .quiet{color:var(--muted)}
+.bytes{margin-top:10px;display:flex;flex-wrap:wrap;gap:4px 14px;font-family:var(--font-mono);font-size:11.5px;color:var(--body);font-variant-numeric:tabular-nums}
+.bytes .k{color:var(--muted)}
+.progress{height:3px;margin-top:7px;border-radius:2px;background:var(--surface-soft);overflow:hidden}
+.progress i{display:block;height:100%;background:var(--accent)}
+.lane-acts{margin-top:10px;display:flex;flex-wrap:wrap;gap:2px 10px}
+
+/* ── 空闲帧：只留一条 1 行状态条 ───────────────────────────────── */
+.idle-bar{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 12px;padding:13px 16px;margin-bottom:20px;border:1px solid var(--hairline);border-radius:var(--r);background:var(--raised);font-size:14px;font-weight:500;color:var(--ink)}
+.idle-bar .mut{font-size:12px;font-weight:400;color:var(--muted)}
+
+/* ── 节点健康：一行紧凑摘要，不再是主视图的大卡 ─────────────────── */
+.health-strip{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 16px;padding:11px 16px;margin-bottom:16px;border:1px solid var(--hairline);border-radius:var(--r);background:var(--raised);font-size:12.5px;color:var(--muted)}
+.health-strip .t{color:var(--ink);font-weight:500}
+.health-strip .e{color:var(--error-fg)}
+.health-strip .w{color:var(--warning-fg)}
+.health-strip .textlink{margin-left:auto}
+
+/* ── 折叠区：本机节点队列 / 历史 ─────────────────────────────────── */
+.fold{border:1px solid var(--hairline);border-radius:var(--r);background:var(--raised);margin-bottom:12px}
+.fold summary{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding:12px 16px;cursor:pointer;list-style:none;font-size:14px;font-weight:500;color:var(--ink)}
+.fold summary::-webkit-details-marker{display:none}
+.fold .sum-meta{font-size:12px;font-weight:400;color:var(--muted)}
+.fold .chev{margin-left:auto;width:7px;height:7px;border-right:1.5px solid var(--muted);border-bottom:1.5px solid var(--muted);transform:rotate(45deg);transition:transform .14s var(--ease)}
+.fold[open] .chev{transform:rotate(225deg)}
+.fold-body{border-top:1px solid var(--hairline);padding:6px 16px 12px}
+.fold-hint{margin:2px 0 10px;font-size:11.5px;color:var(--muted)}
+.mini{width:100%;border-collapse:collapse}
+.mini th{text-align:left;font-size:11.5px;font-weight:500;color:var(--muted);padding:7px 0;border-bottom:1px solid var(--hairline)}
+.mini td{font-size:12.5px;color:var(--body);padding:8px 0;border-bottom:1px solid var(--hairline)}
+.mini tr:last-child td{border-bottom:0}
+.mini .r{text-align:right;font-family:var(--font-mono);font-variant-numeric:tabular-nums}
+.mini th.r{text-align:right}
+.mini .name{color:var(--ink);font-weight:500}
+.mini .sub{font-family:var(--font-mono);font-size:11.5px;color:var(--muted)}
+.mini .alive{color:var(--success-fg)}
+.fold-note{margin-top:10px;font-size:11.5px;color:var(--muted)}
+
+.legend{margin-top:28px;border-top:1px solid var(--hairline);padding-top:14px;display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px;color:var(--muted)}
+.legend .group-title{color:var(--ink);font-weight:500;margin-right:4px}
+.legend .s{display:inline-flex;align-items:center;gap:6px}
+.footnote{margin-top:12px;font-size:11.5px;line-height:1.65;color:var(--muted);max-width:920px}
+
+@media (max-width:880px){
+  .shell{padding:24px 18px 56px}
+  .static-note{margin-left:0;flex-basis:100%}
+  .head-actions{width:100%}
+  .health-strip .textlink{margin-left:0}
+  .flow-seg{flex-basis:100%;padding:8px 0 0;border-left:0;border-top:1px solid var(--hairline)}
+  .flow-seg:first-child{border-top:0;padding-top:0}
+}
+</style>
+</head>
+<body>
+
+<svg class="sprite" aria-hidden="true">
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></symbol>
+</svg>
+
+<div class="shell">
+
+  <header class="page-head">
+    <div>
+      <p class="eyebrow">设计原型 · 示意数据</p>
+      <h1>处理队列</h1>
+      <p class="subtitle">先看需要人判断的事，再看正在跑的场次。节点健康、本机队列与历史都收在后面。</p>
+      <div class="freshness">队列数据 3s 前<span class="sep">·</span>资源池 3s 前<span class="sep">·</span>节点健康 12s 前<span class="sep">·</span>时区 Asia/Shanghai</div>
+    </div>
+    <div class="head-actions">
+      <button class="btn" id="themeBtn" type="button" aria-label="切换主题">
+        <svg class="ico"><use id="themeIcon" href="#i-sun"/></svg><span id="themeLabel">亮色</span>
+      </button>
+      <button class="btn" type="button">刷新</button>
+      <button class="proto-toggle" id="idleToggle" type="button" aria-pressed="false">预览空闲帧</button>
+    </div>
+  </header>
+
+  <!-- ① 需要处理：从原来的第 7 层提到首屏第一块 -->
+  <section class="attention" id="attentionSection" aria-labelledby="attTitle">
+    <div class="sec-head" style="padding:12px 16px 10px;margin:0;border-bottom:1px solid var(--hairline)">
+      <h2 id="attTitle">需处理</h2>
+      <span class="count num">3 条</span>
+      <span class="note">需要人判断；自动对账不算故障</span>
+    </div>
+
+    <div class="att-row">
+      <div class="att-top">
+        <span class="dot err"></span>
+        <span class="att-name">主播F · B站房间</span>
+        <span class="att-slug">bili_demo06 / 10-26 20:00</span>
+        <span class="att-tag e"><span class="dot err"></span>需处理</span>
+      </div>
+      <div class="att-reason">上传结果未知 · ssh 连接在提交分 P 时中断，未确认是否投稿成功；源录像与临时文件均已保留，不会自动重传。</div>
+      <div class="att-meta"><span>vps-2 · home-nas</span><span>18 分钟前</span><span class="bv">BV1DEMO0003</span></div>
+      <div class="att-acts">
+        <button class="action" type="button">日志</button>
+        <button class="action" type="button">打开房间</button>
+        <button class="action" type="button">标记已核对</button>
+      </div>
+    </div>
+
+    <div class="att-row">
+      <div class="att-top">
+        <span class="dot warn"></span>
+        <span class="att-name">主播E · 抖音房间</span>
+        <span class="att-slug">dy_demo05 / 10-26 19:30</span>
+        <span class="att-tag"><span class="dot warn"></span>需处理</span>
+      </div>
+      <div class="att-reason">分 P 待核对 · P3 回读分 P 数未变化，请到创作中心核对稿件分 P；本地回退文件保留，未删源。</div>
+      <div class="att-meta"><span>controller · 直播直传</span><span>42 分钟前</span><span class="bv">BV1DEMO0002</span></div>
+      <div class="att-acts">
+        <button class="action" type="button">日志</button>
+        <button class="action" type="button">打开房间</button>
+        <button class="action" type="button">标记已核对</button>
+      </div>
+    </div>
+
+    <div class="att-row">
+      <div class="att-top">
+        <span class="dot err"></span>
+        <span class="att-name">主播H · B站房间</span>
+        <span class="att-slug">bili_demo08 / 10-26 17:10</span>
+        <span class="att-tag e"><span class="dot err"></span>需处理</span>
+      </div>
+      <div class="att-reason">合并失败 · ffmpeg 退出码 1：源分段 2 缺少视频流。两份源录像都保留，管线未自动重跑。</div>
+      <div class="att-meta"><span>vps-1</span><span>2 小时前</span><span>最近重试 第 2 次</span></div>
+      <div class="att-acts">
+        <button class="action" type="button">日志</button>
+        <button class="action" type="button">打开房间</button>
+        <button class="action" type="button">标记已核对</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 筛选：统一叫「进行中」 -->
+  <div class="filterbar" id="filterbar">
+    <div class="chips" role="group" aria-label="队列筛选">
+      <button class="chip is-on" type="button" data-filter="all" aria-pressed="true">全部 <span class="n num">6</span></button>
+      <button class="chip" type="button" data-filter="progress" aria-pressed="false"><span class="dot run"></span>进行中 <span class="n num">3</span></button>
+      <button class="chip" type="button" data-filter="attention" aria-pressed="false"><span class="dot warn"></span>需处理 <span class="n num">3</span></button>
+    </div>
+    <span class="static-note">筛选只作用于上面的活动区，历史记录始终在下方</span>
+  </div>
+
+  <!-- ② 进行中：资源池压成一行，零值容器不出现 -->
+  <section class="live" id="liveSection" aria-labelledby="liveTitle">
+    <div class="sec-head">
+      <h2 id="liveTitle">进行中</h2>
+      <span class="count num">3 条</span>
+      <span class="note">时间、字节与心跳都取自最近一次真实快照</span>
+    </div>
+
+    <div class="pool-line">
+      <span>CPU / 合并烧录 <b>1/2</b> · 排队 <b>1</b></span>
+      <span>上传窗口 <b>1/3</b></span>
+      <span>上传冷却 <b>正常</b></span>
+      <span>节点 <b>3/4</b> 在线</span>
+    </div>
+
+    <!-- 合并执行中 -->
+    <article class="lane">
+      <div class="lane-head">
+        <div>
+          <span class="lane-title">主播B · 抖音房间</span>
+          <span class="lane-slug">dy_demo02 / 10-26 20:00</span>
+          <div class="lane-sub">抖音 · vps-1 胜出 · 候选 2 个节点</div>
+        </div>
+        <span class="phase"><span class="dot run"></span>执行中 · 合并</span>
+      </div>
+      <div class="lane-meta">
+        <span class="k">已运行</span><span>06:38</span>
+        <span class="k">预计剩余</span><span>03:10</span>
+        <span class="k">心跳</span><span>3s 前</span>
+      </div>
+      <div class="flow" role="group" aria-label="流程进度">
+        <div class="flow-seg"><div class="flow-k">已完成</div><div class="flow-v">拉取录像 · 选优</div></div>
+        <div class="flow-seg now"><div class="flow-k">正在做</div><div class="flow-v">合并</div></div>
+        <div class="flow-seg"><div class="flow-k">接下来</div><div class="flow-v">烧弹幕 / 投稿 B站</div></div>
+      </div>
+      <div class="bytes"><span class="k">上传进度</span><span>1.84 GB / 2.60 GB</span><span>12.4 MB/s</span><span class="k">第 1 次</span></div>
+      <div class="progress" aria-hidden="true"><i style="width:70.8%"></i></div>
+      <div class="lane-acts">
+        <button class="action" type="button">日志</button>
+        <button class="action" type="button">打开房间</button>
+      </div>
+    </article>
+
+    <!-- 烧录排队等 CPU -->
+    <article class="lane">
+      <div class="lane-head">
+        <div>
+          <span class="lane-title">主播D · B站房间</span>
+          <span class="lane-slug">bili_demo04 / 10-26 19:30</span>
+          <div class="lane-sub">B站 · controller 胜出 · 候选 1 个节点</div>
+        </div>
+        <span class="phase wait"><span class="dot idle"></span>排队中（等 CPU · 第 2 位）</span>
+      </div>
+      <div class="lane-meta">
+        <span class="k">已等</span><span>04:12</span>
+        <span class="k">心跳</span><span>5s 前</span>
+        <span class="k">入队</span><span>10-26 21:42</span>
+      </div>
+      <div class="flow" role="group" aria-label="流程进度">
+        <div class="flow-seg"><div class="flow-k">已完成</div><div class="flow-v">拉取录像 · 合并</div></div>
+        <div class="flow-seg now"><div class="flow-k">正在做</div><div class="flow-v">烧弹幕 <span class="quiet">· 排队中</span></div></div>
+        <div class="flow-seg"><div class="flow-k">接下来</div><div class="flow-v">投稿 B站</div></div>
+      </div>
+      <div class="lane-acts">
+        <button class="action" type="button">日志</button>
+        <button class="action" type="button">打开房间</button>
+      </div>
+    </article>
+
+    <!-- 直播直传 lane -->
+    <article class="lane">
+      <div class="lane-head">
+        <div>
+          <span class="lane-title">主播C · 抖音房间</span>
+          <span class="lane-slug">dy_demo03 / 10-26 20:30 · 直播直传</span>
+          <div class="lane-sub">抖音 · controller · 不写本地视频</div>
+        </div>
+        <span class="phase"><span class="dot ok"></span>执行中 · 录制并上传中</span>
+      </div>
+      <div class="lane-meta">
+        <span class="k">当前</span><span>P4</span>
+        <span class="k">已确认</span><span>3 个分 P</span>
+        <span class="k">稿件</span><span>BV1DEMO0002</span>
+        <span class="k">心跳</span><span>2s 前</span>
+      </div>
+      <div class="flow" role="group" aria-label="流程进度">
+        <div class="flow-seg"><div class="flow-k">已完成</div><div class="flow-v">P1–P3 已确认</div></div>
+        <div class="flow-seg now"><div class="flow-k">正在做</div><div class="flow-v">P4 录制上传中</div></div>
+        <div class="flow-seg"><div class="flow-k">接下来</div><div class="flow-v">封口 / 提交分 P</div></div>
+      </div>
+      <div class="bytes"><span class="k">分 P 字节</span><span>862 MiB / 1540 MiB</span><span>8.6 MB/s</span><span class="k">已确认 3 / 4</span></div>
+      <div class="progress" aria-hidden="true"><i style="width:56%"></i></div>
+      <div class="lane-acts">
+        <button class="action" type="button">事件时间线</button>
+        <button class="action" type="button">打开房间</button>
+      </div>
+    </article>
+  </section>
+
+  <!-- 空闲对照帧：一条 1 行状态条，所有零值容器隐藏 -->
+  <div class="idle-bar" id="idleBar" hidden>
+    <span class="dot idle"></span>
+    队列空闲 · <span class="num">14</span> 条已完成
+    <span class="mut">最近完成 12 分钟前 · 下一次对账约 40s 后</span>
+  </div>
+
+  <!-- 节点健康：从首屏大卡降为一行摘要，位置在需要处理之后 -->
+  <section class="health-strip" id="healthStrip" aria-label="节点健康">
+    <span class="t">节点健康 · <span class="num">3/4</span> 在线</span>
+    <span class="e"><span class="dot err"></span> vps-2 离线 3 分钟</span>
+    <span class="w"><span class="dot warn"></span> home-nas 探测失败</span>
+    <span>在录 2 个房间 · 边录边传 1 场</span>
+    <a class="textlink" href="/nodes">打开节点页</a>
+  </section>
+
+  <!-- ③ 本机节点队列：默认一行折叠摘要；展开后也不画零值行 -->
+  <details class="fold" id="nodeQueue">
+    <summary>本机节点队列 · <span class="mono" style="font-size:12.5px;font-weight:400;color:var(--body)">controller</span>
+      <span class="sum-meta">执行中 2 · 待执行 3 · 执行宿主运行中</span>
+      <span class="chev" aria-hidden="true"></span>
+    </summary>
+    <div class="fold-body">
+      <p class="fold-hint">这台机器自己的处理队列；上面的场次队列是主控管线。展开才看 6 类明细，零值只用数字，不再画 chip。</p>
+      <table class="mini">
+        <thead><tr><th>处理类型</th><th class="r">执行中</th><th class="r">待执行</th><th class="r">执行宿主</th></tr></thead>
+        <tbody>
+          <tr><td><span class="name">分 P 上传</span> <span class="sub">upload-part</span></td><td class="r">1</td><td class="r">2</td><td class="r"><span class="alive">存活</span></td></tr>
+          <tr><td><span class="name">分 P 清理</span> <span class="sub">cleanup-part</span></td><td class="r">0</td><td class="r">0</td><td class="r sub">无存活租约</td></tr>
+          <tr><td><span class="name">分 P 对账</span> <span class="sub">reconcile-part</span></td><td class="r">0</td><td class="r">1</td><td class="r sub">无存活租约</td></tr>
+          <tr><td><span class="name">上传预处理</span> <span class="sub">upload-prep</span></td><td class="r">0</td><td class="r">0</td><td class="r sub">无存活租约</td></tr>
+          <tr><td><span class="name">B站上传</span> <span class="sub">biliup</span></td><td class="r">1</td><td class="r">0</td><td class="r"><span class="alive">存活</span></td></tr>
+          <tr><td><span class="name">格式转换</span> <span class="sub">remux</span></td><td class="r">0</td><td class="r">0</td><td class="r sub">无存活租约</td></tr>
+        </tbody>
+      </table>
+      <div class="fold-note">6 类只占 6 行；空闲帧里整块隐藏，不会留下 18 个零值 chip。</div>
+    </div>
+  </details>
+
+  <!-- ④ 历史：14–15px 标题 + N 条已完成，默认收起 -->
+  <details class="fold" id="history">
+    <summary>历史记录
+      <span class="sum-meta"><span class="num">14</span> 条已完成 · 默认收起</span>
+      <span class="chev" aria-hidden="true"></span>
+    </summary>
+    <div class="fold-body">
+      <p class="fold-hint">按收尾时间倒序，这里只列最近 4 条。</p>
+      <table class="mini">
+        <thead><tr><th>收尾时间</th><th>房间 / 场次</th><th>结果</th><th>稿件</th></tr></thead>
+        <tbody>
+          <tr><td class="mono num">10-26 21:28</td><td>主播A · B站房间 <span class="sub">10-26 19:00</span></td><td>已完成</td><td class="mono">BV1DEMO0001</td></tr>
+          <tr><td class="mono num">10-26 20:06</td><td>主播G · 抖音房间 <span class="sub">10-26 18:00</span></td><td>已完成</td><td class="mono">BV1DEMO0004</td></tr>
+          <tr><td class="mono num">10-26 17:52</td><td>主播D · B站房间 <span class="sub">10-26 15:30</span></td><td>已完成</td><td class="mono">BV1DEMO0005</td></tr>
+          <tr><td class="mono num">10-26 15:14</td><td>主播I · 抖音房间 <span class="sub">10-26 13:00</span></td><td>已完成 · 只存档</td><td class="sub">—</td></tr>
+        </tbody>
+      </table>
+      <div class="fold-note">另有 10 条更早记录，展开后可继续翻页。</div>
+    </div>
+  </details>
+
+  <section class="legend" aria-label="状态图例">
+    <span class="group-title">状态词</span>
+    <span class="s"><span class="dot run"></span>执行中</span>
+    <span class="s"><span class="dot idle"></span>排队中（等 CPU · 第 N 位）</span>
+    <span class="s"><span class="dot warn"></span>需处理</span>
+    <span class="s"><span class="dot ok"></span>已完成</span>
+  </section>
+  <p class="footnote">设计原型 · 示意数据。房间名、节点主机（vps-1.ts.example / vps-2.ts.example / home-nas.ts.example）、稿件号（BV1DEMO*）与场次时间均为占位，不含真实主机、IP、房间号或主播名；controller 为本机内置主控。已运行 / 预计剩余 / 字节进度 / 心跳均为真实字段示意，不虚构百分比；空闲帧隐藏全部零值容器，只留一条状态条。亮暗切换与节点页原型共用同一存储键。</p>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ── 主题：与节点页、房间页原型共用存储键 ───────────────────────── */
+  var root = document.documentElement;
+  var themeBtn = document.getElementById("themeBtn");
+  var themeIcon = document.getElementById("themeIcon");
+  var themeLabel = document.getElementById("themeLabel");
+  function applyTheme(mode) {
+    var light = mode === "light";
+    root.setAttribute("data-theme", light ? "light" : "dark");
+    themeIcon.setAttribute("href", light ? "#i-moon" : "#i-sun");
+    themeLabel.textContent = light ? "暗色" : "亮色";
+    try { localStorage.setItem("drec-proto-theme", light ? "light" : "dark"); } catch (e) {}
+  }
+  try { var saved = localStorage.getItem("drec-proto-theme"); if (saved) applyTheme(saved); } catch (e) {}
+  themeBtn.addEventListener("click", function () {
+    applyTheme(root.getAttribute("data-theme") === "light" ? "dark" : "light");
+  });
+
+  var attentionSection = document.getElementById("attentionSection");
+  var liveSection = document.getElementById("liveSection");
+  var filterbar = document.getElementById("filterbar");
+  var nodeQueue = document.getElementById("nodeQueue");
+  var idleBar = document.getElementById("idleBar");
+  var idleToggle = document.getElementById("idleToggle");
+  var chips = Array.prototype.slice.call(document.querySelectorAll(".chip[data-filter]"));
+  var filter = "all";
+  var idle = false;
+
+  function render() {
+    chips.forEach(function (c) {
+      var on = c.getAttribute("data-filter") === filter;
+      c.classList.toggle("is-on", on);
+      c.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+
+    /* 空闲帧：活动区、筛选、本机队列整体隐藏，只留一条状态条 */
+    attentionSection.hidden = idle || filter === "progress";
+    liveSection.hidden = idle || filter === "attention";
+    filterbar.hidden = idle;
+    nodeQueue.hidden = idle;
+    idleBar.hidden = !idle;
+
+    idleToggle.setAttribute("aria-pressed", idle ? "true" : "false");
+    idleToggle.textContent = idle ? "恢复数据帧" : "预览空闲帧";
+  }
+
+  chips.forEach(function (c) {
+    c.addEventListener("click", function () {
+      filter = c.getAttribute("data-filter");
+      render();
+    });
+  });
+  idleToggle.addEventListener("click", function () {
+    idle = !idle;
+    render();
+  });
+  render();
+})();
+</script>
+</body>
+</html>
