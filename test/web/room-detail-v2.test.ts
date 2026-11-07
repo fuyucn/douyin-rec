@@ -20,6 +20,18 @@ function rec(patch: Partial<NonNullable<RoomDTO["recording"]>>): RoomDTO["record
 }
 
 const INPUT = {
+  tr: (key: string) => KEYZH[key] ?? key,
+  words: {
+    yes: "开", no: "关", unsetMark: "-", stored: "已设置(不回显)", paused: "已暂停",
+    merged: "合并为一个视频", perSegment: "按录制分段",
+    seasonNote: "未加入合集;投稿成功后可自动加入", partSizeNote: "继承默认 1540(10 MiB 对齐)",
+    templateNote: "编辑时预填统一默认值", descNote: "留空 = 不额外填写",
+    webhookStoredNote: "凭据不回显;留空 = 用全局配置", webhookUnsetNote: "未设置;留空 = 用全局配置",
+    cleanupNote: "弹幕与字幕文件永不删到最后一份", anchorNote: "运行时解析名,与任务名称独立",
+    loginNote: "取流匿名,账号只用于礼物/入场弹幕", outDirNote: "留空 = 数据根默认输出目录",
+    procPausedNote: "各节点停录,录完也不处理;任务与配置保留",
+    engineValue: (engine: string) => engine,
+  },
   qualityFull: (q: string) => (q === "origin" ? "原画" : q),
   segmentUnit: (s: number) => `${s} s`,
   noSegment: "不分段",
@@ -33,6 +45,9 @@ const INPUT = {
   cleanupSummary: "合并后删存档源 · 完成后删节点源",
   createdAt: "2026-11-07 10:00",
 };
+
+/** 测试词典:label 走 key 直读(断言用 key),值断言用注入的 words/value。 */
+const KEYZH: Record<string, string> = {};
 
 function fields(domainId: string, r: RoomDTO): Map<string, string> {
   const d = configDomains({ room: r, ...INPUT }).find((x) => x.id === domainId)!;
@@ -65,7 +80,9 @@ describe("room detail v2 config domains (#557)", () => {
     ]) {
       expect(all, `missing field: ${key}`).toContain(key);
     }
-    expect(all.length).toBeGreaterThanOrEqual(30);
+    // 字段全集精确断言(#553 原型 52 项中去除编辑器派生伪字段后的用户可见集)
+    expect(all.length).toBe(40);
+    expect(new Set(all).size).toBe(all.length); // 无重复 key(domainSummary 按 key 建 Map,重复会静默吞字段)
   });
 
   it("renders unset explicitly instead of dropping the field", () => {
@@ -73,7 +90,7 @@ describe("room detail v2 config domains (#557)", () => {
     const record = fields("record", r);
     expect(record.get("outDir")).toBe("-");
     const up = fields("upload", r);
-    expect(up.get("uploadOn")).toBe("未配置");
+    expect(up.get("uploadOn")).toBe("-");
   });
 
   it("summary skips unset fields and joins the rest", () => {

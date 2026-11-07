@@ -2338,6 +2338,43 @@ table.tasks tbody tr:last-child td {
   .room-fact { padding: 0 12px; }
 }
 
+/* ── Room detail v2 (#557): 摘要式四域 + 进度区 + field grid ──────────── */
+.section-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; margin-bottom: 10px; }
+.section-head h2 { margin: 0; font-size: 15px; line-height: 1.3; font-weight: 600; color: var(--ink); }
+.room-live-section > .card { border-left: 2px solid var(--accent); }
+.cfg-summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+  grid-template-areas: "title abstract count edit chev";
+  align-items: center;
+  gap: 8px 12px;
+  padding: 12px 16px;
+  cursor: pointer;
+  list-style: none;
+  color: var(--ink);
+}
+.cfg-summary::-webkit-details-marker { display: none; }
+.cfg-summary:hover { background: var(--surface); }
+.cfg-title { grid-area: title; font-size: 14px; font-weight: 500; color: var(--ink); white-space: nowrap; }
+.cfg-abstract { grid-area: abstract; min-width: 0; font-size: 12.5px; color: var(--body); overflow-wrap: anywhere; }
+.cfg-count { grid-area: count; justify-self: end; font-size: 11.5px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.cfg-body { border-top: 1px solid var(--hairline); padding: 14px 16px 16px; }
+.field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 22px; margin: 0; }
+.field { min-width: 0; }
+.field-label { display: block; margin: 0; font-size: 12px; line-height: 1.45; color: var(--muted); }
+.field-value { display: block; margin: 3px 0 0; font-size: 13px; line-height: 1.45; color: var(--ink); word-break: break-word; overflow-wrap: anywhere; }
+.field-value.unset { color: var(--muted); }
+.field-note { display: block; margin: 3px 0 0; font-size: 11.5px; line-height: 1.45; color: var(--muted); }
+.more { margin-top: 12px; border-top: 1px solid var(--hairline); }
+.more-sum { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 11px 2px 3px; cursor: pointer; list-style: none; font-size: 12.5px; color: var(--body); }
+.more-sum::-webkit-details-marker { display: none; }
+.more-sum:hover { color: var(--ink); }
+.more-sum .m-count { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.more-sum .chev { margin-left: auto; width: 7px; height: 7px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: rotate(45deg); transition: transform 140ms var(--ease-out); }
+.more[open] .more-sum .chev { transform: rotate(225deg); }
+.more-body-grid { padding: 12px 0 2px; }
+.cfg-single { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
 /* ── Queue task stream ────────────────────────────────────────────────────
    One vertical rail connects ordered groups. Step chips form a compact,
    wrap-safe pipeline; only the real current step carries motion. */

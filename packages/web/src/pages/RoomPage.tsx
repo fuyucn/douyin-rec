@@ -56,7 +56,7 @@ export function RoomPage(): ReactNode {
   // Switching rooms must not carry the open/closed state over; a recording room reopens it.
   useEffect(() => {
     setLogsOpen(params.get("logs") === "1" || live);
-  }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [key, live, params]); // eslint-disable-line react-hooks/exhaustive-deps
   const toggleLogs = (): void => {
     const next = !logsOpen;
     setLogsOpen(next);
@@ -71,7 +71,7 @@ export function RoomPage(): ReactNode {
     if (!logsMounted || !window.matchMedia("(max-width: 1023px)").matches) return;
     if (params.get("logs") !== "1") return;
     document.getElementById("logs")?.scrollIntoView({ block: "start", behavior: "smooth" });
-  }, [logsMounted]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [logsMounted, key]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Elapsed time only exists for a local recorder process (runtime); remote-only → "—".
   const [detail, setDetail] = useState<TaskDetail | null>(null);
@@ -129,6 +129,19 @@ export function RoomPage(): ReactNode {
     : "";
   const domains = configDomains({
     room,
+    tr: t,
+    words: {
+      yes: t("common.yes"), no: t("common.no"), unsetMark: "-",
+      stored: t("room.cfg.stored"), paused: t("room.pausedRule"),
+      merged: t("roomForm.mergeOne"), perSegment: t("roomForm.mergeSplit"),
+      seasonNote: t("room.cfg.f.seasonNote"), partSizeNote: t("room.cfg.f.partSizeNote"),
+      templateNote: t("room.cfg.f.templateNote"), descNote: t("room.cfg.f.descNote"),
+      webhookStoredNote: t("room.cfg.f.webhookStoredNote"), webhookUnsetNote: t("room.cfg.f.webhookUnsetNote"),
+      cleanupNote: t("room.cfg.f.cleanupNote"), anchorNote: t("room.cfg.f.anchorNote"),
+      loginNote: t("room.cfg.f.loginNote"), outDirNote: t("room.cfg.f.outDirNote"),
+      procPausedNote: t("room.cfg.f.procPausedNote"),
+      engineValue: (engine) => engine,
+    },
     qualityFull: qualityLabel,
     segmentUnit: (sec) => t("tasks.segmentUnit", { s: String(sec) }),
     noSegment: t("tasks.noSegment"),
@@ -236,7 +249,7 @@ export function RoomPage(): ReactNode {
           <details className="cfg-domain" data-domain="runtime">
             <summary className="cfg-summary">
               <span className="cfg-title">{t("tasks.groupRuntime")}</span>
-              <span className="cfg-abstract">{vis.nodes ? (workers.length ? `${recNodes}/${workers.length} 在录` : nodesText(room, data.workers, t("room.allNodes"))) : t("room.detail.local")}</span>
+              <span className="cfg-abstract">{vis.nodes ? (workers.length ? `${recNodes}/${workers.length} ${t("room.detail.nodeRecording")}` : nodesText(room, data.workers, t("room.allNodes"))) : t("room.detail.local")}</span>
               <span className="cfg-domain-spacer" />
               <ChevronDown className="w-4 h-4 cfg-domain-chev" />
             </summary>

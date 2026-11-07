@@ -2,10 +2,34 @@
  * room-detail-v2.ts — 房间详情页 v2 的展示模型(#557,基准 = dev/room-detail-v2-proto.html)。
  *
  * 页面优先级原则:正在录的房间,进度 + 日志是高频,配置是低频。
- * 本模块只做纯函数:四域字段的常用/更多分组、summary 摘要文案。数据全部来自 RoomDTO
- * (与 RoomEditor 的 formFromRoom 同源投影),不发明字段、不新造判定。
+ * 本模块只做纯函数:四域字段的常用/更多分组、summary 摘要文案。数据全部来自 RoomDTO,
+ * 不发明字段、不新造判定。**零硬编码文案**:label/note 走 i18n key,由调用方注入
+ * `tr()` 翻译;value 的可读词(开/关/已设置等)由调用方经 `words` 注入。
  */
 import type { RoomDTO } from "../api/client";
+
+/** 值域可读词(调用方从 i18n 注入;模块零中文)。 */
+export interface ValueWords {
+  yes: string;
+  no: string;
+  unsetMark: string;
+  stored: string;
+  paused: string;
+  merged: string;
+  perSegment: string;
+  seasonNote: string;
+  partSizeNote: string;
+  templateNote: string;
+  descNote: string;
+  webhookStoredNote: string;
+  webhookUnsetNote: string;
+  cleanupNote: string;
+  anchorNote: string;
+  loginNote: string;
+  outDirNote: string;
+  procPausedNote: string;
+  engineValue: (engine: string) => string;
+}
 
 /** 一个配置字段的展示投影。value 已是可读文案;unset=true 时 UI 弱化显示。 */
 export interface CfgField {
@@ -35,90 +59,109 @@ export interface DomainDef {
 const f = (key: string, label: string, value: string, opts: Partial<Omit<CfgField, "key" | "label" | "value">> = {}): CfgField =>
   ({ key, label, value, ...opts });
 
-const YES = "开";
-const NO = "关";
+/** 标签与备注统一走 i18n key(room.cfg.f.*),调用方注入 tr。 */
+const L = (input: DomainInput, key: string): string => input.tr(`room.cfg.f.${key}`);
 
 /** 录制域:任务半边 + 输出格式(含锁定原因)。 */
 function recordFields(room: RoomDTO, opts: DomainInput): CfgField[] {
   const rec = room.recording;
-  if (!rec) return [f("taskId", "录制任务", "未绑定", { unset: true })];
-  const out: CfgField[] = [
-    f("platform", "平台", room.platform, { mono: true }),
-    f("quality", "画质", opts.qualityFull(rec.quality)),
-    f("engine", "录制引擎", rec.engine, { mono: true }),
-    f("segmentSec", "分段时长", rec.segmentSec > 0 ? opts.segmentUnit(rec.segmentSec) : opts.noSegment, { mono: true }),
-    f("danmu", "录制弹幕", rec.danmu ? YES : NO, { short: rec.danmu ? "弹幕开" : "不录弹幕" }),
-    f("schedule", "录制窗口", opts.schedule, { mono: true }),
-    f("name", "保存名称", rec.name ?? "-", { note: "文件名优先取解析名" }),
-    f("anchorName", "主播名", rec.anchorName ?? "-", { note: "运行时解析名,与任务名称独立" }),
-    f("useLoginState", "带账号信息", rec.useCookie ? YES : NO, { note: "取流匿名,账号只用于礼物/入场弹幕" }),
-    f("outDir", "输出目录", rec.outDir ?? "-", { mono: true, unset: !rec.outDir, note: rec.outDir ? undefined : "留空 = 数据根默认输出目录" }),
-    f("outputFormat", "输出格式", rec.outputFormat === "original" ? opts.fmtOriginal : rec.outputFormat.toUpperCase(), {
+  const w = opts.words;
+  const L_ = (k: string) => L(opts, k);
+  if (!rec) return [f("taskId", L_("task"), w.unsetMark, { unset: true })];
+  return [
+    f("platform", L_("platform"), room.platform, { mono: true }),
+    f("quality", L_("quality"), opts.qualityFull(rec.quality)),
+    f("engine", L_("engine"), w.engineValue(rec.engine), { mono: true }),
+    f("segmentSec", L_("segmentSec"), rec.segmentSec > 0 ? opts.segmentUnit(rec.segmentSec) : opts.noSegment, { mono: true }),
+    f("danmu", L_("danmu"), rec.danmu ? w.yes : w.no, { short: rec.danmu ? w.yes : w.no }),
+    f("schedule", L_("schedule"), opts.schedule, { mono: true }),
+    f("name", L_("name"), rec.name ?? w.unsetMark, { unset: !rec.name, note: opts.tr("room.cfg.f.nameNote") }),
+    f("anchorName", L_("anchorName"), rec.anchorName ?? w.unsetMark, { unset: !rec.anchorName, note: opts.tr("room.cfg.f.anchorNote") }),
+    f("useLoginState", L_("useLoginState"), rec.useCookie ? w.yes : w.no, { note: opts.tr("room.cfg.f.loginNote") }),
+    f("hasLoginState", L_("hasLoginState"), rec.hasCookies === true ? w.stored : w.unsetMark, { unset: rec?.hasCookies !== true, note: opts.tr("room.cfg.f.webhookStoredNote") }),
+    f("taskId", L_("taskId"), String(rec.taskId ?? w.unsetMark), { mono: true, unset: rec.taskId == null }),
+    f("enabled", L_("enabled"), rec.enabled ? w.yes : w.no, { short: rec.enabled ? w.yes : w.no, note: opts.tr("room.cfg.f.enabledNote") }),
+    f("rollingEffective", L_("rollingEffective"), rec.rollingEffective || rec.rollingUpload ? w.yes : w.no, { short: rec.rollingEffective || rec.rollingUpload ? w.yes : w.no }),
+    f("outDir", L_("outDir"), rec.outDir ?? w.unsetMark, { mono: true, unset: !rec.outDir, note: rec.outDir ? undefined : opts.tr("room.cfg.f.outDirNote") }),
+    f("outputFormat", L_("outputFormat"), rec.outputFormat === "original" ? opts.fmtOriginal : rec.outputFormat.toUpperCase(), {
       mono: true,
       note: opts.lockReason,
     }),
   ];
-  return out;
 }
 
 /** 处理域:规则半边的管线步骤与版本。 */
 function processFields(room: RoomDTO, opts: DomainInput): CfgField[] {
   const proc = room.processing;
-  if (!proc) return [f("procEnabled", "编排", "未配置处理", { unset: true })];
+  const w = opts.words;
+  const L_ = (k: string) => L(opts, k);
+  if (!proc) return [f("procEnabled", L_("procEnabled"), w.unsetMark, { unset: true })];
   const steps = proc.pipeline.steps ?? {};
   return [
-    f("procEnabled", "编排此房间", proc.enabled ? YES : NO, { short: proc.enabled ? "编排开" : "已暂停", note: proc.enabled ? undefined : "各节点停录,录完也不处理;任务与配置保留" }),
-    f("mergeSegments", "产出形态", steps.mergeSegments === false ? "按录制分段" : "合并为一个视频"),
-    f("burnDanmu", "烧录弹幕", steps.burnDanmu === false ? NO : YES, { short: steps.burnDanmu === false ? "不烧录" : "烧弹幕" }),
-    f("burnLivechat", "烧录聊天", steps.burnLivechat === false ? NO : YES),
-    f("versions", "要哪些版本", opts.versions),
-    f("where", "参与节点", opts.where, { mono: true }),
-    ...(proc.requires?.length ? [f("requires", "能力要求", proc.requires.join(" · "), { mono: true })] : []),
+    f("procEnabled", L_("procEnabled"), proc.enabled ? w.yes : w.no, { short: proc.enabled ? w.yes : w.paused, note: proc.enabled ? undefined : opts.tr("room.cfg.f.procPausedNote") }),
+    f("mergeSegments", L_("mergeSegments"), steps.mergeSegments === false ? w.perSegment : w.merged),
+    f("burnDanmu", L_("burnDanmu"), steps.burnDanmu === false ? w.no : w.yes, { short: steps.burnDanmu === false ? w.no : w.yes }),
+    f("burnLivechat", L_("burnLivechat"), steps.burnLivechat === false ? w.no : w.yes),
+    f("nodeSideUpload", L_("nodeSideUpload"), steps.nodeSideUpload === true ? w.yes : w.no),
+    f("tsDirect", L_("tsDirect"), steps.tsDirect === true ? w.yes : w.no),
+    f("versions", L_("versions"), opts.versions),
+    f("where", L_("where"), opts.where, { mono: true }),
+    ...(proc.requires?.length ? [f("requires", L_("requires"), proc.requires.join(" · "), { mono: true })] : []),
   ];
 }
 
 /** 投稿域:上传方式与稿件字段。 */
 function uploadFields(room: RoomDTO, opts: DomainInput): CfgField[] {
   const up = room.processing?.pipeline?.upload;
-  if (!up) return [f("uploadOn", "录完之后", "未配置", { unset: true, note: "无处理规则" })];
+  const w = opts.words;
+  const L_ = (k: string) => L(opts, k);
+  if (!up) return [f("uploadOn", L_("uploadOn"), w.unsetMark, { unset: true })];
   return [
-    f("uploadMode", "上传方式", opts.delivery, { short: opts.delivery }),
-    f("uploadPrivate", "可见性", opts.privateLabel),
-    f("tid", "分区 tid", up.tid != null ? String(up.tid) : "-", { mono: true, unset: up.tid == null }),
-    f("tag", "标签", up.tag || "-", { unset: !up.tag }),
-    f("titleTemplate", "文件名模板", up.titleTemplate || "-", { mono: true, unset: !up.titleTemplate, note: up.titleTemplate ? undefined : "编辑时预填统一默认值" }),
-    f("submissionTitleTemplate", "稿件标题模板", up.submissionTitleTemplate || "-", { mono: true, unset: !up.submissionTitleTemplate }),
-    f("partTitleTemplate", "分 P 标题模板", up.partTitleTemplate || "-", { mono: true, unset: !up.partTitleTemplate }),
-    f("desc", "简介", up.desc || "-", { unset: !up.desc, note: up.desc ? undefined : "留空 = 不额外填写" }),
-    f("seasonSectionId", "合集 ID", up.seasonSectionId != null ? String(up.seasonSectionId) : "-", {
+    f("uploadMode", L_("uploadMode"), opts.delivery, { short: opts.delivery }),
+    f("streamUpload", L_("streamUpload"), room.recording?.streamUpload === true ? w.yes : w.no, { short: room.recording?.streamUpload === true ? w.yes : w.no, note: opts.tr("room.cfg.f.streamUploadNote") }),
+    f("streamUploadSpool", L_("streamUploadSpool"), w.yes, { note: opts.tr("room.cfg.f.spoolNote") }),
+    f("uploadPrivate", L_("uploadPrivate"), opts.privateLabel),
+    f("tid", L_("tid"), up.tid != null ? String(up.tid) : w.unsetMark, { mono: true, unset: up.tid == null }),
+    f("tag", L_("tag"), up.tag || w.unsetMark, { unset: !up.tag }),
+    f("titleTemplate", L_("titleTemplate"), up.titleTemplate || w.unsetMark, { mono: true, unset: !up.titleTemplate, note: up.titleTemplate ? undefined : opts.tr("room.cfg.f.templateNote") }),
+    f("submissionTitleTemplate", L_("submissionTitleTemplate"), up.submissionTitleTemplate || w.unsetMark, { mono: true, unset: !up.submissionTitleTemplate }),
+    f("partTitleTemplate", L_("partTitleTemplate"), up.partTitleTemplate || w.unsetMark, { mono: true, unset: !up.partTitleTemplate }),
+    f("desc", L_("desc"), up.desc || w.unsetMark, { unset: !up.desc, note: up.desc ? undefined : opts.tr("room.cfg.f.descNote") }),
+    f("seasonSectionId", L_("seasonSectionId"), up.seasonSectionId != null ? String(up.seasonSectionId) : w.unsetMark, {
       mono: true,
       unset: up.seasonSectionId == null,
-      note: up.seasonSectionId == null ? "未加入合集;投稿成功后可自动加入" : undefined,
+      note: up.seasonSectionId == null ? opts.tr("room.cfg.f.seasonNote") : undefined,
     }),
-    f("partSizeMiB", "每 P 大小(MiB)", up.partSizeMiB != null ? String(up.partSizeMiB) : "-", {
+    f("partSizeMiB", L_("partSizeMiB"), up.partSizeMiB != null ? String(up.partSizeMiB) : w.unsetMark, {
       mono: true,
       unset: up.partSizeMiB == null,
-      note: up.partSizeMiB == null ? "继承默认 1540(10 MiB 对齐)" : undefined,
+      note: up.partSizeMiB == null ? opts.tr("room.cfg.f.partSizeNote") : undefined,
     }),
   ];
 }
 
 /** 通知与清理域。 */
-function notifyFields(room: RoomDTO, opts: { cleanupSummary: string; createdAt: string | null }): CfgField[] {
+function notifyFields(room: RoomDTO, opts: DomainInput): CfgField[] {
   const rec = room.recording;
+  const w = opts.words;
+  const L_ = (k: string) => L(opts, k);
   const out: CfgField[] = [
-    f("webhook", "通知推送地址", rec?.hasWebhook === true ? "已设置(不回显)" : "-", { unset: rec?.hasWebhook !== true, note: rec?.hasWebhook === true ? "凭据不回显;留空 = 用全局配置" : undefined }),
+    f("webhook", L_("webhook"), rec?.hasWebhook === true ? w.stored : w.unsetMark, { unset: rec?.hasWebhook !== true, note: rec?.hasWebhook === true ? opts.tr("room.cfg.f.webhookStoredNote") : opts.tr("room.cfg.f.webhookUnsetNote") }),
   ];
   if (room.processing) {
-    out.push(f("cleanup", "清理行为", opts.cleanupSummary, { note: "弹幕与字幕文件永不删到最后一份" }));
+    out.push(f("cleanup", L_("cleanup"), opts.cleanupSummary, { note: opts.tr("room.cfg.f.cleanupNote") }));
   }
-  if (opts.createdAt) out.push(f("createdAt", "创建时间", opts.createdAt, { mono: true }));
+  out.push(f("notifyToggles", L_("notifyToggles"), opts.tr("room.cfg.f.notifyTogglesValue")));
+  if (opts.createdAt) out.push(f("createdAt", L_("createdAt"), opts.createdAt, { mono: true }));
   return out;
 }
 
 export interface DomainInput {
   room: RoomDTO;
-  /** 渲染层文案(已翻译)由调用方注入,本模块不依赖 i18n。 */
+  /** i18n 注入:key → 已翻译文案(标签与备注)。 */
+  tr: (key: string) => string;
+  words: ValueWords;
+  /** 渲染层文案(已翻译)由调用方注入。 */
   qualityFull: (q: string) => string;
   segmentUnit: (s: number) => string;
   noSegment: string;
