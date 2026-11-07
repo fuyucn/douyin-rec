@@ -15,10 +15,7 @@
 
 ## 进行中
 - [~] **T-154 节点页与管理节点合并为一页（issue [#549](https://github.com/fuyucn/douyin-rec/issues/549) → PR [#550](https://github.com/fuyucn/douyin-rec/pull/550)，已合并 0c3ed335，版本 0.0.317，2026-11-07）** — **待部署验证**：节点卡 host/管理操作/拖拽、受管只读、i18n 实跑核对后收口。
-- [~] **T-156 房间列表与处理队列减法 pass：决策优先级重排、状态词统一、图标形态保留（issue [#552](https://github.com/fuyucn/douyin-rec/issues/552)）**（2026-11-06）
-  — rooms 首页「方式」列图标不可读、筛选器与指标错位；queue 需处理排第 7 层、空闲态 5 个空容器、状态词 4 套说法。设计原型 dev/rooms-redesign-proto.html 与 dev/queue-redesign-proto.html 已经人确认。
-  **做什么**: rooms 方式列文字 chip + 筛选 chip 化 + 告警一条一条 + 列重排（定时降行）+ 640-1023px 保留表格 + 节点入口改导航；queue 需处理进首屏 + 空闲合并一行 + 本机队列折叠 + 状态词唯一口径。**红线**：图标操作按钮、受管只读、判定口径全部保留。
-  **验收**: 见 issue；全量 pnpm test / typecheck / web build / i18n / bundle 通过。
+- [~] **T-156 房间列表与处理队列减法 pass（issue [#552](https://github.com/fuyucn/douyin-rec/issues/552) → PR [#554](https://github.com/fuyucn/douyin-rec/pull/554)，已合并 049f626a，版本 0.0.318，2026-11-07）** — **待部署验证**。独立 review APPROVE（红线逐项核实 + 门禁补跑全绿；RISK 为文案误报）。followup：筛选「需处理」为空时 idle 条与「无匹配」不可区分（一行修，下个小 PR）。残余：640-1023px 平板断点未动（留 #553 票）。
 - [~] **T-157 房间详情页重排：动态状态进首屏、配置按四域补齐重组（issue [#553](https://github.com/fuyucn/douyin-rec/issues/553)）**（2026-11-06）
   — 详情页答不出「这场跑到哪了」，运行树默认折叠；配置散在 5 个 InfoGroup 且缺约 15 个编辑器字段（标题模板/合集 ID/每 P 大小/outputFormatLock 等）。设计原型 dev/room-detail-redesign-proto.html 已经人确认（52 字段清单已验证）。
   **做什么**: 当前场次运行树默认展开进首屏 + 直传时间线提为一等区块 + 配置按录制/处理/投稿/通知与清理四域重组补齐、未设置显式标注。**红线**：全部图标操作入口与受管只读语义保留。

@@ -1,0 +1,897 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>处理队列 · 视觉走查对照原型（PR #551 修正版）</title>
+<style>
+/* =====================================================================
+   处理队列 /queue · 视觉走查对照原型
+   基准：dev/nodes-redesign-proto.html（令牌）、dev/rooms-redesign-proto.html（chip/列表语言）、
+        dev/queue-redesign-proto.html（数据、状态词、行式信息架构）。
+   对照：origin/main 的 PR #551 实现（QueuePage.tsx / index.css / i18n.tsx，均用 git show 读取）。
+
+   本页 = 新信息架构（概览在最上、需处理第一组）+ 按下面 9 条修订值重画的视觉。
+   自包含：无外部字体、图片、脚本；主题键与三份原型共用 drec-proto-theme。
+   约束：无 uppercase 微标签、无 emoji、无文本 glyph、无动画；最小字号 11.5px。
+   ===================================================================== */
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0;padding:0}
+:root{
+  --font-sans:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",sans-serif;
+  --font-mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --canvas:#101214;
+  --raised:#15181b;
+  --surface:#1b1f22;
+  --surface-soft:#22262a;
+  --hairline:rgba(255,255,255,.08);
+  --hairline-strong:rgba(255,255,255,.16);
+  --ink:#e9edf0;
+  --body:#a9b1b8;
+  --muted:#788088;
+  --accent:#4a9ede;
+  --accent-fg:#0d1116;
+  --success:#2f9e6e;
+  --success-fg:#4cc38a;
+  --warning:#c9932e;
+  --warning-fg:#d9a94a;
+  --error:#d84a4f;
+  --error-fg:#ef7a7d;
+  --state-idle:#8a939b;
+  --state-off:#565e66;
+  --r:6px;
+  --ease:cubic-bezier(.16,1,.3,1);
+}
+:root[data-theme="light"]{
+  --canvas:#fafafa;
+  --raised:#ffffff;
+  --surface:#f2f3f4;
+  --surface-soft:#e9ebec;
+  --hairline:rgba(15,19,23,.10);
+  --hairline-strong:rgba(15,19,23,.20);
+  --ink:#12161a;
+  --body:#43494f;
+  --muted:#70767c;
+  --accent:#1a6fb5;
+  --accent-fg:#ffffff;
+  --success:#1e7a4f;
+  --success-fg:#17724a;
+  --warning:#9a6b10;
+  --warning-fg:#8a5f0c;
+  --error:#c2373c;
+  --error-fg:#b32f34;
+  --state-idle:#7d858c;
+  --state-off:#b3b9be;
+}
+html{min-height:100%;background:var(--canvas)}
+body{min-height:100%;background:var(--canvas);color:var(--body);font-family:var(--font-sans);font-size:14px;line-height:1.55;-webkit-font-smoothing:antialiased}
+[hidden]{display:none !important}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+a{color:inherit}
+.sprite{position:absolute;width:0;height:0;overflow:hidden}
+.ico{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex:none;display:inline-block}
+.num{font-variant-numeric:tabular-nums}
+.mono{font-family:var(--font-mono)}
+
+/* ── 状态点：全站唯一的状态语言，7px 方形（差距 #5）────────────────── */
+.dot{display:inline-block;width:7px;height:7px;border-radius:2px;flex:none}
+.dot.ok{background:var(--success)}
+.dot.err{background:var(--error)}
+.dot.warn{background:var(--warning)}
+.dot.idle{background:var(--state-idle)}
+.dot.off{background:transparent;border:1.5px solid var(--state-off)}
+.dot.run{background:var(--accent)}
+
+/* ── 页面骨架 ─────────────────────────────────────────────────────── */
+.shell{max-width:1180px;margin:0 auto;padding:32px 32px 72px}
+.page-head{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:18px}
+.eyebrow{margin:0 0 8px;font-size:11.5px;color:var(--muted)}
+h1{font-size:26px;line-height:1.2;font-weight:600;margin:0;color:var(--ink)}
+.subtitle{margin:6px 0 0;font-size:13px;color:var(--muted);max-width:760px;line-height:1.6}
+.freshness{margin-top:10px;font-size:12px;color:var(--muted)}
+.freshness .sep{margin:0 8px;color:var(--hairline-strong)}
+.head-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:32px;padding:0 12px;border-radius:var(--r);border:1px solid var(--hairline);background:transparent;color:var(--body);font:500 12.5px/1 var(--font-sans);cursor:pointer;white-space:nowrap;transition:color .14s var(--ease),background-color .14s var(--ease),border-color .14s var(--ease)}
+.btn:hover{color:var(--ink);border-color:var(--hairline-strong);background:var(--surface)}
+.proto-toggle{height:32px;padding:0 4px;border:0;background:transparent;color:var(--muted);font:400 12.5px/1 var(--font-sans);cursor:pointer;text-decoration:underline;text-underline-offset:3px;white-space:nowrap}
+.proto-toggle:hover{color:var(--accent)}
+.proto-toggle[aria-pressed="true"]{color:var(--warning-fg)}
+.textlink{color:var(--accent);text-decoration:none;font-size:12.5px;white-space:nowrap}
+.textlink:hover{text-decoration:underline}
+.textlink.dim{color:var(--muted)}
+.action{height:28px;padding:0 6px;border:0;border-radius:var(--r);background:transparent;color:var(--muted);font:400 12.5px/1 var(--font-sans);cursor:pointer;white-space:nowrap}
+.action:hover{color:var(--ink);background:var(--surface-soft)}
+.action.danger{color:var(--error-fg)}
+
+/* ── 修订说明条：走查元信息，虚线中性框，不是产品 UI ──────────────── */
+.review{margin:0 0 12px;border:1px dashed var(--hairline-strong);border-left:2px solid var(--hairline-strong);border-radius:var(--r);background:transparent}
+.review summary{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;padding:9px 12px;cursor:pointer;list-style:none;font-size:12.5px;color:var(--body)}
+.review summary::-webkit-details-marker{display:none}
+.rv-no{font-family:var(--font-mono);font-size:11.5px;color:var(--accent);white-space:nowrap}
+.rv-x{color:var(--ink);font-weight:500}
+.rv-why{font-size:11.5px;color:var(--muted)}
+.rv-chev{margin-left:auto;width:7px;height:7px;border-right:1.5px solid var(--muted);border-bottom:1.5px solid var(--muted);transform:rotate(45deg);transition:transform .14s var(--ease);flex:none;align-self:center}
+.review[open] .rv-chev{transform:rotate(225deg)}
+.rev-body{padding:2px 12px 11px;border-top:1px solid var(--hairline)}
+.rev-line{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;margin-top:8px;font-size:12px;color:var(--body);line-height:1.6}
+.rev-line .k{flex:0 0 auto;font-family:var(--font-mono);font-size:11.5px;color:var(--muted)}
+.rev-line code{font-family:var(--font-mono);font-size:11.5px;color:var(--ink);background:var(--surface);border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;word-break:break-word}
+.rev-line .note{color:var(--muted)}
+
+/* ── 差距 #1 概览行：border-block，一行安静的数据，计数右对齐 ─────── */
+.overview{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 18px;padding:12px 2px;border-block:1px solid var(--hairline);margin-bottom:14px;font-size:12.5px;color:var(--muted)}
+.overview .ov-label{color:var(--body);font-weight:500}
+.ov-counts{margin-left:auto;display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:baseline;gap:6px 20px;text-align:right}
+.ov-counts .item{display:inline-flex;align-items:baseline;gap:7px;white-space:nowrap}
+.ov-counts b{font-size:13px;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+.ov-counts .item[data-tone="danger"] b{color:var(--error-fg)}
+.ov-health{display:inline-flex;align-items:baseline;gap:7px;padding-left:18px;border-left:1px solid var(--hairline);font-size:12.5px}
+.ov-health .e{color:var(--error-fg)}
+
+/* ── 差距 #2 资源池：单行，不画 72px 三格卡 ───────────────────────── */
+.pool-line{display:flex;flex-wrap:wrap;gap:4px 18px;padding:10px 14px;margin-bottom:14px;border:1px solid var(--hairline);border-radius:var(--r);background:var(--raised);font-size:12.5px;color:var(--muted)}
+.pool-line b{font-weight:500;color:var(--body);font-variant-numeric:tabular-nums}
+
+/* ── 差距 #3 筛选 chip：rooms 原型语言 ─────────────────────────────── */
+.filterbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;padding:10px 0 12px;border-bottom:1px solid var(--hairline);margin-bottom:18px}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{display:inline-flex;align-items:center;gap:7px;height:30px;padding:0 11px;border:1px solid var(--hairline);border-radius:var(--r);background:transparent;color:var(--body);font:500 12.5px/1 var(--font-sans);cursor:pointer;white-space:nowrap;transition:color .14s var(--ease),background-color .14s var(--ease),border-color .14s var(--ease)}
+.chip:hover{color:var(--ink);border-color:var(--hairline-strong)}
+.chip.is-on{background:var(--surface-soft);border-color:var(--hairline-strong);color:var(--ink)}
+.chip .n{font-family:var(--font-mono);font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.chip.is-on .n{color:var(--ink)}
+.search{margin-left:auto;height:30px;padding:0 10px;border:1px solid var(--hairline);border-radius:var(--r);background:transparent;color:var(--body);font:400 12.5px/1 var(--font-sans);min-width:190px}
+.search::placeholder{color:var(--muted)}
+.linkbtn{border:0;background:transparent;color:var(--muted);font:400 12.5px/1 var(--font-sans);cursor:pointer;text-decoration:underline;text-underline-offset:3px;padding:4px 0;white-space:nowrap}
+.linkbtn:hover{color:var(--accent)}
+
+/* ── 差距 #4 分组：无卡片框，15px 标题 + 留白，单一层级 ───────────── */
+.blk{margin-bottom:26px}
+.sec-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 12px;margin-bottom:8px}
+.sec-head h2{margin:0;font-size:15px;line-height:1.3;font-weight:600;color:var(--ink)}
+.sec-head .count{font-family:var(--font-mono);font-size:12.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.sec-head .note{font-size:11.5px;color:var(--muted)}
+.sec-head .textlink{margin-left:auto}
+.sec-head.att h2,.sec-head.att .count{color:var(--error-fg)}
+
+/* 行：hairline 分隔 + 方形 rail 点；无卡片、无左边色条、无入场动画 */
+.row{display:flex;gap:12px;padding:12px 0 11px;border-bottom:1px solid var(--hairline)}
+.row:last-child{border-bottom:0}
+.row-rail{position:relative;flex:0 0 12px}
+.row-rail::before{content:"";position:absolute;left:3px;top:9px;bottom:-12px;width:1px;background:var(--hairline)}
+.row:last-child .row-rail::before{display:none}
+.row-rail .dot{position:absolute;left:0;top:5px}
+.row-body{min-width:0;flex:1}
+.row-head{display:flex;flex-wrap:wrap;align-items:flex-start;gap:6px 12px}
+.row-title{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 10px;min-width:0}
+.row-name{font-size:13.5px;font-weight:600;color:var(--ink)}
+.row-slug{font-family:var(--font-mono);font-size:11.5px;color:var(--muted)}
+.row-phase{margin-left:auto;display:inline-flex;align-items:baseline;gap:7px;font-size:12.5px;font-weight:500;color:var(--ink);white-space:nowrap}
+.row-phase.wait{color:var(--body);font-weight:400}
+.row-sub{margin-top:4px;font-size:11.5px;color:var(--muted)}
+.row-meta{margin-top:9px;display:flex;flex-wrap:wrap;gap:4px 16px;font-size:11.5px;color:var(--body);font-variant-numeric:tabular-nums}
+.row-meta .k{color:var(--muted)}
+.row-meta .mono{font-family:var(--font-mono)}
+.row-summary{margin-top:7px;font-size:12.5px;color:var(--muted)}
+.row-acts{margin-top:8px;display:flex;flex-wrap:wrap;gap:2px 10px}
+
+/* 需处理：全页唯一强色时刻 = 2px 左规则 + 方形严重度点 + 严重度字色 */
+.att-row{display:flex;padding:12px 0 12px 14px;border-left:2px solid var(--warning);border-bottom:1px solid var(--hairline)}
+.att-row[data-severity="error"]{border-left-color:var(--error)}
+.att-row:last-child{border-bottom:0}
+.att-row .row-body{padding-left:12px}
+.att-tag{display:inline-flex;align-items:baseline;gap:7px;font-size:11.5px;color:var(--warning-fg)}
+.att-tag.e{color:var(--error-fg)}
+.att-reason{margin-top:6px;font-size:12.5px;line-height:1.5;color:var(--body)}
+.att-meta{margin-top:6px;display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 14px;font-size:11.5px;color:var(--muted)}
+.att-meta .bv{font-family:var(--font-mono);font-size:11.5px;color:var(--body)}
+
+/* ── 差距 #6 三段链：5px 分段条 + 数字图例 + 12.5px 步骤名 ────────── */
+.steps{margin-top:11px;padding-top:10px;border-top:1px solid var(--hairline)}
+.step-bar{display:flex;gap:3px;height:5px}
+.step-bar i{flex:1 1 0;height:5px;border-radius:2px;background:var(--surface-soft);border:1px solid var(--hairline)}
+.step-bar i[data-state="done"]{background:var(--success);border-color:transparent}
+.step-bar i[data-state="current"]{background:var(--accent);border-color:transparent}
+.step-legend{margin-top:8px;display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 0;font-size:12.5px;color:var(--body)}
+.step-legend .n{font-family:var(--font-mono);font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums;margin-right:12px}
+.step-legend .seg{display:inline-flex;align-items:baseline;gap:6px;padding:0 12px;border-right:1px solid var(--hairline)}
+.step-legend .seg:last-child{border-right:0;padding-right:0}
+.step-legend .seg .k{font-size:11.5px;color:var(--muted)}
+.step-legend .seg.now .v{color:var(--ink);font-weight:500}
+
+/* ── 空闲帧：整页一条状态条，零值容器全部隐藏（差距 #7）───────────── */
+.idle-bar{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 12px;padding:13px 16px;margin:0 0 20px;border:1px solid var(--hairline);border-radius:var(--r);background:var(--raised);font-size:14px;font-weight:500;color:var(--ink)}
+.idle-bar .mut{font-size:12px;font-weight:400;color:var(--muted)}
+
+/* ── 折叠区：本机队列，border-block 而非卡片框 ─────────────────────── */
+.fold{border-block:1px solid var(--hairline);background:transparent;margin-bottom:12px}
+.fold summary{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 12px;padding:12px 2px;cursor:pointer;list-style:none;font-size:14px;font-weight:500;color:var(--ink)}
+.fold summary::-webkit-details-marker{display:none}
+.fold .sum-meta{font-size:12px;font-weight:400;color:var(--muted)}
+.fold .chev{margin-left:auto;width:7px;height:7px;border-right:1.5px solid var(--muted);border-bottom:1.5px solid var(--muted);transform:rotate(45deg);transition:transform .14s var(--ease);align-self:center;flex:none}
+.fold[open] .chev{transform:rotate(225deg)}
+.fold-body{border-top:1px solid var(--hairline);padding:8px 2px 12px}
+.fold-hint{margin:2px 0 10px;font-size:11.5px;color:var(--muted)}
+.mini{width:100%;border-collapse:collapse}
+.mini th{text-align:left;font-size:11.5px;font-weight:500;color:var(--muted);padding:7px 0;border-bottom:1px solid var(--hairline)}
+.mini td{font-size:12.5px;color:var(--body);padding:8px 0;border-bottom:1px solid var(--hairline)}
+.mini tr:last-child td{border-bottom:0}
+.mini .r{text-align:right;font-family:var(--font-mono);font-variant-numeric:tabular-nums}
+.mini th.r{text-align:right}
+.mini .name{color:var(--ink);font-weight:500}
+.mini .sub{font-family:var(--font-mono);font-size:11.5px;color:var(--muted)}
+.mini .alive{color:var(--success-fg)}
+.fold-note{margin-top:10px;font-size:11.5px;color:var(--muted)}
+
+/* ── 对照小样 / 脚注 ───────────────────────────────────────────────── */
+.swatch{margin-top:28px;border-top:1px solid var(--hairline);padding-top:14px}
+.swatch h2{margin:0 0 4px;font-size:15px;font-weight:600;color:var(--ink)}
+.swatch-note{margin:0 0 10px;font-size:11.5px;color:var(--muted)}
+.swatch-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 24px}
+.swatch-item{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 10px;padding:9px 0;border-bottom:1px solid var(--hairline);font-size:12.5px;color:var(--body)}
+.swatch-item .k{flex:0 0 auto;min-width:92px;font-family:var(--font-mono);font-size:11.5px;color:var(--muted)}
+.swatch-item code{font-family:var(--font-mono);font-size:11.5px;color:var(--ink)}
+.swatch-item .old{color:var(--muted);text-decoration:line-through}
+.swatch-item .new{color:var(--ink)}
+.swatch-round{display:inline-block;width:7px;height:7px;border-radius:50%;border:1px solid var(--accent);background:var(--surface)}
+.legend{margin-top:24px;display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px;color:var(--muted)}
+.legend .group-title{color:var(--ink);font-weight:500;margin-right:4px}
+.legend .s{display:inline-flex;align-items:center;gap:6px}
+.footnote{margin-top:12px;font-size:11.5px;line-height:1.7;color:var(--muted);max-width:960px}
+
+@media (max-width:880px){
+  .shell{padding:24px 18px 56px}
+  .ov-counts{margin-left:0;justify-content:flex-start;text-align:left;flex-basis:100%}
+  .ov-health{padding-left:0;border-left:0}
+  .search{margin-left:0;flex-basis:100%}
+  .swatch-grid{grid-template-columns:minmax(0,1fr)}
+  .row-phase{margin-left:0}
+  .sec-head .textlink{margin-left:0}
+}
+</style>
+</head>
+<body>
+
+<svg class="sprite" aria-hidden="true">
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></symbol>
+</svg>
+
+<div class="shell">
+
+  <header class="page-head">
+    <div>
+      <p class="eyebrow">视觉走查对照原型 · 示意数据 · PR #551 已合并实现</p>
+      <h1>处理队列 · 视觉走查</h1>
+      <p class="subtitle">对照 origin/main 的 QueuePage.tsx / index.css 与人确认的三份设计原型。下方采用新信息架构（概览带在最上、需处理第一组），按 9 条修订的具体 CSS 值重画。每条修订折叠可看现状行号与建议值。</p>
+      <div class="freshness">队列数据 3s 前<span class="sep">·</span>资源池 3s 前<span class="sep">·</span>节点健康 12s 前<span class="sep">·</span>时区 Asia/Shanghai</div>
+    </div>
+    <div class="head-actions">
+      <button class="btn" id="themeBtn" type="button" aria-label="切换主题">
+        <svg class="ico"><use id="themeIcon" href="#i-sun"/></svg><span id="themeLabel">亮色</span>
+      </button>
+      <button class="proto-toggle" id="idleToggle" type="button" aria-pressed="false">预览空闲帧</button>
+      <button class="proto-toggle" id="notesToggle" type="button">折叠全部修订</button>
+    </div>
+  </header>
+
+  <!-- ── 差距 #1 概览带 ─────────────────────────────────────────────── -->
+  <details class="review" open>
+    <summary>
+      <span class="rv-no">差距 #1</span>
+      <span class="rv-x">实现是圆角卡片横条 + 4 个 14px 图标 + 右箭头 → 改为 border-block 一行安静数据（计数右对齐、无图标）</span>
+      <span class="rv-why">理由：最该安静的一行不该被做成页面里的第二张卡。</span>
+      <span class="rv-chev" aria-hidden="true"></span>
+    </summary>
+    <div class="rev-body">
+      <div class="rev-line"><span class="k">现状</span>QueuePage.tsx:237–242（Loader2 / Hourglass / AlertTriangle / Check，w-3.5）、:249（ChevronRight）；index.css:2185–2196（卡片框 + raised 底）、:2197–2202（计数 13px muted、健康点 50% 圆）</div>
+      <div class="rev-line"><span class="k">建议值</span><code>.queue-overview{border:0;border-block:1px solid var(--hairline);border-radius:0;background:none;padding:12px 0;margin-bottom:14px}</code><code>.queue-overview-counts{margin-left:auto;justify-content:flex-end;text-align:right}</code><code>.queue-overview-count{font-size:12.5px}</code><code>.queue-overview-count b{font-size:13px;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}</code><span class="note">（把 {n} 包进 b.num，文案其余部分保持 12.5px）</span><code>.queue-overview-count svg,.queue-node-health svg{display:none}</code><code>.queue-node-health .dot{width:7px;height:7px;border-radius:2px}</code></div>
+      <div class="rev-line"><span class="k">核实</span><span class="note">原型「一行安静的数据」见 nodes-redesign-proto.html:91–97（.summary，border-block、13px、计数 tabular、右侧纯文字链接）；rooms-redesign-proto.html:114（.metrics-line）同口径。计数语义仍取自 flow.counts，不改数据只改排版。</span></div>
+    </div>
+  </details>
+
+  <section class="overview" aria-label="队列概览">
+    <span class="ov-label">队列概览</span>
+    <div class="ov-counts">
+      <span class="item"><b class="num" data-count="running">2</b> 个在跑</span>
+      <span class="item"><b class="num" data-count="queued">1</b> 个排队</span>
+      <span class="item" data-tone="danger"><b class="num" data-count="actions">3</b> 个待处理</span>
+      <span class="item"><b class="num" data-count="done">14</b> 个已完成</span>
+    </div>
+    <a class="textlink ov-health" href="#nodeQueue"><span class="dot err"></span>3/4 在线<span class="e">· vps-2 离线 3 分钟</span></a>
+  </section>
+
+  <!-- ── 差距 #2 资源池 ─────────────────────────────────────────────── -->
+  <details class="review" open>
+    <summary>
+      <span class="rv-no">差距 #2</span>
+      <span class="rv-x">实现是 3 格 72px 高 telemetry 卡 + 3 个图标 → 改为一条 12.5px 数据行</span>
+      <span class="rv-why">理由：三个数不值得占一块 72px 的仪表卡，图标也不提供信息。</span>
+      <span class="rv-chev" aria-hidden="true"></span>
+    </summary>
+    <div class="rev-body">
+      <div class="rev-line"><span class="k">现状</span>QueueLive.tsx:43–68（LivePool，Gauge / ArrowRight / Timer 三图标）、index.css:1094–1101（telemetry-bar 卡）、:1115–1121（.telemetry-cell min-height:72px）</div>
+      <div class="rev-line"><span class="k">建议值</span><code>.telemetry-bar{display:flex;flex-wrap:wrap;gap:4px 18px;border:0;border-radius:0;background:none;padding:10px 14px}</code><code>.telemetry-cell{min-height:0;padding:0;border:0;gap:0}</code><code>.telemetry-icon{display:none}</code><code>.telemetry-label{font-size:12px}</code><code>.telemetry-value{font-size:12.5px;font-weight:500}</code></div>
+      <div class="rev-line"><span class="k">核实</span><span class="note">原型 queue-redesign-proto.html:133–134（.pool-line，单行 12.5px、tabular 数字、无图标）；示意数据同 :305–310。这里保留 1px 描边 + raised 底，仅此一条，不再叠第二层卡。</span></div>
+    </div>
+  </details>
+
+  <div class="pool-line" id="poolLine">
+    <span>CPU / 合并烧录 <b>1/2</b> · 排队 <b>1</b></span>
+    <span>上传窗口 <b>1/3</b></span>
+    <span>上传冷却 <b>正常</b></span>
+    <span>节点 <b>3/4</b> 在线</span>
+  </div>
+
+  <!-- ── 差距 #3 筛选 chip ──────────────────────────────────────────── -->
+  <details class="review" open>
+    <summary>
+      <span class="rv-no">差距 #3</span>
+      <span class="rv-x">实现是 11px mono / 24px 高 chip + 搜索框内图标 → 改为 12.5px 无衬线 / 30px 高 chip + 方形状态点</span>
+      <span class="rv-why">理由：筛选是主操作，不是 11px 等宽的数据脚注。</span>
+      <span class="rv-chev" aria-hidden="true"></span>
+    </summary>
+    <div class="rev-body">
+      <div class="rev-line"><span class="k">现状</span>QueuePage.tsx:168–213（CompactFilterBar，Search 图标 w-3.5）、index.css:1039–1053（.chip 11px mono / 24px）、:2205–2207（.queue-filters）</div>
+      <div class="rev-line"><span class="k">建议值</span><code>.chip{height:30px;padding:0 11px;font:500 12.5px/1 var(--font-sans);border-radius:6px}</code><code>.chip .n{font-size:12px}</code><code>.queue-filters{gap:8px 14px;padding:11px 0;border-block:1px solid var(--hairline)}</code><code>.queue-filters .relative&gt;svg{display:none}</code><span class="note">（或从 QueuePage.tsx:170 的 JSX 直接删掉 Search 图标，输入框改 !pl-2.5）</span></div>
+      <div class="rev-line"><span class="k">核实</span><span class="note">rooms-redesign-proto.html:106–110 / queue-redesign-proto.html:109–114：chip 带方形状态点与计数，选中态只用 surface-soft + ink 文字，不使用强调色边框。</span></div>
+    </div>
+  </details>
+
+  <div class="filterbar" id="filterbar">
+    <div class="chips" role="group" aria-label="队列筛选">
+      <button class="chip is-on" type="button" data-filter="all" aria-pressed="true"><span class="dot idle"></span>全部 <span class="n num">21</span></button>
+      <button class="chip" type="button" data-filter="progress" aria-pressed="false"><span class="dot run"></span>进行中 <span class="n num">4</span></button>
+      <button class="chip" type="button" data-filter="attention" aria-pressed="false"><span class="dot warn"></span>需处理 <span class="n num">3</span></button>
+    </div>
+    <input class="search" type="search" placeholder="搜主播 / 房间号" aria-label="搜索队列">
+    <button class="linkbtn" type="button">更多筛选</button>
+  </div>
+
+  <!-- 空闲帧：整页一条状态条 -->
+  <div class="idle-bar" id="idleBar" hidden>
+    <span class="dot idle"></span>
+    队列空闲 · <span class="num">14</span> 条已完成
+    <span class="mut">最近完成 12 分钟前 · 下一次对账约 40s 后 · 概览行仍保留，零值容器全部隐藏</span>
+  </div>
+
+  <div id="stream">
+
+    <!-- ── 差距 #4 分组框 + 需处理强化 ──────────────────────────────── -->
+    <details class="review" open>
+      <summary>
+        <span class="rv-no">差距 #4</span>
+        <span class="rv-x">实现是 5 个圆角分组卡 + 需处理组仅 32% warning 边框 + 11px uppercase 微标签／13px 组标题两套层级 → 改为无框分组（15px 标题 + 留白）+ 2px 左规则 + 行级方形严重度点</span>
+        <span class="rv-why">理由：概览卡、5 个分组卡、组内行三层框叠成卡片墙，而唯一该抢眼的组反而只剩一道淡边框。</span>
+        <span class="rv-chev" aria-hidden="true"></span>
+      </summary>
+      <div class="rev-body">
+        <div class="rev-line"><span class="k">现状</span>index.css:2210（.queue-group 卡）、:2211（attention 仅 color-mix 32% warning 边框）、:2215–2218（13px 标题 / 11px hint / 999px 计数胶囊）、:2219（body 顶边）；QueuePage.tsx:442–456、:646–670（5 个 QueueGroup）；QueuePage.tsx:67（NodeQueueCard 用 .section-label）、index.css:1084–1091（11px + text-transform:uppercase）</div>
+        <div class="rev-line"><span class="k">建议值</span><code>.queue-group{border:0;border-radius:0;background:none;overflow:visible;margin-bottom:26px}</code><code>.queue-group-title{font-size:15px;font-weight:600}</code><code>.queue-group-count{font-size:12.5px;min-width:0;padding:0;border-radius:0;background:none}</code><code>.queue-group-hint{font-size:11.5px}</code><code>.queue-group-body{border-top:0;padding:0}</code><code>.section-label{font-size:15px;font-family:var(--font-sans);font-weight:600;text-transform:none;letter-spacing:0;color:var(--ink)}</code><code>.queue-row[data-group="attention"]{border-left:2px solid var(--error);padding-left:14px}</code><code>.queue-row[data-severity="warning"]{border-left-color:var(--warning)}</code><code>.queue-row[data-group="attention"] .dot{width:7px;height:7px;border-radius:2px}</code></div>
+        <div class="rev-line"><span class="k">核实</span><span class="note">原型 queue-redesign-proto.html:101–105（14–15px 正常字重区块标题，明确不用 11px uppercase）、:118–129（需处理行式 + 方点 + 严重度）。核实补正：原型的「需处理」仍有一层 1px 卡片框（:118），进行中每条 lane 也是卡（:135）——原型只有一层卡，实现是三层；本走查统一降到零框，用左规则承担唯一强色。核实补正：题面给的 :592 / :880 / :900 在 origin/main 的 index.css 里分别是 .modal-card / .topbar-link:hover / .topbar-advanced-menu，与 section-label 无关；/queue 页唯一残留是 QueuePage.tsx:67。</span></div>
+      </div>
+    </details>
+
+    <section class="blk" data-group="attention" aria-labelledby="attTitle">
+      <div class="sec-head att">
+        <h2 id="attTitle">需要你处理</h2>
+        <span class="count num">3 条</span>
+        <span class="note">按严重度 · 自动对账不算故障</span>
+        <a class="textlink" href="#running">跳到正在跑</a>
+      </div>
+
+      <article class="att-row" data-severity="error">
+        <div class="row-body">
+          <div class="row-head">
+            <div class="row-title">
+              <span class="dot err"></span>
+              <span class="row-name">主播F · B站房间</span>
+              <span class="row-slug">bili_demo06 / 10-26 20:00</span>
+            </div>
+            <span class="row-phase att-tag e"><span class="dot err"></span>需处理 · 上传结果未知</span>
+          </div>
+          <div class="att-reason">ssh 连接在提交分 P 时中断，未确认是否投稿成功；源录像与临时文件均已保留，不会自动重传。</div>
+          <div class="att-meta"><span>vps-2 · home-nas</span><span>18 分钟前</span><span class="bv">DEMO-0001</span></div>
+          <div class="row-acts">
+            <button class="action" type="button">看日志</button>
+            <button class="action" type="button">打开房间</button>
+            <button class="action" type="button">确认</button>
+          </div>
+        </div>
+      </article>
+
+      <article class="att-row" data-severity="warning">
+        <div class="row-body">
+          <div class="row-head">
+            <div class="row-title">
+              <span class="dot warn"></span>
+              <span class="row-name">主播E · 抖音房间</span>
+              <span class="row-slug">dy_demo05 / 10-26 19:30</span>
+            </div>
+            <span class="row-phase att-tag"><span class="dot warn"></span>需处理 · 分 P 待核对</span>
+          </div>
+          <div class="att-reason">P3 回读分 P 数未变化，请到创作中心核对稿件分 P；本地回退文件保留，未删源。</div>
+          <div class="att-meta"><span>controller · 直播直传</span><span>42 分钟前</span><span class="bv">DEMO-0001</span></div>
+          <div class="row-acts">
+            <button class="action" type="button">看日志</button>
+            <button class="action" type="button">打开房间</button>
+            <button class="action" type="button">确认</button>
+          </div>
+        </div>
+      </article>
+
+      <article class="att-row" data-severity="error">
+        <div class="row-body">
+          <div class="row-head">
+            <div class="row-title">
+              <span class="dot err"></span>
+              <span class="row-name">主播H · B站房间</span>
+              <span class="row-slug">bili_demo08 / 10-26 17:10</span>
+            </div>
+            <span class="row-phase att-tag e"><span class="dot err"></span>需处理 · 合并失败</span>
+          </div>
+          <div class="att-reason">ffmpeg 退出码 1：源分段 2 缺少视频流。两份源录像都保留，管线未自动重跑。</div>
+          <div class="att-meta"><span>vps-1</span><span>2 小时前</span><span>最近重试 第 2 次</span></div>
+          <div class="row-acts">
+            <button class="action" type="button">看日志</button>
+            <button class="action" type="button">重试</button>
+            <button class="action" type="button">确认</button>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <!-- ── 差距 #5 状态点 ────────────────────────────────────────────── -->
+    <details class="review" open>
+      <summary>
+        <span class="rv-no">差距 #5</span>
+        <span class="rv-x">实现 .queue-rail 与 .queue-node-health .dot 是 7px 圆形（border-radius:50%）→ 改为 7px 方形（border-radius:2px）</span>
+        <span class="rv-why">理由：全站唯一状态语言是方点，圆点只在 queue 页破例，扫读时会读成另一种状态。</span>
+        <span class="rv-chev" aria-hidden="true"></span>
+      </summary>
+      <div class="rev-body">
+        <div class="rev-line"><span class="k">现状</span>index.css:2227（.queue-rail &gt; span，50% 圆）、:2228–2231（各态圆点边框）、:2202（.queue-node-health .dot，50% 圆）；对照全局 index.css:358–364（.dot 8px 方点 radius 2px）</div>
+        <div class="rev-line"><span class="k">建议值</span><code>.dot{width:7px;height:7px;border-radius:2px}</code><code>.queue-rail&gt;span{width:7px;height:7px;border-radius:2px;border:0;background:var(--accent)}</code><code>.queue-node-health .dot{border-radius:2px}</code><code>.queue-rail::before{width:1px;background:var(--hairline)}</code></div>
+        <div class="rev-line"><span class="k">核实</span><span class="note">三原型均 7px 方点：nodes-redesign-proto.html:71、rooms-redesign-proto.html:72、queue-redesign-proto.html:73。任务流方向（竖线 rail）是新实现正确的地方，保留竖线，只把点改方。</span></div>
+      </div>
+    </details>
+
+    <section class="blk" data-group="progress" aria-labelledby="runTitle">
+      <div class="sec-head">
+        <h2 id="runTitle">正在跑</h2>
+        <span class="count num">2 条</span>
+        <span class="note">当前步骤与预计剩余</span>
+      </div>
+
+      <article class="row">
+        <div class="row-rail" aria-hidden="true"><span class="dot run"></span></div>
+        <div class="row-body">
+          <div class="row-head">
+            <div class="row-title">
+              <span class="row-name">主播B · 抖音房间</span>
+              <span class="row-slug">dy_demo02 / 10-26 20:00</span>
+            </div>
+            <span class="row-phase"><span class="dot run"></span>执行中 · 合并</span>
+          </div>
+          <div class="row-sub">抖音 · vps-1 胜出 · 候选 2 个节点</div>
+          <div class="row-meta"><span class="k">已运行</span><span>06:38</span><span class="k">预计剩余</span><span>03:10</span><span class="k">心跳</span><span>3s 前</span><span class="k">上传进度</span><span class="mono">1.84 GB / 2.60 GB</span><span class="mono">12.4 MB/s</span></div>
+          <div class="steps" role="group" aria-label="步骤流水线">
+            <div class="step-bar" aria-hidden="true">
+              <i data-state="done"></i><i data-state="done"></i><i data-state="current"></i><i data-state="next"></i><i data-state="next"></i>
+            </div>
+            <div class="step-legend">
+              <span class="n">第 3 / 5 步</span>
+              <span class="seg"><span class="k">已完成</span><span class="v">拉取录像 · 选优</span></span>
+              <span class="seg now"><span class="k">正在做</span><span class="v">合并</span></span>
+              <span class="seg"><span class="k">接下来</span><span class="v">烧弹幕 / 投稿 B站</span></span>
+            </div>
+          </div>
+          <div class="row-summary">正在合并（第 3 步，共 5 步），预计还需 03:10</div>
+          <div class="row-acts">
+            <button class="action" type="button">看日志</button>
+            <button class="action" type="button">打开房间</button>
+          </div>
+        </div>
+      </article>
+
+      <!-- 差距 #9 的归一结果：旧 live-lane 卡改写成同一套行语法 -->
+      <article class="row">
+        <div class="row-rail" aria-hidden="true"><span class="dot run"></span></div>
+        <div class="row-body">
+          <div class="row-head">
+            <div class="row-title">
+              <span class="row-name">主播C · 抖音房间</span>
+              <span class="row-slug">dy_demo03 / 10-26 20:30 · 直播直传</span>
+            </div>
+            <span class="row-phase"><span class="dot run"></span>执行中 · 录制并上传中</span>
+          </div>
+          <div class="row-sub">抖音 · controller · 不写本地视频（原 live-lane 卡，已归行）</div>
+          <div class="row-meta"><span class="k">当前</span><span>P4</span><span class="k">已确认</span><span>3 个分 P</span><span class="k">稿件</span><span class="mono">DEMO-0001</span><span class="k">心跳</span><span>2s 前</span><span class="k">分 P 字节</span><span class="mono">862 MiB / 1540 MiB</span></div>
+          <div class="steps" role="group" aria-label="步骤流水线">
+            <div class="step-bar" aria-hidden="true">
+              <i data-state="done"></i><i data-state="current"></i><i data-state="next"></i>
+            </div>
+            <div class="step-legend">
+              <span class="n">第 2 / 3 步</span>
+              <span class="seg"><span class="k">已完成</span><span class="v">P1–P3 已确认</span></span>
+              <span class="seg now"><span class="k">正在做</span><span class="v">P4 录制上传中</span></span>
+              <span class="seg"><span class="k">接下来</span><span class="v">封口 / 提交分 P</span></span>
+            </div>
+          </div>
+          <div class="row-summary">录制上传中，已确认 3 / 4 个分 P</div>
+          <div class="row-acts">
+            <button class="action" type="button">事件时间线</button>
+            <button class="action" type="button">打开房间</button>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <!-- ── 差距 #6 三段链 ────────────────────────────────────────────── -->
+    <details class="review" open>
+      <summary>
+        <span class="rv-no">差距 #6</span>
+        <span class="rv-x">实现是 11px mono 步骤名 + 中点分隔 + 勾／三角／空心圆文本 glyph + 1.5s 脉冲 → 改为 5px 分段条 + 12.5px 步骤名 + 数字图例「第 3 / 5 步」</span>
+        <span class="rv-why">理由：11px 等宽步骤名读不清，文本 glyph 跨平台会变宽度甚至被渲染成彩色 emoji。</span>
+        <span class="rv-chev" aria-hidden="true"></span>
+      </summary>
+      <div class="rev-body">
+        <div class="rev-line"><span class="k">现状</span>QueuePage.tsx:255–267（StepPipeline，:261 三个文本 glyph）、index.css:2241–2251（.queue-flow-step 11px mono、::before 中点、glyph 10px、current accent-soft 底 + queue-pulse 1.5s、next 虚线框）、i18n.tsx:636（文案本来就有「第 {current} 步，共 {total} 步」，数字被埋进正文）</div>
+        <div class="rev-line"><span class="k">建议值</span><code>.queue-flow-step{font-family:var(--font-sans);font-size:12.5px;border:0;background:none;padding:0;white-space:normal}</code><code>.queue-flow-glyph,.queue-flow-step+.queue-flow-step::before{display:none}</code><code>.step-bar{display:flex;gap:3px;height:5px}</code><code>.step-bar i{flex:1 1 0;height:5px;border-radius:2px;background:var(--surface-soft)}</code><code>.step-bar i[data-state="current"]{background:var(--accent)}</code><code>.step-bar i[data-state="done"]{background:var(--success)}</code><code>.step-legend .n{font-family:var(--font-mono);font-size:11.5px;font-variant-numeric:tabular-nums}</code><code>.queue-flow-step[data-state="current"] .queue-flow-glyph{animation:none}</code><span class="note">（同时删掉 index.css:2251 的 @keyframes queue-pulse 与 .queue-flow-glyph 节点）</span></div>
+        <div class="rev-line"><span class="k">核实</span><span class="note">题面说的「5px 分段条」并不字面存在于三份原型：原型是三段文字流（queue-redesign-proto.html:145–151，11.5px 键 / 12.5px 值、静态 hairline、无光环无渐变）+ 3px 字节进度条（:155–156）。本页按约定的目标态给出 5px 分段条 + 数字图例，同时保留原型三条原则：静态 hairline、零动画、最小 11.5px；字节进度条不再另画一根，避免一行里两根条互抢。</span></div>
+      </div>
+    </details>
+
+    <section class="blk" data-group="progress" aria-labelledby="queueTitle">
+      <div class="sec-head">
+        <h2 id="queueTitle">排队中</h2>
+        <span class="count num">1 条</span>
+        <span class="note">按资源位次</span>
+      </div>
+
+      <article class="row">
+        <div class="row-rail" aria-hidden="true"><span class="dot idle"></span></div>
+        <div class="row-body">
+          <div class="row-head">
+            <div class="row-title">
+              <span class="row-name">主播D · B站房间</span>
+              <span class="row-slug">bili_demo04 / 10-26 19:30</span>
+            </div>
+            <span class="row-phase wait"><span class="dot idle"></span>排队中 · 等 CPU · 第 2 位</span>
+          </div>
+          <div class="row-sub">B站 · controller 胜出 · 候选 1 个节点</div>
+          <div class="row-meta"><span class="k">已等</span><span>04:12</span><span class="k">心跳</span><span>5s 前</span><span class="k">入队</span><span class="mono">10-26 21:42</span></div>
+          <div class="steps" role="group" aria-label="步骤流水线">
+            <div class="step-bar" aria-hidden="true">
+              <i data-state="done"></i><i data-state="done"></i><i data-state="current"></i><i data-state="next"></i>
+            </div>
+            <div class="step-legend">
+              <span class="n">第 3 / 4 步</span>
+              <span class="seg"><span class="k">已完成</span><span class="v">拉取录像 · 合并</span></span>
+              <span class="seg now"><span class="k">正在做</span><span class="v">烧弹幕 · 排队中</span></span>
+              <span class="seg"><span class="k">接下来</span><span class="v">投稿 B站</span></span>
+            </div>
+          </div>
+          <div class="row-summary">等 CPU 资源，第 2 位</div>
+          <div class="row-acts">
+            <button class="action" type="button">看日志</button>
+            <button class="action" type="button">打开房间</button>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <!-- ── 差距 #7 空态 ──────────────────────────────────────────────── -->
+    <details class="review" open>
+      <summary>
+        <span class="rv-no">差距 #7</span>
+        <span class="rv-x">实现是每个分组一条 12px 空行（最多 5 条同时出现）→ 改为整页一条 14px 空闲状态条，零值容器整体隐藏</span>
+        <span class="rv-why">理由：五个「没有…」的空容器比一条「队列空闲」更吵，也更难看出真的没事。</span>
+        <span class="rv-chev" aria-hidden="true"></span>
+      </summary>
+      <div class="rev-body">
+        <div class="rev-line"><span class="k">现状</span>index.css:2220（.queue-empty 12px 单行）、QueuePage.tsx:452（每个空组渲染一条）、:646–670（5 个组都常驻）</div>
+        <div class="rev-line"><span class="k">建议值</span><code>.queue-group[data-empty="true"]{display:none}</code><code>.idle-bar{font-size:14px;font-weight:500;color:var(--ink);padding:13px 16px;border-block:1px solid var(--hairline)}</code><code>.idle-bar .mut{font-size:12px;font-weight:400;color:var(--muted)}</code><code>if (counts.running+counts.queued+counts.actions+counts.settling===0) renderIdleBar()</code></div>
+        <div class="rev-line"><span class="k">核实</span><span class="note">queue-redesign-proto.html:160–161（.idle-bar）、:397–401（空闲帧）、:504–509（空闲时活动区与筛选整体隐藏，只留一条状态条）。点页头「预览空闲帧」可看本页目标态：概览行保留，其余零值容器全部隐藏。</span></div>
+      </div>
+    </details>
+
+    <section class="blk" data-group="progress" aria-labelledby="settleTitle">
+      <div class="sec-head">
+        <h2 id="settleTitle">等收播</h2>
+        <span class="count num">1 条</span>
+        <span class="note">收播后进入处理</span>
+      </div>
+
+      <article class="row">
+        <div class="row-rail" aria-hidden="true"><span class="dot idle"></span></div>
+        <div class="row-body">
+          <div class="row-head">
+            <div class="row-title">
+              <span class="row-name">主播J · 抖音房间</span>
+              <span class="row-slug">dy_demo09 / 10-26 21:00</span>
+            </div>
+            <span class="row-phase wait"><span class="dot idle"></span>等待收播</span>
+          </div>
+          <div class="row-sub">抖音 · vps-1 · vps-2 双录中</div>
+          <div class="row-meta"><span class="k">已等</span><span>02:40</span><span class="k">心跳</span><span>4s 前</span></div>
+          <div class="steps" role="group" aria-label="步骤流水线">
+            <div class="step-bar" aria-hidden="true">
+              <i data-state="done"></i><i data-state="current"></i><i data-state="next"></i><i data-state="next"></i>
+            </div>
+            <div class="step-legend">
+              <span class="n">第 2 / 4 步</span>
+              <span class="seg"><span class="k">已完成</span><span class="v">录制</span></span>
+              <span class="seg now"><span class="k">正在做</span><span class="v">等待收播</span></span>
+              <span class="seg"><span class="k">接下来</span><span class="v">选优 / 合并</span></span>
+            </div>
+          </div>
+          <div class="row-summary">已等 2 分 40 秒，收播后开始处理</div>
+          <div class="row-acts">
+            <button class="action" type="button">看日志</button>
+            <button class="action" type="button">打开房间</button>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <!-- ── 差距 #8 操作按钮与字号 ────────────────────────────────────── -->
+    <details class="review" open>
+      <summary>
+        <span class="rv-no">差距 #8</span>
+        <span class="rv-x">实现是 11px 带边框文字按钮 + 11px mono 元信息 + 10px 心跳 → 改为 12.5px 安静文字链接（无边框无底）、正文 12.5px、元信息下限 11.5px</span>
+        <span class="rv-why">理由：11px 已经是整页最密的字号，还要再叠一层按钮描边，操作区比标题更抢眼。</span>
+        <span class="rv-chev" aria-hidden="true"></span>
+      </summary>
+      <div class="rev-body">
+        <div class="rev-line"><span class="k">现状</span>index.css:2238（.queue-action-btn 11px / 26px / 1px 边框 / surface 底）、:2240（.queue-bv 11px）、:2216–2218（计数与 hint 11px）、:2204（.queue-manual-more 11px）、:2243（步骤 11px mono）；QueuePage.tsx:342/344/390/392/691 与 :84/87/99/204 的 text-[11px]；QueueBadges.tsx:54/83（11px mono）；QueueLive.tsx:26（text-[10px]）</div>
+        <div class="rev-line"><span class="k">建议值</span><code>.queue-action-btn{height:28px;padding:0 6px;border:0;border-radius:6px;background:transparent;color:var(--muted);font:400 12.5px/1 var(--font-sans)}</code><code>.queue-action-btn:hover{color:var(--ink);background:var(--surface-soft)}</code><code>.queue-row-summary,.queue-action-reason{font-size:12.5px}</code><code>.queue-bv,.queue-group-hint,.queue-manual-more,.queue-flow-line.queue-flow-empty{font-size:11.5px}</code><code>全局最小字号 11.5px；10px/11px 一律提到 11.5px（元信息）或 12.5px（正文 / 操作）</code></div>
+        <div class="rev-line"><span class="k">核实</span><span class="note">queue-redesign-proto.html:98（.action 12.5px、无边框、透明底、hover 才有 surface-soft）、nodes-redesign-proto.html:127 同值；三原型的最小字号就是 11.5px。</span></div>
+      </div>
+    </details>
+
+    <section class="blk" data-group="done" aria-labelledby="doneTitle">
+      <div class="sec-head">
+        <h2 id="doneTitle">最近完成</h2>
+        <span class="count num">14 条</span>
+        <span class="note">默认显示最近 5 条</span>
+        <a class="textlink" href="#doneTitle">展开全部 14 条</a>
+      </div>
+
+      <article class="row">
+        <div class="row-rail" aria-hidden="true"><span class="dot ok"></span></div>
+        <div class="row-body">
+          <div class="row-head">
+            <div class="row-title"><span class="row-name">主播A · B站房间</span><span class="row-slug">10-26 21:28</span></div>
+            <span class="row-phase wait">已完成 · 02:14:06</span>
+          </div>
+          <div class="row-meta"><span class="k">稿件</span><span class="mono">DEMO-0001</span><span class="k">完成于</span><span>10-26 21:28</span></div>
+          <div class="row-acts"><button class="action" type="button">看日志</button><button class="action" type="button">打开房间</button></div>
+        </div>
+      </article>
+
+      <article class="row">
+        <div class="row-rail" aria-hidden="true"><span class="dot ok"></span></div>
+        <div class="row-body">
+          <div class="row-head">
+            <div class="row-title"><span class="row-name">主播G · 抖音房间</span><span class="row-slug">10-26 20:06</span></div>
+            <span class="row-phase wait">已完成 · 01:48:22</span>
+          </div>
+          <div class="row-meta"><span class="k">稿件</span><span class="mono">DEMO-0001</span><span class="k">完成于</span><span>10-26 20:06</span></div>
+          <div class="row-acts"><button class="action" type="button">看日志</button><button class="action" type="button">打开房间</button></div>
+        </div>
+      </article>
+
+      <article class="row">
+        <div class="row-rail" aria-hidden="true"><span class="dot ok"></span></div>
+        <div class="row-body">
+          <div class="row-head">
+            <div class="row-title"><span class="row-name">主播D · B站房间</span><span class="row-slug">10-26 17:52</span></div>
+            <span class="row-phase wait">已完成 · 02:02:11</span>
+          </div>
+          <div class="row-meta"><span class="k">稿件</span><span class="mono">DEMO-0001</span><span class="k">完成于</span><span>10-26 17:52</span></div>
+          <div class="row-acts"><button class="action" type="button">看日志</button><button class="action" type="button">打开房间</button></div>
+        </div>
+      </article>
+
+      <article class="row">
+        <div class="row-rail" aria-hidden="true"><span class="dot ok"></span></div>
+        <div class="row-body">
+          <div class="row-head">
+            <div class="row-title"><span class="row-name">主播I · 抖音房间</span><span class="row-slug">10-26 15:14</span></div>
+            <span class="row-phase wait">已完成 · 只存档</span>
+          </div>
+          <div class="row-meta"><span class="k">稿件</span><span class="mono">—</span><span class="k">完成于</span><span>10-26 15:14</span></div>
+          <div class="row-acts"><button class="action" type="button">看日志</button><button class="action" type="button">打开房间</button></div>
+        </div>
+      </article>
+    </section>
+
+    <!-- ── 差距 #9 旧 lane 与本机队列 ────────────────────────────────── -->
+    <details class="review" open>
+      <summary>
+        <span class="rv-no">差距 #9</span>
+        <span class="rv-x">实现是旧 live-lane 卡（2px 相位色左条 + 320ms 入场动画 + 10px 心跳）与新任务流行并存 → 改为同一套行语法（hairline + 方点 + 11.5px 元信息），本机队列也去掉 11px uppercase 标题</span>
+        <span class="rv-why">理由：同一个「正在跑」组里出现两套卡片语法，读数时得切换两次。</span>
+        <span class="rv-chev" aria-hidden="true"></span>
+      </summary>
+      <div class="rev-body">
+        <div class="rev-line"><span class="k">现状</span>QueueLive.tsx:13–31（LiveUploadLanes 塞在 running 组内、11px/10px 文字）、index.css:1171–1192（.live-lane 卡 + 2px 左色条 + lane-in 动画）、QueuePage.tsx:660（与新 FlowRow 并列）、QueuePage.tsx:67–108（NodeQueueCard 的 section-label 与 11px mono 明细）</div>
+        <div class="rev-line"><span class="k">建议值</span><code>.live-lane{border:0;border-bottom:1px solid var(--hairline);border-radius:0;background:none;animation:none}</code><code>.live-lane::before{display:none}</code><code>.live-lane-head{padding:12px 0;border:0}</code><code>.live-lane .font-mono{font-size:11.5px}</code><span class="note">（QueueLive.tsx:26 的 Tailwind 类名 text-[10px] 直接改 text-[11.5px]）</span><code>.queue-support .section-label{font-size:15px;font-family:var(--font-sans);text-transform:none;letter-spacing:0}</code></div>
+        <div class="rev-line"><span class="k">核实</span><span class="note">上方「正在跑」第二条（主播C · 直播直传）就是归一后的结果：竖线 rail + 方点 + 5px 分段条，与第一条同语法。原型 queue-redesign-proto.html:366–393 的直播直传 lane 与另外两条 lane 同式，没有额外色条或动画。</span></div>
+      </div>
+    </details>
+
+    <section class="blk" id="nodeQueue" data-group="node" aria-label="本机节点队列">
+      <details class="fold">
+        <summary>本机节点队列 · <span class="mono" style="font-size:12.5px;font-weight:400;color:var(--body)">controller</span>
+          <span class="sum-meta">执行中 2 · 待执行 3 · 执行宿主运行中</span>
+          <span class="chev" aria-hidden="true"></span>
+        </summary>
+        <div class="fold-body">
+          <p class="fold-hint">这台机器自己的处理队列；上面的场次队列是主控管线。标题用 15px 正常字重（此处折叠摘要 14px），不再有 11px uppercase 微标签。</p>
+          <table class="mini">
+            <thead><tr><th>处理类型</th><th class="r">执行中</th><th class="r">待执行</th><th class="r">执行宿主</th></tr></thead>
+            <tbody>
+              <tr><td><span class="name">分 P 上传</span> <span class="sub">upload-part</span></td><td class="r">1</td><td class="r">2</td><td class="r"><span class="alive">存活</span></td></tr>
+              <tr><td><span class="name">分 P 清理</span> <span class="sub">cleanup-part</span></td><td class="r">0</td><td class="r">0</td><td class="r sub">无存活租约</td></tr>
+              <tr><td><span class="name">分 P 对账</span> <span class="sub">reconcile-part</span></td><td class="r">0</td><td class="r">1</td><td class="r sub">无存活租约</td></tr>
+              <tr><td><span class="name">上传预处理</span> <span class="sub">upload-prep</span></td><td class="r">0</td><td class="r">0</td><td class="r sub">无存活租约</td></tr>
+              <tr><td><span class="name">B站上传</span> <span class="sub">biliup</span></td><td class="r">1</td><td class="r">0</td><td class="r"><span class="alive">存活</span></td></tr>
+              <tr><td><span class="name">格式转换</span> <span class="sub">remux</span></td><td class="r">0</td><td class="r">0</td><td class="r sub">无存活租约</td></tr>
+            </tbody>
+          </table>
+          <div class="fold-note">6 类只占 6 行；零值只用数字，不画 chip。</div>
+        </div>
+      </details>
+    </section>
+
+  </div><!-- /#stream -->
+
+  <!-- 对照小样：把跨组令牌钉成可直接转实现的 CSS 值 -->
+  <section class="swatch" aria-label="令牌对照小样">
+    <h2>对照小样 · 具体 CSS 值</h2>
+    <p class="swatch-note">每格左边划线的是实现现状，箭头右边是本页采用的建议值。状态点、字号、标题层级、glyph、动画五项是跨组令牌，改一次全页生效。</p>
+    <div class="swatch-grid">
+      <div class="swatch-item">
+        <span class="k">状态点</span>
+        <span class="swatch-round" aria-hidden="true"></span><span class="old">7px / border-radius:50%</span>
+        <span>→</span><span class="dot run" aria-hidden="true"></span><span class="new">width:7px;height:7px;border-radius:2px</span>
+      </div>
+      <div class="swatch-item">
+        <span class="k">最小字号</span>
+        <span class="old">10px / 11px</span><span>→</span>
+        <span class="new">元信息 11.5px；正文与操作 12.5px</span>
+        <code>font-size:11.5px / 12.5px</code>
+      </div>
+      <div class="swatch-item">
+        <span class="k">标题层级</span>
+        <span class="old">11px uppercase section-label + 13px 组标题</span><span>→</span>
+        <span class="new">15px / 600 / 无 uppercase</span>
+        <code>text-transform:none;letter-spacing:0</code>
+      </div>
+      <div class="swatch-item">
+        <span class="k">分组容器</span>
+        <span class="old">border + radius + surface 底 ×5</span><span>→</span>
+        <span class="new">0 框，section 标题 + 26px 留白</span>
+        <code>border:0;background:none;margin-bottom:26px</code>
+      </div>
+      <div class="swatch-item">
+        <span class="k">步骤状态</span>
+        <span class="old">勾 / 实心三角 / 空心圆 + 1.5s 脉冲</span><span>→</span>
+        <span class="new">5px 分段条 + 数字图例</span>
+        <code>height:5px;border-radius:2px;animation:none</code>
+      </div>
+      <div class="swatch-item">
+        <span class="k">强色时刻</span>
+        <span class="old">32% warning 边框（几乎看不见）</span><span>→</span>
+        <span class="new">2px 左规则 + 方点 + 严重度字色，全页仅此一处</span>
+        <code>border-left:2px solid var(--error)</code>
+      </div>
+    </div>
+  </section>
+
+  <section class="legend" aria-label="状态词">
+    <span class="group-title">状态词</span>
+    <span class="s"><span class="dot run"></span>执行中</span>
+    <span class="s"><span class="dot idle"></span>排队中 / 等收播</span>
+    <span class="s"><span class="dot warn"></span>需处理</span>
+    <span class="s"><span class="dot err"></span>上传结果未知 / 失败</span>
+    <span class="s"><span class="dot ok"></span>已完成</span>
+  </section>
+
+  <p class="footnote">视觉走查对照原型 · 单文件自包含（无外部字体、图片或脚本；图标为内联 SVG 符号；主题键 drec-proto-theme 与三份原型共用）。示意数据同源 dev/queue-redesign-proto.html：主播 / 房间号 / 节点主机 / BV / 场次时间均为占位，不含真实主机、IP、房间号或主播名；已运行、预计剩余、字节、心跳均为字段示意，不虚构百分比。本页不含 uppercase 微标签、emoji、文本状态 glyph 与进度／脉冲动画，最小字号 11.5px；亮暗切换、修订折叠、筛选 chip 与空闲帧预览均可点。行号均取自 git show origin/main:… 的实际读取结果。</p>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var root = document.documentElement;
+  var themeBtn = document.getElementById("themeBtn");
+  var themeIcon = document.getElementById("themeIcon");
+  var themeLabel = document.getElementById("themeLabel");
+  function applyTheme(mode) {
+    var light = mode === "light";
+    root.setAttribute("data-theme", light ? "light" : "dark");
+    themeIcon.setAttribute("href", light ? "#i-moon" : "#i-sun");
+    themeLabel.textContent = light ? "暗色" : "亮色";
+    try { localStorage.setItem("drec-proto-theme", light ? "light" : "dark"); } catch (e) {}
+  }
+  try { var saved = localStorage.getItem("drec-proto-theme"); if (saved) applyTheme(saved); } catch (e) {}
+  themeBtn.addEventListener("click", function () {
+    applyTheme(root.getAttribute("data-theme") === "light" ? "dark" : "light");
+  });
+
+  var idleToggle = document.getElementById("idleToggle");
+  var notesToggle = document.getElementById("notesToggle");
+  var idleBar = document.getElementById("idleBar");
+  var stream = document.getElementById("stream");
+  var poolLine = document.getElementById("poolLine");
+  var filterbar = document.getElementById("filterbar");
+  var chips = Array.prototype.slice.call(document.querySelectorAll(".chip[data-filter]"));
+  var notes = Array.prototype.slice.call(document.querySelectorAll("details.review"));
+  var counts = Array.prototype.slice.call(document.querySelectorAll("[data-count]"));
+  var groups = Array.prototype.slice.call(document.querySelectorAll("#stream > section.blk"));
+  var idle = false;
+  var filter = "all";
+  var notesOpen = true;
+
+  function render() {
+    chips.forEach(function (c) {
+      var on = c.getAttribute("data-filter") === filter;
+      c.classList.toggle("is-on", on);
+      c.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+
+    idleBar.hidden = !idle;
+    stream.hidden = idle;
+    poolLine.hidden = idle;
+    filterbar.hidden = idle;
+
+    counts.forEach(function (el) {
+      var key = el.getAttribute("data-count");
+      if (!idle) return;
+      el.textContent = key === "done" ? "14" : "0";
+    });
+    /* 恢复数据帧时把计数放回，避免上一步的 0 留在页面上 */
+    if (!idle) {
+      var values = { running: "2", queued: "1", actions: "3", done: "14" };
+      counts.forEach(function (el) { el.textContent = values[el.getAttribute("data-count")]; });
+    }
+
+    groups.forEach(function (g) {
+      var group = g.getAttribute("data-group");
+      /* 与 queue 原型一致：筛选只作用于活动区，最近完成与本机队列始终在下方 */
+      var always = group === "done" || group === "node";
+      var show = filter === "all" || always
+        || (filter === "attention" && group === "attention")
+        || (filter === "progress" && group === "progress");
+      g.hidden = !show;
+    });
+
+    idleToggle.setAttribute("aria-pressed", idle ? "true" : "false");
+    idleToggle.textContent = idle ? "恢复数据帧" : "预览空闲帧";
+  }
+
+  chips.forEach(function (c) {
+    c.addEventListener("click", function () {
+      filter = c.getAttribute("data-filter");
+      render();
+    });
+  });
+  idleToggle.addEventListener("click", function () {
+    idle = !idle;
+    render();
+  });
+  notesToggle.addEventListener("click", function () {
+    notesOpen = !notesOpen;
+    notes.forEach(function (d) { d.open = notesOpen; });
+    /* 纯动作按钮：标签直接说明下一次点击做什么，不用 aria-pressed 表达状态 */
+    notesToggle.textContent = notesOpen ? "折叠全部修订" : "展开全部修订";
+  });
+  render();
+})();
+</script>
+</body>
+</html>

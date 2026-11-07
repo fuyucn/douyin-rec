@@ -1,0 +1,558 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>房间 · 设计原型（示意数据）</title>
+<style>
+/* =====================================================================
+   房间页 · 设计原型
+   设计令牌、状态点、卡片、字号系统全部沿用 dev/nodes-redesign-proto.html。
+   本页只回答：哪些房间需要人看、每个房间现在在做什么、怎么交付、在哪录。
+   「定时」是低频静态配置 → 降到房间名下第二行，不再占一列。
+   ===================================================================== */
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0;padding:0}
+:root{
+  --font-sans:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",sans-serif;
+  --font-mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --canvas:#101214;
+  --raised:#15181b;
+  --surface:#1b1f22;
+  --surface-soft:#22262a;
+  --hairline:rgba(255,255,255,.08);
+  --hairline-strong:rgba(255,255,255,.16);
+  --ink:#e9edf0;
+  --body:#a9b1b8;
+  --muted:#788088;
+  --accent:#4a9ede;
+  --accent-fg:#0d1116;
+  --success:#2f9e6e;
+  --success-fg:#4cc38a;
+  --warning:#c9932e;
+  --warning-fg:#d9a94a;
+  --error:#d84a4f;
+  --error-fg:#ef7a7d;
+  --state-idle:#8a939b;
+  --state-off:#565e66;
+  --r:6px;
+  --ease:cubic-bezier(.16,1,.3,1);
+}
+:root[data-theme="light"]{
+  --canvas:#fafafa;
+  --raised:#ffffff;
+  --surface:#f2f3f4;
+  --surface-soft:#e9ebec;
+  --hairline:rgba(15,19,23,.10);
+  --hairline-strong:rgba(15,19,23,.20);
+  --ink:#12161a;
+  --body:#43494f;
+  --muted:#70767c;
+  --accent:#1a6fb5;
+  --accent-fg:#ffffff;
+  --success:#1e7a4f;
+  --success-fg:#17724a;
+  --warning:#9a6b10;
+  --warning-fg:#8a5f0c;
+  --error:#c2373c;
+  --error-fg:#b32f34;
+  --state-idle:#7d858c;
+  --state-off:#b3b9be;
+}
+html{min-height:100%;background:var(--canvas)}
+body{min-height:100%;background:var(--canvas);color:var(--body);font-family:var(--font-sans);font-size:14px;line-height:1.55;-webkit-font-smoothing:antialiased}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+a{color:inherit}
+.sprite{position:absolute;width:0;height:0;overflow:hidden}
+.ico{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex:none;display:inline-block}
+.num{font-variant-numeric:tabular-nums}
+.mono{font-family:var(--font-mono)}
+
+/* 状态点：全站唯一的状态语言。.run 用既有 --accent，不引入新色。 */
+.dot{display:inline-block;width:7px;height:7px;border-radius:2px;flex:none}
+.dot.ok{background:var(--success)}
+.dot.err{background:var(--error)}
+.dot.warn{background:var(--warning)}
+.dot.idle{background:var(--state-idle)}
+.dot.off{background:transparent;border:1.5px solid var(--state-off)}
+.dot.run{background:var(--accent)}
+
+/* ── 页面骨架 ─────────────────────────────────────────────────────── */
+.shell{max-width:1240px;margin:0 auto;padding:32px 32px 72px}
+.page-head{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:20px}
+.eyebrow{margin:0 0 8px;font-size:11.5px;color:var(--muted)}
+h1{font-size:26px;line-height:1.2;font-weight:600;margin:0;color:var(--ink)}
+.subtitle{margin:6px 0 0;font-size:13px;color:var(--muted);max-width:640px}
+.freshness{margin-top:10px;font-size:12px;color:var(--muted)}
+.freshness .sep{margin:0 8px;color:var(--hairline-strong)}
+.head-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:32px;padding:0 12px;border-radius:var(--r);border:1px solid var(--hairline);background:transparent;color:var(--body);font:500 12.5px/1 var(--font-sans);cursor:pointer;white-space:nowrap;transition:color .14s var(--ease),background-color .14s var(--ease),border-color .14s var(--ease)}
+.btn:hover{color:var(--ink);border-color:var(--hairline-strong);background:var(--surface)}
+.btn.primary{background:var(--ink);color:var(--canvas);border-color:transparent}
+.btn.primary:hover{opacity:.88}
+/* 作者样式里的 display 会盖掉 UA 的 [hidden]，显式钉住 */
+.btn[hidden],.alert-card[hidden],.empty[hidden]{display:none}
+/* 头部「节点」是纯导航链接，不再是打开浮层的按钮 */
+.navlink{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 4px;font-size:12.5px;color:var(--body);text-decoration:none;white-space:nowrap}
+.navlink:hover{color:var(--ink);text-decoration:underline;text-underline-offset:3px}
+.navlink .arrow{color:var(--muted);font-size:12px}
+.textlink{color:var(--accent);text-decoration:none;font-size:12.5px;white-space:nowrap}
+.textlink:hover{text-decoration:underline}
+.textlink.dim{color:var(--muted)}
+
+/* ── 筛选 chip 与指标分家 ────────────────────────────────────────── */
+.filterbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;padding:11px 0;border-top:1px solid var(--hairline)}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{display:inline-flex;align-items:center;gap:7px;height:30px;padding:0 11px;border:1px solid var(--hairline);border-radius:var(--r);background:transparent;color:var(--body);font:500 12.5px/1 var(--font-sans);cursor:pointer;white-space:nowrap;transition:color .14s var(--ease),background-color .14s var(--ease),border-color .14s var(--ease)}
+.chip:hover{color:var(--ink);border-color:var(--hairline-strong)}
+.chip.is-on{background:var(--surface-soft);border-color:var(--hairline-strong);color:var(--ink)}
+.chip .n{font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.chip.is-on .n{color:var(--ink)}
+.linkbtn{margin-left:auto;border:0;background:transparent;color:var(--muted);font:400 12px/1 var(--font-sans);cursor:pointer;text-decoration:underline;text-underline-offset:3px;padding:4px 0;white-space:nowrap}
+.linkbtn:hover{color:var(--accent)}
+.linkbtn[aria-pressed="true"]{color:var(--warning-fg)}
+.metrics-line{padding:9px 0 11px;border-bottom:1px solid var(--hairline);margin-bottom:18px;font-size:12px;color:var(--muted);display:flex;flex-wrap:wrap;gap:4px 18px}
+.metrics-line b{font-weight:500;color:var(--body)}
+
+/* ── 告警带：一条 = 一条，最多 3 行，13px ───────────────────────── */
+.alert-card{border:1px solid var(--hairline);border-radius:var(--r);background:var(--raised);margin-bottom:18px}
+.alert-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px;padding:10px 16px;border-bottom:1px solid var(--hairline)}
+.alert-head b{font-size:13.5px;font-weight:600;color:var(--ink)}
+.alert-head .note{font-size:11.5px;color:var(--muted)}
+.alert-head .textlink{margin-left:auto}
+.alert-row{display:flex;flex-wrap:wrap;align-items:baseline;gap:5px 12px;padding:9px 16px;border-bottom:1px solid var(--hairline);font-size:13px}
+.alert-row:last-child{border-bottom:0}
+.alert-row .who{font-weight:500;color:var(--ink);min-width:132px}
+.alert-row .why{flex:1 1 300px;color:var(--body)}
+.alert-row .why.e{color:var(--error-fg)}
+.alert-row .when{font-family:var(--font-mono);font-size:11.5px;color:var(--muted)}
+.alert-row.is-acked{color:var(--muted)}
+.alert-row.is-acked .who,.alert-row.is-acked .why{color:var(--muted);font-weight:400}
+.acked-tag{font-size:11.5px;color:var(--muted);border:1px solid var(--hairline);border-radius:4px;padding:1px 6px}
+
+/* ── 表格：房间 / 状态+原因 / 方式 / 上次交付 / 节点 / 操作 ───────── */
+.table-shell{border:1px solid var(--hairline);border-radius:var(--r);background:var(--raised);overflow:hidden}
+.table-view{overflow-x:auto}
+table{width:100%;border-collapse:collapse;table-layout:fixed}
+th{text-align:left;font-size:11.5px;font-weight:500;color:var(--muted);padding:10px 14px;border-bottom:1px solid var(--hairline);white-space:nowrap}
+td{padding:12px 14px;border-bottom:1px solid var(--hairline);vertical-align:top;font-size:12.5px}
+tbody tr:last-child td{border-bottom:0}
+tbody tr:hover{background:var(--surface)}
+tbody tr[hidden]{display:none}
+th.c-room{width:22%}
+th.c-status{width:21%}
+th.c-mode{width:16%}
+th.c-deliver{width:15%}
+th.c-nodes{width:12%}
+th.c-actions{width:14%;text-align:right}
+td.c-actions{text-align:right}
+.room-name{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 8px}
+.room-name a{font-size:13.5px;font-weight:600;color:var(--ink);text-decoration:none}
+.room-name a:hover{text-decoration:underline}
+/* 平台徽标：中文、11.5px、无 uppercase */
+.plat{font-size:11.5px;color:var(--body);background:var(--surface);border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;white-space:nowrap}
+.room-sub{margin-top:5px;display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px;font-size:11.5px;color:var(--muted)}
+.room-sub .slug{font-family:var(--font-mono);font-size:12px;color:var(--body)}
+.room-sub .sched{font-variant-numeric:tabular-nums}
+.tablet-extra{display:none;margin-top:6px;font-size:11.5px;color:var(--muted)}
+.tablet-extra b{font-weight:500;color:var(--body)}
+.state{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:500;color:var(--ink);white-space:nowrap}
+/* 状态说明 12.5px，允许 2 行，不再 11px 截断 */
+.reason{margin-top:5px;font-size:12.5px;line-height:1.45;color:var(--muted);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.reason.e{color:var(--error-fg)}
+.reason.w{color:var(--warning-fg)}
+/* 方式：短文字 chip，配置直接可读，不用逐个 hover */
+.mode-chip{display:inline-flex;align-items:center;height:23px;padding:0 8px;border:1px solid var(--hairline);border-radius:var(--r);background:var(--surface);font-size:12px;color:var(--ink);white-space:nowrap}
+.mode-chip.muted{color:var(--muted);background:transparent}
+.mode-note{margin-top:5px;font-size:11.5px;color:var(--muted)}
+.deliver{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--ink);white-space:nowrap}
+.deliver.ok{color:var(--success-fg)}
+.deliver.err{color:var(--error-fg)}
+.deliver.dim{color:var(--muted)}
+.deliver-meta{margin-top:5px;font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.deliver-meta .bv{font-family:var(--font-mono);font-size:11.5px;color:var(--body)}
+.nodes{font-family:var(--font-mono);font-size:12px;color:var(--body);word-break:break-word}
+.nodes.dim{color:var(--muted)}
+.nodes-more{margin-left:4px;font-family:var(--font-sans);font-size:11.5px;color:var(--muted)}
+.acts{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:2px 4px}
+.action{height:28px;padding:0 7px;border:0;border-radius:var(--r);background:transparent;color:var(--muted);font:400 12.5px/1 var(--font-sans);cursor:pointer;transition:color .14s ease,background-color .14s ease;white-space:nowrap}
+.action:hover{color:var(--ink);background:var(--surface-soft)}
+.action.ico-btn{width:28px;padding:0;font-size:11px;line-height:1;border:1px solid var(--hairline);border-radius:var(--r);background:var(--raised)}
+.action.ico-btn:hover{border-color:var(--hairline-strong)}
+.action.ico-btn.warn{color:var(--warning-fg)}
+.action.ico-btn.go{color:var(--success-fg)}
+.acts .edit-link{font-size:12px;color:var(--accent);text-decoration:none;margin-left:4px}
+.acts .edit-link:hover{text-decoration:underline}
+.managed-tag{margin-left:6px;font-size:11px;color:var(--muted);white-space:nowrap}
+.action.warn{color:var(--warning-fg)}
+.action.go{color:var(--success-fg)}
+
+/* 空态：按筛选条件区分 */
+.empty{padding:38px 20px;text-align:center}
+.empty .t{font-size:14px;font-weight:600;color:var(--ink)}
+.empty .d{margin-top:6px;font-size:12.5px;color:var(--muted)}
+.empty .btn{margin-top:14px}
+
+/* 窄屏（<640px）才切紧凑卡 */
+.compact-view{display:none}
+.compact-row{padding:13px 16px;border-bottom:1px solid var(--hairline)}
+.compact-row:last-child{border-bottom:0}
+.compact-row[hidden]{display:none}
+.compact-top{display:flex;flex-wrap:wrap;align-items:flex-start;justify-content:space-between;gap:8px}
+.compact-meta{margin-top:9px;display:flex;flex-wrap:wrap;align-items:baseline;gap:5px 12px;font-size:11.5px;color:var(--muted)}
+.compact-meta .mode-chip{font-size:11.5px;height:21px}
+.compact-reason{margin-top:7px;font-size:12.5px;line-height:1.45;color:var(--muted)}
+
+.table-foot{display:flex;flex-wrap:wrap;gap:4px 18px;padding:10px 2px;font-size:11.5px;color:var(--muted)}
+.table-foot b{font-weight:500;color:var(--body)}
+.legend{margin-top:28px;border-top:1px solid var(--hairline);padding-top:14px;display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px;color:var(--muted)}
+.legend .group-title{color:var(--ink);font-weight:500;margin-right:4px}
+.legend .s{display:inline-flex;align-items:center;gap:6px}
+.footnote{margin-top:12px;font-size:11.5px;line-height:1.65;color:var(--muted);max-width:900px}
+
+/* 640–1023px 是平板：保留表格，只收起两列，不切成手机卡 */
+@media (min-width:640px) and (max-width:1023px){
+  .c-deliver,.c-nodes{display:none}
+  .tablet-extra{display:block}
+  .table-view{overflow-x:visible}
+  .linkbtn{margin-left:0}
+}
+@media (max-width:639px){
+  .shell{padding:24px 18px 56px}
+  .page-head{gap:12px}
+  h1{font-size:24px}
+  .head-actions{width:100%}
+  .table-view{display:none}
+  .compact-view{display:block}
+  .linkbtn{margin-left:0}
+}
+</style>
+</head>
+<body>
+
+<svg class="sprite" aria-hidden="true">
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></symbol>
+</svg>
+
+<div class="shell">
+
+  <header class="page-head">
+    <div>
+      <p class="eyebrow">设计原型 · 示意数据</p>
+      <h1>房间</h1>
+      <p class="subtitle">每个直播间一行：现在在做什么、怎么交付、在哪录。需要人处理的房间排在最前。</p>
+      <div class="freshness">房间清单 12s 前<span class="sep">·</span>任务状态 5s 前<span class="sep">·</span>规则 4m 前<span class="sep">·</span>时区 Asia/Shanghai</div>
+    </div>
+    <div class="head-actions">
+      <a class="navlink" href="/nodes" title="打开节点页 /nodes">节点 · 4 <span class="arrow">↗</span></a>
+      <button class="btn" id="themeBtn" type="button" aria-label="切换主题">
+        <svg class="ico"><use id="themeIcon" href="#i-sun"/></svg><span id="themeLabel">亮色</span>
+      </button>
+      <button class="btn" type="button">刷新</button>
+      <button class="btn primary" type="button">添加房间</button>
+    </div>
+  </header>
+
+  <!-- 筛选器：只负责筛选；指标在下面单独一行，不可点、不带图标 -->
+  <div class="filterbar">
+    <div class="chips" role="group" aria-label="房间筛选">
+      <button class="chip is-on" type="button" data-filter="all" aria-pressed="true"><span class="dot idle"></span>全部 <span class="n num" data-count="all">9</span></button>
+      <button class="chip" type="button" data-filter="recording" aria-pressed="false"><span class="dot ok"></span>录制中 <span class="n num" data-count="recording">2</span></button>
+      <button class="chip" type="button" data-filter="processing" aria-pressed="false"><span class="dot run"></span>处理中 <span class="n num" data-count="processing">2</span></button>
+      <button class="chip" type="button" data-filter="attention" aria-pressed="false"><span class="dot warn"></span>需处理 <span class="n num" data-count="attention">2</span></button>
+    </div>
+    <button class="linkbtn" id="emptyToggle" type="button" aria-pressed="false">预览空态</button>
+  </div>
+  <div class="metrics-line">
+    <span>概览 · 今日 <b class="num">14</b> 场已完成</span>
+    <span>最近交付 <b>12 分钟前</b></span>
+    <span>节点 <b class="num">3/4</b> 在线</span>
+    <span>共 <b class="num">9</b> 个房间</span>
+  </div>
+
+  <!-- 告警带：一条 = 一条，最近 3 条；不再只报第一个房间 -->
+  <section class="alert-card" id="alertCard" aria-label="最近需处理房间">
+    <div class="alert-head">
+      <span class="dot warn"></span>
+      <b>需处理 · 2 个房间</b>
+      <span class="note">按最近发生排序，最多 3 条</span>
+      <a class="textlink" href="#filter-attention" id="alertGoto">查看全部</a>
+    </div>
+    <div class="alert-row">
+      <span class="dot warn"></span>
+      <span class="who">主播E · 抖音房间</span>
+      <span class="why">分 P 待核对 · P3 回读分 P 数未变化，本地回退文件已保留</span>
+      <span class="when">42 分钟前</span>
+      <a class="textlink" href="#rooms/dy_demo05">查看</a>
+    </div>
+    <div class="alert-row">
+      <span class="dot warn"></span>
+      <span class="who">主播F · B站房间</span>
+      <span class="why e">上传结果未知 · ssh 连接中断，未确认是否投稿成功；源录像与临时文件均保留</span>
+      <span class="when">18 分钟前</span>
+      <a class="textlink" href="#rooms/bili_demo06">查看</a>
+    </div>
+    <div class="alert-row is-acked">
+      <span class="dot off"></span>
+      <span class="who">主播H · B站房间</span>
+      <span class="why">合并失败已核对 · 两份源录像保留，不再需要处理</span>
+      <span class="when">2 小时前</span>
+      <span class="acked-tag">已核对</span>
+    </div>
+  </section>
+
+  <section class="table-shell" aria-label="房间列表">
+    <div class="table-view">
+      <table>
+        <thead>
+          <tr>
+            <th class="c-room">房间</th>
+            <th class="c-status">状态 / 原因</th>
+            <th class="c-mode">方式</th>
+            <th class="c-deliver">上次交付</th>
+            <th class="c-nodes">节点</th>
+            <th class="c-actions">操作</th>
+          </tr>
+        </thead>
+        <tbody id="roomRows"></tbody>
+      </table>
+    </div>
+    <div class="compact-view" id="compactRows"></div>
+    <div class="empty" id="emptyState" hidden>
+      <div class="t" id="emptyTitle">还没有房间</div>
+      <div class="d" id="emptyDesc"></div>
+      <button class="btn" type="button" id="emptyAll" hidden>查看全部房间</button>
+    </div>
+  </section>
+
+  <div class="table-foot">
+    <span>显示 <b class="num" id="shownCount">9</b> / <b class="num">9</b> 个房间</span>
+    <span>状态说明最多 2 行，完整文案见房间详情</span>
+    <span>数据更新 12s 前</span>
+  </div>
+
+  <section class="legend" aria-label="状态图例">
+    <span class="group-title">状态</span>
+    <span class="s"><span class="dot ok"></span>录制中</span>
+    <span class="s"><span class="dot run"></span>处理中</span>
+    <span class="s"><span class="dot warn"></span>需处理</span>
+    <span class="s"><span class="dot idle"></span>等开播</span>
+    <span class="s"><span class="dot off"></span>已停用 / 尚无场次</span>
+  </section>
+  <p class="footnote">设计原型 · 示意数据。房间名、节点主机（vps-1.example / vps-2.example / home-nas.example）、稿件号（DEMO-0001 占位）与场次时间均为占位，不含真实主机、IP、房间号或主播名；controller 为本机内置主控。页头「节点 · 4」是纯导航链接（/nodes），不再打开浮层；筛选 chip 可真实过滤行，「预览空态」可查看按筛选区分的空文案；640–1023px 保留表格，仅 <span class="num">640</span>px 以下才切紧凑卡。</p>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ── 主题：与节点页原型共用存储键，切换一次全站一致 ───────────── */
+  var root = document.documentElement;
+  var themeBtn = document.getElementById("themeBtn");
+  var themeIcon = document.getElementById("themeIcon");
+  var themeLabel = document.getElementById("themeLabel");
+  function applyTheme(mode) {
+    var light = mode === "light";
+    root.setAttribute("data-theme", light ? "light" : "dark");
+    themeIcon.setAttribute("href", light ? "#i-moon" : "#i-sun");
+    themeLabel.textContent = light ? "暗色" : "亮色";
+    try { localStorage.setItem("drec-proto-theme", light ? "light" : "dark"); } catch (e) {}
+  }
+  try { var saved = localStorage.getItem("drec-proto-theme"); if (saved) applyTheme(saved); } catch (e) {}
+  themeBtn.addEventListener("click", function () {
+    applyTheme(root.getAttribute("data-theme") === "light" ? "dark" : "light");
+  });
+
+  /* ── 示意数据 ─────────────────────────────────────────────────── */
+  var ROOMS = [
+    { key:"bili_demo01", name:"主播A · B站房间", platform:"B站", slug:"bili_demo01", schedule:"全天",
+      kind:"recording", status:"录制中", dot:"ok", reason:"vps-1 · vps-2 双录中 · 已录 01:42:18",
+      mode:"收播后上传", modeNote:"投稿 B站 · 仅自己可见",
+      deliver:"已投稿", deliverTone:"ok", deliverDot:"ok", deliverMeta:"2 小时前 · ", bv:"稿件 DEMO-0001",
+      nodes:["vps-1","vps-2"], actions:[["stop","warn","停止录制：当前分段完整封口"]] },
+    { key:"dy_demo02", name:"主播B · 抖音房间", platform:"抖音", slug:"dy_demo02", schedule:"20:00–02:00",
+      kind:"recording", status:"录制中", dot:"ok", reason:"controller · 直播直传 P4 · 已确认 3 个分 P · 心跳 2s 前",
+      mode:"直播直传", modeNote:"投稿 B站 · 保留本地回退文件",
+      deliver:"处理中", deliverTone:"", deliverDot:"run", deliverMeta:"12 分钟前 · ", bv:"稿件 DEMO-0001",
+      nodes:["controller"], actions:[["stop","warn","停止录制：当前分段完整封口"]] },
+    { key:"dy_demo03", name:"主播C · 抖音房间", platform:"抖音", slug:"dy_demo03", schedule:"全天",
+      kind:"processing", status:"处理中", dot:"run", reason:"排队中 · 等 CPU · 第 2 位 · 已等 04:12", reasonTone:"",
+      mode:"边录边传", modeNote:"投稿 B站 · 逐段上传",
+      deliver:"已存档", deliverTone:"dim", deliverDot:"idle", deliverMeta:"3 小时前", bv:"",
+      nodes:["vps-1"], actions:[] },
+    { key:"bili_demo04", name:"主播D · B站房间", platform:"B站", slug:"bili_demo04", schedule:"19:30–23:30",
+      kind:"processing", status:"处理中", dot:"run", reason:"烧录中 · 已运行 06:38 · 预计剩余 03:10",
+      mode:"收播后上传", modeNote:"投稿 B站 · 弹幕版 + 聊天版",
+      deliver:"处理中", deliverTone:"", deliverDot:"run", deliverMeta:"6 分钟前", bv:"",
+      nodes:["controller","vps-1"], actions:[] },
+    { key:"dy_demo05", name:"主播E · 抖音房间", platform:"抖音", slug:"dy_demo05", schedule:"全天",
+      kind:"attention", status:"需处理", dot:"warn", reasonTone:"w",
+      reason:"分 P 待核对 · P3 回读分 P 数未变化，本地回退文件已保留",
+      mode:"直播直传", modeNote:"投稿 B站 · 保留本地回退文件",
+      deliver:"交付失败", deliverTone:"err", deliverDot:"err", deliverMeta:"42 分钟前 · ", bv:"稿件 DEMO-0001",
+      nodes:["controller"], actions:[["logs","","打开房间日志"]] },
+      managed:true },
+    { key:"bili_demo06", name:"主播F · B站房间", platform:"B站", slug:"bili_demo06", schedule:"全天",
+      kind:"attention", status:"需处理", dot:"warn", reasonTone:"e",
+      reason:"上传结果未知 · ssh 连接中断，未确认是否投稿成功；源录像与临时文件均保留",
+      mode:"节点直传", modeNote:"投稿 B站 · 节点侧上传",
+      deliver:"交付失败", deliverTone:"err", deliverDot:"err", deliverMeta:"18 分钟前", bv:"",
+      nodes:["vps-2","home-nas"], actions:[["logs","","打开房间日志"]] },
+      managed:true },
+    { key:"dy_demo07", name:"主播G · 抖音房间", platform:"抖音", slug:"dy_demo07", schedule:"22:00–01:30",
+      kind:"waiting", status:"等开播", dot:"idle", reason:"定时窗口未到 · 判活闸门中，未占用录制进程",
+      mode:"收播后上传", modeNote:"投稿 B站 · 仅自己可见",
+      deliver:"已投稿", deliverTone:"ok", deliverDot:"ok", deliverMeta:"昨天 · ", bv:"稿件 DEMO-0001",
+      nodes:["vps-1","vps-2"], nodesExtra:"+1", actions:[["stop","warn","停止录制：当前分段完整封口"]] },
+    { key:"bili_demo08", name:"主播H · B站房间", platform:"B站", slug:"bili_demo08", schedule:"全天",
+      kind:"paused", status:"已停用", dot:"off", reason:"规则已暂停 · 任务与配置保留，不再录制也不再处理",
+      mode:"存档", modeNote:"只留原始录像 · 不投稿",
+      deliver:"已存档", deliverTone:"dim", deliverDot:"idle", deliverMeta:"3 天前", bv:"",
+      nodes:["vps-1","home-nas"], actions:[["play","go","开始录制（当前停用）"],["edit","","编辑房间配置"]] },
+    { key:"dy_demo09", name:"主播I · 抖音房间", platform:"抖音", slug:"dy_demo09", schedule:"全天",
+      kind:"new", status:"尚无场次", dot:"off", reason:"刚添加 · 尚未绑定录制任务，也没有历史场次",
+      mode:"未配置", modeNote:"等待选择上传方式", modeMuted:true,
+      deliver:"尚无交付", deliverTone:"dim", deliverDot:"off", deliverMeta:"—", bv:"",
+      nodes:[], nodesText:"未分配", actions:[["edit","","编辑房间配置"]] }
+  ];
+
+  var EMPTY = {
+    all:        ["还没有房间", "点右上角「添加房间」，输入直播间链接即可开始。"],
+    recording:  ["当前没有录制中的房间", "开播后会自动起录；等待开播的房间仍在「全部」里。"],
+    processing: ["当前没有处理中的场次", "收播后合并、烧录、上传会出现在这里。"],
+    attention:  ["没有需要处理的房间", "所有异常都已核对完成。"]
+  };
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c];
+    });
+  }
+  function dot(cls) { return '<span class="dot ' + cls + '"></span>'; }
+
+  function roomCell(r) {
+    return '<td class="c-room">' +
+      '<div class="room-name"><a href="#rooms/' + esc(r.key) + '">' + esc(r.name) + '</a>' +
+      '<span class="plat">' + esc(r.platform) + '</span></div>' +
+      '<div class="room-sub"><span class="slug">' + esc(r.slug) + '</span><span>·</span>' +
+      '<span class="sched">' + esc(r.schedule) + '</span></div>' +
+      '<div class="tablet-extra">上次交付 <b>' + esc(r.deliver) + '</b> · 节点 <b>' +
+      esc(r.nodesText || r.nodes.join(" · ")) + '</b></div>' +
+    '</td>';
+  }
+  function statusCell(r) {
+    return '<td class="c-status"><span class="state">' + dot(r.dot) + esc(r.status) + '</span>' +
+      '<div class="reason ' + (r.reasonTone || "") + '" title="' + esc(r.reason) + '">' + esc(r.reason) + '</div></td>';
+  }
+  function modeCell(r) {
+    return '<td class="c-mode"><span class="mode-chip' + (r.modeMuted ? " muted" : "") + '">' + esc(r.mode) + '</span>' +
+      '<div class="mode-note">' + esc(r.modeNote) + '</div></td>';
+  }
+  function deliverCell(r) {
+    return '<td class="c-deliver"><span class="deliver ' + (r.deliverTone || "") + '">' + dot(r.deliverDot) + esc(r.deliver) + '</span>' +
+      '<div class="deliver-meta">' + esc(r.deliverMeta) +
+      (r.bv ? '<span class="bv">' + esc(r.bv) + '</span>' : "") + '</div></td>';
+  }
+  function nodesCell(r) {
+    var text = r.nodesText || (r.nodes.length ? r.nodes.join(" · ") : "未分配");
+    return '<td class="c-nodes"><span class="nodes' + (r.nodesText ? " dim" : "") + '">' + esc(text) + '</span>' +
+      (r.nodesExtra ? '<span class="nodes-more">' + esc(r.nodesExtra) + '</span>' : "") + '</td>';
+  }
+  function actionsCell(r) {
+    // 与现有页面同构：启停 = 主图标；受管 = 只读日志；编辑入口保留在行内（不再是文字长链）
+    var html = r.actions.map(function (a) {
+      var glyph = { stop:"■", play:"▶", edit:"✎", logs:"▤" }[a[0]] || "•";
+      return '<button class="action ico-btn ' + a[1] + '" type="button" title="' + esc(a[2] || a[0]) + '" aria-label="' + esc(a[2] || a[0]) + '">' + glyph + '</button>';
+    }).join("");
+    if (r.managed) html += '<span class="managed-tag">受管 · 只读</span>';
+    return '<td class="c-actions"><div class="acts">' + html + '</div></td>';
+  }
+  function compactRow(r) {
+    return '<article class="compact-row" data-kind="' + r.kind + '">' +
+      '<div class="compact-top"><div><div class="room-name">' +
+        '<a href="#rooms/' + esc(r.key) + '">' + esc(r.name) + '</a><span class="plat">' + esc(r.platform) + '</span></div>' +
+        '<div class="room-sub"><span class="slug">' + esc(r.slug) + '</span><span>·</span><span class="sched">' + esc(r.schedule) + '</span></div></div>' +
+        '<span class="state">' + dot(r.dot) + esc(r.status) + '</span></div>' +
+      '<div class="compact-reason">' + esc(r.reason) + '</div>' +
+      '<div class="compact-meta"><span class="mode-chip' + (r.modeMuted ? " muted" : "") + '">' + esc(r.mode) + '</span>' +
+        '<span>' + esc(r.deliver) + '</span><span>' + esc(r.nodesText || r.nodes.join(" · ")) + '</span></div>' +
+      '<div class="acts" style="justify-content:flex-start;margin-top:6px">' + r.actions.map(function (a) {
+        var glyph = { stop:"■", play:"▶", edit:"✎", logs:"▤" }[a[0]] || "•";
+        return '<button class="action ico-btn ' + a[1] + '" type="button" title="' + esc(a[2] || a[0]) + '" aria-label="' + esc(a[2] || a[0]) + '">' + glyph + '</button>';
+      }).join("") + (r.managed ? '<span class="managed-tag">受管 · 只读</span>' : "") + '</div>' +
+    '</article>';
+  }
+
+  var tbody = document.getElementById("roomRows");
+  var compact = document.getElementById("compactRows");
+  tbody.innerHTML = ROOMS.map(function (r) {
+    return '<tr data-kind="' + r.kind + '">' + roomCell(r) + statusCell(r) + modeCell(r) +
+      deliverCell(r) + nodesCell(r) + actionsCell(r) + '</tr>';
+  }).join("");
+  compact.innerHTML = ROOMS.map(compactRow).join("");
+
+  var chips = Array.prototype.slice.call(document.querySelectorAll(".chip[data-filter]"));
+  var alertCard = document.getElementById("alertCard");
+  var emptyState = document.getElementById("emptyState");
+  var emptyTitle = document.getElementById("emptyTitle");
+  var emptyDesc = document.getElementById("emptyDesc");
+  var emptyAll = document.getElementById("emptyAll");
+  var shownCount = document.getElementById("shownCount");
+  var emptyToggle = document.getElementById("emptyToggle");
+  var filter = "all";
+  var demoEmpty = false;
+
+  var counts = { all:ROOMS.length, recording:0, processing:0, attention:0 };
+  ROOMS.forEach(function (r) { if (counts[r.kind] !== undefined) counts[r.kind] += 1; });
+  Array.prototype.forEach.call(document.querySelectorAll("[data-count]"), function (el) {
+    el.textContent = String(counts[el.getAttribute("data-count")]);
+  });
+
+  function render() {
+    var n = 0;
+    function apply(list) {
+      Array.prototype.forEach.call(list, function (el) {
+        var kind = el.getAttribute("data-kind");
+        var show = !demoEmpty && (filter === "all" || kind === filter);
+        el.hidden = !show;
+        if (el.tagName === "TR" && show) n += 1;
+      });
+    }
+    apply(tbody.querySelectorAll("tr"));
+    apply(compact.querySelectorAll(".compact-row"));
+    shownCount.textContent = String(n);
+
+    chips.forEach(function (c) {
+      var on = c.getAttribute("data-filter") === filter;
+      c.classList.toggle("is-on", on);
+      c.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+
+    var none = n === 0;
+    emptyState.hidden = !none;
+    if (none) {
+      var copy = EMPTY[filter];
+      emptyTitle.textContent = copy[0];
+      emptyDesc.textContent = copy[1];
+      emptyAll.hidden = filter === "all";
+    }
+    alertCard.hidden = demoEmpty || filter === "attention";
+    emptyToggle.setAttribute("aria-pressed", demoEmpty ? "true" : "false");
+    emptyToggle.textContent = demoEmpty ? "恢复数据" : "预览空态";
+  }
+
+  function setFilter(next) { filter = next; render(); }
+  chips.forEach(function (c) {
+    c.addEventListener("click", function () { setFilter(c.getAttribute("data-filter")); });
+  });
+  document.getElementById("alertGoto").addEventListener("click", function (e) {
+    e.preventDefault(); setFilter("attention");
+  });
+  emptyAll.addEventListener("click", function () { demoEmpty = false; setFilter("all"); });
+  emptyToggle.addEventListener("click", function () { demoEmpty = !demoEmpty; render(); });
+  render();
+})();
+</script>
+</body>
+</html>
