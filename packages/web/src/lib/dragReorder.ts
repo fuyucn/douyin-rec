@@ -35,6 +35,8 @@ export interface DragReorder<T> {
   dragKey: string | null;
   /** 拖拽悬停目标 key,供插入指示样式。 */
   overKey: string | null;
+  /** 拖拽是否启用(disabled 或列表不足 2 项时为 false,调用方可借此隐藏把手)。 */
+  enabled: boolean;
   itemProps: (key: string) => DragItemDomProps;
 }
 
@@ -131,5 +133,5 @@ export function useDragReorder<T>(opts: UseDragReorderOpts<T>): DragReorder<T> {
     onDragEnd: () => void finish(),
   });
 
-  return { ordered, dragKey, overKey, itemProps };
+  return { ordered, dragKey, overKey, enabled: !disabled && items.length > 1, itemProps };
 }

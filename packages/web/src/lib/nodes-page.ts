@@ -26,6 +26,12 @@ export interface NodeView extends Omit<NodeSummary, "rooms"> {
   recordingRooms: number;
   /** Number of rolling sessions still carrying ambiguous parts. */
   uncertainSessions: number;
+  /** Connection target from the worker config (ssh/tailscale-ssh host); undefined = none configured. */
+  host?: string;
+  /** Worker-configured web entry (apiUrl); rendered as a quick link when set. */
+  apiUrl?: string;
+  /** Capability tags from the worker config (absent on old configs / unknown nodes). */
+  capabilities?: string[];
 }
 
 const STATE_RANK: Record<NodeRoomView["state"], number> = {
@@ -50,6 +56,8 @@ export function buildNodes(
   const bySlug = new Map(rooms.map((r) => [`${r.platform}:${r.roomSlug}`, r]));
   const base = summarizeNodes(tasks, status, delivering, masterVersion, workers);
   const workerNames = new Map(workers.map((w) => [w.id, w.name || w.host || w.id]));
+  const workerCfg = new Map(workers.map((w) => [w.id, w]));
+  const order = workers.map((w) => w.id);
   return base.map((n) => {
     const roomsOut: NodeRoomView[] = n.rooms.map((nr) => {
       const roomSlug = nr.roomSlug ?? nr.key.split(":").slice(2).join(":");
@@ -67,20 +75,28 @@ export function buildNodes(
         sessions: nr.sessions,
       };
     }).sort((a, b) => STATE_RANK[a.state] - STATE_RANK[b.state] || a.label.localeCompare(b.label));
+    const cfg = workerCfg.get(n.id);
     return {
       ...n,
       name: n.name || workerNames.get(n.id) || n.id,
+      host: cfg?.host,
+      apiUrl: cfg?.apiUrl,
+      capabilities: cfg?.capabilities,
       rooms: roomsOut,
       activeRooms: roomsOut.filter((r) => r.state !== "disabled").length,
       recordingRooms: roomsOut.filter((r) => r.state === "recording").length,
       uncertainSessions: roomsOut.reduce((sum, r) => sum + r.sessions.filter((s) => s.ambiguous > 0).length, 0),
     };
   }).sort((a, b) => {
-    // Controller first, then healthy nodes, then offline nodes.
+    // Display order = configured worker order (drag-reorder persists exactly this; the controller
+    // card stays first). Inline reordering would be pointless if health/name re-sorted the cards.
     if (a.id === "local") return -1;
     if (b.id === "local") return 1;
-    const health = (n: NodeView): number => (n.ok === false ? 1 : n.ok === undefined ? 2 : 0);
-    return health(a) - health(b) || a.name.localeCompare(b.name);
+    const rank = (n: NodeView): number => {
+      const i = order.indexOf(n.id);
+      return i === -1 ? Number.MAX_SAFE_INTEGER : i;
+    };
+    return rank(a) - rank(b) || a.name.localeCompare(b.name);
   });
 }
 
@@ -102,4 +118,14 @@ export function nodeCounts(n: Pick<NodeView, "activeRooms" | "recordingRooms" | 
   unavailable: number;
 } {
   return { active: n.activeRooms, recording: n.recordingRooms, unavailable: n.unavailable };
+}
+
+/** Nodes with management actions: everything except the controller itself (never editable/deletable). */
+export function nodeManagable(node: Pick<NodeView, "id">): boolean {
+  return node.id !== "local";
+}
+
+/** Show connection info only when the worker config actually carries it (never render empty hints). */
+export function nodeConnectionInfo(n: Pick<NodeView, "host" | "apiUrl">): { host?: string; apiUrl?: string } {
+  return { host: n.host || undefined, apiUrl: n.apiUrl || undefined };
 }

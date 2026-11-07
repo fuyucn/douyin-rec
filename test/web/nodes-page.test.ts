@@ -1,12 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { buildNodes, nodeCounts, nodeRoomHref } from "../../packages/web/src/lib/nodes-page.js";
+import { buildNodes, nodeConnectionInfo, nodeCounts, nodeManagable, nodeRoomHref } from "../../packages/web/src/lib/nodes-page.js";
 import type { RoomDTO, Task, WorkerDTO, WorkerStatus } from "../../packages/core/src/api-types.js";
 
 const workers: WorkerDTO[] = [
   { id: "local", name: "controller", kind: "local" },
   { id: "w1", name: "worker-one", kind: "ssh", host: "host" },
 ];
-
 function task(patch: Partial<Task>): Task {
   return {
     id: 1, platform: "douyin", room: "https://live.douyin.com/1", name: "Alice",
@@ -82,5 +81,46 @@ describe("nodes page model", () => {
     const room = out.find((n) => n.id === "w1")?.rooms[0];
     expect(room?.platform).toBe("");
     expect(nodeRoomHref(room!)).toBe("");
+  });
+
+  it("exposes host/apiUrl/capabilities from the worker config for the inline card (issue #549)", () => {
+    const withApi: WorkerDTO[] = [
+      ...workers,
+      { id: "w2", name: "worker-two", kind: "tailscale-ssh", host: "vps.ts.net", apiUrl: "http://vps.ts.net:7860", dataRoot: "/data", capabilities: ["danmu:douyin", "burn"] },
+    ];
+    const out = buildNodes([], [], withApi, {}, [], "0.0.234");
+    const w2 = out.find((n) => n.id === "w2")!;
+    expect(nodeConnectionInfo(w2)).toEqual({ host: "vps.ts.net", apiUrl: "http://vps.ts.net:7860" });
+    expect(w2.capabilities).toEqual(["danmu:douyin", "burn"]);
+    // The controller has no host; a plain ssh worker has no apiUrl.
+    expect(nodeConnectionInfo(out.find((n) => n.id === "local")!).host).toBeUndefined();
+    expect(nodeConnectionInfo(out.find((n) => n.id === "w1")!).apiUrl).toBeUndefined();
+  });
+
+  it("keeps the controller manageable-gated off and workers manageable", () => {
+    const out = buildNodes([], [], workers, {}, [], "0.0.234");
+    expect(nodeManagable(out.find((n) => n.id === "local")!)).toBe(false);
+    expect(nodeManagable(out.find((n) => n.id === "w1")!)).toBe(true);
+  });
+
+  it("orders nodes by configured worker order, not health (drag-reorder must be visible)", () => {
+    // w2 first in config; its probe is down while w1 is up — config order still wins.
+    const cfg: WorkerDTO[] = [
+      { id: "local", name: "controller", kind: "local" },
+      { id: "w2", name: "worker-two", kind: "ssh", host: "h2" },
+      { id: "w1", name: "worker-one", kind: "ssh", host: "h1" },
+    ];
+    const status: Record<string, WorkerStatus> = {
+      w1: { id: "w1", ok: true },
+      w2: { id: "w2", ok: false, error: "down" },
+    };
+    const out = buildNodes([], [], cfg, status, [], "0.0.234");
+    expect(out.map((n) => n.id)).toEqual(["local", "w2", "w1"]);
+  });
+
+  it("appends probe-only nodes (not yet in the config list) after configured ones", () => {
+    const status: Record<string, WorkerStatus> = { w1: { id: "w1", ok: true }, ghost: { id: "ghost", ok: true } };
+    const out = buildNodes([], [], workers, status, [], "0.0.234");
+    expect(out.map((n) => n.id)).toEqual(["local", "w1", "ghost"]);
   });
 });
