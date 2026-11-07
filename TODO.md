@@ -16,10 +16,7 @@
 ## 进行中
 - [~] **T-154 节点页与管理节点合并为一页（issue [#549](https://github.com/fuyucn/douyin-rec/issues/549) → PR [#550](https://github.com/fuyucn/douyin-rec/pull/550)，已合并 0c3ed335，版本 0.0.317，2026-11-07）** — **待部署验证**：节点卡 host/管理操作/拖拽、受管只读、i18n 实跑核对后收口。
 - [~] **T-156 房间列表与处理队列减法 pass（issue [#552](https://github.com/fuyucn/douyin-rec/issues/552) → PR [#554](https://github.com/fuyucn/douyin-rec/pull/554)，已合并 049f626a，版本 0.0.318，2026-11-07）** — **待部署验证**。独立 review APPROVE（红线逐项核实 + 门禁补跑全绿；RISK 为文案误报）。followup：筛选「需处理」为空时 idle 条与「无匹配」不可区分（一行修，下个小 PR）。残余：640-1023px 平板断点未动（留 #553 票）。
-- [~] **T-157 房间详情页重排：动态状态进首屏、配置按四域补齐重组（issue [#553](https://github.com/fuyucn/douyin-rec/issues/553)）**（2026-11-06）
-  — 详情页答不出「这场跑到哪了」，运行树默认折叠；配置散在 5 个 InfoGroup 且缺约 15 个编辑器字段（标题模板/合集 ID/每 P 大小/outputFormatLock 等）。设计原型 dev/room-detail-redesign-proto.html 已经人确认（52 字段清单已验证）。
-  **做什么**: 当前场次运行树默认展开进首屏 + 直传时间线提为一等区块 + 配置按录制/处理/投稿/通知与清理四域重组补齐、未设置显式标注。**红线**：全部图标操作入口与受管只读语义保留。
-  **验收**: 见 issue；全量门禁通过。
+- [~] **T-157 房间详情页重排（issue [#553](https://github.com/fuyucn/douyin-rec/issues/553) → PR [#556](https://github.com/fuyucn/douyin-rec/pull/556)，已合并 ecff51f2，版本 0.0.319，2026-11-07）** — **待部署验证**。review 打回一轮（P1 cfg CSS 漏移植等）返工后 APPROVE。核对项：详情页首屏、配置四域、图标操作、受管只读。
 - [~] **T-163 Queue 页信息架构重做（已由 PR [#551](https://github.com/fuyucn/douyin-rec/pull/551) 合并，2026-11-07 实际收口）**
   — 与 T-156 的 queue 部分重叠：#552 实现时基于 #551 产物只做视觉走查残余差异（dev/queue-visual-review.html 的 9 条修订）。
 - [~] **T-126 worker 按 Release 部署:main 为 stable,开发分支按需 prerelease（issue [#392](https://github.com/fuyucn/douyin-rec/issues/392)）**（2026-10-29）
