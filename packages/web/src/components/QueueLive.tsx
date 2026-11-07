@@ -1,5 +1,4 @@
 import type { ReactNode } from "react";
-import { ArrowRight, Gauge, Timer } from "lucide-react";
 import type { HubPoolSnapshotDTO } from "../api/client";
 import { humanSec } from "./HubJobs";
 import { useT } from "../lib/i18n";
@@ -39,32 +38,12 @@ export function LivePool({ pool }: { pool: HubPoolSnapshotDTO }): ReactNode {
   const uploadUsage = pool.upload.windowLimit > 0
     ? `${pool.upload.windowUsed}/${pool.upload.windowLimit}`
     : t("queue.pool.unlimited");
+  // 资源池降为一行安静数据(#552):三个数不值得 72px 仪表卡,图标去掉,数值留在表意位置。
   return (
-    <div className="telemetry-bar telemetry-bar-cols-3 mb-5">
-      <div className="telemetry-cell">
-        <div className="flex flex-col gap-1.5">
-          <span className="telemetry-label">{t("queue.pool.cpu")}</span>
-          <span className="telemetry-value tabular-nums">
-            {pool.cpu.active}/{pool.cpu.max || "-"}
-            {pool.cpu.queued > 0 && <span className="text-muted-soft font-normal text-[13px]"> · {t("queue.pool.queued", { n: pool.cpu.queued })}</span>}
-          </span>
-        </div>
-        <span className="telemetry-icon"><Gauge className="w-4 h-4" /></span>
-      </div>
-      <div className="telemetry-cell">
-        <div className="flex flex-col gap-1.5">
-          <span className="telemetry-label">{t("queue.pool.upload")}</span>
-          <span className="telemetry-value tabular-nums">
-            {uploadUsage}
-            {pool.upload.queued > 0 && <span className="text-muted-soft font-normal text-[13px]"> · {t("queue.pool.queued", { n: pool.upload.queued })}</span>}
-          </span>
-        </div>
-        <span className="telemetry-icon"><ArrowRight className="w-4 h-4" /></span>
-      </div>
-      <div className="telemetry-cell">
-        <div className="flex flex-col gap-1.5"><span className="telemetry-label">{t("queue.pool.cooldown")}</span><span className="telemetry-value tabular-nums" style={{ color: cooldown ? "var(--warning-fg)" : undefined }}>{cooldown ? humanSec(cooldown) : t("queue.pool.noCooldown")}</span></div>
-        <span className="telemetry-icon"><Timer className="w-4 h-4" /></span>
-      </div>
+    <div className="queue-pool-line" aria-label={t("queue.live.title")}>
+      <span className="queue-pool-item"><span className="queue-pool-label">{t("queue.pool.cpu")}</span><b className="tabular-nums">{pool.cpu.active}/{pool.cpu.max || "-"}</b>{pool.cpu.queued > 0 && <span className="queue-pool-extra">{t("queue.pool.queued", { n: pool.cpu.queued })}</span>}</span>
+      <span className="queue-pool-item"><span className="queue-pool-label">{t("queue.pool.upload")}</span><b className="tabular-nums">{uploadUsage}</b>{pool.upload.queued > 0 && <span className="queue-pool-extra">{t("queue.pool.queued", { n: pool.upload.queued })}</span>}</span>
+      <span className="queue-pool-item"><span className="queue-pool-label">{t("queue.pool.cooldown")}</span><b className="tabular-nums" style={cooldown ? { color: "var(--warning-fg)" } : undefined}>{cooldown ? humanSec(cooldown) : t("queue.pool.noCooldown")}</b></span>
     </div>
   );
 }
