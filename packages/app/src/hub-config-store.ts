@@ -38,9 +38,38 @@ export const DEFAULT_HUB_RESOURCES: Required<HubResources> = {
 
 interface HubConfigFile { resources?: Partial<HubResources>; [k: string]: unknown }
 
+/**
+ * The hub config the master is **actually running with**: its JSON text and/or the file it came from
+ * (same shape as `resolveHubConfig`'s result). `json` wins when present — that is the content the
+ * process resolved, which for an inline (`--hub-config '<json>'`) or settings-sourced config is not
+ * in the file at all (issue #473).
+ */
+export interface HubConfigSource {
+  json?: string;
+  path?: string;
+}
+
+/** Parse hub config text. Missing/garbage → `{}` (same lenient rule for the file and inline text). */
+function parseConfigText(text: string | undefined): HubConfigFile {
+  if (text === undefined) return {};
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? (parsed as HubConfigFile) : {};
+  } catch { return {}; }
+}
+
+/** Read a config file. Missing/unreadable/garbage → `{}` (writes replace it with valid JSON). */
 function readFile(path: string): HubConfigFile {
-  try { return JSON.parse(readFileSync(path, "utf-8")) as HubConfigFile; }
-  catch { return {}; }   // 缺失/坏 JSON → 空(与 worker-store 同口径:写时会重写出合法文件)
+  try { return parseConfigText(readFileSync(path, "utf-8")); }
+  catch { return {}; }
+}
+
+/** Resolve a path or source object to config content (JSON text first, then the file). */
+function configOf(source: string | HubConfigSource | undefined): HubConfigFile {
+  if (typeof source === "string") return readFile(source);
+  if (!source) return {};
+  if (source.json !== undefined) return parseConfigText(source.json);
+  return source.path ? readFile(source.path) : {};
 }
 
 /**
@@ -49,8 +78,8 @@ function readFile(path: string): HubConfigFile {
  * **返回的是补齐后的完整对象**而不是原始 partial:调用方(ResourcePool)拿到就能直接用,
  * 不用在每个消费点各写一遍 `?? 默认值` —— 那正是「两处默认值漂移」的来源。
  */
-export function readResources(configPath: string): HubResources {
-  const raw = readFile(configPath).resources ?? {};
+export function readResources(source: string | HubConfigSource | undefined): HubResources {
+  const raw = configOf(source).resources ?? {};
   return {
     maxCpuParallel: num(raw.maxCpuParallel, DEFAULT_HUB_RESOURCES.maxCpuParallel, 1),
     maxNetParallel: num(raw.maxNetParallel, DEFAULT_HUB_RESOURCES.maxNetParallel, 0),

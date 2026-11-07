@@ -577,3 +577,71 @@ describe("stamp 分段文件名时间戳按设置时区(issue #155)", () => {
     expect(stamp(d, "Asia/Shanghai")).toBe("2026-09-13_01-30-05");
   });
 });
+
+describe("确认在播但没有可播放地址(issue #476)", () => {
+  type Mode = "offline" | "no-url" | "url";
+  /** 平台状态按测试推进:calls 记录 getStream 次数(钉住「不额外请求」)。 */
+  function makeNoUrlPlatform(state: { mode: Mode; calls: number }, getLiving: () => Promise<boolean>) {
+    const platform: Platform = {
+      id: "test-no-url",
+      matchUrl: (url) => /no-url\.local/.test(url),
+      roomToUrl: (room) => room,
+      extractRoomSlug: (url) => url.replace(/^https?:\/\//, ""),
+      resolveShortUrl: async () => null,
+      fetchAnchorName: async () => null,
+      getStream: async () => {
+        state.calls++;
+        if (state.mode === "offline") return { living: false };
+        if (state.mode === "no-url") return { living: true, unplayableReason: "playurl 空" };
+        return { living: true, url: "http://no-url.local/live.flv", owner: "主播" };
+      },
+      getLiving,
+      defaultQuality: "origin",
+      defaultEngine: "ffmpeg",
+      qualities: ["origin"],
+      engines: ["ffmpeg"],
+    };
+    return platform;
+  }
+
+  it("多次轮询只告警一次、不起录、不额外请求;下播后重新武装,URL 出现即起录", async () => {
+    vi.useFakeTimers();
+    const state: { mode: Mode; calls: number } = { mode: "no-url", calls: 0 };
+    const getLiving = vi.fn(async () => state.mode !== "offline");
+    registerPlatform(makeNoUrlPlatform(state, getLiving));
+    const spawn = vi.fn(() => ({ proc: new FakeProc() as unknown as ChildProcess, sessionFirstPath: "/out/a.ts" }));
+    const rec = new PollingRecorder({ id: "fake", spawn } as DownloadEngine);
+    const ev: RecorderEvents = { onLive: vi.fn(), onSegment: vi.fn(), onOffline: vi.fn(), onError: vi.fn(), onProbeError: vi.fn() };
+    const outDir = mkdtempSync(join(tmpdir(), "rec-no-url-"));
+    await rec.start("https://no-url.local/live/123", { quality: "origin", outDir, segmentSec: 0 }, ev);
+    await vi.advanceTimersByTimeAsync(1);
+
+    // 在播但无地址:告警一次,不起录,保持正常轮询(每 POLL_MS 恰好一次请求,不调 getLiving)。
+    expect(ev.onProbeError).toHaveBeenCalledTimes(1);
+    expect(String((ev.onProbeError as ReturnType<typeof vi.fn>).mock.calls[0][0])).toContain("可播放地址");
+    expect(spawn).not.toHaveBeenCalled();
+    expect(ev.onLive).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(POLL_MS * 4);
+    expect(state.calls).toBe(5);
+    expect(ev.onProbeError).toHaveBeenCalledTimes(1);
+    expect(spawn).not.toHaveBeenCalled();
+    expect(getLiving).not.toHaveBeenCalled();
+
+    // 主播下播 → 本轮结束;再次开播仍无地址 → 重新告警一次(每次直播各一次)。
+    state.mode = "offline";
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(ev.onProbeError).toHaveBeenCalledTimes(1);
+    state.mode = "no-url";
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(ev.onProbeError).toHaveBeenCalledTimes(2);
+    expect(spawn).not.toHaveBeenCalled();
+
+    // 地址出现 → 起录(不再继续告警)。
+    state.mode = "url";
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(ev.onLive).toHaveBeenCalledTimes(1);
+    expect(ev.onProbeError).toHaveBeenCalledTimes(2);
+    rmSync(outDir, { recursive: true, force: true });
+  });
+});

@@ -9,6 +9,10 @@
  * Parsing is strict on purpose: a missing field is a refusal to start, never a default.
  */
 import { processTimeZone, zonedStamp } from "./title-template.js";
+import {
+  capLiveUploadSnapshot, LIVE_HISTORY_LIMIT, normalizeLiveUploadSnapshot, REPORT_EVENT_LIMIT, REPORT_PART_LIMIT,
+  type LiveUploadSnapshot, type LiveUploadSummary,
+} from "./live-upload.js";
 
 /** Env var carrying the delivered JSON from the node's task manager to its `record` child. */
 export const ZERO_DISK_DELIVERY_ENV = "DREC_ZERO_DISK_DELIVERY";
@@ -117,6 +121,7 @@ export function parseZeroDiskDelivery(raw: unknown): ZeroDiskDeliveryParse {
 export type ZeroDiskRefusalCode =
   | "delivery_missing"      // managed node task without (valid) delivered metadata
   | "credential_missing"    // no upload login file found on the node
+  | "credential_unreadable" // the chosen login cannot be read (e.g. root-owned → EACCES) and no alternate identifies an account. A readable *primary* without an account ID still reports account_unknown
   | "account_unknown"       // node or master account cannot be identified
   | "account_mismatch";     // node account differs from the master-configured one
 
@@ -197,10 +202,12 @@ export interface ZeroDiskReport {
   v: 1;
   receipts: ZeroDiskReceipt[];
   status: ZeroDiskNodeStatus[];
+  /** Bounded current/previous snapshots for rooms with an active or recent run; `history` = finished runs, newest first. */
+  live?: Array<{ platform: string; roomSlug: string; current?: LiveUploadSnapshot; previous?: LiveUploadSnapshot; history?: LiveUploadSnapshot[] }>;
 }
 
 const RUN_STATES: readonly string[] = ["running", "finished", "failed", "refused", "stopped"];
-const REFUSALS: readonly string[] = ["delivery_missing", "credential_missing", "account_unknown", "account_mismatch"];
+const REFUSALS: readonly string[] = ["delivery_missing", "credential_missing", "credential_unreadable", "account_unknown", "account_mismatch"];
 
 export function normalizeZeroDiskReceipt(x: unknown): ZeroDiskReceipt | null {
   if (!isRecord(x) || x.v !== 1) return null;
@@ -237,7 +244,22 @@ export function normalizeZeroDiskReport(x: unknown): ZeroDiskReport | null {
   if (!isRecord(x) || x.v !== 1) return null;
   const receipts = (Array.isArray(x.receipts) ? x.receipts : []).map(normalizeZeroDiskReceipt).filter((r): r is ZeroDiskReceipt => r !== null);
   const status = (Array.isArray(x.status) ? x.status : []).map(normalizeZeroDiskStatus).filter((s): s is ZeroDiskNodeStatus => s !== null);
-  return { v: 1, receipts, status };
+  const live = (Array.isArray(x.live) ? x.live : []).flatMap((v) => {
+    if (!isRecord(v) || typeof v.platform !== "string" || !v.platform || typeof v.roomSlug !== "string" || !v.roomSlug) return [];
+    const current = v.current ? normalizeLiveUploadSnapshot(v.current) : undefined;
+    const previous = v.previous ? normalizeLiveUploadSnapshot(v.previous) : undefined;
+    const history = (Array.isArray(v.history) ? v.history : [])
+      .flatMap((h) => { const s = normalizeLiveUploadSnapshot(h); return s ? [capLiveUploadSnapshot(s, { events: REPORT_EVENT_LIMIT, parts: REPORT_PART_LIMIT })] : []; })
+      .slice(0, LIVE_HISTORY_LIMIT);
+    return [{
+      platform: v.platform,
+      roomSlug: v.roomSlug,
+      ...(current ? { current: capLiveUploadSnapshot(current) } : {}),
+      ...(previous ? { previous: capLiveUploadSnapshot(previous) } : {}),
+      ...(history.length ? { history } : {}),
+    }];
+  });
+  return { v: 1, receipts, status, ...(live.length ? { live } : {}) };
 }
 
 /** GET /api/tasks projection of one zero-disk node for a room (one entry per targeted worker). */
@@ -256,4 +278,6 @@ export interface ZeroDiskNodeStatusDTO {
   bvid?: string;
   /** When the master last got a real answer (epoch ms). */
   checkedAt: number | null;
+  /** Compact timeline summary for this worker/room. */
+  live?: LiveUploadSummary;
 }

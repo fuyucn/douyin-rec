@@ -48,17 +48,9 @@ export function registerNodePipelineCommands(program: Command): void {
     .command("_node-capabilities <dataRoot>", { hidden: true })
     .description("(内部) 输出节点侧上传能力 JSON(biliup/cookies/磁盘/字体;供 master ssh 调用)")
     .action(async (dataRoot: string) => {
-      await applyNodeDataRoot(dataRoot);
-      const { probeNodeCapabilities } = await import("@drec/app");
-      try {
-        // processors = registered kinds plus declared capabilities (plans/036 §2.4; old bundles omit it = unsupported).
-        const { advertisedCapabilities } = await import("@drec/core");
-        const caps = await probeNodeCapabilities(dataRoot);
-        process.stdout.write(JSON.stringify({ ...caps, processors: advertisedCapabilities() }) + "\n");
-      } catch (e) {
-        process.stdout.write(JSON.stringify({ error: String((e as Error)?.message ?? e) }) + "\n");
-        process.exitCode = 1;
-      }
+      // Single implementation shared with the fleet long connection (plans/042); lazy to avoid an import cycle.
+      const { runNodeCommandCli } = await import("./node-commands.js");
+      await runNodeCommandCli("node-capabilities", dataRoot, []);
     });
 
   // Zero-disk receipts + status (issue #331): read-only output the master polls. The node never deletes
@@ -68,14 +60,9 @@ export function registerNodePipelineCommands(program: Command): void {
     .command("_zero-disk-report <dataRoot>", { hidden: true })
     .description("(内部) 输出 0 落盘回执与各房间状态 JSON(只读;供 master ssh 调用)")
     .action(async (dataRoot: string) => {
-      await applyNodeDataRoot(dataRoot);
-      const { buildZeroDiskReport } = await import("@drec/app");
-      try {
-        process.stdout.write(JSON.stringify(buildZeroDiskReport()) + "\n");
-      } catch (e) {
-        process.stdout.write(JSON.stringify({ error: String((e as Error)?.message ?? e) }) + "\n");
-        process.exitCode = 1;
-      }
+      // Single implementation shared with the fleet long connection (plans/042); lazy to avoid an import cycle.
+      const { runNodeCommandCli } = await import("./node-commands.js");
+      await runNodeCommandCli("zero-disk-report", dataRoot, []);
     });
 
   // 节点本地 remux(+可选聚组)→ biliup 上传 → 回传 BV。**不含视频回传**(省掉 rsync 的关键)。

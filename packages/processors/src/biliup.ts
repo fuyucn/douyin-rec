@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 import {
-  addArchiveToSeasonIfConfigured, seasonCheckpointState, APPEND_AMBIGUOUS_MARKER, BILIUP_QUEUE_CAPABILITY, BILIUP_SLOT_CAPABILITY, isSlotBusy, SLOT_BUSY_MARKER, normalizeSeasonSectionId, UncertainOutcome, formatPartTitle, linkOrCopy, partTitleToFilename, probeChild,
+  addArchiveToSeasonIfConfigured, seasonCheckpointState, APPEND_AMBIGUOUS_MARKER, BILIUP_QUEUE_CAPABILITY, BILIUP_SLOT_CAPABILITY, isSlotBusy, SLOT_BUSY_MARKER, normalizeSeasonSectionId, UncertainOutcome, formatPartTitle, linkOrCopy, partTitleToFilename, probeChild, retryBackoffMs, RETRY_BACKOFF_MS,
   type ProcessContext, type ProcessJob, type ProcessResult, type Processor, type TitleContext, type UploadProgress, type UploadSlot,
 } from "@drec/core";
 import { appendGroup, countVideoParts, isAllFilesUploadedLine, runBiliup, uploadPlain, type BiliupHooks } from "./run-biliup.js";
@@ -28,7 +28,7 @@ export interface BiliupParams {
 }
 
 /** BV persisted on the queue row by an earlier attempt of this same job (P1 created by us, inputs[0] is P1). */
-function persistedBv(job: ProcessJob): string | undefined {
+export function persistedBv(job: ProcessJob): string | undefined {
   const v = (job as { bv?: string | null }).bv;
   return typeof v === "string" && v ? v : undefined;
 }
@@ -38,7 +38,7 @@ function persistedSeasonState(job: ProcessJob): "pending" | "done" | "failed" | 
   return s === "pending" || s === "done" || s === "failed" ? s : undefined;
 }
 
-function params(job: ProcessJob): BiliupParams {
+export function params(job: ProcessJob): BiliupParams {
   const p = job.params as Partial<BiliupParams>;
   const persisted = persistedBv(job);
   return {
@@ -93,7 +93,7 @@ export interface BiliupDeps {
 const ALIAS_DIR = ".upload";
 
 /** biliup is always run with the node's own cookies when it has them (the master path rarely exists here). */
-const cookiesOf = (p: BiliupParams, deps: BiliupDeps): string => deps.localCookies?.() ?? p.cookies;
+export const cookiesOf = (p: BiliupParams, deps: BiliupDeps): string => deps.localCookies?.() ?? p.cookies;
 
 /**
  * biliup names a part after its file stem, so each part is hard-linked under its rendered part title
@@ -124,12 +124,9 @@ export function aliasPartFiles(files: readonly string[], template?: string, ctx?
 }
 
 /** Transfer retries are counted by claims (plan 038 §4.3): 1 claim + 2 retries. */
-const MAX_ATTEMPTS = 3;
-const RETRY_BACKOFF_MS = 5 * 60_000;
-const MAX_BACKOFF_MS = 3600_000;
 
 /** The watchdog killed a stalled child; the processor decides retry vs manual. */
-class StallError extends Error {}
+export class StallError extends Error {}
 
 /** Expected duration comes from the job (master/prep), never silently defaulted to "safe". */
 function expectedDuration(job: ProcessJob, deps: BiliupDeps): number {
@@ -137,11 +134,18 @@ function expectedDuration(job: ProcessJob, deps: BiliupDeps): number {
   return Number.isFinite(fromJob) && fromJob > 0 ? fromJob : (deps.expectedDurationSec ?? 0);
 }
 
-interface Supervisor {
+export interface Supervisor {
   run: (argv: string[]) => Promise<string>;
   setStep: (step: string) => void;
   /** The next run uploads one part: bytes already uploaded by earlier parts, this part's size, job total. */
   setPart: (baseBytes: number, partBytes: number, totalBytes: number) => void;
+  /** Bytes acked by the last child so far; null = no readable sample (unknown, not zero). */
+  ackedSinceChild: () => number | null;
+  /**
+   * Bytes acked at the transfer-complete boundary, the plan 046 §5.4 byte proof; null = no readable
+   * sample at that moment (unknown, never treated as a short transfer).
+   */
+  ackedAtBoundary: () => number | null;
   /** Rejects with UncertainOutcome once submit passes maxWallMs; never resolves. */
   abandoned: Promise<never>;
   wallHit: () => boolean;
@@ -149,7 +153,7 @@ interface Supervisor {
 }
 
 /** Wrap biliup runs with the transfer watchdog: stall kills the child, submit is never killed. */
-function supervise(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps): Supervisor {
+export function supervise(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps): Supervisor {
   const watch = new TransferWatch(watchConfigOf(job.params), deps.now ?? Date.now, (m) => ctx.alert(m));
   const kill = deps.kill ?? ((pid: number, sig: NodeJS.Signals) => { try { process.kill(pid, sig); } catch { /* already gone */ } });
   let child: { pid: number; stalled: boolean; exited: boolean } | null = null;
@@ -167,13 +171,27 @@ function supervise(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps): Supe
     if (part.total <= 0) return;
     const t = now();
     if (!force && lastWrite && t - lastWrite.at < (deps.progressEveryMs ?? 30_000)) return;
-    const doneBytes = Math.min(part.total, part.base + Math.min(part.size, watch.ackedSinceChild));
+    const acked = watch.ackedSinceChild;
+    const doneBytes = Math.min(part.total, part.base + (acked === null ? 0 : Math.min(part.size, acked)));
     const dt = lastWrite ? t - lastWrite.at : 0;
     const bps = lastWrite && dt > 0 && doneBytes >= lastWrite.doneBytes ? Math.round(((doneBytes - lastWrite.doneBytes) * 1000) / dt) : null;
     lastWrite = { doneBytes, totalBytes: part.total, bps, at: t };
     // Runs inside a timer / child output handler: a throw here would be uncaught, and progress is display-only.
     try { ctx.setState?.({ progress: lastWrite }); } catch (e) { ctx.log(`progress not saved: ${(e as Error)?.message ?? e}`); }
     slot?.touch();
+  };
+  // Read the child's sockets while it is still alive. The final reading must happen at the transfer
+  // boundary: once the child exits its sockets are gone and ss cannot report them (issue #532). Always
+  // sampled with the live child pid; a pid of 0 could never match a socket and must stay unreachable.
+  const sampleNow = (): AckSample => {
+    const c = child;
+    if (!c || c.exited || c.pid <= 0 || watch.currentStep !== "transfer") return null;
+    try {
+      const sample = (deps.readAcked ?? readTcpAcked)(c.pid);
+      if (sample === null || sample.size === 0) return null;
+      watch.observe(sample);
+      return sample;
+    } catch { return null; }
   };
   const timer = setInterval(() => {
     const c = child;
@@ -215,7 +233,11 @@ function supervise(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps): Supe
           watch.setStep("transfer");
           ctx.setState?.({ step: "transfer", childPid: pid, childPidStartedAt: (deps.probe ?? probeChild)(pid)?.startedAt ?? null });
         },
-        onLine: (line) => { if (isAllFilesUploadedLine(line)) setStep("submit"); },
+        onLine: (line) => {
+          if (!isAllFilesUploadedLine(line)) return;
+          watch.markBoundary(sampleNow());
+          setStep("submit");
+        },
       });
     } catch (e) {
       if (me.stalled) throw new StallError(`biliup stalled and was stopped (${String((e as Error)?.message ?? e).slice(0, 200)})`);
@@ -224,11 +246,16 @@ function supervise(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps): Supe
       me.exited = true;
     }
   };
-  return { run, setStep, setPart, abandoned, wallHit: () => wall, stop: () => clearInterval(timer) };
+  return {
+    run, setStep, setPart,
+    ackedSinceChild: () => watch.ackedSinceChild,
+    ackedAtBoundary: () => watch.ackedAtBoundary,
+    abandoned, wallHit: () => wall, stop: () => clearInterval(timer),
+  };
 }
 
 /** Mutable progress of one run, read by the stall handler. */
-interface RunState { bv?: string }
+export interface RunState { bv?: string }
 
 async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps, sup: Supervisor, st: RunState): Promise<ProcessResult> {
   const p = params(job);
@@ -345,18 +372,17 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
   return { outputs: [], bv, note: `${basename(job.inputs[0] ?? "")} +${Math.max(0, files.length - 1)} parts` };
 }
 
-const countPartsOf = (deps: BiliupDeps) => deps.countParts ?? (deps.run ? undefined : countVideoParts);
+export const countPartsOf = (deps: BiliupDeps) => deps.countParts ?? (deps.run ? undefined : countVideoParts);
 
 /**
  * After a stall kill: retry only with proof that resuming cannot duplicate anything (plan 038 §4.3).
  * Create: no archive with this title+duration. Append: a confirmed part count (the resume path continues
  * from it). Anything unconfirmed fails as ambiguous for manual handling.
  */
-async function afterStall(job: ProcessJob, deps: BiliupDeps, sup: Supervisor, st: RunState, e: StallError): Promise<ProcessResult> {
+export async function afterStall(job: ProcessJob, deps: BiliupDeps, sup: Supervisor, st: RunState, e: StallError): Promise<ProcessResult> {
   const p = params(job);
   const attempts = (job as { attempts?: number }).attempts ?? 1;
   if (sup.wallHit()) throw new Error(`${e.message}; past maxWallMs, not retrying`);
-  if (attempts >= MAX_ATTEMPTS) throw new Error(`${e.message}; ${attempts} attempts used, not retrying`);
   if (!st.bv) {
     const proof = await findRecentArchive(cookiesOf(p, deps), p.title, expectedDuration(job, deps), deps.lookup);
     if (proof !== "no") throw new Error(`${APPEND_AMBIGUOUS_MARKER} ${e.message}; cannot prove no draft was created (${proof})`);
@@ -366,7 +392,7 @@ async function afterStall(job: ProcessJob, deps: BiliupDeps, sup: Supervisor, st
     const n = countParts ? await countParts(st.bv, cookiesOf(p, deps)).catch(() => null) : null;
     if (n == null || n < 1 || n > job.inputs.length) throw new Error(`${APPEND_AMBIGUOUS_MARKER} ${e.message}; part count unknown (${n ?? "unknown"})`);
   }
-  const backoff = Math.min(MAX_BACKOFF_MS, RETRY_BACKOFF_MS * 2 ** (attempts - 1));
+  const backoff = retryBackoffMs(attempts);
   return { outputs: [], ...(st.bv ? { bv: st.bv } : {}), retry: { notBefore: (deps.now ?? Date.now)() + backoff, reason: "transfer-retry" } };
 }
 

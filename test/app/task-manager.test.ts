@@ -65,7 +65,9 @@ class FakeRecorderProcess implements RecorderProcess {
 
 class MockSpawner implements Spawner {
   readonly spawned: FakeRecorderProcess[] = [];
-  spawn(task: { id: number }): RecorderProcess {
+  readonly tasks: { id: number; streamUploadSpool: boolean }[] = [];
+  spawn(task: { id: number; streamUploadSpool: boolean }): RecorderProcess {
+    this.tasks.push(task);
     const p = new FakeRecorderProcess(task.id);
     this.spawned.push(p);
     return p;
@@ -81,6 +83,7 @@ let store: TaskStore;
 
 beforeEach(() => {
   store = new TaskStore(":memory:");
+  store.setSetting("liveGate", "false"); // gate behaviour: test/app/live-gate.test.ts
 });
 
 function addTask(
@@ -117,6 +120,27 @@ describe("TaskManager beforeSpawn(边录边传起录兜底)", () => {
 });
 
 describe("TaskManager", () => {
+  it("legacy no-spool task alerts once and spawns with spool required", () => {
+    const id = addTask({ streamUpload: true, streamUploadSpool: false });
+    const spawner = new MockSpawner();
+    const logs: string[] = [];
+    const alerts: string[] = [];
+    const downs: string[] = [];
+    const mgr = new TaskManager(store, spawner, {
+      log: () => {},
+      onAlert: (_id, _stage, message) => alerts.push(message),
+      onTaskDown: (_id, message) => downs.push(message),
+      logStore: { append: (_id: number, message: string) => logs.push(message) } as never,
+    });
+    expect(mgr.start(id)).toBe(true);
+    expect(store.getTask(id)!.streamUploadSpool).toBe(false);
+    expect(spawner.tasks[0]!.streamUploadSpool).toBe(true);
+    expect(logs.filter((line) => line.includes("历史任务关闭了直播直传本地回退文件"))).toHaveLength(1);
+    expect(alerts).toHaveLength(1);
+    expect(downs).toHaveLength(1);
+    expect(mgr.isRunning(id)).toBe(true);
+  });
+
   it("start spawns, marks running, isRunning true", () => {
     const id = addTask();
     const spawner = new MockSpawner();

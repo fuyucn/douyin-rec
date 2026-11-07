@@ -49,16 +49,18 @@ remux + 上传,**省掉整场录像回传**(pull 步)。
 
 | 文件 | 角色 |
 |---|---|
-| `packages/orchestrator/src/node-side-upload.ts` | master 侧全部逻辑 + **`NODE_SIDE_UPLOAD_ENABLED` kill switch** |
+| `packages/orchestrator/src/node-side-upload.ts` | master 侧全部逻辑(自 issue #471 起从 core re-export) |
+| `packages/core/src/node-side-upload-policy.ts` | 纯判定 `shouldUseNodeSideUpload` + **`NODE_SIDE_UPLOAD_ENABLED` kill switch** |
 | `packages/app/src/node-pipeline.ts` | 节点侧执行体(remux/聚组/建稿/append) |
 | `packages/cli/src/node-pipeline-commands.ts` | 节点侧隐藏子命令 `_node-capabilities` / `_node-pipeline` |
 
 `pipeline.ts` / `cli.ts` 里只保留**最小接线**(一次 import + 一次调用),不掺实验逻辑。
 
 **开关方式**:
-- **一键停用**:把 `node-side-upload.ts` 的 `NODE_SIDE_UPLOAD_ENABLED` 改成 `false`
+- **一键停用**:把 `packages/core/src/node-side-upload-policy.ts` 的 `NODE_SIDE_UPLOAD_ENABLED` 改成 `false`
   → 即使规则里开了 `steps.nodeSideUpload` 也一律回落现状(不动任何规则文件/数据库)。
-- **彻底移除**:删上述 3 个文件 + `pipeline.ts` 的接线 + `cli.ts` 的 `registerNodePipelineCommands` 调用。
+- **彻底移除**:删上述 3 个文件 + `packages/core/src/node-side-upload-policy.ts` + `pipeline.ts` 的接线
+  + `cli.ts` 的 `registerNodePipelineCommands` 调用 + `@drec/app` `node-remux.ts` 的调用点。
 
 ## 约束(硬性)
 

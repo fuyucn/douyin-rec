@@ -46,6 +46,10 @@ SENSITIVE_FILES=(
   packages/app/src/node-pipeline.ts
   packages/app/src/orphan-cleanup.ts
   packages/cli/src/node-pipeline-commands.ts
+  # 校验闸门 / 任务表 / 留存转格式:放宽任何一处都可能让坏文件通过校验后删原文件(#432)。
+  packages/processors/src/remux.ts
+  packages/proc-queue/src/store.ts
+  packages/orchestrator/src/finalize-format.ts
 )
 
 # Display-only web modules (dictionary / toast text / progress rows): a content hit there is listed as a

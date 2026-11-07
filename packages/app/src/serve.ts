@@ -7,9 +7,9 @@
  * **命令定义**(`task serve` 的选项/描述)在 cli(T-22 第 4 步:命令定义属入口层);
  * 本文件只负责「拿到已解析的选项后怎么把服务跑起来」。cli 通过 `runServe(opts, deps)` 调它。
  */
-import { mkdirSync, statfsSync } from "node:fs";
+import { existsSync, mkdirSync, statfsSync } from "node:fs";
 import { join } from "node:path";
-import { createLogger, freeBytesOf, freeGBOf } from "@drec/core";
+import { createLogger, freeBytesOf, freeGBOf, platformForRoom } from "@drec/core";
 import { TaskStore, resolveTaskWebhook } from "./store.js";
 import { resolveDbPath } from "./db.js";
 import { EventCenter } from "@drec/observability";
@@ -25,6 +25,10 @@ import { TaskDaemon, resolveDiskWatermark } from "./daemon.js";
 import { makeManualStartAdmit, currentDiskMinGB } from "./disk-gate.js";
 import { ProcQueueStore, ProcRunner, SimpleSlotLimiter } from "@drec/proc-queue";
 import { TaskManager } from "./task-manager.js";
+import { masterSendsTransition, roomIsLive, workerProbeUsable, type LiveTick } from "./live-notify.js";
+import { NotifyOutbox } from "./notify-outbox.js";
+import { watchFleetAgent, type FleetAgent, type FleetNodeCommand } from "./fleet-agent.js";
+import { APP_VERSION } from "./version.js";
 import { TaskLogStore } from "@drec/observability";
 import { NodeRecordSpawner } from "./process/spawner.js";
 import { sweepCredentialFiles } from "./process/credential-file.js";
@@ -58,6 +62,12 @@ export interface ServeDeps {
   getWebhook: () => string | undefined;
   /** 多节点 hub 编排实现(由 cli 注入,app 不依赖 orchestrator)。 */
   hubStarter?: HubStarter;
+  /**
+   * Node command registry (cli/node-commands.ts), injected by the CLI. With `<root>/config/fleet.json`
+   * present on a worker (no --hub), serve runs the fleet agent that answers the master over one long
+   * connection instead of ssh-spawned processes (plans/042).
+   */
+  fleetCommands?: Readonly<Record<string, FleetNodeCommand>>;
 }
 
 /** 跑起 Web 控制台(+ 可选调度 + 可选 hub)。行为与拆分前 `task serve` 完全一致。 */
@@ -89,20 +99,33 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     if (swept.removed > 0) console.log(`[cred] 启动清扫:删除残留录制凭证文件 ${swept.removed} 个`);
     for (const f of swept.failed) console.error(`[cred] 启动清扫失败: ${f}`);
 
+    // 受管节点(DREC_NOTIFY_RELAY=1)不自己做任何通知:事件写发件箱,由主控统一发送(issue #405)。
+    // 子进程与本站中枢都必须静默,否则节点本地与主控会各发一条。
+    // 只认显式开关:目录标记是历史残留,不能用来推断「现在仍受管」,否则会把通知静默憋死在节点上。
+    const relayMode = process.env.DREC_NOTIFY_RELAY === "1";
+    if (relayMode) serveLog.info("[notify] 中继模式:事件写入发件箱,由主控统一发送");
+
     // ONE manager drives both the web (manual start/stop) and, if requested,
     // the scheduler (automatic start/stop). They share the same subprocess
     // lifecycle + crash auto-restart.
+    // Serve-level hub flag, known only after the config resolves below: the spawner reads it per spawn.
+    const spawnerFlags = { hubMaster: false };
     const spawner = new NodeRecordSpawner({
       // getter:每次 spawn 读「全局 --discord-webhook/env ?? settings 表 discordWebhook」(与下方
       // EventCenter 的 globalHook 一致),否则 UI 里设的 webhook 进不了子进程(子进程无 DB)。
-      webhook: () => getWebhook() ?? store.getSetting("discordWebhook") ?? undefined,
+      // 中继模式下节点不持有推送地址:不传给子进程,凭据文件也不会生成。
+      webhook: () => relayMode ? undefined : getWebhook() ?? store.getSetting("discordWebhook") ?? undefined,
       // mesio 路径设置:每次 spawn 读 settings.mesioPath(空=引擎兜底 bin/mesio)→ 注入 MESIO_PATH。
       mesioPath: () => store.getSetting("mesioPath") || undefined,
       // 抖音 API 模式设置:每次 spawn 读 settings.douyinApiMode(空=默认 balance)→ 注入 DOUYIN_REC_API_MODE。
       douyinApiMode: () => store.getSetting("douyinApiMode") || undefined,
       // webhook 类型开关:每次 spawn 读 settings → DREC_WEBHOOK_TOGGLES 注入子进程。
-      webhookToggles: () => resolveWebhookToggles(store.getSetting("notifWebhookToggles")),
+      // 中继模式下子进程一律不发:类型开关强制全关(事件仍会经发件箱上报)。
+      webhookToggles: () => relayMode
+        ? { live: false, recordEnd: false, merge: false, hub: false, error: false }
+        : resolveWebhookToggles(store.getSetting("notifWebhookToggles")),
       onLog: (m) => console.log(m),
+      hubMaster: () => spawnerFlags.hubMaster,
     });
     // Per-task log ring buffer shared with the manager so the Web 详情/日志
     // 页面 can tail each recorder subprocess's captured output.
@@ -137,7 +160,8 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
       },
       // 子进程结构化告警(取流失败/卡死/录制错误)→ 站内 toast(webhook 子进程已发,故 webhook:false 不重发)。
       onAlert: (taskId, stage, message, ctx) => {
-        events.emit(taskId, { kind: "error", stage, message, ...(ctx ? { ctx } : {}) }, { webhook: false });
+        // 中继节点:子进程已被静默,告警必须由主控代发,所以这里要标记成需要推送。
+        events.emit(taskId, { kind: "error", stage, message, ...(ctx ? { ctx } : {}) }, { webhook: relayMode });
       },
     });
 
@@ -157,10 +181,25 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
 
     // 站内事件中枢:每个事件 → 本地事件流(web/tui 轮询)+ 按「任务 webhook ?? 全局」发 Discord。
     const globalHook = (): string | null => getWebhook() ?? store.getSetting("discordWebhook") ?? null;
+    let notifyOutbox: NotifyOutbox | null = null;
+    if (relayMode) {
+      try {
+        notifyOutbox = new NotifyOutbox(join(drecRoot(), "db", "notify-outbox.db"));
+      } catch (e) {
+        serveLog.error("[notify] 发件箱打不开,本次仍按本地发送:", e);
+      }
+    }
     const events = new EventCenter({
       // 墙钟播种游标:进程重启后 id 仍单调,前端旧游标不会过滤掉重启窗口内的新事件。
       initialSeq: Date.now(),
-      makeNotifier,
+      // 发件箱已就绪时由主控代发,本地不再持有发送方。
+      ...(notifyOutbox ? {} : { makeNotifier }),
+      ...(notifyOutbox
+        ? { onEmit: (e: import("@drec/observability").AppEvent, meta: { webhook: boolean }) => {
+          const t = e.taskId == null ? null : store.getTask(e.taskId);
+          notifyOutbox!.append(e.taskId, t?.room ?? null, e.event, meta.webhook, e.at);
+        } }
+        : {}),
       resolveWebhook: (taskId) => {
         const t = taskId == null ? null : store.getTask(taskId);
         return resolveTaskWebhook(t ?? { webhook: null }, globalHook()) ?? undefined;
@@ -171,6 +210,8 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     // hub 是否在本节点启用(master)?= --hub + 有 hubStarter + 能解析出 hub 配置。
     // slave(无 --hub)= false → 前端据此隐藏 Hub 页 / 显示 child node 提示。
     const hubEnabled = !!(o.hub && hubStarter && resolveHubConfigJson(o.hubConfig, store));
+    // Children spawned from here on may take upload ownership for rule-bound rooms (plan 046 PR6).
+    spawnerFlags.hubMaster = hubEnabled;
     // 边录边传生效值(issue #40):首轮 hub 同步前,先用唯一判定刷新绑定了规则的本机任务,
     // 堵住「同步未跑完、daemon 已起录」窗口里按旧开关放行而绕过多节点重复投稿闸门。失败只告警(回落旧开关迁移)。
     rollingGuardOn = hubEnabled;
@@ -182,6 +223,18 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
         console.warn(`[rolling] 启动刷新边录边传生效值失败(回落旧开关迁移):${String((e as Error)?.message ?? e)}`);
       }
     }
+    // Fleet agent (plans/042): workers only. fleet.json is followed, so a master-issued join (or token
+    // rotation) takes effect without restarting serve. Absent/invalid → off, the master uses ssh.
+    const fleetAgent: FleetAgent | null =
+      !hubEnabled && deps.fleetCommands
+        ? watchFleetAgent({
+            configPath: join(rootConfigDir(), "fleet.json"),
+            dataRoot: drecRoot(),
+            appVersion: APP_VERSION,
+            commands: deps.fleetCommands,
+            log: (m) => serveLog.info(m),
+          })
+        : null;
     // hub 台账路径与 cli hubStarter 同一推导(<db>-sync.db)——「hub 任务」端点读它展示进度/ETA/日志。
     const syncDbPath = resolveDbPath(o.db).replace(/\.db$/, "-sync.db");
     // T4:台账变更监视 → SSE(/api/hub/stream)。
@@ -257,6 +310,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
       nodeTasks: hubEnabled ? hubStarter?.nodeTasks : undefined,
       recordingWorkers: hubEnabled ? hubStarter?.recordingWorkers : undefined,
       zeroDiskStatus: hubEnabled ? hubStarter?.zeroDiskStatus : undefined,
+      zeroDiskLive: hubEnabled ? hubStarter?.readZeroDiskLive : undefined,
       // issue #73:与 `_apply-tasks` 同目录(<数据根>/config/managed),节点列表据快照里的 assigned 标记过滤。
       managedStateDir: join(rootConfigDir(), "managed"),
       rollingDelivery: hubEnabled ? hubStarter?.rollingDelivery : undefined,
@@ -283,25 +337,96 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
       log: (m) => console.log(m),
     });
 
-    // 开播/收播观察器:轮询 manager.isRecording 翻转 → emit 到本地流(Discord 已由录制子进程
-    // 用每任务 webhook 发,故 { webhook:false } 不重复推)。首次见到只播种不触发,避免启动即误报。
-    const lastRec = new Map<number, boolean>();
+    // 开播/收播观察器:本机进程与 hub 节点任一在录即视为「这场在播」,翻转时 emit 一次。
+    // 主控代发 webhook 的两种情形:本机直播直传(子进程不发),以及进程在 worker 上的房间
+    // (子进程不在本机)。本机文件录制仍由录制子进程自己发,这里只进本地流,避免重复推送。
+    // 记住上一 tick 的完整判定:{在播, 本机, 直播直传}。收播时用「刚结束的那场」的归属,
+    // 因为本机文件录制在进程退出前就已把录制标记清掉,按当前 tick 判会给它重复推送。
+    const lastRec = new Map<number, LiveTick>();
     const recWatch = setInterval(() => {
       for (const t of store.listTasks()) {
-        const rec = manager.isRecording(t.id);
+        const localRec = manager.isRecording(t.id);
+        let workerStates: ReadonlyArray<{ state: string }> = [];
+        if (!localRec && hubEnabled && hubStarter?.recordingWorkers) {
+          try {
+            const p = platformForRoom(t.room);
+            workerStates = hubStarter.recordingWorkers(p.id, p.extractRoomSlug(t.room));
+          } catch {
+            workerStates = [{ state: "unavailable" }]; // 探测失败 → 保留上一轮判定,不能读成收播
+          }
+        }
         const prev = lastRec.get(t.id);
-        lastRec.set(t.id, rec);
-        if (prev === undefined || rec === prev) continue;
+        // 节点探测不到时保留上一 tick 的判定:一次网络抖动不能被读成「收播」,否则会误报。
+        const usableProbe = workerProbeUsable(workerStates);
+        const rec = usableProbe ? roomIsLive(localRec, workerStates) : prev?.live ?? localRec;
+        const next: LiveTick = { live: rec, local: localRec, streamUpload: t.streamUpload === true };
+        if (prev === undefined) { lastRec.set(t.id, next); continue; }
+        if (rec === prev.live) { lastRec.set(t.id, next); continue; }
+        lastRec.set(t.id, next);
+        // Tell the master right away instead of at the next heartbeat tick (only recording state changed).
+        fleetAgent?.triggerHeartbeat(["recording-status"]);
         const anchor = taskDisplayName(t, manager.getAnchorName(t.id));
+        const selfNotifies = !masterSendsTransition(prev, next);
         events.emit(
           t.id,
           rec
             ? { kind: "recordStart", anchor, room: t.room, quality: t.quality }
             : { kind: "recordEnd", anchor, room: t.room, outDir: t.outDir ?? "" },
-          { webhook: false },
+          // 中继节点只进本地流:开播/收播已由主控的代发逻辑统一发送(issue #403),
+          // 再走中继就会重复。其余事件按原归属。
+          { webhook: relayMode ? false : !selfNotifies },
         );
       }
     }, 3000);
+
+    // 通知中继(issue #405):受管节点把事件写进自己的发件箱,主控每 10 秒按游标拉取,
+    // 统一走本中枢发送,发送后确认。节点不持有推送凭据。旧 bundle 没有该命令 → 拉取返回空。
+    const notifyCursors = new Map<string, number>();
+    let notifyRunning = false;
+    const notifyRelay = hubEnabled && hubStarter?.notifyOutbox
+      ? setInterval(() => {
+          if (notifyRunning) return; // 上一轮还没结束(慢节点/SSH 超时)时不并发重发
+          notifyRunning = true;
+          void (async () => {
+            let workers: ReturnType<typeof workerStore.listWorkers> = [];
+            try {
+              workers = workerStore.listWorkers(rootHubConfig());
+            } catch {
+              return;
+            }
+            for (const w of workers) {
+              if (w.kind === "local") continue; // 本机事件已经在主控自己的中枢里
+              const after = notifyCursors.get(w.id) ?? 0;
+              try {
+                const rows = await hubStarter!.notifyOutbox!(w.id, after, 200, []);
+                if (rows.length === 0) continue;
+                let max = after;
+                for (const r of rows) {
+                  if (r.id > max) max = r.id;
+                  // 节点与主控的 task id 是两套,必须按房间重新解析,否则可能发到别的房间。
+                  const t = r.room
+                    ? store.listTasks().find((x) => {
+                        try {
+                          const p = platformForRoom(x.room);
+                          const q = platformForRoom(r.room!);
+                          return p.id === q.id && p.extractRoomSlug(x.room) === q.extractRoomSlug(r.room!);
+                        } catch {
+                          return false;
+                        }
+                      })
+                    : undefined;
+                  events.emit(t?.id ?? null, r.event, { webhook: r.wantWebhook });
+                }
+                // 发送后再确认,确认成功才推进游标:确认失败时下一轮会重发,而不是丢事件。
+                await hubStarter!.notifyOutbox!(w.id, max, 0, rows.map((r) => r.id));
+                notifyCursors.set(w.id, max);
+              } catch {
+                // 节点不可达/旧版本 → 下一轮再试,不影响其它节点
+              }
+            }
+          })().finally(() => { notifyRunning = false; });
+        }, 10_000)
+      : null;
 
     // 磁盘看门狗:输出根剩余 < 阈值 → 全局告警(原画很快写满盘;Python 版有此保护,TS 重写漏了)。
     const DISK_MIN_GB = Number(process.env.DOUYIN_REC_DISK_MIN_GB ?? 5);
@@ -452,6 +577,9 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
         serveLog.error("[proc] runner 停止出错:", err);
       });
       clearInterval(recWatch);
+      fleetAgent?.stop();
+      if (notifyRelay) clearInterval(notifyRelay);
+      notifyOutbox?.close();
       clearInterval(diskWatch);
       clearInterval(cookieWatch);
       if (canaryWatch) clearInterval(canaryWatch);
@@ -489,6 +617,11 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
         serveLog.info("定时调度已关闭（--no-schedule）：仅手动启停");
       }
     };
+    // Fleet long connection (plans/042): workers dial the master on this same port. Anything else that asks
+    // for an upgrade is refused.
+    server.on("upgrade", (req, socket, head) => {
+      if (!(hubEnabled && hubStarter?.fleetUpgrade?.(req, socket, head))) socket.destroy();
+    });
     if (host) server.listen(port, host, onListen);
     else server.listen(port, onListen);
 }

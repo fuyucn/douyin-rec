@@ -133,7 +133,7 @@ const base = (over: BiliupDeps): BiliupDeps => ({
 describe("biliup processor stall handling", () => {
   it("stall while creating: child stopped, no draft proven → retry with backoff and nothing else run", async () => {
     const { run, kill } = hangingRun(() => true);
-    const p = makeBiliupProcessor(base({ run, kill, lookup: { run: async () => "[]" } }));
+    const p = makeBiliupProcessor(base({ run, kill, lookup: { run: async () => "[]", trustNo: true } }));
     const { c, alerts } = ctx();
     const t0 = Date.now();
     const r = await p.run(job(files(2)), c);
@@ -148,20 +148,31 @@ describe("biliup processor stall handling", () => {
     const { run, kill } = hangingRun(() => true);
     let calls = 0;
     // The pre-create proof succeeds; the post-stall proof cannot be obtained.
-    const lookup = { run: async () => { if (++calls > 3) throw new Error("x"); return "[]"; } };
+    const lookup = { run: async () => { if (++calls > 3) throw new Error("x"); return "[]"; }, trustNo: true };
     const p = makeBiliupProcessor(base({ run, kill, lookup }));
     await expect(p.run(job(files(1)), ctx().c)).rejects.toThrow(/cannot prove no draft/);
   });
 
-  it("third attempt does not retry again", async () => {
+  it("default archive lookup does not trust absence, so a stalled create is not retried", async () => {
     const { run, kill } = hangingRun(() => true);
-    const p = makeBiliupProcessor(base({ run, kill, lookup: { run: async () => "[]" } }));
-    await expect(p.run(job(files(1), { attempts: 3 }), ctx().c)).rejects.toThrow(/3 attempts used/);
+    const p = makeBiliupProcessor(base({ run, kill, lookup: { run: async () => "[]", log: () => {} } }));
+    await expect(p.run(job(files(1)), ctx().c)).rejects.toThrow(/cannot confirm/);
+    expect(run).not.toHaveBeenCalled();
+    expect(kill).not.toHaveBeenCalled();
+  });
+
+  it("third and much later attempts still retry with the one-hour cap", async () => {
+    const { run, kill } = hangingRun(() => true);
+    const p = makeBiliupProcessor(base({ run, kill, lookup: { run: async () => "[]", trustNo: true } }));
+    const third = await p.run(job(files(1), { attempts: 3 }), ctx().c);
+    expect(third.retry?.reason).toBe("transfer-retry");
+    const late = await p.run(job(files(1), { attempts: 8 }), ctx().c);
+    expect(late.retry?.notBefore - Date.now()).toBeGreaterThanOrEqual(60 * 60_000 - 1_000);
   });
 
   it("stall while appending: a confirmed part count allows retry and keeps the bv", async () => {
     const { run, kill } = hangingRun((a) => a.includes("append"));
-    const p = makeBiliupProcessor(base({ run, kill, lookup: { run: async () => "[]" }, countParts: async () => 1 }));
+    const p = makeBiliupProcessor(base({ run, kill, lookup: { run: async () => "[]", trustNo: true }, countParts: async () => 1 }));
     const r = await p.run(job(files(3)), ctx().c);
     expect(r.bv).toBe("BV1aaaaaaaaa"); // issue-guard: allow (fake BV fixture)
     expect(r.retry?.reason).toBe("transfer-retry");
@@ -169,7 +180,7 @@ describe("biliup processor stall handling", () => {
 
   it("stall while appending with an unknown part count → ambiguous, no retry", async () => {
     const { run, kill } = hangingRun((a) => a.includes("append"));
-    const p = makeBiliupProcessor(base({ run, kill, lookup: { run: async () => "[]" }, countParts: async () => null }));
+    const p = makeBiliupProcessor(base({ run, kill, lookup: { run: async () => "[]", trustNo: true }, countParts: async () => null }));
     await expect(p.run(job(files(2)), ctx().c)).rejects.toThrow(/part count unknown/);
   });
 
@@ -178,7 +189,7 @@ describe("biliup processor stall handling", () => {
     let finish: () => void = () => {};
     const run = vi.fn((_a: string[], hooks?: BiliupHooks) => new Promise<string>((res) => { hooks?.onSpawn?.(9); finish = () => res("BV1bbbbbbbbb"); })); // issue-guard: allow (fake BV fixture)
     const kill = vi.fn();
-    const p = makeBiliupProcessor(base({ run, kill, readAcked: () => new Map([["s", ++n]]), lookup: { run: async () => "[]" } }));
+    const p = makeBiliupProcessor(base({ run, kill, readAcked: () => new Map([["s", ++n]]), lookup: { run: async () => "[]", trustNo: true } }));
     const pending = p.run(job(files(1)), ctx().c);
     await new Promise((r) => setTimeout(r, 150));
     finish();
@@ -192,7 +203,7 @@ describe("biliup processor stall handling", () => {
       hooks?.onSpawn?.(11);
       hooks?.onLine?.("All files uploaded successfully");
     }));
-    const p = makeBiliupProcessor(base({ run, kill, readAcked: () => new Map(), lookup: { run: async () => "[]" } }));
+    const p = makeBiliupProcessor(base({ run, kill, readAcked: () => new Map(), lookup: { run: async () => "[]", trustNo: true } }));
     const err = await p.run(job(files(1), {}, { maxWallMs: 30 }), ctx().c).catch((e: unknown) => e);
     expect(isUncertainOutcome(err)).toBe(true);
     expect(kill).not.toHaveBeenCalled();
@@ -206,7 +217,7 @@ describe("biliup processor stall handling", () => {
       enterSubmit = () => hooks?.onLine?.("All files uploaded successfully");
     }));
     let n = 0;
-    const p = makeBiliupProcessor(base({ run, kill, readAcked: () => new Map([["s", ++n]]), lookup: { run: async () => "[]" } }));
+    const p = makeBiliupProcessor(base({ run, kill, readAcked: () => new Map([["s", ++n]]), lookup: { run: async () => "[]", trustNo: true } }));
     const pending = p.run(job(files(1), {}, { maxWallMs: 20 }), ctx().c).catch((e: unknown) => e);
     await new Promise((r) => setTimeout(r, 60));
     enterSubmit();
@@ -221,7 +232,7 @@ describe("biliup processor stall handling", () => {
       hooks?.onLine?.("All files uploaded successfully");
       finishSubmit = () => res(argv.includes("upload") ? "BV1ccccccccc" : "ok"); // issue-guard: allow (fake BV fixture)
     }));
-    const p = makeBiliupProcessor(base({ run, readAcked: () => new Map(), lookup: { run: async () => "[]" }, countParts: async () => 1 }));
+    const p = makeBiliupProcessor(base({ run, readAcked: () => new Map(), lookup: { run: async () => "[]", trustNo: true }, countParts: async () => 1 }));
     const err = await p.run(job(files(3), {}, { maxWallMs: 30 }), ctx().c).catch((e: unknown) => e);
     expect(isUncertainOutcome(err)).toBe(true);
     finishSubmit();
@@ -232,7 +243,7 @@ describe("biliup processor stall handling", () => {
   it("records the child's start fingerprint so the slot can be bound to it", async () => {
     const { run } = hangingRun(() => false);
     const { c, setState } = ctx();
-    await makeBiliupProcessor(base({ run, probe: (pid) => ({ pid, startedAt: "st", cmdline: "biliup" }), lookup: { run: async () => "[]" } })).run(job(files(1)), c);
+    await makeBiliupProcessor(base({ run, probe: (pid) => ({ pid, startedAt: "st", cmdline: "biliup" }), lookup: { run: async () => "[]", trustNo: true } })).run(job(files(1)), c);
     expect(setState).toHaveBeenCalledWith({ step: "transfer", childPid: 100, childPidStartedAt: "st" });
   });
 });
@@ -257,7 +268,89 @@ describe("TransferWatch.ackedSinceChild", () => {
     clock.t = 2; w.observe(new Map([["b", 200]])); // a closed, b new
     expect(w.ackedSinceChild).toBe(700);
     w.childStarted();
-    expect(w.ackedSinceChild).toBe(0);
+    expect(w.ackedSinceChild).toBeNull(); // no sample yet = unknown, never 0 bytes (issue #532)
+  });
+
+  it("no sample (null or an ss listing without the child's sockets) stays unknown", () => {
+    const { w } = mkWatch();
+    w.setStep("transfer");
+    expect(w.ackedSinceChild).toBeNull();
+    w.observe(null);
+    expect(w.ackedSinceChild).toBeNull();
+    expect(w.observe(new Map()).kind).toBe("ok");
+    expect(w.ackedSinceChild).toBeNull();
+    expect(w.markBoundary(null)).toBeNull();
+    expect(w.markBoundary(new Map())).toBeNull(); // listed nothing: still unknown
+  });
+
+  it("a boundary listing whose socket carries no bytes_acked token is unknown, not 0 bytes (ss fixture)", () => {
+    const fixture = [
+      'ESTAB 0      0         local:53844 peer-a:443   users:(("biliup",pid=4242,fd=9))',
+      "\t cubic wscale:9,7 bytes_sent:904 segs_out:3",
+    ].join("\n");
+    const listing = parseSsAcked(fixture, 4242);
+    expect([...listing.values()]).toEqual([0]); // the socket is listed, no acked number was parsed
+    const { w } = mkWatch();
+    w.setStep("transfer");
+    w.observe(listing);
+    expect(w.markBoundary(listing)).toBeNull();
+    expect(w.ackedAtBoundary).toBeNull();
+  });
+
+  it("a socket seen earlier but missing at the boundary keeps the proof unknown (a lower bound is not a count)", () => {
+    const { w, clock } = mkWatch();
+    w.setStep("transfer");
+    clock.t = 1; w.observe(new Map([["a", 400], ["b", 100]]));
+    clock.t = 2; w.observe(new Map([["a", 500]])); // b closed: bytes after its last read were never seen
+    expect(w.markBoundary(new Map([["a", 500]]))).toBeNull();
+    expect(w.ackedAtBoundary).toBeNull();
+  });
+
+  it("a complete boundary read uses the exact acked total", () => {
+    const { w, clock } = mkWatch();
+    w.setStep("transfer");
+    clock.t = 1; w.observe(new Map([["a", 400], ["b", 100]]));
+    clock.t = 2; w.observe(new Map([["a", 500], ["b", 200]]));
+    expect(w.markBoundary(new Map([["a", 500], ["b", 200]]))).toBe(700);
+  });
+
+  it("a reused socket tuple counts from its own zero, keeping the closed socket's share", () => {
+    const { w, clock } = mkWatch();
+    w.setStep("transfer");
+    clock.t = 1; w.observe(new Map([["a", 500]]));
+    clock.t = 2; w.observe(new Map([["a", 40]])); // same tuple, new connection
+    expect(w.ackedSinceChild).toBe(540);
+  });
+
+  it("an empty listing keeps the per-socket baseline: the next sample is a delta, not a new total", () => {
+    const { w, clock } = mkWatch();
+    w.setStep("transfer");
+    clock.t = 1; w.observe(new Map([["a", 500]]));
+    clock.t = 2; w.observe(new Map()); // sockets briefly invisible
+    clock.t = 3; w.observe(new Map([["a", 550]]));
+    expect(w.ackedSinceChild).toBe(550); // 500 + 50; never 500 + 550
+  });
+
+  it("an empty listing is still no progress for the stall watchdog", () => {
+    const { w, clock } = mkWatch({ stallMs: 100 });
+    w.setStep("transfer");
+    clock.t = 1; w.observe(new Map([["a", 100]]));
+    clock.t = 101; expect(w.observe(new Map()).kind).toBe("stall");
+  });
+
+  it("ackedAtBoundary snapshots the proof at the boundary and resets per child", () => {
+    const { w, clock } = mkWatch();
+    w.setStep("transfer");
+    expect(w.markBoundary(null)).toBeNull();
+    clock.t = 1; w.observe(new Map([["a", 900]]));
+    clock.t = 2; w.observe(new Map([["a", 1000]]));
+    expect(w.markBoundary(new Map([["a", 1000]]))).toBe(1000);
+    expect(w.ackedAtBoundary).toBe(1000);
+    clock.t = 3; w.observe(new Map([["a", 1500]]));
+    expect(w.ackedAtBoundary).toBe(1000); // late samples never rewrite the proof
+    expect(w.markBoundary(new Map())).toBe(1000); // an unusable repeat never erases the proof
+    w.childStarted();
+    expect(w.ackedAtBoundary).toBeNull();
   });
 });
 
@@ -274,7 +367,7 @@ describe("biliup processor progress", () => {
     }));
     const p = makeBiliupProcessor(base({
       run, progressEveryMs: 0, sizeOf: () => 1000, readAcked: () => new Map([["s", (acked += 400)]]),
-      lookup: { run: async () => "[]" }, countParts: async () => 1,
+      lookup: { run: async () => "[]", trustNo: true }, countParts: async () => 1,
     }));
     const { c, setState } = ctx();
     const done = p.run(job(files(2), {}, { stallMs: 60_000 }), c);
@@ -308,7 +401,7 @@ describe("biliup processor progress write failures", () => {
     const setState = vi.fn((patch: { progress?: unknown }) => { if (patch.progress) throw new Error("database is locked"); });
     const c = { log: (m: string) => logs.push(m), alert() {}, markProgress() {}, assertLease() {}, signal: new AbortController().signal, setState } as never;
     let n = 0;
-    const p = makeBiliupProcessor(base({ run, progressEveryMs: 0, sizeOf: () => 10, readAcked: () => new Map([["s", ++n]]), lookup: { run: async () => "[]" } }));
+    const p = makeBiliupProcessor(base({ run, progressEveryMs: 0, sizeOf: () => 10, readAcked: () => new Map([["s", ++n]]), lookup: { run: async () => "[]", trustNo: true } }));
     const pending = p.run(job(files(1), {}, { stallMs: 60_000 }), c);
     await new Promise((r) => setTimeout(r, 30));
     finish();
@@ -339,7 +432,7 @@ describe("biliup processor upload slot", () => {
       bvSeen.push(argv.includes("upload") ? "create" : "append");
       return argv.includes("upload") ? "BV1aaaaaaaaa" : "ok"; // issue-guard: allow (fake BV fixture)
     });
-    const p = makeBiliupProcessor(base({ run, slot: fakeSlot(held) as never, lookup: { run: async () => "[]" }, countParts: async () => 1 }));
+    const p = makeBiliupProcessor(base({ run, slot: fakeSlot(held) as never, lookup: { run: async () => "[]", trustNo: true }, countParts: async () => 1 }));
     const r = await p.run(job(files(3), {}, { stallMs: 60_000 }), ctx().c);
     expect(r.bv).toBe("BV1aaaaaaaaa"); // issue-guard: allow (fake BV fixture)
     expect(overlap).toEqual([true, true, true]);
@@ -358,7 +451,7 @@ describe("biliup processor upload slot", () => {
     const ours = openUploadSlot(join(dir, "proc-queue.db"), { concurrency: 1, probe: () => null });
     const release = setTimeout(() => other.release(), 20);
     try {
-        const p = makeBiliupProcessor(base({ run, slot: ours, lookup: { run: async () => "[]" } }));
+        const p = makeBiliupProcessor(base({ run, slot: ours, lookup: { run: async () => "[]", trustNo: true } }));
       const r = await p.run(job(files(1), {}, { stallMs: 60_000 }), ctx().c);
       expect(r.bv).toBe("BV1aaaaaaaaa"); // issue-guard: allow (fake BV fixture)
       expect(created).toBe(1);
@@ -368,7 +461,7 @@ describe("biliup processor upload slot", () => {
 
   it("asks for a retry (not a failure) when no slot frees up within the wait limit", async () => {
     const run = vi.fn(async () => "BV1aaaaaaaaa"); // issue-guard: allow (fake BV fixture)
-    const p = makeBiliupProcessor(base({ run, slotWaitMs: 1, slot: fakeSlot({ v: true }) as never, lookup: { run: async () => "[]" } }));
+    const p = makeBiliupProcessor(base({ run, slotWaitMs: 1, slot: fakeSlot({ v: true }) as never, lookup: { run: async () => "[]", trustNo: true } }));
     // Nothing was uploaded, so this must stay retryable: treating it as uncertain would need manual review.
     expect(await p.run(job(files(1)), ctx().c)).toMatchObject({ outputs: [], retry: { reason: "slot-busy" } });
     expect(run).not.toHaveBeenCalled();
@@ -376,7 +469,7 @@ describe("biliup processor upload slot", () => {
 
   it("without a slot nothing changes (old behaviour)", async () => {
     const run = vi.fn(async () => "BV1aaaaaaaaa"); // issue-guard: allow (fake BV fixture)
-    const p = makeBiliupProcessor(base({ run, lookup: { run: async () => "[]" } }));
+    const p = makeBiliupProcessor(base({ run, lookup: { run: async () => "[]", trustNo: true } }));
     expect((await p.run(job(files(1)), ctx().c)).bv).toBe("BV1aaaaaaaaa"); // issue-guard: allow (fake BV fixture)
     expect(run).toHaveBeenCalledTimes(1);
   });

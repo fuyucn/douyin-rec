@@ -12,13 +12,23 @@ import { join } from "node:path";
 const SCRIPT = join(import.meta.dirname, "..", "..", "scripts", "install-worker.sh");
 let server: Server | undefined;
 
-function serve(tasks: string, proc: string, status = 200): Promise<number> {
+function serve(
+  tasks: string,
+  proc: string,
+  status = 200,
+  procStatus = 200,
+  procBehavior: "body" | "timeout" = "body",
+): Promise<number> {
   return new Promise((resolve) => {
     server = createServer((req, res) => {
       if (req.url === "/api/tasks") { res.statusCode = status; res.end(tasks); }
-      else if (req.url === "/api/proc/active") res.end(proc);
+      else if (req.url === "/api/proc/active") {
+        res.statusCode = procStatus;
+        if (procBehavior === "timeout") return;
+        res.end(proc);
+      }
       else { res.statusCode = 404; res.end(); }
-    }).listen(0, () => resolve((server!.address() as { port: number }).port));
+    }).listen(0, "localhost", () => resolve((server!.address() as { port: number }).port));
   });
 }
 
@@ -49,9 +59,27 @@ describe("install-worker --check-busy", () => {
     expect(r.code).toBe(1);
     expect(r.out).toContain("upload");
   });
+  it("a running part-chain upload job → busy", async () => {
+    const port = await serve(JSON.stringify([{ id: 1, recording: false }]), JSON.stringify({ running: { "upload-part": 1 } }));
+    const r = await check(port);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("upload");
+  });
   it("old node without the queue endpoint is judged by recording only", async () => {
-    const port = await serve(JSON.stringify([{ id: 1, recording: false }]), "not json");
+    const port = await serve(JSON.stringify([{ id: 1, recording: false }]), "not json", 200, 404);
     expect(await check(port)).toMatchObject({ code: 0 });
+  });
+  it("an unreadable upload queue fails closed", async () => {
+    const port = await serve(JSON.stringify([{ id: 1, recording: false }]), "not json");
+    const r = await check(port);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("unreadable upload queue");
+  });
+  it("an upload queue timeout fails closed", async () => {
+    const port = await serve(JSON.stringify([{ id: 1, recording: false }]), "{}", 200, 200, "timeout");
+    const r = await check(port, { DREC_BUSY_TIMEOUT_MS: "50" });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("upload queue unavailable");
   });
   it("unreadable task list fails closed", async () => {
     const port = await serve("<html>", "{}");
@@ -67,7 +95,7 @@ describe("install-worker --check-busy", () => {
     const port = await serve(JSON.stringify([{ id: 1, recording: true }]), "{}");
     // A PATH holding only the tools the script needs, so the result cannot depend on where node lives.
     const bin = mkdtempSync(join(tmpdir(), "no-node-"));
-    for (const tool of ["curl", "sed", "grep", "awk", "cat", "tr", "uname", "id", "dirname", "basename"]) {
+    for (const tool of ["sed", "grep", "awk", "cat", "tr", "uname", "id", "dirname", "basename"]) {
       const real = execFileSync("sh", ["-c", `command -v ${tool}`]).toString().trim();
       if (real) symlinkSync(real, join(bin, tool));
     }

@@ -1,6 +1,36 @@
 import { DatabaseSync } from "node:sqlite";
 import type { HubJobState, HubNodeStateName, HubStepName } from "@drec/core";
 
+/**
+ * 写端等锁预算(issue #428):台账有多个写端(serve 长连接、直播直传收尾的 record 子进程每次
+ * `new SyncLedger`、删除房间历史),撞上他人写事务时等锁而不是立刻 `SQLITE_BUSY`,
+ * 否则 pipeline 步骤会被误记 failed(稿件已传、台账没记)。
+ */
+const LEDGER_BUSY_TIMEOUT_MS = 5000;
+/** journal_mode 切换的退避重试上限(同 proc-queue 的 initWal:2 进程并发首开实测约 43% 失败)。 */
+const WAL_RETRIES = 200;
+
+/**
+ * Every table/column initSchema must leave behind (issue #478). Its ALTER/CREATE statements are
+ * idempotent and swallow duplicate-column errors, so a REAL migration failure (disk full, lock) used to
+ * stay invisible and surface later as "never queued" / "no stem". Validated once at the end of the
+ * migration: a missing column/table makes opening the ledger fail loudly, naming what is missing.
+ */
+const EXPECTED_SCHEMA: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ["sync_jobs", ["streamKey", "state", "winnerWorker", "bv", "error", "fails", "startMs", "outputStem",
+    "followups", "uploadPlan", "uploadStatus", "ackedAt", "ackNote", "seasonState", "updatedAt"]],
+  ["sync_candidates", ["streamKey", "workerId", "coverage", "durationSec", "startMs", "endMs",
+    "totalGapSec", "isWinner", "danmuCount", "updatedAt"]],
+  ["sync_job_events", ["streamKey", "state", "at"]],
+  ["sync_job_steps", ["streamKey", "step", "phase", "at", "detail"]],
+  ["sync_node_states", ["streamKey", "node", "state", "error", "attempts", "updatedAt"]],
+  ["sync_parts", ["streamKey", "groupName", "partIndex", "updatedAt"]],
+];
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 // 状态/步骤名的**唯一真理 = core 的只读契约**(app 的 hub 任务页只读同一张库,靠它对齐)。
 export type JobState = HubJobState;
 
@@ -111,6 +141,20 @@ export class SyncLedger {
   private db: DatabaseSync;
   constructor(dbPath: string) {
     this.db = new DatabaseSync(dbPath);
+    try {
+      this.initSchema();
+    } catch (e) {
+      // 连接打开成功但初始化(initWal/建表/迁移)失败 → 先关连接再抛,不泄漏文件句柄(issue #428 复审)。
+      try { this.db.close(); } catch { /* 已关闭 */ }
+      throw e;
+    }
+  }
+
+  /** busy_timeout + WAL + 建表/迁移。原构造体;任一步抛错由构造函数统一 close 后重抛。 */
+  private initSchema(): void {
+    // busy_timeout 必须在首个写语句之前生效(每连接设置,不落库;issue #428)。
+    this.db.exec(`PRAGMA busy_timeout=${LEDGER_BUSY_TIMEOUT_MS}`);
+    this.initWal();
     this.db.exec(`CREATE TABLE IF NOT EXISTS sync_jobs(
       streamKey TEXT PRIMARY KEY, state TEXT NOT NULL,
       winnerWorker TEXT, bv TEXT, error TEXT, fails INTEGER NOT NULL DEFAULT 0,
@@ -129,11 +173,6 @@ export class SyncLedger {
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN ackedAt INTEGER"); } catch { /* column exists */ }
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN ackNote TEXT"); } catch { /* column exists */ }
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN seasonState TEXT"); } catch { /* column exists */ }
-    // transition() names these columns on every state change, so a failed ALTER must surface here, not later.
-    const cols = new Set((this.db.prepare("PRAGMA table_info(sync_jobs)").all() as Array<{ name: string }>).map((c) => c.name));
-    if (!cols.has("ackedAt") || !cols.has("ackNote") || !cols.has("seasonState")) {
-      throw new Error("sync_jobs migration failed: ackedAt/ackNote/seasonState columns missing");
-    }
     // 选优候选明细:每场每节点一行,记 coverage/时长/起止/缺口 + 是否胜出,供事后复盘选优依据。
     this.db.exec(`CREATE TABLE IF NOT EXISTS sync_candidates(
       streamKey TEXT NOT NULL, workerId TEXT NOT NULL,
@@ -169,6 +208,43 @@ export class SyncLedger {
     this.db.exec(`CREATE TABLE IF NOT EXISTS sync_parts(
       streamKey TEXT NOT NULL, groupName TEXT NOT NULL, partIndex INTEGER NOT NULL,
       updatedAt INTEGER NOT NULL, PRIMARY KEY(streamKey, groupName, partIndex))`);
+    this.assertSchema();
+  }
+
+  /**
+   * Issue #478: verify every expected table/column exists after the idempotent migration. Throws with the
+   * missing names so a failed ALTER/CREATE (disk full, lock, stale view) cannot hide until a later query.
+   */
+  private assertSchema(): void {
+    const problems: string[] = [];
+    for (const [table, expected] of EXPECTED_SCHEMA) {
+      const cols = new Set(
+        (this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name),
+      );
+      if (cols.size === 0) { problems.push(`${table} (table missing)`); continue; }
+      const missing = expected.filter((c) => !cols.has(c));
+      if (missing.length) problems.push(`${table}: missing ${missing.join(", ")}`);
+    }
+    if (problems.length) throw new Error(`ledger migration failed — ${problems.join("; ")}`);
+  }
+
+  /**
+   * 切 WAL(幂等,issue #428)。已是 WAL 直接返回;否则退避重试 `locked/busy`:并发首开时
+   * busy_timeout 对 journal_mode 切换**不生效**(需排他锁,busy handler 不被调用),不重试会让
+   * 后到的进程(直播直传收尾的 record 子进程)直接抛 `database is locked`。做法同 proc-queue。
+   */
+  private initWal(): void {
+    for (let i = 0; ; i++) {
+      try {
+        const cur = (this.db.prepare("PRAGMA journal_mode").get() as { journal_mode?: string }).journal_mode;
+        if (String(cur).toLowerCase() === "wal") return;
+        this.db.exec("PRAGMA journal_mode=WAL");
+        return;
+      } catch (e) {
+        if (i >= WAL_RETRIES || !/locked|busy/i.test((e as Error).message)) throw e;
+        sleepSync(5 + Math.random() * 25);
+      }
+    }
   }
   private logEvent(streamKey: string, state: JobState, at: number): void {
     this.db.prepare("INSERT INTO sync_job_events(streamKey,state,at) VALUES(?,?,?)").run(streamKey, state, at);

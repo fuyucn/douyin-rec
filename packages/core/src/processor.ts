@@ -12,8 +12,103 @@
 import { isAbsolute, relative, resolve } from "node:path";
 import type { UploadProgressDTO } from "./api-types.js";
 import { isVideoFileName } from "./output-format.js";
+import { rollingSidecarPathOf } from "./rolling.js";
+import { isUploadRateLimited } from "./upload-contract.js";
 
 export type ResourceClass = "cpu" | "net" | "upload";
+
+/** Per-part queue kinds (plan 046 PR1): contracts only; no processor or caller is wired here yet. */
+export const PART_KINDS = Object.freeze({
+  upload: "upload-part",
+  cleanup: "cleanup-part",
+  reconcile: "reconcile-part",
+} as const);
+export type PartChainKind = (typeof PART_KINDS)[keyof typeof PART_KINDS];
+
+/**
+ * Plan 046 PR6 switch: when on, the recorder's seal hook only enqueues upload-part rows (方案 A)
+ * instead of uploading from the recorder process. Default off: the legacy path stays byte-identical.
+ */
+export const ROLLING_QUEUE_MODE_SETTING = "rollingQueueMode";
+
+/**
+ * The single logical key for one part row: every producer (recorder enqueue, hub-owned skip, runner
+ * bv inheritance) must use this so a segment can never have two job ids.
+ */
+export function partLogicalKey(orderKey: string, seq: number): string {
+  return orderKey + ":part:" + String(seq);
+}
+
+/** Persisted in `params.ctx`; one upload/reconcile row points at exactly one video part. */
+export interface PartCtx {
+  v: 1;
+  orderKey: string;
+  index: number;
+  file: string;
+  fp: { size: number; mtimeMs: number };
+  bv?: string;
+}
+
+export interface PartWorkflowTemplate {
+  /** Never enqueue an upload task in this mode (streaming stays in the recorder process). */
+  uploadAt: "never" | "seal" | "broadcast-end";
+  cleanupAt: "part-confirmed" | "order-confirmed";
+  cleanupScope: "part" | "order";
+}
+
+/** Single source of truth for when the three modes enqueue part upload and cleanup (plan 046 section 4.2). */
+export const PART_WORKFLOW_TEMPLATES: Readonly<Record<"live-pump" | "rolling" | "whole-order", PartWorkflowTemplate>> = Object.freeze({
+  "live-pump": Object.freeze({ uploadAt: "never", cleanupAt: "part-confirmed", cleanupScope: "part" }),
+  rolling: Object.freeze({ uploadAt: "seal", cleanupAt: "part-confirmed", cleanupScope: "part" }),
+  "whole-order": Object.freeze({ uploadAt: "broadcast-end", cleanupAt: "order-confirmed", cleanupScope: "order" }),
+});
+
+function assertPartCtx(ctx: unknown, kind: string, bad: (why: string) => never): void {
+  if (kind !== PART_KINDS.upload && kind !== PART_KINDS.reconcile) return;
+  if (typeof ctx !== "object" || ctx === null || Array.isArray(ctx)) bad("part-chain job requires params.ctx");
+  const c = ctx as Record<string, unknown>;
+  if (c.v !== 1) bad("params.ctx.v must be 1");
+  if (typeof c.orderKey !== "string" || c.orderKey === "") bad("params.ctx.orderKey must be a non-empty string");
+  if (!Number.isSafeInteger(c.index) || (c.index as number) < 1) bad("params.ctx.index must be an integer >= 1");
+  if (typeof c.file !== "string" || c.file === "" || c.file.includes("\0") || !isAbsolute(c.file)) {
+    bad("params.ctx.file must be a non-empty absolute path");
+  }
+  if (!isVideoFileName(c.file)) bad("params.ctx.file must be a video file (xml/ass/sidecars are forbidden)");
+  if (typeof c.fp !== "object" || c.fp === null || Array.isArray(c.fp)) bad("params.ctx.fp must be an object");
+  const fp = c.fp as Record<string, unknown>;
+  for (const key of ["size", "mtimeMs"] as const) {
+    if (typeof fp[key] !== "number" || !Number.isFinite(fp[key]) || (fp[key] as number) < 0) {
+      bad("params.ctx.fp." + key + " must be a finite non-negative number");
+    }
+  }
+  if (c.bv !== undefined && (typeof c.bv !== "string" || c.bv === "")) bad("params.ctx.bv must be a non-empty string when present");
+}
+
+/**
+ * `params.sidecarPath` is written by the processor, so it is never taken from a caller: a remote
+ * `_enqueue` payload could otherwise overwrite any file on the node (path traversal / symlink escape).
+ * The only accepted value is the canonical sidecar of `ctx.file` (same directory, session base +
+ * `.rolling.json`), which is derived here from the validated video path.
+ */
+function assertSidecarPath(params: Record<string, unknown>, ctx: unknown, bad: (why: string) => never): void {
+  const raw = params.sidecarPath;
+  // The recorder-side index written into `confirmed` is caller data too: a bogus value would corrupt
+  // the session's upload ledger (rework addendum 9).
+  const index = params.sidecarIndex;
+  if (index !== undefined && (!Number.isSafeInteger(index) || (index as number) < 0)) {
+    bad("params.sidecarIndex must be a non-negative safe integer");
+  }
+  if (raw === undefined) return;
+  if (typeof raw !== "string" || raw === "" || raw.includes("\0") || !isAbsolute(raw)) {
+    bad("params.sidecarPath must be a non-empty absolute path");
+  }
+  const file = (ctx as Record<string, unknown>).file;
+  if (typeof file !== "string" || file === "") bad("params.sidecarPath requires params.ctx.file");
+  const expected = rollingSidecarPathOf(file);
+  if (resolve(raw) !== resolve(expected)) {
+    bad("params.sidecarPath must be the canonical sidecar of params.ctx.file (same directory, .rolling.json)");
+  }
+}
 
 export interface ProcessJob {
   /** = jobIdOf(kind, logicalKey, generation);派发方给定、确定性 → 幂等。 */
@@ -76,6 +171,12 @@ export interface ProcessResult {
   /** BV created by this run (biliup). */
   bv?: string;
   /**
+   * Plan 046 §5.4: local proof that this part was fully sent and the in-queue fingerprint still matches.
+   * ackedBytes is null when no tcp sample was readable at the transfer boundary (unknown, not zero;
+   * the processor logs the degraded check, issue #532).
+   */
+  confirmed?: { size: number; mtimeMs: number; ackedBytes: number | null };
+  /**
    * Ask the runner to retry later. Omitted reason = `transfer-retry` (failed/stalled transfer, child
    * confirmed stopped); `slot-busy` = the node-wide upload slot was taken, nothing was uploaded (PR4).
    */
@@ -120,6 +221,65 @@ export class UncertainOutcome extends Error {
 
 export function isUncertainOutcome(e: unknown): boolean {
   return (e as { uncertain?: unknown } | null)?.uncertain === true;
+}
+
+export const RETRY_BACKOFF_MS = 5 * 60_000;
+export const MAX_BACKOFF_MS = 60 * 60_000;
+export const STUCK_ALERT_MS = 6 * 60 * 60_000;
+
+export type RetryFailureKind = "transient" | "deterministic" | "rate-limit";
+export type RetryFailureCode =
+  | "unknown" | "rate-limit" | "login-expired" | "credentials-invalid" | "forbidden" | "not-found";
+
+export interface RetryFailureClassification {
+  kind: RetryFailureKind;
+  code: RetryFailureCode;
+  retry: boolean;
+  /** Whether this failure belongs in the stuck-counter / backoff sequence (rate-limit does not). */
+  countsAsFailure: boolean;
+}
+
+const DETERMINISTIC_CODES: Readonly<Record<Exclude<RetryFailureCode, "unknown" | "rate-limit">, readonly string[]>> = Object.freeze({
+  "login-expired": Object.freeze(["login-expired"]),
+  "credentials-invalid": Object.freeze(["credentials-invalid", "invalid-cookies", "cookie-expired", "cookie-invalid"]),
+  forbidden: Object.freeze(["permission-denied"]),
+  "not-found": Object.freeze(["missing-cookies", "missing-cookies-path"]),
+});
+
+function failureMessage(err: unknown): string {
+  return String((err as Error)?.message ?? err);
+}
+
+function explicitCode(err: unknown): string | null {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === "string" ? code.toLowerCase() : null;
+}
+
+/** One enumerable classification gate; callers must not duplicate string heuristics.
+ *  Rate limits retry without consuming an attempt (`countsAsFailure=false`). */
+export function classifyRetryableFailure(err: unknown): RetryFailureClassification {
+  if (isUploadRateLimited(err)) return { kind: "rate-limit", code: "rate-limit", retry: true, countsAsFailure: false };
+  const code = explicitCode(err);
+  if (code) {
+    if (code === "unknown" || code === "rate-limit") return { kind: "transient", code: "unknown", retry: true, countsAsFailure: true };
+    if (code in DETERMINISTIC_CODES) {
+      return { kind: "deterministic", code: code as Exclude<RetryFailureCode, "unknown" | "rate-limit">, retry: false, countsAsFailure: false };
+    }
+    return { kind: "transient", code: "unknown", retry: true, countsAsFailure: true };
+  }
+  const message = failureMessage(err).toLowerCase();
+  for (const [deterministicCode, patterns] of Object.entries(DETERMINISTIC_CODES) as Array<[Exclude<RetryFailureCode, "unknown" | "rate-limit">, readonly string[]]>) {
+    if (patterns.some((pattern) => message.includes(pattern))) {
+      return { kind: "deterministic", code: deterministicCode, retry: false, countsAsFailure: false };
+    }
+  }
+  return { kind: "transient", code: "unknown", retry: true, countsAsFailure: true };
+}
+
+/** Five minutes, doubling to a one-hour cap; repeated failures never terminate by count. */
+export function retryBackoffMs(consecutiveFailures: number): number {
+  const exponent = Math.max(0, Math.floor(consecutiveFailures) - 1);
+  return Math.min(MAX_BACKOFF_MS, RETRY_BACKOFF_MS * 2 ** exponent);
 }
 
 // ───────────────────────── 注册表 ─────────────────────────
@@ -213,6 +373,10 @@ export function assertJobInvariants(job: ProcessJob, opts: { allowedRoots: reado
     bad("jobId 与 kind/logicalKey/generation 不一致");
   }
   if (!Array.isArray(job.inputs) || job.inputs.length === 0) bad("inputs 为空");
+  if (!isRecord(job.params)) bad("params 须为对象");
+  if (job.kind === PART_KINDS.cleanup && (job.orderKey != null || job.seq != null)) {
+    bad("cleanup-part must not carry orderKey/seq (cleanup and upload run in parallel)");
+  }
   const paths = [...job.inputs, ...(job.outputs ?? [])];
   for (const p of paths) {
     if (typeof p !== "string" || p === "" || p.includes("\0")) bad("路径非法");
@@ -233,27 +397,43 @@ export function assertJobInvariants(job: ProcessJob, opts: { allowedRoots: reado
   for (const p of paths) {
     if (!roots.some((r) => isUnderRoot(p, r))) bad(`路径不在 allowedRoots 内: ${p}`);
   }
+  assertPartCtx(job.params.ctx, job.kind, bad);
+  if (job.kind === PART_KINDS.upload || job.kind === PART_KINDS.reconcile) {
+    assertSidecarPath(job.params, job.params.ctx, bad);
+  }
+  const ctx = job.params.ctx as PartCtx | undefined;
+  if (ctx && typeof ctx.file === "string" && !roots.some((r) => isUnderRoot(ctx.file, r))) {
+    bad(`params.ctx.file 不在 allowedRoots 内: ${ctx.file}`);
+  }
 }
 
 // ───────────────────────── 状态机 ─────────────────────────
 
-export type JobState = "pending" | "running" | "done" | "failed" | "uncertain" | "cancelled";
+export type JobState = "pending" | "running" | "done" | "failed" | "uncertain" | "cancelled" | "skipped" | "reconciling";
 
 /**
  * 合法迁移**边集**(必要条件)。带条件的边还须过 `canTransition`:
  * - pending → cancelled:仅从未被认领;
  * - running → pending:仅租约过期且 recover()=rerun,或关停时 interruptible job 被 abort;
+ * - running → reconciling:提交阶段结果不明,自动对账中(非终态);
+ * - reconciling → pending:仅 settle 窗口外确认「无稿」且允许重传;
+ * - reconciling → done:对账确认「有稿」;
+ * - reconciling → reconciling:对账仍不明,保持非终态;
+ * - running → skipped:无副作用的跳过(hub 托管 / 源文件消失);
+ * - reconciling → failed:对账时间盒耗尽,转入人工;
  * - failed → pending:只经 requeue;
  * - uncertain → failed:人工 ackUncertain(uncertain 不可直接回 pending/done);
- * - done / cancelled 终态。
+ * - done / cancelled / skipped 终态(skipped 不链出后续)。
  */
 export const PROC_TRANSITIONS: Readonly<Record<JobState, readonly JobState[]>> = Object.freeze({
   pending: Object.freeze(["running", "cancelled"] as const),
-  running: Object.freeze(["done", "failed", "uncertain", "cancelled", "pending"] as const),
+  running: Object.freeze(["done", "failed", "uncertain", "cancelled", "pending", "reconciling", "skipped"] as const),
+  reconciling: Object.freeze(["done", "failed", "pending", "reconciling"] as const),
   failed: Object.freeze(["pending"] as const),
   uncertain: Object.freeze(["failed"] as const),
   done: Object.freeze([] as const),
   cancelled: Object.freeze([] as const),
+  skipped: Object.freeze([] as const),
 });
 
 export type TransitionReason =
@@ -263,6 +443,13 @@ export type TransitionReason =
   | "ack-uncertain" // uncertain → failed
   | "transfer-retry" // running → pending after a failed/stalled transfer (child confirmed stopped)
   | "slot-busy" // running → pending after waiting in vain for the node-wide upload slot (nothing done)
+  | "reconcile-start" // running → reconciling after an interrupted submit
+  | "reconcile-unknown" // reconciling → reconciling while the archive lookup stays unknown
+  | "reconcile-yes" // reconciling → done after a positive archive match
+  | "reconcile-no-resend" // reconciling → pending after a settled negative archive match
+  | "reconcile-timeout" // reconciling → failed after the reconciliation time box
+  | "skip-hub-owned" // running → skipped when the master owns the room's upload
+  | "skip-source-gone" // running → skipped when the source is gone without side effects
   | "order-blocked"; // cascade cancel of later seq rows in the same generation
 
 export interface TransitionContext {
@@ -275,6 +462,8 @@ export interface TransitionContext {
   kind?: string;
   step?: string | null;
   childConfirmedStopped?: boolean;
+  /** Explicit opt-in after a measured settle window exists; default false keeps "no" conservative. */
+  allowReconcileResend?: boolean;
 }
 
 /**
@@ -286,6 +475,14 @@ export interface TransitionContext {
  */
 export function canTransition(from: JobState, to: JobState, ctx: TransitionContext = {}): boolean {
   if (!PROC_TRANSITIONS[from].includes(to)) return false;
+  if (from === "running" && to === "reconciling") return ctx.reason === "reconcile-start";
+  if (from === "reconciling" && to === "reconciling") return ctx.reason === "reconcile-unknown";
+  if (from === "reconciling" && to === "done") return ctx.reason === "reconcile-yes";
+  if (from === "reconciling" && to === "pending") {
+    return ctx.reason === "reconcile-no-resend" && ctx.allowReconcileResend === true;
+  }
+  if (from === "reconciling" && to === "failed") return ctx.reason === "reconcile-timeout";
+  if (from === "running" && to === "skipped") return ctx.reason === "skip-hub-owned" || ctx.reason === "skip-source-gone";
   if (from === "pending" && to === "cancelled") return ctx.neverClaimed === true;
   if (from === "running" && to === "pending") {
     // A busy slot means no upload was attempted, so no child-stopped proof is needed.
@@ -314,9 +511,11 @@ export function cancelOutcome(kind: string, hasIntent: boolean): "cancelled" | "
 export interface EnqueueRequest {
   v: 1;
   jobs: ProcessJob[];
+  /** All-or-nothing enqueue for an ordered part chain. */
+  batch?: boolean;
 }
 
-export type EnqueueState = "pending" | "running" | "done" | "stale" | "rejected";
+export type EnqueueState = "pending" | "running" | "reconciling" | "skipped" | "done" | "stale" | "rejected";
 
 export interface EnqueueResult {
   jobId: string;
@@ -326,7 +525,7 @@ export interface EnqueueResult {
   /** state=rejected 时的原因(可选,供标注)。 */
   error?: string;
   /** 仅 state=rejected 且因「同 jobId 已有终态行」被拒:该行现态。入队方据此区分「须人工处理」与契约/stat 失败(后者可回落)。 */
-  existingState?: "failed" | "uncertain" | "cancelled";
+  existingState?: Exclude<JobState, "pending" | "running" | "done">;
 }
 
 /** `_enqueue` 的单行 JSON 响应。 */
@@ -446,5 +645,5 @@ export function decodeEnqueue(b64: string): EnqueueRequest {
     if (seen.has(j.jobId)) throw new Error(`[processor] EnqueueRequest 含重复 jobId: ${j.jobId}`);
     seen.add(j.jobId);
   }
-  return { v: 1, jobs };
+  return { v: 1, jobs, ...(parsed.batch === true ? { batch: true } : {}) };
 }

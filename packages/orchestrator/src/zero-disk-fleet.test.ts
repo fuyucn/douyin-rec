@@ -216,6 +216,26 @@ describe("console view", () => {
     await g.refreshSupport([dead.w]);
     expect(g.view(dead.w, room)).toMatchObject({ state: "offline" });
   });
+  it("attaches the compact live summary from report.live", async () => {
+    const { f } = fleet();
+    const n = node({ zeroDisk: true, report: async () => report({
+      status: [{ v: 1, platform: "douyin", roomSlug: "1", state: "running", parts: 1, updatedAt: 10 }],
+      live: [{
+        platform: "douyin", roomSlug: "1",
+        current: {
+          schemaVersion: 1, mode: "zero-disk", sessionId: "douyin:1:10", createdAt: 10,
+          platform: "douyin", roomSlug: "1", state: "streaming", startedAt: 10, updatedAt: 10,
+          currentPart: { index: 0, phase: "streaming", uploadedBytes: 50, chunks: 1 },
+          parts: [{ index: 0, phase: "streaming", uploadedBytes: 50, chunks: 1 }], events: [],
+        },
+      }],
+    }) });
+    await f.refreshSupport([n.w]);
+    await f.poll([n.w], new Set(["vps1"]));
+    expect(f.view(n.w, room)).toMatchObject({
+      state: "ok", live: { state: "streaming", partsConfirmed: 0, currentPart: { uploadedBytes: 50 } },
+    });
+  });
   it("snapshot groups per room and carries blocked reasons by (worker, room)", async () => {
     const { f } = fleet();
     const n = node({ zeroDisk: true });

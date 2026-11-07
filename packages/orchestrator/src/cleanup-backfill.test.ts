@@ -19,7 +19,7 @@ import { join } from "node:path";
 import type { PipelineDeps, PipelineCfg } from "./pipeline.js";
 
 /** 直接调私有方法(它承载判定逻辑;绕开 reconcileAll 的编排,单测只验判定)。 */
-function due(ledger: SyncLedger, sourceAfterDone: boolean): string | null {
+function due(ledger: SyncLedger, segmentMode = false): string | null {
   const r = new Reconciler({
     platform: "douyin",
     transports: new Map(),
@@ -28,8 +28,8 @@ function due(ledger: SyncLedger, sourceAfterDone: boolean): string | null {
     // 节流置 0:测试要立刻可补跑(生产默认 15 分钟防刷屏)。
     cleanupBackfillThrottleMs: 0,
   });
-  return (r as unknown as { cleanupBackfillDue: (k: string, s?: boolean) => string | null })
-    .cleanupBackfillDue("douyin:test:2026-10-11", sourceAfterDone);
+  return (r as unknown as { cleanupBackfillDue: (k: string, segmentMode?: boolean) => string | null })
+    .cleanupBackfillDue("douyin:test:2026-10-11", segmentMode);
 }
 
 describe("cleanupBackfillDue:**不再**因「clean_source 缺失」补跑(2026-10-11 撤回了这条)", () => {
@@ -43,7 +43,7 @@ describe("cleanupBackfillDue:**不再**因「clean_source 缺失」补跑(2026-1
     l.markDone("douyin:test:2026-10-11", "BV1");
     l.syncNodeState("douyin:test:2026-10-11", "clean_verify", "failed");
     l.syncNodeState("douyin:test:2026-10-11", "upload_plain", "done");
-    expect(due(l, true)).toBeNull();
+    expect(due(l)).toBeNull();
   });
 
   it("clean_source=failed → 仍走原分支补跑(回归:这条本来就有,没被撤回影响)", () => {
@@ -51,7 +51,7 @@ describe("cleanupBackfillDue:**不再**因「clean_source 缺失」补跑(2026-1
     l.upsertPending("douyin:test:2026-10-11");
     l.markDone("douyin:test:2026-10-11", "BV1");
     l.syncNodeState("douyin:test:2026-10-11", "clean_source", "failed", { error: "磁盘满" });
-    expect(due(l, true)).toContain("clean_source");
+    expect(due(l)).toContain("clean_source");
   });
 
   it("clean_verify=pending(旧版遗留软状态)→ 不再补跑(issue #92:核验改旁路,据它补跑会反复重入且无法收敛)", () => {
@@ -59,7 +59,26 @@ describe("cleanupBackfillDue:**不再**因「clean_source 缺失」补跑(2026-1
     l.upsertPending("douyin:test:2026-10-11");
     l.markDone("douyin:test:2026-10-11", "BV1");
     l.syncNodeState("douyin:test:2026-10-11", "clean_verify", "pending");
-    expect(due(l, true)).toBeNull();
+    expect(due(l)).toBeNull();
+  });
+});
+
+describe("cleanupBackfillDue:分段模式不补跑 / 合并模式上限 3(issue #429)", () => {
+  const K = "douyin:test:2026-10-11";
+  const failed = (attempts?: number) => {
+    const l = new SyncLedger(":memory:");
+    l.upsertPending(K);
+    l.markDone(K, "BV1");
+    l.syncNodeState(K, "clean_source", "failed", { error: "磁盘满", ...(attempts != null ? { attempts } : {}) });
+    return l;
+  };
+  it("分段模式(mergeSegments=false):clean_* failed 也不补跑", () => {
+    expect(due(failed(), true)).toBeNull();
+  });
+  it("合并模式:attempts 0/1/2 仍可补跑,达 3 不再补跑", () => {
+    for (const a of [0, 1, 2]) expect(due(failed(a)), `attempts=${a}`).toContain("clean_source");
+    expect(due(failed(3))).toBeNull();
+    expect(due(failed(9))).toBeNull();
   });
 });
 

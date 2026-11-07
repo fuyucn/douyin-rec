@@ -15,7 +15,8 @@ import { existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   assertJobInvariants, canTransition, cancelOutcome, jobIdOf,
-  type EnqueueResult, type JobState, type ProcessJob, type UploadProgress,
+  PART_KINDS, type PartCtx,
+  type EnqueueResult, type JobState, type ProcessJob, type TransitionReason, type UploadProgress,
 } from "@drec/core";
 import { migrateSchema } from "./schema.js";
 import { ProcLeaseStore } from "./lease.js";
@@ -87,8 +88,35 @@ export type FinishOutcome =
   | { state: "done"; outputs: string[]; note?: string }
   | { state: "failed"; error: string }
   | { state: "uncertain"; error: string }
+  | { state: "reconciling"; error: string; reason: "reconcile-start" }
+  | { state: "skipped"; error?: string; reason: "skip-hub-owned" | "skip-source-gone" }
   /** 取消落点经 `cancelOutcome(kind, hasIntent)`;第一期无 intent 概念,hasIntent 缺省 false。 */
   | { state: "cancelled"; hasIntent?: boolean; error?: string };
+
+/** Atomic "finish one row and enqueue its successor" receipt (plan 046 PR1). */
+export interface ChainJob {
+  logicalKey: string;
+  generation: number;
+  ctx: PartCtx;
+  owner: { taskId?: number; streamKey?: string };
+  /** Optional fault-injection seam for tests; production callers omit it. */
+  beforeInsert?: () => void;
+}
+
+export type CompleteAndChainResult =
+  | { ok: true; nextJobId: string; chained: boolean }
+  | { ok: false; error: string };
+
+/** Explicit PR3 settlement outcomes; each reason is re-checked against canTransition inside the write transaction. */
+export type ReconcileOutcome = "yes" | "no" | "unknown" | "timeout";
+
+export interface ReconcileSettleContext {
+  /** Explicit opt-in after a measured settle window exists; default false maps "no" to "unknown". */
+  allowResend?: boolean;
+  bv?: string;
+  note?: string;
+  error?: string;
+}
 
 export interface ProcQueueStoreOpts {
   now?: () => number;
@@ -262,6 +290,12 @@ export class ProcQueueStore {
     return (this.db.prepare(sql).all(...args) as Row[]).map(toRecord);
   }
 
+  /** Lightweight per-tick scan for non-terminal reconciliation rows; claim() intentionally does not see them. */
+  listReconciling(limit = 100): ProcJobRecord[] {
+    return (this.db.prepare("SELECT * FROM proc_jobs WHERE state='reconciling' ORDER BY updatedAt, rowid LIMIT ?")
+      .all(limit) as Row[]).map(toRecord);
+  }
+
   /** 各 kind 的 running / pending 计数(只含有行的 kind)。 */
   active(): { running: Record<string, number>; pending: Record<string, number> } {
     const out = { running: {} as Record<string, number>, pending: {} as Record<string, number> };
@@ -278,6 +312,14 @@ export class ProcQueueStore {
       .prepare("SELECT MAX(generation) AS g FROM proc_jobs WHERE kind=? AND logicalKey=?")
       .get(kind, logicalKey) as Row;
     return (r.g == null ? 0 : Number(r.g)) + 1;
+  }
+
+  /** Generation used by a live order; 1 when no rows exist. Unlike nextGeneration, repeated calls stay stable. */
+  currentOrderGeneration(orderKey: string): number {
+    const r = this.db
+      .prepare("SELECT MAX(generation) AS g FROM proc_jobs WHERE orderKey=?")
+      .get(orderKey) as Row;
+    return r.g == null ? 1 : Number(r.g);
   }
 
   // ───────────────────────── 入队 ─────────────────────────
@@ -304,13 +346,123 @@ export class ProcQueueStore {
     return this.tx(() => this.enqueueTx(job, logicalKey));
   }
 
+  /**
+   * plan 046 PR7: write a terminal skipped(hub-owned) history row at seal time. It is never claimable
+   * and never chains cleanup; repeated calls are idempotent. Any existing non-skipped row is left
+   * untouched (a real upload row must not be converted into a skip).
+   */
+  enqueueSkipped(job: ProcessJob, opts: { allowedRoots: readonly string[]; reason?: "skip-hub-owned" }): EnqueueResult {
+    return this.enqueueTerminalSkip(job, opts);
+  }
+
+  /** Plan 046 PR6: empty/discarded sealed parts keep a skipped placeholder so seq never gaps. */
+  enqueueSourceGone(job: ProcessJob, opts: { allowedRoots: readonly string[] }): EnqueueResult {
+    return this.enqueueTerminalSkip(job, { ...opts, reason: "skip-source-gone" });
+  }
+
+  /**
+   * Plan 046 PR6 sidecar import: a segment the legacy rolling uploader already confirmed becomes a done
+   * row so later parts can inherit its bv. Idempotent: an existing row is reported, never rewritten.
+   */
+  importConfirmedPart(
+    job: ProcessJob,
+    opts: { allowedRoots: readonly string[]; bv: string; cleanupJob?: ProcessJob },
+  ): EnqueueResult {
+    try {
+      assertJobInvariants(job, { allowedRoots: opts.allowedRoots });
+    } catch (e) {
+      return { jobId: job.jobId, state: "rejected", error: (e as Error).message };
+    }
+    return this.tx(() => {
+      const existing = this.get(job.jobId);
+      if (existing) {
+        if (existing.state === "done") {
+          // A row written by an earlier build may have no cleanup successor: still enqueue it (idempotent).
+          if (opts.cleanupJob) {
+            assertJobInvariants(opts.cleanupJob, { allowedRoots: opts.allowedRoots });
+            const c = this.enqueueTx(opts.cleanupJob, opts.cleanupJob.logicalKey);
+            if (c.state === "rejected" || c.state === "stale") {
+              throw new Error("cleanup enqueue rejected: " + (c.error ?? c.state));
+            }
+          }
+          return { jobId: job.jobId, state: "done" };
+        }
+        return {
+          jobId: job.jobId, state: "rejected", error: "已存在且 state=" + existing.state,
+          existingState: existing.state as Exclude<JobState, "pending" | "running" | "done">,
+        };
+      }
+      const t = this.now();
+      this.db.prepare(
+        "INSERT INTO proc_jobs(jobId, kind, logicalKey, generation, state, inputs, outputs, params, replaceInputs, " +
+        "ownerTaskId, ownerStreamKey, createdAt, updatedAt, finishedAt, resultOutputs, bv, orderKey, seq, prepJobId) " +
+        "VALUES(?, ?, ?, ?, 'done', ?, '[]', ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?)",
+      ).run(
+        job.jobId, job.kind, job.logicalKey, job.generation, JSON.stringify(job.inputs),
+        JSON.stringify(job.params), job.replaceInputs ? 1 : 0,
+        job.owner.taskId ?? null, job.owner.streamKey ?? null, t, t, t, opts.bv,
+        job.orderKey ?? null, job.seq ?? null, job.prepJobId ?? null,
+      );
+      if (opts.cleanupJob) {
+        assertJobInvariants(opts.cleanupJob, { allowedRoots: opts.allowedRoots });
+        const c = this.enqueueTx(opts.cleanupJob, opts.cleanupJob.logicalKey);
+        if (c.state === "rejected" || c.state === "stale") {
+          throw new Error("cleanup enqueue rejected: " + (c.error ?? c.state));
+        }
+      }
+      return { jobId: job.jobId, state: "done" };
+    });
+  }
+
+  private enqueueTerminalSkip(
+    job: ProcessJob,
+    opts: { allowedRoots: readonly string[]; reason?: "skip-hub-owned" | "skip-source-gone" },
+  ): EnqueueResult {
+    try {
+      assertJobInvariants(job, { allowedRoots: opts.allowedRoots });
+    } catch (e) {
+      return { jobId: job.jobId, state: "rejected", error: (e as Error).message };
+    }
+    let tag: string;
+    try {
+      tag = fileTagOf(job.inputs[0]);
+    } catch (e) {
+      return { jobId: job.jobId, state: "rejected", error: "inputs[0] cannot be stat-ed: " + (e as Error).message };
+    }
+    const logicalKey = job.logicalKey.endsWith(FILE_TAG_PLACEHOLDER) ? job.logicalKey + tag : job.logicalKey;
+    const jobId = jobIdOf(job.kind, logicalKey, job.generation);
+    return this.tx(() => {
+      const existing = this.get(jobId);
+      if (existing) {
+        if (existing.state === "skipped") return { jobId, state: "skipped" };
+        return {
+          jobId, state: "rejected", error: "已存在且 state=" + existing.state + "(需人工处理)",
+          existingState: existing.state as Exclude<JobState, "pending" | "running" | "done">,
+        };
+      }
+      const t = this.now();
+      this.db.prepare(
+        "INSERT INTO proc_jobs(jobId, kind, logicalKey, generation, state, inputs, outputs, params, replaceInputs, " +
+        "ownerTaskId, ownerStreamKey, createdAt, updatedAt, finishedAt, error, orderKey, seq, notBefore, prepJobId) " +
+        "VALUES(?, ?, ?, ?, 'skipped', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run(
+        jobId, job.kind, logicalKey, job.generation, JSON.stringify(job.inputs),
+        job.outputs ? JSON.stringify(job.outputs) : null, JSON.stringify(job.params), job.replaceInputs ? 1 : 0,
+        job.owner.taskId ?? null, job.owner.streamKey ?? null, t, t, t,
+        opts.reason ?? "skip-hub-owned", job.orderKey ?? null, job.seq ?? null, job.notBefore ?? null, job.prepJobId ?? null,
+      );
+      return { jobId, state: "skipped" };
+    });
+  }
+
   private enqueueTx(job: ProcessJob, logicalKey: string): EnqueueResult {
     const jobId = jobIdOf(job.kind, logicalKey, job.generation);
     const existing = this.get(jobId);
     if (existing) {
       switch (existing.state) {
         case "pending": return { jobId, state: "pending" };
-        case "running": return { jobId, state: "running" };
+        case "running":
+        case "reconciling": return { jobId, state: existing.state };
         case "done": {
           const targets = existing.resultOutputs ?? existing.outputs ?? [];
           if (targets.some((p) => !existsSync(p))) {
@@ -319,10 +471,10 @@ export class ProcQueueStore {
           return { jobId, state: "done" };
         }
         default:
-          // failed / uncertain / cancelled: never revive implicitly (requeue / ackUncertain only).
+          // failed / uncertain / cancelled / skipped / reconciling: never revive implicitly.
           return {
             jobId, state: "rejected", error: `已存在且 state=${existing.state}(需人工处理)`,
-            existingState: existing.state as "failed" | "uncertain" | "cancelled",
+            existingState: existing.state as Exclude<JobState, "pending" | "running" | "done">,
           };
       }
     }
@@ -340,12 +492,72 @@ export class ProcQueueStore {
     return { jobId, state: "pending" };
   }
 
+  private insertPendingTx(job: ProcessJob, jobId: string): void {
+    const t = this.now();
+    this.db.prepare(
+      `INSERT INTO proc_jobs(jobId, kind, logicalKey, generation, state, inputs, outputs, params, replaceInputs,
+         ownerTaskId, ownerStreamKey, createdAt, updatedAt, orderKey, seq, notBefore, prepJobId)
+       VALUES(?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      jobId, job.kind, job.logicalKey, job.generation, JSON.stringify(job.inputs),
+      job.outputs ? JSON.stringify(job.outputs) : null, JSON.stringify(job.params), job.replaceInputs ? 1 : 0,
+      job.owner.taskId ?? null, job.owner.streamKey ?? null, t, t,
+      job.orderKey ?? null, job.seq ?? null, job.notBefore ?? null, job.prepJobId ?? null,
+    );
+  }
+
   /** Next generation for one orderKey (shared by the whole session, not per logicalKey). */
   nextOrderGeneration(orderKey: string): number {
     const r = this.db
       .prepare("SELECT MAX(generation) AS g FROM proc_jobs WHERE orderKey=?")
       .get(orderKey) as Row;
     return (r.g == null ? 0 : Number(r.g)) + 1;
+  }
+
+  /** Highest upload-part seq for one order key (restart/same-broadcast continuation; SQL, not a truncated list). */
+  maxPartSeq(orderKey: string): number {
+    const r = this.db
+      .prepare("SELECT MAX(seq) AS s FROM proc_jobs WHERE kind=? AND orderKey=?")
+      .get(PART_KINDS.upload, orderKey) as Row;
+    return r.s == null ? 0 : Number(r.s);
+  }
+
+  /**
+   * Rows of one kind already recorded for (orderKey, seq), regardless of logical-key spelling (PR7 back-compat).
+   *
+   * `generation` narrows the answer to the live generation of the order. Without it a done row from an
+   * older generation makes a fresh part look handled (never uploaded), and an old-generation pending
+   * row makes a caller enqueue a second job id for the same part (claimable twice).
+   */
+  rowsForOrderSeq(orderKey: string, seq: number, kind: string = PART_KINDS.upload, generation?: number): ProcJobRecord[] {
+    if (generation === undefined) {
+      return (this.db.prepare("SELECT * FROM proc_jobs WHERE kind=? AND orderKey=? AND seq=?")
+        .all(kind, orderKey, seq) as Row[]).map(toRecord);
+    }
+    return (this.db.prepare("SELECT * FROM proc_jobs WHERE kind=? AND orderKey=? AND seq=? AND generation=?")
+      .all(kind, orderKey, seq, generation) as Row[]).map(toRecord);
+  }
+
+  /** How many rows of one kind exist for an order key (any state). */
+  countOrderRows(orderKey: string, kind: string = PART_KINDS.upload): number {
+    const r = this.db.prepare("SELECT COUNT(*) AS n FROM proc_jobs WHERE kind=? AND orderKey=?")
+      .get(kind, orderKey) as Row;
+    return r.n == null ? 0 : Number(r.n);
+  }
+
+  /**
+   * Rows of one order that the queue still owns: everything except the success/discard terminals
+   * (done / cancelled / skipped). The PR6 rollback guard counts THESE, not every row: once an order is
+   * fully drained, the legacy path may continue without racing the runner, and waiting for the 7-day GC
+   * would block a new session of the same broadcast for no reason (rework addendum 9).
+   * failed / uncertain are included because they can still be requeued (runner or a human) and would
+   * then upload the same part twice.
+   */
+  countOpenOrderRows(orderKey: string, kind: string = PART_KINDS.upload): number {
+    const r = this.db.prepare(
+      "SELECT COUNT(*) AS n FROM proc_jobs WHERE kind=? AND orderKey=? AND state NOT IN ('done','cancelled','skipped')",
+    ).get(kind, orderKey) as Row;
+    return r.n == null ? 0 : Number(r.n);
   }
 
   /**
@@ -510,7 +722,7 @@ export class ProcQueueStore {
            AND (j.orderKey IS NULL OR NOT EXISTS (
              SELECT 1 FROM proc_jobs p
              WHERE p.orderKey=j.orderKey AND p.generation=j.generation
-               AND p.seq<j.seq AND p.state<>'done'))
+               AND p.seq<j.seq AND p.state NOT IN ('done','skipped')))
            AND (j.prepJobId IS NULL OR EXISTS (
              SELECT 1 FROM proc_jobs q WHERE q.jobId=j.prepJobId AND q.state='done'))
          ORDER BY COALESCE((SELECT c.lastClaimedAt FROM proc_order_cursor c
@@ -565,18 +777,134 @@ export class ProcQueueStore {
     });
   }
 
+  /**
+   * Independent PR3 entry point: running -> reconciling after an interrupted submit. The old
+   * applyFinish guard remains intentionally, so no legacy finish call can strand a row in a state
+   * that only this API and settleReconciling can advance.
+   */
+  startReconciliation(jobId: string, owner: string, info: { error: string }): boolean {
+    return this.tx(() => {
+      const row = this.get(jobId);
+      if (!row || row.state !== "running" || row.claimedBy !== owner) return false;
+      if (!this.leaseValid(row.kind, owner)) return false;
+      if (!canTransition("running", "reconciling", { reason: "reconcile-start" })) return false;
+      const t = this.now();
+      const res = this.db.prepare(
+        "UPDATE proc_jobs SET state='reconciling', claimedBy=NULL, error=?, finishedAt=NULL, updatedAt=? WHERE jobId=? AND state='running' AND claimedBy=?",
+      ).run(info.error, t, jobId, owner);
+      return Number(res.changes) > 0;
+    });
+  }
+
+  /** The only writer of reconciling out-edges; reason and lease are re-checked atomically. */
+  settleReconciling(
+    jobId: string,
+    owner: string,
+    outcome: ReconcileOutcome,
+    ctx: ReconcileSettleContext = {},
+  ): boolean {
+    return this.tx(() => {
+      const row = this.get(jobId);
+      if (!row || row.state !== "reconciling" || !this.leaseValid(row.kind, owner)) return false;
+      let to: JobState;
+      let reason: TransitionReason;
+      if (outcome === "yes") { to = "done"; reason = "reconcile-yes"; }
+      else if (outcome === "no") {
+        if (ctx.allowResend !== true) { to = "reconciling"; reason = "reconcile-unknown"; }
+        else { to = "pending"; reason = "reconcile-no-resend"; }
+      } else if (outcome === "timeout") { to = "failed"; reason = "reconcile-timeout"; }
+      else { to = "reconciling"; reason = "reconcile-unknown"; }
+      if (!canTransition("reconciling", to, {
+        reason,
+        ...(reason === "reconcile-no-resend" ? { allowReconcileResend: ctx.allowResend === true } : {}),
+      })) return false;
+      const t = this.now();
+      const error = to === "failed" ? (ctx.error ?? "对账时间盒耗尽,转人工核对") : null;
+      const note = to === "done" ? (ctx.note ?? "对账确认稿件已存在") : null;
+      const resultOutputs = to === "done" ? JSON.stringify(row.outputs ?? []) : null;
+      const res = this.db.prepare(
+        "UPDATE proc_jobs SET state=?, claimedBy=NULL, error=?, note=?, resultOutputs=?, updatedAt=?, finishedAt=? WHERE jobId=? AND state='reconciling'",
+      ).run(to, error, note, resultOutputs, t, to === "reconciling" ? null : t, jobId);
+      return Number(res.changes) > 0;
+    });
+  }
+
+  /**
+   * Finish the current running upload row and insert its deterministic cleanup successor in one
+   * transaction. Crash re-entry is read-only idempotent and needs NO valid lease: done + successor
+   * in the same database is itself the proof of completion, while done without the successor is
+   * rejected so a chain step can never be silently lost. The successor ctx is rebuilt with the
+   * confirmed upload row's bv as the single truth; a caller-supplied bv is overwritten.
+   */
+  completeAndChain(
+    jobId: string,
+    owner: string,
+    finish: { state: "done"; outputs: string[]; note?: string },
+    next: ChainJob,
+    opts: { allowedRoots: readonly string[]; attempts?: number },
+  ): CompleteAndChainResult {
+    if (!Number.isSafeInteger(next.generation) || next.generation < 1) return { ok: false, error: "invalid generation" };
+    const nextJobId = jobIdOf(PART_KINDS.cleanup, next.logicalKey, next.generation);
+    const nextJob: ProcessJob = {
+      ...next,
+      jobId: nextJobId, kind: PART_KINDS.cleanup,
+      inputs: [next.ctx.file], params: { ctx: next.ctx }, replaceInputs: false,
+      createdAt: this.now(),
+    };
+    return this.tx(() => {
+      const row = this.get(jobId);
+      const successor = this.get(nextJobId);
+      if (!row) return { ok: false, error: "unknown job" };
+      if (row.state === "done") {
+        // 只读幂等回执(P1):崩溃重入时租约多半已过期,done+下一行同时在库即为完成证明,不再查租约。
+        return successor ? { ok: true, nextJobId, chained: false } : { ok: false, error: "done without successor" };
+      }
+      if (row.state !== "running") return { ok: false, error: "job is not running or done" };
+      if (row.claimedBy !== owner) return { ok: false, error: "lease owner mismatch" };
+      if (opts.attempts !== undefined && row.attempts !== opts.attempts) return { ok: false, error: "generation CAS mismatch" };
+      if (!this.leaseValid(row.kind, owner)) return { ok: false, error: "lease invalid or expired" };
+      if (successor) return { ok: false, error: "successor exists while predecessor is still running" };
+      if (row.kind !== PART_KINDS.upload) return { ok: false, error: "predecessor is not an upload-part" };
+      const ctx = row.params.ctx as PartCtx | undefined;
+      if (!ctx || ctx.file !== next.ctx.file || ctx.index !== next.ctx.index || ctx.orderKey !== next.ctx.orderKey
+        || ctx.fp.size !== next.ctx.fp.size || ctx.fp.mtimeMs !== next.ctx.fp.mtimeMs) {
+        return { ok: false, error: "successor ctx does not match the confirmed upload" };
+      }
+      if (!row.bv) return { ok: false, error: "confirmed upload has no draft identifier" };
+      // bv 单一真理 = 已确认的上传行:覆盖调用方带入的 bv,再对最终落库的 job 校验一次(P3)。
+      const finalNext: ProcessJob = { ...nextJob, params: { ctx: { ...next.ctx, bv: row.bv } } };
+      try {
+        assertJobInvariants(finalNext, { allowedRoots: opts.allowedRoots });
+      } catch (e) {
+        return { ok: false, error: (e as Error).message };
+      }
+      next.beforeInsert?.();
+      if (!this.applyFinish(row, finish)) return { ok: false, error: "invalid finish transition" };
+      this.insertPendingTx(finalNext, nextJobId);
+      return { ok: true, nextJobId, chained: true };
+    });
+  }
+
   private applyFinish(row: ProcJobRecord, outcome: FinishOutcome): boolean {
     const t = this.now();
     let to: JobState = outcome.state;
     if (outcome.state === "cancelled") to = cancelOutcome(row.kind, outcome.hasIntent ?? false);
-    if (!canTransition("running", to)) return false;
+    // PR1 只立契约(P2):reconciling 的全部出边由 PR3 的 settleReconciling 落地;在此之前拒绝写入,
+    // 否则会产生没有任何 API 能推进/回收的搁浅行(claim 看不见、gc 不删、人工也无法恢复)。
+    if (to === "reconciling") return false;
+    if (!canTransition("running", to, { reason: outcome.state === "reconciling" || outcome.state === "skipped" ? outcome.reason : undefined })) return false;
     const error = "error" in outcome ? (outcome.error ?? null) : null;
+    let resultOutputs: string | null = null;
+    let note: string | null = null;
+    if (outcome.state === "done") {
+      resultOutputs = JSON.stringify(outcome.outputs);
+      note = outcome.note ?? null;
+    }
     this.db.prepare(
       `UPDATE proc_jobs SET state=?, resultOutputs=?, note=?, error=?, updatedAt=?, finishedAt=?
        WHERE jobId=? AND state='running'`,
     ).run(
-      to, outcome.state === "done" ? JSON.stringify(outcome.outputs) : null,
-      outcome.state === "done" ? (outcome.note ?? null) : null, error, t, t, row.jobId,
+      to, resultOutputs, note, error, t, t, row.jobId,
     );
     return true;
   }
@@ -687,14 +1015,14 @@ export class ProcQueueStore {
   // ───────────────────────── 保留 ─────────────────────────
 
   /**
-   * 清理:done/cancelled 超过 `retainMs`(默认 7 天)删;**failed / uncertain 不自动删**。
+   * 清理:done/cancelled/skipped 超过 `retainMs`(默认 7 天)删;**failed / uncertain / reconciling 不自动删**。
    * `purgeFailed` 时额外删 failed(人工清,`_proc-gc --purge-failed` / `POST /api/proc/purge`);
    * uncertain 须先 `ackUncertain` 转 failed 才会被删。返回删除行数。
    */
   gc(o: { retainMs?: number; purgeFailed?: boolean } = {}): number {
     const cutoff = this.now() - (o.retainMs ?? GC_RETAIN_MS);
     let n = Number(
-      this.db.prepare("DELETE FROM proc_jobs WHERE state IN ('done','cancelled') AND finishedAt IS NOT NULL AND finishedAt<?")
+      this.db.prepare("DELETE FROM proc_jobs WHERE state IN ('done','cancelled','skipped') AND finishedAt IS NOT NULL AND finishedAt<?")
         .run(cutoff).changes,
     );
     if (o.purgeFailed) n += Number(this.db.prepare("DELETE FROM proc_jobs WHERE state='failed'").run().changes);

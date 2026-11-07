@@ -58,13 +58,20 @@ export function filterDanmuCookies(raw: string): string {
     .join("; ");
 }
 
+/** 访客登录态拉取超时:live.douyin.com 首页偶发不响应,无超时会让弹幕 start 永久挂在拉取上。 */
+const GUEST_COOKIE_TIMEOUT_MS = 10_000;
+
 /**
  * 拉一份匿名 guest cookie（live.douyin.com 的 set-cookie，含 ttwid/s_v_web_id 等设备字段）。
- * 与同目录 ./api.js 的 getCookie 同源。失败返回 ""。
+ * 与同目录 ./api.js 的 getCookie 同源。带 10s 超时(AbortSignal.timeout);失败/超时返回 ""。
  */
 export async function fetchGuestCookie(): Promise<string> {
   try {
-    const res = await fetch("https://live.douyin.com/", { method: "GET" });
+    // 必须带超时:首页偶发挂起,无超时会把弹幕 start 卡死在 buildDanmuCookie。
+    const res = await fetch("https://live.douyin.com/", {
+      method: "GET",
+      signal: AbortSignal.timeout(GUEST_COOKIE_TIMEOUT_MS),
+    });
     const sc = res.headers.get("set-cookie");
     if (!sc) return "";
     return sc

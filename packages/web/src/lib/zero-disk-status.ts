@@ -2,7 +2,7 @@
  * zero-disk-status.ts — how a side node's zero-disk state is shown in the master console (issue #331).
  * Pure and tested: the backend sends a state + a stable refusal code, the UI picks the wording.
  */
-import type { ZeroDiskNodeStatusDTO } from "@drec/contracts";
+import type { LiveUploadSummary, ZeroDiskNodeStatusDTO, ZeroDiskRefusalCode } from "@drec/contracts";
 
 export type ZeroDiskTone = "ok" | "warn" | "error" | "muted";
 
@@ -15,10 +15,12 @@ export interface ZeroDiskView {
   detail?: string;
 }
 
-const REFUSAL_KEYS: Record<string, string> = {
+/** Exhaustive on purpose: adding a refusal code in core must break this file (never fall back silently). */
+const REFUSAL_KEYS: Record<ZeroDiskRefusalCode, string> = {
   account_mismatch: "room.zeroDisk.refusedAccountMismatch",
   account_unknown: "room.zeroDisk.refusedAccountUnknown",
   credential_missing: "room.zeroDisk.refusedCredential",
+  credential_unreadable: "room.zeroDisk.refusedCredentialUnreadable",
   delivery_missing: "room.zeroDisk.refusedDelivery",
 };
 
@@ -58,4 +60,41 @@ export function zeroDiskView(z: ZeroDiskNodeStatusDTO): ZeroDiskView {
 export function zeroDiskNeedsAttention(z: ZeroDiskNodeStatusDTO): boolean {
   const tone = zeroDiskView(z).tone;
   return tone === "error" || z.state === "offline";
+}
+
+export interface LiveDetailEntry {
+  workerId: string;
+  workerName: string;
+  current?: import("@drec/contracts").LiveUploadSnapshot;
+  previous?: import("@drec/contracts").LiveUploadSnapshot;
+  /** Finished runs of this room on this node, newest first (issue #413). */
+  history?: import("@drec/contracts").LiveUploadSnapshot[];
+}
+
+export interface LiveUploadView {
+  state: string;
+  currentPart?: number;
+  parts: import("@drec/contracts").LivePartView[];
+  events: import("@drec/contracts").LiveEvent[];
+  bvid?: string;
+  updatedAt: number;
+  tone: ZeroDiskTone;
+}
+
+/** Pick the newest detail entry (current first, then previous). */
+export function liveUploadView(summary: LiveUploadSummary, entries: LiveDetailEntry[] = []): LiveUploadView {
+  const best = entries
+    .flatMap((e) => [e.current, e.previous].filter((x): x is NonNullable<typeof x> => !!x))
+    .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+  const snap = best;
+  const tone: ZeroDiskTone = summary.state === "failed" ? "error" : summary.state === "stopped" ? "warn" : summary.state === "finished" ? "muted" : "ok";
+  return {
+    state: snap?.state ?? summary.state,
+    ...(snap?.currentPart?.index !== undefined ? { currentPart: snap.currentPart.index } : {}),
+    parts: snap?.parts ?? [],
+    events: snap?.events ?? [],
+    ...(snap?.bvid ?? summary.bvid ? { bvid: snap?.bvid ?? summary.bvid } : {}),
+    updatedAt: snap?.updatedAt ?? summary.updatedAt,
+    tone,
+  };
 }

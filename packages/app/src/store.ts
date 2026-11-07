@@ -80,8 +80,8 @@ export interface Task {
    */
   streamUpload: boolean;
   /**
-   * 0 落盘是否保留本地 spool(默认 true)。false = 真 0 落盘:视频字节完全不写盘,
-   * 代价是该分 P 上传失败时没有本地回退源。仅 streamUpload=true 时有意义。
+   * 0 落盘是否保留本地 spool(固定 true)。历史 false 行仅作迁移输入,启动时按 true
+   * 运行并告警一次;新写入不再接受 false。仅 streamUpload=true 时有意义。
    */
   streamUploadSpool: boolean;
   /**
@@ -130,7 +130,7 @@ export interface TaskInput {
   rollingUpload?: boolean;
   /** 0 落盘边录边传(默认 false);与 rollingUpload/rollingEffective 互斥。 */
   streamUpload?: boolean;
-  /** 0 落盘是否保留 spool(默认 true);false = 真 0 落盘。 */
+  /** 0 落盘是否保留 spool(固定 true);false 仅由内部历史数据兼容路径读取。 */
   streamUploadSpool?: boolean;
   /** Raw zero-disk delivery JSON from the master (issue #331); written only by the internal sync path. */
   zeroDiskDelivery?: string | null;

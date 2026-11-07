@@ -1,11 +1,13 @@
 /**
  * node-side-upload.ts — 节点侧上传(**experimental**,见 plans/027)的 master 侧全部逻辑。
  *
- * ⚠️ 本文件是实验功能的**唯一入口**。要快速开关/回退,只动这一个文件:
- *   - **全局停用**:把 `NODE_SIDE_UPLOAD_ENABLED` 改成 `false` → 即使规则里开了
- *     `pipeline.steps.nodeSideUpload` 也一律回落现状(不改任何规则文件)。
- *   - **彻底移除**:删本文件 + `@drec/app` 的 `node-pipeline.ts` + cli 的
- *     `node-pipeline-commands.ts`,再删 pipeline.ts 里的调用点(见 `maybeRunNodeSideUpload`)。
+ * ⚠️ 要快速开关/回退:
+ *   - **全局停用**:把 `packages/core/src/node-side-upload-policy.ts` 里的
+ *     `NODE_SIDE_UPLOAD_ENABLED` 改成 `false`(本文件只从 core re-export,开关已不在此)→
+ *     即使规则里开了 `pipeline.steps.nodeSideUpload` 也一律回落现状(不改任何规则文件)。
+ *   - **彻底移除**:删本文件 + `@drec/core` 的 `node-side-upload-policy.ts` + `@drec/app` 的
+ *     `node-pipeline.ts` + cli 的 `node-pipeline-commands.ts`,并删掉 `@drec/app` `node-remux.ts`
+ *     里的调用点,再删 pipeline.ts 里的调用点(见 `maybeRunNodeSideUpload`)。
  *
  * 背景(为什么做):实测 pull(rsync 回传录像)是后处理主要耗时(165s~4198s),而 9/16 房间
  * 不烧录、其 merge 只是 `-c copy` 纯 I/O —— 这类房间可让 winner 节点本地 remux + 上传,
@@ -26,24 +28,11 @@ import type { NotifyEvent } from "@drec/core";
 import { tryQueueUpload } from "./node-upload-dispatch.js";
 
 /**
- * **实验功能总开关(kill switch)**。`false` = 全局停用节点侧上传,任何规则设置都不生效。
- * 出问题时把它改 false 即可一键回退,不必动规则文件或数据库。
+ * The kill switch and the pure precondition check now live in core (issue #471): the app's node
+ * output-format lock has to reach the same verdict, and app cannot import the orchestrator.
+ * Re-exported here so `@drec/orchestrator`'s public surface is unchanged.
  */
-export const NODE_SIDE_UPLOAD_ENABLED = true;
-
-/** 是否满足「走节点侧上传」的全部前置条件(纯函数,便于单测;不查节点能力——那要 IO,在 executor 里做)。 */
-export function shouldUseNodeSideUpload(
-  cfg: Pick<PipelineCfg, "uploadMode" | "steps">,
-  burn: { burnDanmu: boolean; burnLivechat: boolean },
-): { ok: true } | { ok: false; reason: string } {
-  if (!NODE_SIDE_UPLOAD_ENABLED) return { ok: false, reason: "实验功能已被全局开关停用(NODE_SIDE_UPLOAD_ENABLED=false)" };
-  if (!cfg.steps?.nodeSideUpload) return { ok: false, reason: "规则未开启 nodeSideUpload" };
-  if (cfg.uploadMode !== "upload") return { ok: false, reason: "本场为 stage 模式(产物需落 master)" };
-  if (burn.burnDanmu || burn.burnLivechat) {
-    return { ok: false, reason: `本场需烧录(danmu=${burn.burnDanmu} livechat=${burn.burnLivechat})` };
-  }
-  return { ok: true };
-}
+export { NODE_SIDE_UPLOAD_ENABLED, shouldUseNodeSideUpload } from "@drec/core";
 
 /**
  * **磁盘水位闸门**(issue #8,纯函数:executor 与将来的消费点共用同一份实现,避免口径漂移)。
@@ -147,7 +136,7 @@ async function finalizeNodeSuccess(
     streamKey, ledger, transports: o.deps.transports,
     members: o.members ?? winnerMembers,
     cleanup: cfg.cleanup, keepNodeXml: true,
-    rmStage: o.deps.rmStage ?? defaultRmStage, log: jlog,
+    rmStage: o.deps.rmStage ?? defaultRmStage, log: jlog, notify: o.deps.notify,
   });
   if (!cleanOutcome.ok) {
     jlog(`节点侧收尾清理部分失败(${cleanOutcome.failed.length}):`

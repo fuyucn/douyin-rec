@@ -21,8 +21,9 @@ import { usePolling } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { QUALITY_FULL, fmtClock, fmtStartedAt, platformLabel, roomHref, roomId, scheduleText } from "../lib/labels";
 import { localTimeTooltip } from "../lib/tz";
-import { versionKeys } from "../lib/room-detail";
+import { roomActionsFor, roomVisibilityFor, versionKeys } from "../lib/room-detail";
 import { zeroDiskView } from "../lib/zero-disk-status";
+import { LiveUploadTimeline } from "../components/LiveUploadTimeline";
 import { deliverText, nodesText, roomName, RoomBadge, runLabel, statusDetail, useRoomActions, useRoomsData } from "./rooms/shared";
 
 export function RoomPage(): ReactNode {
@@ -35,6 +36,9 @@ export function RoomPage(): ReactNode {
   const task = room ? data.taskOf(room) : undefined;
   const s = room ? data.statusOf(room) : null;
   const taskId = room?.recording?.taskId ?? null;
+  // 角色裁剪:能力矩阵是唯一真理(`roomVisibilityFor` / `roomActionsFor`),这里只消费结果。
+  // worker 上处理半边 / 运行历史 / 手工合并 / 直播直传时间线都不挂 —— 那些数据只在 master 有。
+  const vis = roomVisibilityFor(data.caps);
 
   // Logs live on this page (no hop to the task page). The list's log icon arrives with ?logs=1.
   const [params, setParams] = useSearchParams();
@@ -67,7 +71,8 @@ export function RoomPage(): ReactNode {
   }, 5_000, live);
   useEffect(() => { if (!live) setDetail(null); }, [live]);
   useEffect(() => { taskRef.current = taskId; setDetail(null); }, [taskId]);
-  const rolling = useRoomRolling(room ? room.roomSlug : null);
+  // 边录边传进度取自 `/api/hub/queue`(master 端点):worker 上传 null 关掉轮询,连请求都不发。
+  const rolling = useRoomRolling(vis.processing && room ? room.roomSlug : null);
   const serverTz = useAtomValue(serverTimezoneAtom);
 
   if (!data.loaded) return <div className="skeleton h-40 w-full" aria-hidden="true" />;
@@ -84,6 +89,8 @@ export function RoomPage(): ReactNode {
   const proc = room.processing;
   const enabled = task?.enabled ?? rec?.enabled ?? false;
   const managed = actions.managedOf(room);
+  // 受管(`managedBy === "hub"`)= 只读:与角色无关,master 上的受管房间同样没有写操作(plan §3.3)。
+  const view = roomActionsFor({ managed, caps: data.caps });
   const workers = task?.recordingWorkers ?? [];
   const recNodes = workers.filter((w) => w.state === "recording").length;
   const up = proc?.pipeline?.upload;
@@ -117,22 +124,21 @@ export function RoomPage(): ReactNode {
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {rec && !enabled && (
-            <Button small onClick={() => actions.setEnabled(room, true)} disabled={managed || !!task?.stopping}
-                    title={task?.stopping ? t("tasks.stoppingHint") : managed ? t("tasks.managedHint") : undefined}>
+          {view.startStop && rec && !enabled && (
+            <Button small onClick={() => actions.setEnabled(room, true)} disabled={!!task?.stopping}
+                    title={task?.stopping ? t("tasks.stoppingHint") : undefined}>
               {t("tasks.start")}
             </Button>
           )}
-          {rec && enabled && live && !managed && (
+          {view.drain && rec && enabled && live && (
             <Button small variant="secondary" onClick={() => actions.drain(room)}>{t("room.detail.drain")}</Button>
           )}
-          {rec && enabled && (
-            <Button small variant="secondary" onClick={() => actions.setEnabled(room, false)} disabled={managed}
-                    title={managed ? t("tasks.managedHint") : undefined}>
+          {view.startStop && rec && enabled && (
+            <Button small variant="secondary" onClick={() => actions.setEnabled(room, false)}>
               {t("tasks.stop")}
             </Button>
           )}
-          <Button small variant="secondary" onClick={() => actions.edit(room)}>{t("room.detail.edit")}</Button>
+          {view.edit && <Button small variant="secondary" onClick={() => actions.edit(room)}>{t("room.detail.edit")}</Button>}
         </div>
       </div>
 
@@ -143,8 +149,10 @@ export function RoomPage(): ReactNode {
               value={elapsed != null ? fmtClock(elapsed) : live && recNodes > 0 ? t("room.detail.remoteRecording") : "-"}
               valueClass={elapsed != null ? "telemetry-value tabular-nums" : "telemetry-value-sm truncate"} />
         <Cell label={t("tasks.nodesBound")} icon={<MonitorPlay className="w-4 h-4" />}
-              value={workers.length ? `${recNodes}/${workers.length}` : nodesText(room, data.workers, t("room.allNodes"))} />
-        <Cell label={t("room.detail.deliver")} icon={<UploadCloud className="w-4 h-4" />} value={delivery} />
+              value={vis.nodes
+                ? workers.length ? `${recNodes}/${workers.length}` : nodesText(room, data.workers, t("room.allNodes"))
+                : t("room.detail.local")} />
+        <Cell label={t("room.detail.deliver")} icon={<UploadCloud className="w-4 h-4" />} value={vis.processing ? delivery : "-"} />
         <Cell label={t("tasks.schedule")} icon={<CalendarRange className="w-4 h-4" />}
               value={rec ? sched ?? t("room.allDay") : "-"} valueClass="telemetry-value-mono truncate" />
       </div>
@@ -185,7 +193,10 @@ export function RoomPage(): ReactNode {
             </InfoGroup>
 
             <InfoGroup title={t("tasks.groupPipeline")}>
-              {proc ? (
+              {!vis.processing ? (
+                // worker 只负责录:处理半边整块不存在(文案复用主控统一编排的口径)。
+                <Row label={t("room.detail.process")} value={t("room.detail.nodeOnlyRecording")} />
+              ) : proc ? (
                 <>
                   <Row label={t("room.detail.process")} value={proc.enabled ? t("room.detail.procOn") : t("room.pausedRule")} />
                   <Row label={t("room.detail.deliver")} value={delivery} />
@@ -230,7 +241,16 @@ export function RoomPage(): ReactNode {
               ))}
             </InfoGroup>
 
-            {rolling.length > 0 && (
+            {vis.liveUpload && task?.streamUpload && task.zeroDisk?.length ? (
+              <InfoGroup title={t("room.zeroDisk.live.title")}>
+                <LiveUploadTimeline
+                  taskId={task.id}
+                  summaries={task.zeroDisk.flatMap((z) => z.live ? [{ workerId: z.workerId, summary: z.live }] : [])}
+                />
+              </InfoGroup>
+            ) : null}
+
+            {vis.processing && rolling.length > 0 && (
               <InfoGroup title={t("tasks.progressTitle")}>
                 <RollingProgressRows rolling={rolling} />
               </InfoGroup>
@@ -245,10 +265,10 @@ export function RoomPage(): ReactNode {
               <TaskLogPanel taskId={taskId} running={!!task?.running} open={logsOpen} onToggle={toggleLogs} />
             </div>
           )}
-          <RoomRunsPanel room={room} workers={data.workers} collapsed />
+          {vis.runs && <RoomRunsPanel room={room} workers={data.workers} collapsed task={task} rolling={rolling} readOnly={view.readOnly} />}
         </section>
       </div>
-      {taskId !== null && <div className="mt-6"><MergePanel taskId={taskId} /></div>}
+      {vis.mergePanel && view.edit && taskId !== null && <div className="mt-6"><MergePanel taskId={taskId} /></div>}
       {actions.dialogs}
     </>
   );

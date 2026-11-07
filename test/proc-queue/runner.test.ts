@@ -4,15 +4,19 @@ import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path";
 import { registerProcessor, _resetProcessors, UncertainOutcome, type ProcessContext, type ProcessJob } from "@drec/core";
 import { ProcRunner, SimpleSlotLimiter, readProcActive, LEASE_MS, type ProcRunnerOpts } from "@drec/proc-queue";
+import { makeUploadPartProcessor } from "@drec/processors";
+import type { BiliupHooks } from "../../packages/processors/src/run-biliup.js";
 import { makeEnv, fakeProcessor, gate, type Env } from "./helpers.js";
 
 let env: Env;
 let alerts: Array<[number | undefined, string]>;
 const runners: ProcRunner[] = [];
+const retryTasks: Array<{ at: number; run: () => void }> = [];
 
 beforeEach(() => {
   env = makeEnv();
   alerts = [];
+  retryTasks.length = 0;
   _resetProcessors();
 });
 afterEach(async () => {
@@ -22,10 +26,37 @@ afterEach(async () => {
 });
 
 const allowed = (): { allowedRoots: string[] } => ({ allowedRoots: [env.root] });
+async function advanceRetryClock(ms: number): Promise<void> {
+  for (const r of runners) r.heartbeat();
+  env.clock.t += ms;
+  for (const r of runners) r.heartbeat();
+  // Drive both scheduled fake-clock retries and microtask slot releases to a fixed point.
+  // A retry task can fire while the preceding launch is still in its finally block; without
+  // flushing those releases, a test-only runner would permanently lose the claim opportunity.
+  for (let pass = 0; pass < 20; pass += 1) {
+    const due = [...retryTasks.filter((t) => t.at <= env.clock.t)];
+    for (const task of due) {
+      retryTasks.splice(retryTasks.indexOf(task), 1);
+      task.run();
+    }
+    for (const r of runners) r.tick();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    if (due.length === 0) break;
+  }
+}
 function mkRunner(owner: string, over: Partial<ProcRunnerOpts> = {}): ProcRunner {
+  const { store: overrideStore, ...runnerOpts } = over;
   const r = new ProcRunner({
-    store: env.open(), owner, diskMinGB: () => 0, alert: (t, m) => alerts.push([t, m]),
-    timers: false, abortWaitMs: 200, ...over,
+    store: overrideStore ?? env.open(), owner, diskMinGB: () => 0, alert: (t, m) => alerts.push([t, m]),
+    timers: false, abortWaitMs: 200, ...runnerOpts,
+    now: () => env.clock.t,
+    scheduleRetry: (run, delayMs) => {
+      const task = { at: env.clock.t + delayMs, run };
+      retryTasks.push(task);
+      return () => { const i = retryTasks.indexOf(task); if (i >= 0) retryTasks.splice(i, 1); };
+    },
   });
   runners.push(r);
   r.start();
@@ -54,7 +85,7 @@ describe("基本执行", () => {
 
   it("处理器抛错 → failed + 告警(带 owner.taskId);validate 拒绝 → failed 不 run", async () => {
     const run = vi.fn(async () => { throw new Error("boom"); });
-    registerProcessor(fakeProcessor({ run, validate: (j: ProcessJob) => (j.params.bad ? "参数非法" : null) }));
+    registerProcessor(fakeProcessor({ retryable: false, run, validate: (j: ProcessJob) => (j.params.bad ? "参数非法" : null) }));
     const r = mkRunner("A", { limiter: new SimpleSlotLimiter(() => 5) });
     const s = env.open();
     const a = s.enqueue(env.job("a.ts"), allowed()).jobId;
@@ -1072,5 +1103,349 @@ describe("uncertain outcome and pid-bound slot (plan 038 T15)", () => {
     s.enqueue(env.job("b.ts", { kind: "biliup" }), allowed());
     r.tick();
     await vi.waitFor(() => { r.tick(); expect(second).toHaveBeenCalledTimes(1); });
+  });
+});
+
+
+describe("plan 046 PR4 retry policy", () => {
+  it("a generic retryable failure queues another attempt beyond three and applies the backoff sequence", async () => {
+    const run = vi.fn(async () => { throw new Error("cleanup IO error"); });
+    registerProcessor(fakeProcessor({ run }));
+    env.clock.t = 1_000_000;
+    const r = mkRunner("A", { stuckAlertMs: 60_000 });
+    const s = env.open();
+    const { jobId } = s.enqueue(env.job("a.ts"), allowed());
+    r.tick();
+    await vi.waitFor(() => expect(s.get(jobId)?.state).toBe("pending"));
+
+    const advance = async (minutes: number): Promise<void> => {
+      await advanceRetryClock(minutes * 60_000);
+      await vi.waitFor(() => expect(s.get(jobId)?.state).toBe("pending"));
+    };
+    await advance(5); await advance(10); await advance(20); await advance(40);
+    expect(run).toHaveBeenCalledTimes(5);
+    expect(s.get(jobId)?.state).toBe("pending");
+    expect(alerts.filter(([, m]) => m.includes("连续失败满"))).toHaveLength(1);
+    expect(alerts.filter(([, m]) => m.includes("任务失败"))).toHaveLength(0);
+  });
+
+  it("a deterministic upload credential error stops once, alerts once and pauses the account", async () => {
+    const run = vi.fn(async () => { throw Object.assign(new Error("login expired"), { code: "login-expired" }); });
+    const pauseUploadAccount = vi.fn();
+    registerProcessor(fakeProcessor({ kind: "biliup", retryable: false, run }));
+    const r = mkRunner("A", { pauseUploadAccount });
+    const s = env.open();
+    const { jobId } = s.enqueue(env.job("a.ts", { kind: "biliup", params: { accountKey: "acct" } }), allowed());
+    r.tick();
+    await vi.waitFor(() => expect(s.get(jobId)?.state).toBe("failed"));
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(pauseUploadAccount).toHaveBeenCalledWith("acct", "login expired");
+    expect(alerts.filter(([, m]) => m.includes("确定性失败"))).toHaveLength(1);
+  });
+
+  it("continuous transient failures alert once and a later success sends one recovery alert", async () => {
+    let fail = true;
+    const run = vi.fn(async () => {
+      if (fail) throw new Error("prep IO error");
+      return { outputs: [] };
+    });
+    registerProcessor(fakeProcessor({ run }));
+    env.clock.t = 1_000_000;
+    mkRunner("A", { stuckAlertMs: 60_000 });
+    const s = env.open();
+    const { jobId } = s.enqueue(env.job("a.ts"), allowed());
+    for (const minutes of [5, 10, 20, 40, 60, 60, 60, 60]) {
+      await advanceRetryClock(minutes * 60_000);
+      await vi.waitFor(() => expect(s.get(jobId)?.state).toBe("pending"));
+    }
+    expect(alerts.filter(([, m]) => m.includes("连续失败满"))).toHaveLength(1);
+    fail = false;
+    await advanceRetryClock(60 * 60_000);
+    await vi.waitFor(() => expect(s.get(jobId)?.state).toBe("done"));
+    expect(alerts.filter(([, m]) => m.includes("已恢复"))).toHaveLength(1);
+  });
+
+  it("rate-limit failures re-enter pending with backoff and are not counted as attempts", async () => {
+    let phase: "rate" | "transient" = "rate";
+    const run = vi.fn(async () => {
+      if (phase === "rate") throw new Error("code: 21566 投稿过于频繁");
+      throw new Error("cleanup IO error");
+    });
+    registerProcessor(fakeProcessor({ run }));
+    env.clock.t = 1_000_000;
+    const r = mkRunner("A", { stuckAlertMs: 60_000 });
+    const s = env.open();
+    const { jobId } = s.enqueue(env.job("a.ts"), allowed());
+    r.tick();
+    await vi.waitFor(() => expect(s.get(jobId)?.state).toBe("pending"));
+    await advanceRetryClock(5 * 60_000);
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2));
+    phase = "transient";
+    await advanceRetryClock(5 * 60_000);
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(3));
+    await advanceRetryClock(5 * 60_000);
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(4));
+
+    expect(s.get(jobId)?.state).toBe("pending");
+    expect(alerts.filter(([, m]) => m.includes("账号限流"))).toHaveLength(2);
+    expect(alerts.filter(([, m]) => m.includes("连续失败满"))).toHaveLength(1);
+  });
+
+  it("rate-limit failures inherit the current backoff level without consuming an attempt", async () => {
+    let phase: "transient" | "rate" = "transient";
+    const run = vi.fn(async () => {
+      if (phase === "transient") throw new Error("cleanup IO error");
+      throw new Error("code: 601 您上传视频过快");
+    });
+    registerProcessor(fakeProcessor({ run }));
+    env.clock.t = 1_000_000;
+    const r = mkRunner("A", { stuckAlertMs: 10 * 60 * 60_000 });
+    const s = env.open();
+    const { jobId } = s.enqueue(env.job("a.ts"), allowed());
+    r.tick();
+    await vi.waitFor(() => expect(s.get(jobId)?.state).toBe("pending"));
+    phase = "rate";
+    await advanceRetryClock(5 * 60_000);
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2));
+    phase = "transient";
+    await advanceRetryClock(5 * 60_000);
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(3));
+    await advanceRetryClock(5 * 60_000);
+    expect(run).toHaveBeenCalledTimes(3);
+    await advanceRetryClock(5 * 60_000);
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(4));
+    expect(s.get(jobId)?.state).toBe("pending");
+  });
+
+  it("a stuck alert that throws does not consume the dedupe state or bubble into cleanup", async () => {
+    let stuckAlerts = 0;
+    const logs: string[] = [];
+    const run = vi.fn(async () => { throw new Error("prep IO error"); });
+    registerProcessor(fakeProcessor({ run }));
+    env.clock.t = 1_000_000;
+    const r = mkRunner("A", {
+      stuckAlertMs: 60_000,
+      log: (m) => logs.push(m),
+      alert: (taskId, m) => {
+        if (m.includes("连续失败满")) {
+          stuckAlerts += 1;
+          if (stuckAlerts === 1) throw new Error("notification sink down");
+          alerts.push([taskId, m]);
+          return;
+        }
+        alerts.push([taskId, m]);
+      },
+    });
+    const s = env.open();
+    const { jobId } = s.enqueue(env.job("a.ts"), allowed());
+    r.tick();
+    await vi.waitFor(() => expect(s.get(jobId)?.state).toBe("pending"));
+    await advanceRetryClock(5 * 60_000);
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2));
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(s.get(jobId)?.state).toBe("pending");
+    expect(alerts.filter(([, m]) => m.includes("连续失败满"))).toHaveLength(0);
+    expect(logs.some((m) => m.includes("alert failed"))).toBe(true);
+    await advanceRetryClock(10 * 60_000);
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(3));
+    expect(run).toHaveBeenCalledTimes(3);
+    expect(alerts.filter(([, m]) => m.includes("连续失败满"))).toHaveLength(1);
+  });
+
+  it("finish rejection prevents requeue so a lost lease cannot requeue another holder's row", async () => {
+    const run = vi.fn(async () => { throw new Error("transient ssh error"); });
+    registerProcessor(fakeProcessor({ run }));
+    const s = env.open();
+    const finish = vi.fn(() => false);
+    const requeue = vi.fn(() => true);
+    s.finish = finish as typeof s.finish;
+    s.requeue = requeue as typeof s.requeue;
+    const r = mkRunner("A", { store: s });
+    const { jobId } = s.enqueue(env.job("a.ts"), allowed());
+    r.tick();
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+
+    expect(finish).toHaveBeenCalledWith(jobId, "A", expect.objectContaining({ state: "failed" }));
+    expect(requeue).not.toHaveBeenCalled();
+    expect(s.get(jobId)?.state).toBe("running");
+  });
+
+  it("a runner restart preserves the pending row even though in-memory backoff starts over", async () => {
+    let fail = true;
+    const run = vi.fn(async () => {
+      if (fail) throw new Error("transient IO error");
+      return { outputs: [] };
+    });
+    registerProcessor(fakeProcessor({ run }));
+    const a = mkRunner("A");
+    const s = env.open();
+    const { jobId } = s.enqueue(env.job("a.ts"), allowed());
+    a.tick();
+    await vi.waitFor(() => expect(s.get(jobId)?.state).toBe("pending"));
+    await a.stop();
+    fail = false;
+    const b = mkRunner("B");
+    b.tick();
+    await vi.waitFor(() => expect(s.get(jobId)?.state).toBe("done"));
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("plan 046 PR5 part-chain runner wiring", () => {
+  const orderKey = "order-pr5";
+  const mkPart = (name: string, index: number) => {
+    const job = env.job(name, { kind: "upload-part", logicalKey: `${orderKey}:part:${index}`, orderKey, seq: index, params: { partWorkflow: "whole-order" } });
+    const file = job.inputs[0]!;
+    job.params.ctx = { v: 1, orderKey, index, file, fp: { size: statSync(file).size, mtimeMs: statSync(file).mtimeMs } };
+    return job;
+  };
+
+  it("inherits bv from the done predecessor and runs seq=2 as append", async () => {
+    const seen: Array<{ index: number; bv?: string }> = [];
+    registerProcessor(fakeProcessor({
+      kind: "upload-part", retryable: false,
+      run: async (j) => {
+        const ctx = j.params.ctx as { index: number; bv?: string };
+        seen.push({ index: ctx.index, ...(ctx.bv ? { bv: ctx.bv } : {}) });
+        return { outputs: [], bv: ctx.bv ?? "BVfirst" };
+      },
+    }));
+    const r = mkRunner("A");
+    const s = env.open();
+    const one = mkPart("p1.mp4", 1);
+    const two = mkPart("p2.mp4", 2);
+    s.enqueue(one, allowed());
+    s.enqueue(two, allowed());
+    r.tick();
+    await vi.waitFor(() => { r.tick(); expect(s.get(two.jobId)?.state).toBe("done"); });
+    expect(seen).toEqual([{ index: 1 }, { index: 2, bv: "BVfirst" }]);
+  });
+
+  it("does not claim seq=2 while seq=1 is still running", async () => {
+    const hold = gate();
+    registerProcessor(fakeProcessor({
+      kind: "upload-part", retryable: false,
+      run: async (j) => { if ((j.params.ctx as { index: number }).index === 1) await hold.promise; return { outputs: [], bv: "BVfirst" }; },
+    }));
+    const r = mkRunner("A");
+    const s = env.open();
+    const one = mkPart("p3.mp4", 1);
+    const two = mkPart("p4.mp4", 2);
+    s.enqueue(one, allowed());
+    s.enqueue(two, allowed());
+    r.tick();
+    expect(s.get(one.jobId)?.state).toBe("running");
+    expect(s.get(two.jobId)?.state).toBe("pending");
+    hold.resolve();
+    await vi.waitFor(() => { r.tick(); expect(s.get(two.jobId)?.state).toBe("done"); });
+  });
+
+  it("a terminal part failure cascades later pending parts to cancelled", async () => {
+    registerProcessor(fakeProcessor({
+      kind: "upload-part", retryable: false,
+      run: async () => { throw Object.assign(new Error("permission-denied"), { code: "permission-denied" }); },
+    }));
+    const r = mkRunner("A");
+    const s = env.open();
+    const one = mkPart("p5.mp4", 1);
+    const two = mkPart("p6.mp4", 2);
+    s.enqueue(one, allowed());
+    s.enqueue(two, allowed());
+    r.tick();
+    await vi.waitFor(() => expect(s.get(one.jobId)?.state).toBe("failed"));
+    expect(s.get(two.jobId)?.state).toBe("cancelled");
+  });
+
+  it("a validate rejection also cascades later pending parts", async () => {
+    registerProcessor(fakeProcessor({
+      kind: "upload-part", retryable: false,
+      validate: (j) => (j.params.ctx as { index: number }).index === 1 ? "bad part" : null,
+      run: async () => ({ outputs: [], bv: "BVfirst" }),
+    }));
+    const r = mkRunner("A");
+    const s = env.open();
+    const one = mkPart("p7.mp4", 1);
+    const two = mkPart("p8.mp4", 2);
+    s.enqueue(one, allowed());
+    s.enqueue(two, allowed());
+    r.tick();
+    await vi.waitFor(() => expect(s.get(one.jobId)?.state).toBe("failed"));
+    expect(s.get(two.jobId)?.state).toBe("cancelled");
+  });
+
+  it("a whole-order finish rejection reports finalization, not a chain failure", async () => {
+    registerProcessor(fakeProcessor({ kind: "upload-part", retryable: false, run: async () => ({ outputs: [], bv: "BVx" }) }));
+    const s = env.open();
+    s.finish = vi.fn(() => false) as typeof s.finish;
+    const messages: string[] = [];
+    const r = mkRunner("A", { store: s, alert: (_t, m) => messages.push(m) });
+    const one = mkPart("p9.mp4", 1);
+    s.enqueue(one, allowed());
+    r.tick();
+    await vi.waitFor(() => expect(messages.some((m) => m.includes("任务收尾失败"))).toBe(true));
+    expect(messages.some((m) => m.includes("链出失败"))).toBe(false);
+  });
+});
+
+describe("issue #532: unreadable tcp byte sampling never blocks the part chain", () => {
+  const orderKey = "order-532";
+  const BV = "BV1" + "a".repeat(9); // issue-guard: allow (fake BV fixture)
+  const mkPart = (name: string, index: number) => {
+    env.file(name, "x".repeat(10)); // env.job keeps an existing file, so the sealed size is 10 bytes
+    const job = env.job(name, { kind: "upload-part", logicalKey: orderKey + ":part:" + String(index), orderKey, seq: index, params: { partWorkflow: "rolling", cookies: "c", title: "t", tid: 21, tag: "tag" } });
+    const file = job.inputs[0]!;
+    job.params.ctx = { v: 1, orderKey, index, file, fp: { size: statSync(file).size, mtimeMs: statSync(file).mtimeMs } };
+    return job;
+  };
+  const partRun = vi.fn(async (argv: string[], hooks?: BiliupHooks) => {
+    hooks?.onSpawn?.(4242);
+    hooks?.onLine?.("All files uploaded successfully"); // live transfer boundary
+    return argv[2] === "upload" ? "All files uploaded successfully\n" + BV : "All files uploaded successfully\nok";
+  });
+  // The boundary read must use the live child pid (never 0): record what the watchdog was given.
+  const seenPids: number[] = [];
+  const register = (readAcked: (pid: number) => Map<string, number> | null): void => {
+    registerProcessor(makeUploadPartProcessor({
+      run: partRun as never,
+      readAcked: (pid: number) => { seenPids.push(pid); return readAcked(pid); },
+      tickMs: 1, now: () => env.clock.t, probe: () => null,
+    }));
+  };
+
+  it("no readable sample: the part is confirmed and later parts keep running (no order-blocked cascade)", async () => {
+    const one = mkPart("p532-a1.mp4", 1);
+    const two = mkPart("p532-a2.mp4", 2);
+    seenPids.length = 0;
+    register(() => null);
+    const r = mkRunner("A");
+    const s = env.open();
+    s.enqueue(one, allowed());
+    s.enqueue(two, allowed());
+    r.tick();
+    await vi.waitFor(() => { r.tick(); expect(s.get(two.jobId)?.state).toBe("done"); });
+    expect(s.get(one.jobId)).toMatchObject({ state: "done", bv: BV });
+    expect(s.get(two.jobId)?.error ?? "").not.toMatch(/order-blocked/);
+    // Both confirmed parts chained their cleanup in the same transaction.
+    expect(s.list({ kind: "cleanup-part" })).toHaveLength(2);
+    expect(seenPids.length).toBeGreaterThan(0);
+    expect(seenPids.every((pid) => pid > 0)).toBe(true);
+  });
+
+  it("a readable sample short of the file size is a real failure and still cascades", async () => {
+    const one = mkPart("p532-b1.mp4", 1);
+    const two = mkPart("p532-b2.mp4", 2);
+    seenPids.length = 0;
+    register(() => new Map([["local>peer", 5]]));
+    const r = mkRunner("A");
+    const s = env.open();
+    s.enqueue(one, allowed());
+    s.enqueue(two, allowed());
+    r.tick();
+    await vi.waitFor(() => expect(s.get(one.jobId)?.state).toBe("failed"));
+    expect(s.get(one.jobId)?.error).toMatch(/acked bytes 5 < file size 10/);
+    expect(s.get(two.jobId)?.state).toBe("cancelled");
+    expect(s.list({ kind: "cleanup-part" })).toHaveLength(0);
+    expect(seenPids.every((pid) => pid > 0)).toBe(true);
   });
 });

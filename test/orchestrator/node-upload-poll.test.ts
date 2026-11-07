@@ -37,9 +37,15 @@ describe("parseNodeUploadConfig", () => {
 
   it("falls back per field for bad or too-small numbers and keeps good ones", () => {
     expect(parseNodeUploadConfig({ pollMs: 120_000, unreachableAlertMs: 5_000, concurrency: 2 }))
-      .toEqual({ mode: "blocking", pollMs: 120_000, unreachableAlertMs: 5_000, concurrency: 2 });
+      .toEqual({ mode: "blocking", pollMs: 120_000, unreachableAlertMs: 5_000, concurrency: 2, partChain: false });
     expect(parseNodeUploadConfig({ pollMs: 10, unreachableAlertMs: "x", concurrency: 0 }))
       .toEqual(DEFAULT_NODE_UPLOAD);
+  });
+
+  it("partChain is an explicit boolean opt-in and defaults off", () => {
+    expect(DEFAULT_NODE_UPLOAD.partChain).toBe(false);
+    expect(parseNodeUploadConfig({ partChain: true }).partChain).toBe(true);
+    for (const v of ["true", 1, {}, null]) expect(parseNodeUploadConfig({ partChain: v }).partChain).toBe(false);
   });
 });
 
@@ -118,6 +124,15 @@ describe("canFallbackToBlocking", () => {
   it.each(["done", "failed", "cancelled"] as const)("allows when every row is %s, or the node knows no rows", async (state) => {
     expect(await canFallbackToBlocking(t(async () => [rec("j1", state)]), ["j1"])).toEqual({ ok: true });
     expect(await canFallbackToBlocking(t(async () => []), ["j1"])).toEqual({ ok: true });
+  });
+
+  it("a node whose queue db cannot be read is unknown (refused), not an empty queue (issue #470)", async () => {
+    const r = await canFallbackToBlocking(
+      t(async () => { throw new Error("_proc-status 失败: proc-queue status unavailable: no such table: proc_jobs"); }),
+      ["j1"],
+    );
+    expect(r.ok).toBe(false);
+    expect((r as { reason: string }).reason).toContain("queue state unknown");
   });
 
   it("treats an unreachable node, an old bundle and a missing channel as unknown (refused)", async () => {

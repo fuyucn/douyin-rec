@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RecordingSession, SAME_BROADCAST_WINDOW_MS } from "@drec/manager";
+import { SAME_BROADCAST_GAP_MS } from "@drec/core";
 import type { AdmitDecision, Notifier, NotifyEvent, Recorder, RecorderEvents, RecordOpts } from "@drec/core";
 
 /** 记录每次 start 收到的 opts(含 admit),由测试驱动「开播 / 断流」。 */
@@ -185,6 +186,44 @@ describe("同场重连标志的有效窗口 / 去重键(审计返工)", () => {
     n = 2;
     rec.opts.admit!();
     expect(diskAlerts(events)).toHaveLength(2);
+    await sess.stop();
+  });
+});
+
+describe("同场口径与 core 同源(issue #475)", () => {
+  it("SAME_BROADCAST_WINDOW_MS 就是 core 的 SAME_BROADCAST_GAP_MS(不再自带 10 分钟容差)", () => {
+    expect(SAME_BROADCAST_WINDOW_MS).toBe(SAME_BROADCAST_GAP_MS);
+  });
+
+  it("断流 20 分钟仍按同一场:放行且不问闸门(10 分钟口径下这里会被当成新一场)", async () => {
+    vi.useFakeTimers();
+    const gate = vi.fn((): AdmitDecision => DENY);
+    const { rec, sess } = setup(gate);
+    await sess.start("https://live.douyin.com/1", makeOpts(), { anchorName: "" });
+    rec.goLive();
+    rec.isLiveResults = [true];          // 断流后权威判活:仍在播
+    rec.ev.onOffline();
+    await vi.runAllTimersAsync();
+    gate.mockClear();
+    vi.setSystemTime(Date.now() + 20 * 60_000);
+    expect(rec.opts.admit!().ok).toBe(true);
+    expect(gate).not.toHaveBeenCalled();
+    await sess.stop();
+  });
+
+  it("断流超过 30 分钟是新一场:重新受闸门约束", async () => {
+    vi.useFakeTimers();
+    const gate = vi.fn((): AdmitDecision => DENY);
+    const { rec, sess } = setup(gate);
+    await sess.start("https://live.douyin.com/1", makeOpts(), { anchorName: "" });
+    rec.goLive();
+    rec.isLiveResults = [true];
+    rec.ev.onOffline();
+    await vi.runAllTimersAsync();
+    gate.mockClear();
+    vi.setSystemTime(Date.now() + SAME_BROADCAST_GAP_MS + 1_000);
+    expect(rec.opts.admit!().ok).toBe(false);
+    expect(gate).toHaveBeenCalledTimes(1);
     await sess.stop();
   });
 });

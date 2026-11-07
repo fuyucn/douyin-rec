@@ -2,7 +2,7 @@
 
 > 本文件是本仓库 **agent 工作的唯一待办台账**。管理规则见 `AGENTS.md`「任务与 TODO 管理」。
 > 编号 `T-N` 稳定不变（引用/提交信息里用它指代条目）。
-> 最后更新：2026-10-28
+> 最后更新：2026-10-30
 
 ## 状态约定
 
@@ -18,6 +18,67 @@
   — worker 升级靠手动换文件,流程不在仓库里;已有安装脚本和发布流程但从未发过 Release。
   **做什么**: 发布流程按 tag 所指提交是否在 main 区分正式版/prerelease,且不覆盖已有 Release;安装脚本升级前检查无录制/上传、升级后核对版本;文档与 AGENTS 写明流程。
   **验收**: 忙时拒绝、空闲放行、API 不可达视为空闲、答复不可读按忙;版本不一致非 0 退出;全量测试通过;空闲时在一台现有 worker 上 dry-run 与升级各验证一次。
+
+- [~] **T-153 直播直传断流等待期时间线显示「提交分 P 中」而非「等待开播」（issue [#492](https://github.com/fuyucn/douyin-rec/issues/492) → PR [#493](https://github.com/fuyucn/douyin-rec/pull/493)，分支 `codex/issue-492-live-waiting-timeline`，2026-11-05）** — **做什么**:回到取流等待前(本场已录过分 P)补发 `waiting` 事件,停滞恢复窗口里时间线显示「等待开播」而非最后一段的 `submitting`;首个连接不发。**为什么**:最后一段确认上传后进入 20 分钟停滞恢复窗口,state 停在 `submitting`,房间页误显示「提交分 P 中」。**验收**:停滞封口后状态为等待开播;回归测试断言 `part_confirmed` 后、下个连接 `live` 前有 `waiting`,撤修复即失败。**现状**:`pr-risk-scan` 命中上传类 RISK(改动落在 `live-pump` 上传模块),已由人拍板放行合并(2026-11-05);待部署后实跑验证停滞场景。
+- [~] **T-138 直播直传边录边传静默降级可观测（issue [#461](https://github.com/fuyucn/douyin-rec/issues/461)，分支 `fix/live-pump-degrade-visibility`，2026-11-04）** — **做什么**:第一步只做可观测:降级当下(块失败/背压/会话迟到)即时日志 + 告警并写明原因,整文件回退成功后保留原因;续传与会话提前就绪待验证 UPOS 后再做。**为什么**:11-04 测试直播分 P1 在第 88 块后静默停传,封口后静默整文件重传,原因被清空无从定位;0 落盘模式下同情形即丢数据。**验收**:三种降级各有即时原因日志的回归测试;一场真实直播不再出现无原因降级。
+- [~] **T-139 直播直传录像大量缺失（issue [#464](https://github.com/fuyucn/douyin-rec/issues/464)，2026-11-04）** — **做什么**:先只读定位 7 场低比值直传稿件的缺失位置与成因;再把直传无写入看门狗从 300s 对齐到约 60s,并在每个分段结束时记录首/末 PTS、媒体/墙钟时长与空洞,比值过低告警。**为什么**:11-04 多场直传媒体/墙钟只有 0.37–0.76(正常 0.94–0.98),断流后 5 分钟才封口,分段内空洞事后无从定位。**验收**:逐场成因结论带证据;看门狗与空洞统计各有回归测试。
+- [~] **T-135 Worker 轻量化：节点 agent 长连接 + 按需录制进程（issue [#448](https://github.com/fuyucn/douyin-rec/issues/448)，分支 `perf/worker-footprint`，2026-11-03）**
+  — E2.1.Micro worker 被 master 控制面每分钟 ~28 次 ssh 拉起 node 进程（≈0.4 vCPU，steal 75%），等开播子进程每个 ~45MB 常驻导致 swap。
+  **做什么**: 隐藏命令注册表 → 节点出站 WebSocket 长连接（心跳/事件/请求应答，ssh 回落）→ inventory 增量 → 录制进程内存实测 → 判活闸门。
+  **验收**: 见 plan「预期效果」表（控制面 node 进程 0/分、繁忙 worker steal < 20%、待命内存 ~60MB），上线后同方法复测。
+  — 见 plans/042_worker_footprint.md
+- [~] **T-134 直播统计 tab（issue [#443](https://github.com/fuyucn/douyin-rec/issues/443) → PR [#444](https://github.com/fuyucn/douyin-rec/pull/444)，2026-11-03）**
+  — master 对账旁路采集各节点会话落 `room-stats.db`，新增 /stats 页展示热力图/节点负载/配置总览。
+  **做什么**: 库 + 聚合 + API（/api/stats）+ 前端页；契约在 core。
+  **验收**: 全量门禁通过（typecheck / test 4067 / pr-gate 444 / risk-scan 命中但为关键词误判(见 PR)，待 review 心跳按门禁决定）。
+  — 见 plans/041_stats_tab.md
+
+- [~] **T-134 hub 同步只下发启用且分配的房间，未勾选点名删除（issue [#442](https://github.com/fuyucn/douyin-rec/issues/442)）**（2026-11-03）
+  — 未分配/停用的房间也全量下发到所有节点，节点上长期积压隐藏的未分配受管任务，审计快照还明文存未启用房间的凭据。
+  **做什么**: `desiredFor` 只对「规则启用但未勾选本节点」的房间下发 `deleted:true` 点名删除（节点两阶段删除，点名缩容不被空期望/骤减守卫拦）；规则停用/能力不满足仍下发 `enabled:false` 停用保留（本机源任务停用靠这条写回，review F1）；deleted 条目不带凭据。
+  **为什么**: 节点只保留「启用且分配给它」的房间；master 误读保护（desired 为空仍拒发）不交化。
+  **验收**: 点名删除两阶段生效且保留房间不动；空期望守卫不变；规则停用仍停本机；source-grep + 节点侧回归测试钉住；全量门禁通过。
+- [~] **T-133 删除房间同时删掉录制任务与 hub 规则（issue [#439](https://github.com/fuyucn/douyin-rec/issues/439)）**（2026-11-03）
+  — 房间页「删除房间」只删录制任务，hub 规则残留；列表是「规则 ∪ 任务」，房间删完仍在 `/rooms`，且残留的「仅规则」房间在房间页上没有删除入口。
+  **做什么**: 新增 `DELETE /api/rooms/:key` 一次删两半（带受管 403 / 启用或录制中 409 / 进行中 hub job 409 守卫，先全量校验再动数据）；房间编辑器删除改走该端点；仅规则房间也可删。
+  **为什么**: 删除房间必须真的把房间删掉，不能留下看不见的半边。
+  **验收**: 三种形态（任务+规则 / 仅任务 / 仅规则）都删干净；守卫触发时两半都不动；全量门禁通过。
+- [~] **T-132 节点通知发件箱容量上限（issue [#409](https://github.com/fuyucn/douyin-rec/issues/409)）**（2026-10-30）
+  — 通知改由主控拉取后，节点发件箱在主控长期不可用时会无限增长。
+  **做什么**: 保留期从「只删已确认」改为「超期一律删」，再加总行数上限（默认 1 万），超出时从最旧开始删；节点每写 200 条自动清理一次。
+  **为什么**: 主控停机或节点被移出 hub 时，磁盘占用必须有界。
+  **验收**: 超期未确认行会被清理；超过上限时最旧的行被清理；正常量级不误删；全量门禁通过。
+
+- [~] **T-131 通知统一由主控发送（issue [#405](https://github.com/fuyucn/douyin-rec/issues/405)）**（2026-10-30）
+  — 开播/收播已由主控代发，但节点上的错误告警仍在本地发；worker 需要持有推送地址才能报错。
+  **做什么**: 节点新增通知发件箱（sqlite）；受管节点（`DREC_NOTIFY_RELAY=1`）把事件写入发件箱且子进程与本站中枢都不发送；新增隐藏命令读取/确认；主控每 10 秒按游标拉取、去重后统一发送；独立部署无 hub 时行为不变。
+  **为什么**: 用户要求全部通知走主控，节点不再持有推送凭据，主控宕机期间事件也不丢。
+  **验收**: 四类事件都只收到一条；主控停机后恢复能补齐且不重复；节点上没有推送地址；全量门禁通过。
+
+
+- [~] **T-130 主控统一代发开播/收播通知（issue [#403](https://github.com/fuyucn/douyin-rec/issues/403)）**（2026-10-30）
+  — 直播直传不创建录制会话，从来不发开播/收播；hub 托管的房间在 worker 上录，worker 没有推送地址或开关未开，用户因此收不到通知。
+  **做什么**: 主控观察器把本机录制状态与 hub 节点状态合并判定在播；本机直播直传与节点录制房间由主控代发，本机文件录制仍由录制子进程自己发；收播归属按「刚结束的那场」判定，节点探测不可用时保留上一轮判定。
+  **为什么**: 用户在 19 个房间迁到直播直传后就再没收到过通知，而 worker 不该承担通知职责。
+  **验收**: 直播直传与节点录制房间开播/收播各一条且不重复；本机文件录制仍只有一条；全量门禁通过。
+
+- [~] **T-129 房间页按场次的运行树，替换处理 runs 面板（issue [#401](https://github.com/fuyucn/douyin-rec/issues/401)）**（2026-10-29）
+  — #398 预览页只显示当前一场，且把直播直传画成整场三步、固定画 hub 分支，与实际的分 P 流程不符。
+  **做什么**: 房间页 run 列表每行展开为横向运行树：直播直传/边录边传 = 场次→节点→分 P；拉回主控/存档 = 场次→各节点分段→hub 选优→hub 处理链；节点直传处理链在 winner 节点内。历史场次数据取自 hub 任务接口已有的候选、步骤、事件；直播直传与边录边传只显示当前场。验证后替换旧面板与预览页。
+  **为什么**: 用户要回看每场录制各自的节点与阶段，并且流程要按真实顺序表达。
+  **验收**: 历史 run 展开与台账一致；无历史显示「无历史」不伪造；单节点不画分叉；桌面与手机无横向溢出；旧面板替换前保持可用；全量门禁通过。
+
+- [~] **T-128 房间运行责任树页面（issue [#398](https://github.com/fuyucn/douyin-rec/issues/398)）**（2026-10-29）
+  — 多节点房间页只有散开的录制 / 直播直传 / 边录边传状态，看不到「谁在录、现在哪个阶段、其他节点什么角色」。
+  **做什么**: 新增只读 `/rooms/:key/runtime` 页面，保留现有房间详情页；从既有任务、节点、规则数据派生运行责任树（run → winner/candidate/standby/hub → 各自阶段链）；事件流只取直播直传真实快照；手机转纵向布局。
+  **为什么**: 用户先试新视图，确认后再完整替换详情页；避免一次改动就删掉现有页面。
+  **验收**: 现有详情页不变且可一键进入新页；单节点 / 多节点 / 直播直传 / 边录边传 / 拉回主控阶段归属正确；无数据不伪造；桌面与手机无横向溢出；全量测试、类型、Web 构建、i18n、bundle 通过。
+
+- [~] **T-127 直播直传运行时间线与分 P 事件流（issue [#394](https://github.com/fuyucn/douyin-rec/issues/394)）**（2026-10-29）
+  — 直播直传没有 workflow，房间页/队列页看不到当前分 P、逐 P 阶段和事件时间线。
+  **做什么**: core 合同 + 纯 tracker；live-pump/session 在真实状态点发事件；每房间单写者当前/上一场快照（pid、终端 flush、24h/30d 保留）；zero-disk report 携带上限快照；本机与受管详情接口；房间页时间线；队列从 tasks 生成独立 lane。
+  **为什么**: 用户需要知道现在第几个分 P、传到哪、失败/恢复发生了什么，不能靠翻日志。
+  **验收**: 本机 hub on/off 与受管节点均显示；进程被杀显示 stopped、正常结束显示 finished；旧节点显示未知；列表 payload 有上限；全量门禁、7871 冒烟和真实直播核对通过。
 
 - [~] **T-125 直播直传每 P 大小按房间配置（issue [#389](https://github.com/fuyucn/douyin-rec/issues/389)）**（2026-10-29）
   — 默认上界之外，用户要求每个房间可单独设置，且走规则/配置而不是命令行参数。
@@ -357,6 +418,10 @@
     是无效操作 —— 要改概率得调 weight。本轮未改 priority。
 
 ## 待办（Next）
+- [~] **T-162 Queue 页同时展示主控场次与本机节点队列（2026-11-06）** — **做什么**:`/queue` 移入 master/worker 主导航;master 保留场次管线并在场次表格后新增本机 `/api/proc/active` 聚合区块,worker 只显示本节点队列与说明;节点卡片独立,后续可换行级数据源;中英词典、nav 纯函数测试、版本 patch+1。 **为什么**:worker 没有 Queue 入口,而 master 的 Queue 只显示主控 `sync_jobs` 台账,每台节点自己的上传/清理/转换队列不可见。 **验收**:master/worker 两分支导航断言、root typecheck、web build/typecheck、nav 与 i18n 测试、bundle、issue-guard 与 risk-scan 通过;worker 不请求 master-only 接口,master 原有各区块不退化。 **现状**:实现已推 origin 并开 PR [#545](https://github.com/fuyucn/douyin-rec/pull/545);首轮评审 4 个 P2(轮询重入守卫、陈旧数据冒充实时、kind 列表漏 `biliup`/`upload-prep` 且多 `cleanup-spool`、卡片位置跑到 Attention 之后)已返工并复审通过。**编号说明**:此前两次撞号(T-159 已被 #535 占用,T-160 已被节点本地交付开关设计占用),改为 T-162。
+
+- [ ] **T-160 节点本地交付开关（直播直传/边录边传）的独立设计（T-161 偏离记录，2026-11-06）** — **做什么**:评价并设计"不依赖主控规则文件、只靠节点本地状态"的直传/边录边传配置（候选：规则随任务下发一份只读快照 + 节点侧任务字段写回、或把 zero-disk/rolling 判定所需的规则子集落进任务）。**为什么**:T-161 统一房间入口后，普通节点只能看不能改直传/边录边传。它们虽是 task 字段，但生效前提是主控的 rolling 规则（节点没有规则文件可写，也没有对应的规则语义），节点运营要停直传必须回主控；用户原始口径是"节点保留上传"。**验收**:给出一个不产生"看起来配了但不生效"假配置的设计（含哪一侧是唯一真理源、冲突时谁赢）；若结论是维持现状，就在 plan 047 §3.5 写下理由并删掉本条。**前置**:无（但需先确认用户是否真的要在节点上改这两项）。
+- [ ] **T-156 重试状态持久化与账号暂停接线（PR #514 评审遗留，plan [046](plans/046_part_chain_queue.md) §5.5，2026-11-05）** — **做什么**:① 把通用重试的 `notBefore` / 首次失败时间 / 失败次数 / 告警去重计数写进 proc-queue 的 DB 行（当前只在 runner 内存 `failureRuns`，重启、租约接管、第二实例都会丢退避与计数，可能立刻重认领刚失败的行）；② 把 `pauseUploadAccount` 接进生产装配点的账号闸门，并让暂停状态可恢复、可持久化。**为什么**:plan §5.5 明确写 `notBefore` 持久化在 DB；评审实测当前实现只在内存，且账号暂停回调生产未接线。行本身仍 pending 不会丢，但退避与告警去重语义不达预期。**验收**:重启 / 接管场景测试证明退避与告警计数不丢；确定性错误能暂停该账号后续上传且恢复后自动放开；撤修复即红。**前置**:PR3 独占 `store.ts` 期间不动，等其合并后开工。
 - [~] **T-97 0 落盘支持单个 side node,由 master 统一管理(issue [#331](https://github.com/fuyucn/douyin-rec/issues/331))** — 2026-10-20。**做什么**:策略放开为「恰好一个节点」;master 随任务下发上传元数据/账号键/凭证路径;节点写回执、master 轮询后写台账(幂等);节点能力位 `zero-disk:v1` 作闸门;master 控制台可见状态/拒绝原因。**为什么**:0 落盘只能占 master 本机带宽;节点规则目录为空会静默退回默认(私稿/默认标题),节点自写台账 master 看不到。**验收**:单 worker 可保存、多节点/烧录仍拒;节点稿件元数据与 master 规则一致(变异验证);回执在 master 台账出现且离线重连不丢不重;账号不一致/旧节点/元数据缺失明确失败;local 行为不变;全量测试/类型/打包通过。
 - [~] **T-96 0 落盘弹幕 xml 每次启动覆盖上一份(issue [#329](https://github.com/fuyucn/douyin-rec/issues/329))** — 2026-10-20。**做什么**:xml 按每次运行独立命名,writer 打开时不截断已有非空文件(改名留存)。**为什么**:0 落盘 xml 是唯一落盘产物,覆盖不可恢复。**验收**:同房间连续两次运行两份弹幕都在;回归测试 + 变异验证;上线后实测两场两份 xml。
 - [~] **T-89 0 落盘稿件状态按同场口径切分(issue [#293](https://github.com/fuyucn/douyin-rec/issues/293))** — 2026-10-20。状态只按房间键,同房间下一场会追加到上一场稿件。**做什么**:启动时按最后活动距今与 `SAME_BROADCAST_GAP_MS` 比较,超过则归档旧状态并新建稿件,不确定则拒绝并报错。**验收**:同房间间隔 61 分钟起新稿件、59/60 分钟续用、归档含未确认分 P 时保留并报错、状态损坏拒绝启动;有变异验证。
@@ -726,6 +791,39 @@
   属模型取舍，不是可顺手加的功能。**为什么**：冗余模型把轮询量乘了 N，是 VPS 被限流的根因之一。
 
 ## 已完成
+- [x] **T-159 Final mode SVG assets and accessible icon-only room indicators (issue [#531](https://github.com/fuyucn/douyin-rec/issues/531) → PR [#535](https://github.com/fuyucn/douyin-rec/pull/535))** — 完成于 2026-11-06。八枚 SVG 模式图标与纯图标房间标识落地；复审补齐几何宽高守卫、合并/分段/节点语义、真实 320px 房间行、严格 API 隔离和 CI 浏览器门禁，并兼容旧 stage-only 存档值。分支已同步 main 与强制本地回退策略；version 0.0.312。全量 4772 passed、42 skipped；typecheck、web build、bundle、真实浏览器回归与 CI 通过；零高度变异按预期失败。无部署。
+- [x] **T-161 统一房间入口：节点也走 Rooms，能力按角色裁剪，新增/编辑合成一个弹窗（计划 [047](plans/047_rooms_unified_ui.md)，分支 `feat/tasks-unified-ui`，2026-11-06）** — **做什么**:① 所有节点首页与导航统一为 `/rooms`，`/tasks`、`/task/:id` 退化为跳转，删除 `TaskList`/`TaskDetail`/`CreateEditTaskDialog`/`AddRoomDialog`；② 新增 `nodeCaps(hubEnabled)` 能力矩阵，worker 只留录制 + 存档格式（直播直传/边录边传的生效前提是主控的 rolling 规则，节点上只读提示"由主控配置"，见 plan §3.5 偏离记录），隐藏处理/上传/收尾的 hub 编排与节点/队列/统计页；③ `managedBy='hub'` 房间只读（无编辑/启停/删除/合并面板）；④ `RoomEditor` 双模（create 与 edit 共用同一份表单与校验），新增走新端点 `POST /api/rooms` 一次写两半、默认暂停，worker 拒绝写 `processing`。**为什么**:master 用 rooms、节点用 tasks 是两套并发维护的页面，同一房间的状态/交付/受管口径会漂移；新增弹窗只是编辑面板的最小残缺版，字段与校验都不一致（连带「建任务后再反查 key 写规则」的半成功风险）。**验收**:四期 PR 各自有回归测试（能力矩阵、`POST /api/rooms` 回滚、create 表单映射、受管只读 source-grep）；worker 页面零 master 端点请求；受管房间无任何写操作；新建房间创建即暂停；全量 test / typecheck / web build / bundle 通过。（2026-11-06，PR #536，已合入 main；version 0.0.310）
+- [x] **T-155 按分 P 的任务链:封口→上传→清理,节点队列驱动、自动重试与对账(issue [#508](https://github.com/fuyucn/douyin-rec/issues/508),计划 [046](plans/046_part_chain_queue.md),2026-11-05)** — **做什么**:每个分 P 封口入队 `upload-part`,确认后同一事务入队 `cleanup-part`;失败自动重试(退避封顶 1 小时);「不确定」进入 `reconciling` 定时对账,不再等人;边录边传迁成录制进程只入队。 **为什么**:上传环节的 `uncertain / needs_manual / order-blocked / ambiguous` 都要人处理,重试 3 次即停;实测对账解析器与真实 `biliup list` 输出不符(恒 `unknown`),旁证从未生效。 **验收**:分期 PR0–PR8 逐期有回归测试(撤修复即红);PR3 之前不改线上行为;数据验证口径见计划 §12。 **子项**:PR0 对账解析器修复([#507](https://github.com/fuyucn/douyin-rec/issues/507));biliup 固定版本升 v1.3.4([#509](https://github.com/fuyucn/douyin-rec/issues/509))。（2026-11-06，全部 9 个分期 PR0–PR8 已合并：#513/#512/#515/#516/#514/#519/#529/#520/#523；PR6 经 7 轮返工、合并前 2 份独立终审 PASS）
+- [x] **T-158 rooms 交付方式 SVG logo 与更清晰的编辑面板（2026-11-06）** — **做什么**:新增 `ModeLogo`/`ModeChoices`，用不同的 SVG 标记区分存档、投稿 B站(Bilibili 电视标)、直播直传、边录边传、收播后合并上传、节点直传与按分段产出;房间列表的上传方式 chip 带图标，移动端去掉重复的存档/投稿 chip;添加房间与房间编辑的产出形态/上传方式/上传时机改为带说明的卡片。 **为什么**:原有纯文字选项堆叠，分 P/合并/直传/存档在列表和编辑里都不好扫读。 **验收**:图标均 `aria-hidden`、标签仍完整表达含义;模式卡在 390px 宽单列不溢出;`roomMethodKind` 纯函数用例 + 图标文案中英词典存在性用例;全量 4600 passed，typecheck / web build / bundle 通过;version 0.0.307→0.0.308。 **边界**:仓库 `live-direct-name` 门禁不允许 UI 暴露「0 落盘」旧实现措辞，故直播直传沿用产品名，图标表达含义，不新增该文案。
+- [x] **T-157 新建房间默认暂停，不再自动启动录制（2026-11-06）** — **做什么**:`/rooms` 的「添加房间」只建任务 + hub 规则，不调用 `startTask`;弹窗副标题与成功提示写明「默认暂停、需手动启用」。 **为什么**:建房间不应顺带开始取流/录制,启动必须是用户显式动作。 **验收**:`planNewRoomFinish` 用例钉住不启动与提示文案;source-grep 钉住弹窗无 `api.startTask(`;新建 payload 不带 `enabled`(store 默认 false);中英词典都有 `addedPaused`;全量 4596 test、typecheck、web build、bundle 通过;version 0.0.306→0.0.307。
+- [x] **T-156 直播直传预检把「登录文件读不了」从「没登录」里拆出来，读不了时回退到可读的下发路径（用户现场要求的快速修复，2026-11-06）** — **做什么**:新增拒绝码 `credential_unreadable`（`credential_missing` 只表示「无文件」），预检读不了选中登录时按优先序回退到可读的下发 `credentialPath`/节点默认路径，都不行才拒绝；UI（zh/en）与令 `REFUSALS` 白名单同步。 **为什么**:11-06 video-rec-2 的 B 站上传登录文件被 root 重写、服务账号读不了，预检误报「节点上没有 B 站上传登录」，排查被带偏；读不了的文件还挡住了本可用的回退。 **验收**:不可读且无可读回退 → `credential_unreadable`；不可读 + 下发路径可读 → 用下发路径；回归测试三条，全量 4467 过，version 0.0.297→0.0.298 + bundle。（现场用 `chown ubuntu:ubuntu` 已先行恢复录制）
+- [x] **T-154 直播直传媒体/墙钟告警把「无写入等待」算成内容缺失（issue [#504](https://github.com/fuyucn/douyin-rec/issues/504)，分支 `fix/504-ratio-stall-wait`，2026-11-05）** — **做什么**:比例分母只用 `sealedMs`(有数据的时间),不再加 `stalledMs`;卡死封口时日志与告警分别标注「无写入等待 Ns(不计入墙钟)」与「不计入比例」。 **为什么**:近 24h 两台节点 6 次误报「直播内容疑似缺失」(比例 0.46–0.79),差值恰好等于前一行「源流已约 120s 无写入」,下一行就是未开播;无 PTS 空洞。 **验收**:卡死封口且媒体与 `sealedMs` 相符 → 不告警;数据窗口内媒体/墙钟仍低于阈值(含 PTS 空洞)→ 仍告警且文案不归因于等待;冷却逻辑不变。（2026-11-05，PR #505）
+- [x] **T-152 fix(hub): 规则身份由房间地址或文件名推导,两者可能分歧（issue [#481](https://github.com/fuyucn/douyin-rec/issues/481)，计划 [045](plans/045_codebase_optimization.md) B12，2026-11-04）** — 证据/改法/验收见 issue。（2026-11-05，PR #502）
+- [x] **T-151 fix(node): 下发任务批次里一条坏配置使整个节点全部不应用（issue [#480](https://github.com/fuyucn/douyin-rec/issues/480)，计划 [045](plans/045_codebase_optimization.md) B11，2026-11-04）** — 证据/改法/验收见 issue。（2026-11-05，PR #500）
+- [x] **T-150 fix(app): 判活闸门临时改 process.env,正确性依赖「await 前同步读取」（issue [#479](https://github.com/fuyucn/douyin-rec/issues/479)，计划 [045](plans/045_codebase_optimization.md) B10，2026-11-04）** — 证据/改法/验收见 issue。（2026-11-04，PR #499）
+- [x] **T-149 fix(hub): 台账迁移吞掉所有 ALTER 错误,只校验 3 列（issue [#478](https://github.com/fuyucn/douyin-rec/issues/478)，计划 [045](plans/045_codebase_optimization.md) B9，2026-11-04）** — 证据/改法/验收见 issue。（2026-11-04，PR #498）
+- [x] **T-148 fix(manager): 会话边车写入失败被吞,无日志无告警（issue [#477](https://github.com/fuyucn/douyin-rec/issues/477)，计划 [045](plans/045_codebase_optimization.md) B8，2026-11-04）** — 证据/改法/验收见 issue。（2026-11-04，PR #497）
+- [x] **T-147 fix(bilibili): 显示开播却拿不到播放地址时静默当作未开播（issue [#476](https://github.com/fuyucn/douyin-rec/issues/476)，计划 [045](plans/045_codebase_optimization.md) B7，2026-11-04）** — 证据/改法/验收见 issue。（2026-11-04，PR #495）
+- [x] **T-146 fix(manager): 同场窗口 10 分钟与 core 权威 30 分钟不一致（issue [#475](https://github.com/fuyucn/douyin-rec/issues/475)，计划 [045](plans/045_codebase_optimization.md) B6，2026-11-04）** — 证据/改法/验收见 issue。（2026-11-04，PR #494）
+- [x] **T-145 fix(recorder): mesio 卡死看门狗统计目录内所有 .flv,会被同目录其他写入骗过（issue [#474](https://github.com/fuyucn/douyin-rec/issues/474)，计划 [045](plans/045_codebase_optimization.md) B5，2026-11-04）** — 证据/改法/验收见 issue。（2026-11-04，PR #491）
+- [x] **T-144 fix(web): GET /api/hub/resources 忽略内联/设置来源的 hub 配置（issue [#473](https://github.com/fuyucn/douyin-rec/issues/473)，计划 [045](plans/045_codebase_optimization.md) B4，2026-11-04）** — 证据/改法/验收见 issue。（2026-11-04，PR #489）
+- [x] **T-143 fix(cli): --danmu no 反而开启弹幕;布尔参数词表有 4 份且不一致（issue [#472](https://github.com/fuyucn/douyin-rec/issues/472)，计划 [045](plans/045_codebase_optimization.md) B3，2026-11-04）** — 证据/改法/验收见 issue。（2026-11-04，PR #488）
+- [x] **T-142 fix(hub): 节点输出格式锁手抄「节点侧上传」判定,漏掉全局总开关（issue [#471](https://github.com/fuyucn/douyin-rec/issues/471)，计划 [045](plans/045_codebase_optimization.md) B2，2026-11-04）** — 证据/改法/验收见 issue。（2026-11-04，PR #486）
+- [x] **T-141 fix(hub): _proc-status 把数据库错误当成「任务不存在」,可致收尾转格式静默终结与重复投稿（issue [#470](https://github.com/fuyucn/douyin-rec/issues/470)，计划 [045](plans/045_codebase_optimization.md) B1，2026-11-04）** — 证据/改法/验收见 issue。（2026-11-04，PR #483）
+- [x] **T-140 合集 ID(seasonSectionId 直接填合集 ID)（issue [#460](https://github.com/fuyucn/douyin-rec/issues/460)，分支 `feat/460-season-id-v3`，2026-11-04）** — **做什么**:沿用 `upload.seasonSectionId`/`uploadDefaults.seasonSectionId` 两个既有配置项(值现在表示「合集 ID」,旧的小节 ID 仍可用),全部逻辑收在 core 的 `addArchiveToSeasonIfConfigured` 里,调用点零改动:用上传账号的登录态分页查 `GET /x2/creative/web/seasons`,N 是本账号合集→取唯一小节(多小节→不可重试「合集有多个小节,需指定」);否则 N 是本账号某合集里的小节→按旧语义直接用;都不是→不可重试并提示「请确认填写的是本账号的合集 ID」;网络/超时→可重试。结果按 (账号, N) 缓存到登录文件同目录的一份合集缓存(临时文件+改名、写前重读合并、坏文件按空处理、无账号 ID 不缓存)。缓存小节被明确拒绝时清缓存、重解析一次,仅当新小节不同才重试;解析+加入+重试共用一个总预算。**为什么**:创作中心只给 SEASON id,用户填进 seasonSectionId 会让 episodes/add 返回 -404 → 判定明确拒绝、seasonState=failed 且日志难懂。**验收**:单小节合集→加入且第二次零查询;旧小节 ID 原样可用;多小节/非本账号→一次查询零 POST 且文案清楚;网络错→pending;缓存小节被拒→清缓存重解析、新小节才重试;两账号缓存互不影响;坏缓存文件不抛;无账号 ID 不落缓存;`pnpm test`/`typecheck`/web build/bundle 通过。（2026-11-04，PR #468）
+- [x] **T-137 录制进程统一状态文件 + hub 不再误收直播直传临时分 P（issue [#456](https://github.com/fuyucn/douyin-rec/issues/456)，计划 [plans/044_session_state_handover.md](plans/044_session_state_handover.md)，分支 `feat/recorder-state`，2026-11-04）** — **做什么**:会话分组跳过临时分 P;每个 record 子进程写独立状态文件(模式/阶段/owner/退出码),is-done 与 recording-status 改用节点侧唯一判定。**为什么**:直播直传收尾期被判已收播,hub 拉 0 字节临时分 P → needs_manual 误报(3 次);三种模式「是否仍在工作」口径分散。**验收**:直播直传整场无误报;收尾期 is-done=false;旧节点回落行为不变。第二期(部署不打断录制)推迟。（2026-11-04）
+- [x] **T-136 直播直传切分 P 丢一段直播 + 误发开播/收播（issue [#452](https://github.com/fuyucn/douyin-rec/issues/452)，计划 [plans/043_live_pump_seamless.md](plans/043_live_pump_seamless.md)，分支 `fix/live-pump-seamless`，2026-11-04）** — **做什么**:一场一个 ffmpeg,关键帧处切 TS 分 P,旧分 P 后台收尾;落 spool / 不落 spool 都改。**为什么**:每个分 P 重起 ffmpeg,切换空档实测 ≥58s,且空档内被判不在录。**验收**:分 P 字节拼接守恒;各分 P 时长和 ≈ 直播时长;整场 recording 恒 true;B 站转码可播。（2026-11-04）
+- [x] **T-131 运行树画法修正（issue [#407](https://github.com/fuyucn/douyin-rec/issues/407)）**（2026-10-30）
+  — 新运行树三处与真实流程不符：candidate 清理节点被画进 hub 链末尾而非回连各成员；hub 处理链竖排与整图横向不一致；直播直传无历史场次（口径待定）。
+  **做什么**: 清理步改为回连各 candidate 节点；`.tr-hub` 改横向；历史场次口径先在 issue 评论给建议等人拍板，不自行扩到后端。
+  **为什么**: 图要如实表达「选优后按全部在场成员删源」与 T-129 的横向展开验收。
+  **验收**: 单测钉住新边/新布局；画法与台账实际 steps 一致；全量门禁通过。
+- [x] **T-132 直播直传未开播显示「当前场次·进行中」（issue [#408](https://github.com/fuyucn/douyin-rec/issues/408)）**（2026-10-30）
+  — CurrentRunTree 根状态写死 running，且 waiting 快照也渲染整棵树，未开播时常驻「进行中」。
+  **做什么**: 根状态从快照 state 派生；waiting 不渲染整棵树或显示「等待开播」，与 runtime 页 idle 口径对齐。
+  **为什么**: 用户无法区分等开播与正在直播。
+  **验收**: 未开播不显示进行中；streaming/finished/stopped/failed 各态正确；vitest 钉住；全量门禁通过。（完成于 2026-11-01，PR #412/#410，已部署 0.0.251+）
+
 - [x] **T-120 节点健康状态区分加载中与无状态（issue [#378](https://github.com/fuyucn/douyin-rec/issues/378)）**（2026-10-27）
   — PR [#379](https://github.com/fuyucn/douyin-rec/pull/379) 已合并并部署（0.0.236-bace9f，controller 与两个 worker 全部升级且健康）。Nodes/Queue 现在区分 loading、探测失败、无状态、在线、离线；空 200 和 HTTP 失败不会覆盖上一次健康快照。回归覆盖 loading/failed/ready、初始空响应、HTTP 失败和 empty-after-good-snapshot；全量 3804 tests、typecheck、Web build、i18n、bundle 与线上 `/nodes` HTTP 200 均通过，issue 已关闭。
 - [x] **T-93 0 落盘下播后进程不再 code=1 退出重启循环(issue [#308](https://github.com/fuyucn/douyin-rec/issues/308))**（2026-10-20）

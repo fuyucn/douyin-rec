@@ -6,13 +6,14 @@
  */
 import type { ApiCtx } from "./context.js";
 import type { ApiResult } from "./types.js";
-import { parseOutputFormat, platformForRoom, listPlatforms, streamUploadConflicts, zeroDiskRuleError, type OutputFormat } from "@drec/core";
+import { forbidsStreamUploadSpool, parseOutputFormat, platformForRoom, listPlatforms, STREAM_UPLOAD_NO_SPOOL_ERROR, streamUploadConflicts, zeroDiskRuleError, type OutputFormat } from "@drec/core";
 import { inWindow, nowMinutesLocal } from "../../scheduler.js";
 import type { CreateTaskInput, UpdateTaskInput, TaskView } from "./types.js";
 import type { TaskStore } from "../../store.js";
 import { parseSchedule, toDanmuFlag } from "../../task-input.js";
 import { redactLogLines } from "@drec/core";
 import * as hubStore from "../../hub-store.js";
+import { liveUploadPath, readLiveHistory, readLiveUploadFile } from "../../zero-disk-node.js";
 
 /** Web 停止请求最多同步等待的时间(ms)。普通任务几秒内退出;rolling 任务可能在传末段,超时先返回。 */
 const STOP_WAIT_MS = 15_000;
@@ -28,6 +29,9 @@ export function buildTasks(ctx: ApiCtx) {
     createTask(input: CreateTaskInput): ApiResult {
       const room = (input.room ?? "").trim();
       if (!room) return err(400, "room 必填");
+      if (input.streamUpload === true && forbidsStreamUploadSpool(input.streamUploadSpool)) {
+        return err(400, STREAM_UPLOAD_NO_SPOOL_ERROR);
+      }
 
       let scheduleStart = input.scheduleStart ?? null;
       let scheduleEnd = input.scheduleEnd ?? null;
@@ -70,7 +74,7 @@ export function buildTasks(ctx: ApiCtx) {
         webhook: normWebhook(input.webhook),
         rollingUpload: input.rollingUpload === true,
         streamUpload: input.streamUpload === true,
-        streamUploadSpool: input.streamUploadSpool !== false,
+        streamUploadSpool: true,
         outputFormat,
       });
       // 创建即抓主播名（不等开始录制）；后台写回，UI 轮询即显示。
@@ -83,6 +87,10 @@ export function buildTasks(ctx: ApiCtx) {
       if (!existing) return err(404, `未找到任务 id=${id}`);
       if (existing.managedBy === "hub") {
         return err(403, `任务 id=${id} 由 hub 管理，请在 master 上修改`);
+      }
+      const nextStreamUpload = "streamUpload" in input ? input.streamUpload === true : existing.streamUpload;
+      if (nextStreamUpload && forbidsStreamUploadSpool(input.streamUploadSpool)) {
+        return err(400, STREAM_UPLOAD_NO_SPOOL_ERROR);
       }
 
       // Build a patch with ONLY the keys the client actually sent, so omitted
@@ -105,7 +113,7 @@ export function buildTasks(ctx: ApiCtx) {
       if ("webhook" in input) patch.webhook = normWebhook(input.webhook);
       if ("rollingUpload" in input) patch.rollingUpload = input.rollingUpload === true;
       if ("streamUpload" in input) patch.streamUpload = input.streamUpload === true;
-      if ("streamUploadSpool" in input) patch.streamUploadSpool = input.streamUploadSpool !== false;
+      if ("streamUploadSpool" in input) patch.streamUploadSpool = true;
       // 互斥校验用**patch 后的生效值**(只改了其中一边时也要挡住另一边的存量值)。
       if (streamUploadConflicts(patch.streamUpload ?? existing.streamUpload, patch.rollingUpload ?? existing.rollingUpload)) {
         return err(400, "streamUpload 与 rollingUpload 互斥:直播直传不写盘,滚动上传靠文件");
@@ -178,6 +186,22 @@ export function buildTasks(ctx: ApiCtx) {
       // 出网前脱敏:日志里可能带 cookie(vendored 取流代码在异常信息里打印整串)。
       // 这里覆盖「节点自己的网页」与「master 代查(F3)」两条出口。
       return { status: 200, body: { lines: redactLogLines(manager.getLogs(id)) } };
+    },
+
+    getTaskLive(id: number): ApiResult {
+      const t = store.getTask(id);
+      if (!t) return err(404, `未找到任务 id=${id}`);
+      if (!t.streamUpload) return err(404, "任务未开启直播直传");
+      const p = platformForRoom(t.room);
+      const roomSlug = p.extractRoomSlug(t.room);
+      const entries: Array<{ workerId: string; workerName: string; current?: unknown; previous?: unknown; history?: unknown }> = [];
+      if (t.managedBy !== "hub") {
+        const local = readLiveUploadFile(liveUploadPath(p.id, roomSlug));
+        const history = readLiveHistory(p.id, roomSlug);
+        if (local || history.length) entries.push({ workerId: "local", workerName: "本机", ...local, ...(history.length ? { history } : {}) });
+      }
+      entries.push(...(deps.zeroDiskLive?.(p.id, roomSlug) ?? []));
+      return { status: 200, body: { entries } };
     },
 
     async deleteTask(id: number): Promise<ApiResult> {

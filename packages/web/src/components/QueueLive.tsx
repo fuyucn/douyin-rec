@@ -4,17 +4,14 @@ import { Link } from "react-router-dom";
 import type { HubBlockedBroadcastDTO, HubPoolSnapshotDTO, QueueItemDTO } from "../api/client";
 import { humanSec, JobLogDialog } from "./HubJobs";
 import { useT } from "../lib/i18n";
+import type { LiveUploadLane as LiveUploadLaneRow } from "../lib/queue-live";
 import { platformLabel, roomId } from "../lib/labels";
 import { liveStepLabel } from "../lib/queue-live";
 import { countNodeHealth, fmtBytes, type NodeHealthProbe, type NodeSummary } from "../lib/nodes-summary";
+import { QueueStateBadges, PartChainLine } from "./QueueBadges";
+import { nodeUploadPhaseLabel, queueText, stepLabel } from "../lib/queue-chain";
 
 type TFunc = (key: string, vars?: Record<string, string | number>) => string;
-
-function stepLabel(t: TFunc, step: string): string {
-  const key = `hub.jobs.stepNode.${step}`;
-  const label = t(key);
-  return label === key ? step : label;
-}
 
 function sessionLabel(streamKey: string, t: TFunc): string {
   const suffix = streamKey.split(":").slice(2).join(":");
@@ -24,9 +21,12 @@ function sessionLabel(streamKey: string, t: TFunc): string {
 }
 
 /** Real node-upload telemetry; no synthetic percentages. */
-function uploadLine(item: QueueItemDTO, t: TFunc): ReactNode {
+function uploadLine(item: QueueItemDTO, now: number, tz: string, t: TFunc): ReactNode {
   const u = item.nodeUpload;
   if (!u) return null;
+  if (u.phase === "part-chain") {
+    return <PartChainLine upload={u} now={now} tz={tz} t={t} className="mt-2" />;
+  }
   const p = u.progress;
   const pct = p && p.totalBytes > 0 ? Math.min(100, Math.max(0, (p.doneBytes / p.totalBytes) * 100)) : null;
   return (
@@ -34,10 +34,10 @@ function uploadLine(item: QueueItemDTO, t: TFunc): ReactNode {
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-muted">
         <span className="inline-flex items-center gap-1"><Gauge className="w-3 h-3" />{t("queue.live.upload")}</span>
         <span>{u.nodeId}</span>
-        <span>{u.phase}{u.step ? ` · ${u.step}` : ""}</span>
+        <span>{nodeUploadPhaseLabel(t, u.phase)}{u.step ? ` · ${queueText(t, `queue.nodeUpload.step.${u.step}`, u.step)}` : ""}</span>
         {p && <span>{fmtBytes(p.doneBytes)} / {fmtBytes(p.totalBytes)}</span>}
         {p?.bps != null && p.bps > 0 && <span>{fmtBytes(p.bps)}/s</span>}
-        {u.attempts != null && u.attempts > 1 && <span>{t("queue.nodeUpload.attempt", { n: u.attempts })}</span>}
+        {u.attempts != null && u.attempts > 1 && <span>{queueText(t, "queue.nodeUpload.attempt", `attempt ${u.attempts}`, { n: u.attempts })}</span>}
       </div>
       {pct != null && <div className="live-progress"><span style={{ width: `${pct}%` }} /></div>}
     </div>
@@ -48,17 +48,17 @@ function uploadLine(item: QueueItemDTO, t: TFunc): ReactNode {
  * One active pipeline lane. The current step and future steps are real ledger data; elapsed/ETA
  * are locally ticked from the last successful snapshot rather than invented.
  */
-export function LiveLane({ item, now, dataAt, onOpenLog }: {
+export function LiveLane({ item, now, dataAt, tz, onOpenLog }: {
   item: QueueItemDTO;
   now: number;
   dataAt: number;
+  tz: string;
   onOpenLog: (key: string) => void;
 }): ReactNode {
   const t = useT();
   const drift = Math.max(0, Math.round((now - dataAt) / 1000));
   const elapsed = item.currentStepSec != null ? Math.max(0, Math.round(item.currentStepSec + drift)) : null;
   const eta = item.etaSec != null ? Math.max(0, Math.round(item.etaSec - drift)) : null;
-  const done = item.doneSteps.map((s) => s.step);
   const currentKey = liveStepLabel(item);
   const current = item.phase === "queued"
     ? `${t("queue.live.waiting")}${item.resource ? ` · ${item.resource.toUpperCase()}` : ""}`
@@ -84,6 +84,7 @@ export function LiveLane({ item, now, dataAt, onOpenLog }: {
           {item.phase === "queued" ? <Clock3 className="w-3 h-3" /> : <Activity className="w-3 h-3" />}
           {phaseText}
         </span>
+        <QueueStateBadges item={item} t={t} />
         {elapsed != null && <span className="font-mono text-[11px] text-muted">{t("queue.live.started")} {humanSec(elapsed)}</span>}
         {eta != null && item.phase !== "queued" && <span className="font-mono text-[11px] text-muted">{t("queue.live.eta")} {humanSec(eta)}</span>}
         {item.winnerWorker && (
@@ -100,9 +101,12 @@ export function LiveLane({ item, now, dataAt, onOpenLog }: {
       </div>
 
       <div className="live-flow" role="group" aria-label={t("queue.live.current")}>
-        {done.map((s) => (
-          <div key={`d-${s}`} className="live-flow-step" data-state="done">
-            <div className="flex items-center gap-1.5 text-[11px] font-mono"><Check className="w-3 h-3" style={{ color: "var(--success-fg)" }} />{stepLabel(t, s)}</div>
+        {item.doneSteps.map((s) => (
+          <div key={`d-${s.step}`} className="live-flow-step" data-state="done">
+            <div className="flex items-center gap-1.5 text-[11px] font-mono">
+              <Check className="w-3 h-3" style={{ color: "var(--success-fg)" }} />
+              {stepLabel(t, s.step)}
+            </div>
           </div>
         ))}
         <div className="live-flow-step" data-state="current">
@@ -119,8 +123,34 @@ export function LiveLane({ item, now, dataAt, onOpenLog }: {
         ))}
         {next.length > 4 && <div className="live-flow-step" data-state="next"><ArrowRight className="w-3 h-3" /> +{next.length - 4}</div>}
       </div>
-      {uploadLine(item, t)}
+      {uploadLine(item, now, tz, t)}
     </article>
+  );
+}
+
+export function LiveUploadLanes({ lanes, now }: { lanes: LiveUploadLaneRow[]; now: number }): ReactNode {
+  const t = useT();
+  if (lanes.length === 0) return null;
+  return (
+    <div className="space-y-2 mb-5">
+      {lanes.map((l) => (
+        <article key={`${l.taskId}-${l.workerId}`} className="live-lane">
+          <div className="live-lane-head">
+            <div className="min-w-0">
+              <div className="font-medium text-ink truncate">{l.name ?? l.room}</div>
+              <div className="font-mono text-[11px] text-muted-soft mt-0.5">
+                {l.workerName} · {t("queue.liveUpload.state", { state: t(`room.zeroDisk.live.state.${l.state}`) })}
+              </div>
+            </div>
+            <div className="text-right shrink-0">
+              {l.partIndex !== undefined && <div className="font-mono text-sm text-ink">P{l.partIndex + 1}</div>}
+              {l.bvid && <div className="font-mono text-[11px] text-muted">{l.bvid}</div>}
+              <div className="text-[10px] text-muted-soft">{Math.max(0, Math.round((now - l.updatedAt) / 1000))}s</div>
+            </div>
+          </div>
+        </article>
+      ))}
+    </div>
   );
 }
 

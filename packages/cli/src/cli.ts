@@ -13,16 +13,18 @@ import "./load-env.js"; // 副作用:必须最先 import——从 <cwd>/.env 灌
                          // 抢在下面 @drec/app 的 DEFAULT_COOKIES(模块加载时就读 env)求值之前生效。
 import { SyncGate } from "./sync-gate.js";
 import { streamPartMaxMs } from "./stream-part-duration.js";
-import { zeroDiskRoom, zeroDiskSpoolName, zeroDiskXmlPath } from "./zero-disk-room.js";
+import { zeroDiskSpoolName, zeroDiskXmlPath } from "./zero-disk-room.js";
 import { zeroDiskUploadCookie } from "./zero-disk-upload-cookie.js";
 import { Command } from "commander";
 // 节点侧上传(experimental,plans/027)的节点侧命令(隔离在独立文件,便于快速开关/回退)。
 import { applyNodeDataRoot, registerNodePipelineCommands } from "./node-pipeline-commands.js";
+import { NODE_COMMANDS, localRoomProbes, notifyOutboxArgs, runNodeCommandCli } from "./node-commands.js";
 import { registerRecoverOrderCommands } from "./hub-recover-order-commands.js";
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { ZERO_DISK_DELIVERY_ENV, biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, normalizeSeasonSectionId, parseOutputFormat, resolveSeasonSectionId, stageExt, resolveDiskMinGB, resolveJobLogPath, stageSessionDir, ttlMemoAsync, freeGBOf, redactLogLines, recordingRoomDir, sanitizePathSegment, zonedStamp } from "@drec/core";
-import type { EnqueueRequest, HubResources, ProcActiveDTO, OutputFormat, StageFormat } from "@drec/core";
+import { ZERO_DISK_DELIVERY_ENV, biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, normalizeSeasonSectionId, parseBoolFlag, parseOutputFormat, resolveSeasonSectionId, stageExt, resolveDiskMinGB, resolveJobLogPath, stageSessionDir, ttlMemoAsync, sanitizePathSegment, zonedStamp } from "@drec/core";
+import { parseDanmuFlag, rejectsNoSpoolFlag } from "./cli-flags.js";
+import type { EnqueueRequest, HubResources, OutputFormat, StageFormat } from "@drec/core";
 import { RecordingSession, XmlDanmuWriter } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
 import { zeroDiskRuleError, decorateRecordEvent, getEngine, isWorkerAssigned, listProcessors, platformForRoom, resolveSpecAssignment, type DownloadEngine } from "@drec/core";
@@ -31,16 +33,18 @@ import { groupSessionsInDir, mergeSession, mergeSessions } from "@drec/post-proc
 import { renderXmlToAss } from "@drec/post-process";
 import { burn } from "@drec/post-process";
 import { FONTS_DIR } from "@drec/post-process";
-import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir, readOutputLayout } from "@drec/app";
-import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type ZeroDiskNodeStatusDTO, type RollingDeliveryDTO, type HubPoolSnapshotDTO, type HubBlockedBroadcastDTO, type NodeTaskLogsDTO, type NodeTasksDTO, type WorkerStatus } from "@drec/core";
+import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, drecRoot, rootOutputDir, readOutputLayout, LiveUploadReporter } from "@drec/app";
+import { initRecorderState, noteRecorderDraining, noteRecorderSignal, setRecorderPhase } from "@drec/core";
+import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, isWorkerTargeted, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type ZeroDiskNodeStatusDTO, type RollingDeliveryDTO, type HubPoolSnapshotDTO, type HubBlockedBroadcastDTO, type NodeTaskLogsDTO, type NodeTasksDTO, type WorkerStatus } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, resolveUploadAccountKey, type NotifWebhookToggles } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, buildZeroDiskDelivery, zeroDiskStreamMeta, planZeroDiskSpec, APP_VERSION, syncDbPathFor } from "@drec/app";
 import type { HubStarter, TaskStore } from "@drec/app";
-import { applyTimezoneFromDb, dbPathForDataRoot, effectiveTimezone } from "@drec/app";
+import { applyTimezoneFromDb, dbPathForDataRoot, effectiveTimezone, rootStatsDbPath } from "@drec/app";
 import type { UploadOpts } from "@drec/core";
 import { zeroDiskStreamKey } from "@drec/core";
 import type { PipelineCfg, SyncLedger, WorkflowNodeKey } from "@drec/orchestrator";
 import { recordStreamUpload, recordZeroDiskReceipt } from "@drec/orchestrator";
+import { reportStreamUploadLedgerResult } from "./stream-upload-ledger-report.js";
 import { DEFAULT_SEGMENT_CAP } from "@drec/zero-upload";
 
 /**
@@ -68,15 +72,6 @@ function roomToUrl(room: string): string {
   return platformForRoom(room).roomToUrl(room);
 }
 
-/**
- * 解析 --danmu 开关(布尔):弹幕已收进平台(platform.connectDanmu),不再按 provider 名分派。
- *   0 / off / false / none → false(不抓)；其余(含 undefined/旧 provider 名)→ true(抓)。
- */
-function parseDanmu(v: string | undefined): boolean {
-  if (v === undefined) return true;
-  return !["none", "0", "off", "false"].includes(v.trim().toLowerCase());
-}
-
 interface RecordCliOpts {
   room: string;
   name?: string;
@@ -98,6 +93,7 @@ interface RecordCliOpts {
   streamUploadSec?: string;
   streamUploadStallSec?: string;
   streamUploadRecoverSec?: string;
+  streamUploadRatioAlert?: string;
   streamUploadTid?: string;
   streamUploadTag?: string;
   streamUploadPrivate?: string;
@@ -210,11 +206,12 @@ program
   .option("--stream-upload <0|1>", "直播直传: 1=ffmpeg stdout 直传 UPOS 并续同一稿件,上传确认后删本地回退文件;0=关闭(默认)")
   .option("--stream-upload-size <bytes>", "流式直传每 P 字节上界(默认对齐后的 1.5GiB)")
   .option("--stream-upload-sec <sec>", "流式直传每 P 时长阈值(秒),与 --stream-upload-size 谁先到算一 P")
-  .option("--stream-upload-stall-sec <sec>", "流式直传无写入看门狗(秒;默认 300,最低 60):超时自动封口并追稿")
+  .option("--stream-upload-stall-sec <sec>", "流式直传无写入看门狗(秒;默认 120,最低 60):无写入超过该时长即封口并重连,慢速但持续的数据不会误封")
   .option("--stream-upload-recover-sec <sec>", "流式直传停滞后的自动恢复窗口(秒;默认 1200,最低 60)")
+  .option("--stream-upload-ratio-alert <0-1>", "流式直传每 P 媒体时长/墙钟时长 低于该比例时告警(默认 0.85,0=关闭)")
   .option("--stream-upload-tid <tid>", "流式直传投稿分区(默认 21)")
   .option("--stream-upload-tag <tag>", "流式直传标签(逗号分隔;省略=hub 规则/hub.config 默认)")
-  .option("--stream-upload-spool <full|none>", "直播直传是否保留本地回退文件: full=可整文件回退(默认), none=不留本地副本", "full")
+  .option("--stream-upload-spool <full|none>", "(兼容旧参数,已固定为 full) 直播直传保留本地回退文件; none 不再生效", "full")
   .option("--zero-disk-managed <0|1>", "(内部) hub 受管侧节点的 0 落盘:元数据/账号校验只取 master 下发对象,缺失即拒绝启动")
   .option("--stream-upload-private <0|1>", "流式直传仅自己可见(省略=hub 规则/hub.config 默认,保守为 1)")
   .option("--output-format <fmt>", "节点侧输出格式 original|mp4|mkv: 分段封口后原地 remux 成所选容器、校验通过后删原文件 (默认 original=不转)")
@@ -222,6 +219,12 @@ program
   .option("--config <path>", "YAML 配置文件 (命令行选项优先覆盖)")
   .action(async (o: RecordCliOpts) => {
     const cfg = loadConfig(o.config);
+    // Reject a lone `--stream-upload-spool none` too: it used to be silently ignored, so the
+    // operator could believe the flag took effect while the pump still kept a local fallback.
+    if (rejectsNoSpoolFlag(o.streamUploadSpool)) {
+      console.error("[rec] --stream-upload-spool none 已禁用:直播直传必须保留本地回退文件");
+      process.exit(2);
+    }
 
     // 平台驱动默认:命令行 --engine > 兼容别名 --recorder > config > 平台默认引擎。
     // 旧 config.recorder 可能是已废弃的录制器 provider 名(非引擎 id)→ getEngine 返 undefined,
@@ -229,7 +232,7 @@ program
     const platform = platformForRoom(o.room);
     const engineId = o.engine || o.recorder || cfg.recorder || platform.defaultEngine;
     // 弹幕退化为开关:on/off(来源由平台 connectDanmu 提供);config.danmu 旧值非 none 即视为开。
-    const danmuEnabled = parseDanmu(o.danmu ?? cfg.danmu);
+    const danmuEnabled = parseDanmuFlag(o.danmu ?? cfg.danmu);
 
     let cookies = o.cookies ?? cfg.cookies;
     if (o.cookiesFile) cookies = readFileSync(o.cookiesFile, "utf-8").trim();
@@ -279,60 +282,95 @@ program
     };
     // 边录边传(T-33,默认关):开启时注入「每会话一个」上传钩子工厂(metadata 读 hub 规则/hub.config);
     // 关闭时 undefined → session 完全不启用,行为与改动前一致。开关 0/1/on/off/true/false(与 task-input 同套假值)。
-    const rollingEnabled = o.rollingUpload !== undefined
-      && !["0", "off", "false", "no", "none"].includes(o.rollingUpload.trim().toLowerCase());
+    const rollingEnabled = parseBoolFlag(o.rollingUpload, false);
     let makeRolling: (() => import("@drec/manager").RollingUploadHook) | undefined;
     if (rollingEnabled) {
-      const { makeRollingUploadHookFactory } = await import("@drec/app");
+      const { makeRollingUploadHookFactory, uploadOwnerForTask, enqueueHubOwnedSkip, rootHubDir, resolveDbPath, TaskStore } = await import("@drec/app");
+      const { rollingQueueModeEnabled, shouldDecideUploadOwner, masterOwnedWithoutRule, enabledHubRuleForTask } = await import("@drec/app");
       const slug = platform.extractRoomSlug(roomToUrl(o.room));
+      // Production record is spawned by TaskManager; wire the same hub-owner decision as task run,
+      // otherwise hub-bound rooms would upload on the node AND on the master (double archive).
+      // Only a hub master takes ownership here: a machine that has enabled rule files but runs serve
+      // without --hub has no orchestrator to upload the skipped parts, and must keep uploading on the
+      // node (the serve process marks hub mode with DOUYIN_REC_HUB_MASTER=1).
+      const hubMaster = process.env.DOUYIN_REC_HUB_MASTER === "1";
+      let uploadOwner: (() => ReturnType<typeof uploadOwnerForTask>) | undefined;
+      let enqueueHubSkipped: ((input: { file: string; index: number; seq?: number; streamKey: string; title?: string; expectedDurationSec?: number; confirmedAt?: number }) => boolean) | undefined;
+      if (o.taskId !== undefined && /^\d+$/.test(o.taskId)) {
+        const db = new TaskStore(resolveDbPath());
+        try {
+          const task = db.listTasks().find((t) => t.id === Number(o.taskId));
+          if (task && shouldDecideUploadOwner(task, hubMaster)) {
+            uploadOwner = () => uploadOwnerForTask(task, rootHubDir());
+            enqueueHubSkipped = (info) => enqueueHubOwnedSkip({ ...info, taskId: task.id });
+            // A hub-managed task whose rule is gone would record parts nobody ever uploads: say so.
+            // (Worker nodes legitimately have no local rule files, hence the hub-master scope.)
+            if (masterOwnedWithoutRule(uploadOwnerForTask(task, rootHubDir()), enabledHubRuleForTask(task, rootHubDir()) !== undefined, hubMaster)) {
+              console.error("[rec] ⚠️ hub-owned 房间没有启用中的规则:本场只写 skipped 行,没有 uploader(task=" + String(task.id) + ")");
+            }
+          }
+        } finally { db.close(); }
+      }
       makeRolling = makeRollingUploadHookFactory({
         enabled: true,
         platform: platform.id,
         roomSlug: slug,
+        // Plan 046 PR6 (方案 A): settings switch, default off => this path stays unchanged.
+        queueMode: rollingQueueModeEnabled(),
+        ...(o.taskId !== undefined && /^\d+$/.test(o.taskId) ? { taskId: Number(o.taskId) } : {}),
+        ...(uploadOwner ? { uploadOwner } : {}),
+        ...(enqueueHubSkipped ? { enqueueHubSkipped } : {}),
         log: (m: string) => console.log(m),
         notify: (message: string) => { void notifier.notify({ kind: "error", stage: "边录边传", message }).catch(() => {}); },
       });
       console.log(`[rec] 边录边传已开启:每封口一段上传后删该段源(room=${slug})`);
     }
-    const streamUploadEnabled = o.streamUpload !== undefined
-      && !["0", "off", "false", "no", "none"].includes(o.streamUpload.trim().toLowerCase());
+    const streamUploadEnabled = parseBoolFlag(o.streamUpload, false);
     // streaming upload replaces the file-based recorder; running both would pull the same
     // stream twice and upload a duplicate archive, so it must be mutually exclusive.
     if (streamUploadEnabled && rollingEnabled) {
       console.error("[rec] --stream-upload 与 --rolling-upload 互斥,请只开一个");
       process.exit(2);
     }
+    // Process state file (plans/044): only a child launched by serve (has --task-id) writes one. The writer is
+    // started before any mode-specific work, so the file exists while the child is still waiting for a broadcast.
+    // The exit hook covers every exit path except SIGKILL; write failures are logged once and never fatal.
+    if (o.taskId !== undefined && /^\d+$/.test(o.taskId)) {
+      initRecorderState({
+        root: drecRoot(),
+        taskId: Number(o.taskId),
+        platform: platform.id,
+        roomSlug: platform.extractRoomSlug(roomToUrl(o.room)),
+        mode: streamUploadEnabled ? "live" : rollingEnabled ? "rolling" : "file",
+      }).installExitHook(process);
+    }
     if (streamUploadEnabled) {
       // 直连新包(不再经 processors re-export):生产路径的依赖要明确,否则"换实现"
       // 看起来像改 processors,容易连带碰到后处理插件层。
-      const { runLivePump, alignFileSize, DEFAULT_SEGMENT_CAP, DEFAULT_STALL_TIMEOUT_MS, DEFAULT_RECOVERY_WINDOW_MS, readLivePumpState, livePumpStatePath, spoolPathsToKeep, archivedSpoolPathsToKeep, spoolSweepSafe, resolvePumpDir } = await import("@drec/zero-upload");
+      const { runLivePump, alignFileSize, DEFAULT_SEGMENT_CAP, DEFAULT_STALL_TIMEOUT_MS, DEFAULT_RECOVERY_WINDOW_MS, DEFAULT_MEDIA_WALL_ALERT_RATIO, readLivePumpState, livePumpStatePath, spoolPathsToKeep, archivedSpoolPathsToKeep, spoolSweepSafe } = await import("@drec/zero-upload");
       const {
         rootBiliupCookies, sweepOrphanSpools, resolveStreamUploadMeta,
         resolveStreamUploadTitle, resolveStreamPartTitle,
         zeroDiskNodePreflight, writeZeroDiskStatus, createZeroDiskReporter, makeNodeSubmitGate,
+        resolveZeroDiskPumpDirs,
       } = await import("@drec/app");
       // Hub-rule metadata is the same single source as rolling upload (rule upload >
       // hub.config uploadDefaults > built-in defaults). Explicit stream-upload flags still win
       // because they only serve manual debugging.
       const roomSlug = platform.extractRoomSlug(roomToUrl(o.room));
-      const pumpRoom = zeroDiskRoom(platform, o.room);
       // Issue #360: with the room layout on, spool/state/xml live in the room directory and the
       // spool file carries the anchor name. The layout is read once per process; a running pump
       // never changes directory underneath itself. Legacy stays at the output root.
       const pumpLayout = readOutputLayout();
       const pumpAnchor = o.name?.trim() || "";
-      // Always resolve the room directory, even in legacy layout: the rollback check below must
-      // inspect the room-dir state, not the root one.
-      const roomDir = recordingRoomDir(opts.outDir, [pumpAnchor, roomSlug], {
-        platform: platform.id, roomSlug, anchorName: pumpAnchor || roomSlug,
-      }, { layout: "room" }) ?? opts.outDir;
-      const pumpSpoolDir = pumpLayout === "room" ? roomDir : opts.outDir;
-      // Sticky directory: a broadcast that already has a legacy state keeps using the root, so
-      // an upgrade never moves a live archive or its unconfirmed WAL. New broadcasts use the
-      // room directory. Nothing is migrated, so there is no half-migrated state to lose.
-      const pumpFilesDir = pumpLayout === "room"
-        ? resolvePumpDir(pumpSpoolDir, opts.outDir, pumpRoom)
-        : opts.outDir;
+      // Directory resolution is shared with the serve-side live gate (it must look at the same
+      // state file the child recovers from). The room directory is resolved even in legacy
+      // layout: the rollback check below inspects the room-dir state, not the root one.
+      // Sticky: a broadcast that already has a legacy state keeps using the root, so an upgrade
+      // never moves a live archive or its unconfirmed WAL. Nothing is migrated.
+      const { pumpRoom, roomDir, pumpFilesDir } = resolveZeroDiskPumpDirs({
+        platform, rawRoom: o.room, outDir: opts.outDir, anchorName: pumpAnchor, layout: pumpLayout,
+      });
       if (pumpFilesDir !== opts.outDir) mkdirSync(pumpFilesDir, { recursive: true });
       // A rollback to the legacy layout must not strand a room-dir WAL: nothing would ever
       // re-upload those unconfirmed parts. Alert (and keep recording into the root, where the
@@ -369,6 +407,8 @@ program
       // Explicit stream-upload flags only serve manual debugging; a managed run ignores them.
       const manual: Pick<RecordCliOpts, "streamUploadTid" | "streamUploadTag" | "streamUploadPrivate"> = delivery ? {} : o;
       const streamMeta = zeroDiskStreamMeta(delivery, resolveStreamUploadMeta(platform.id, roomSlug));
+      // Display-only timeline. It is independent of the managed receipt reporter below.
+      const liveReporter = new LiveUploadReporter({ platform: platform.id, roomSlug });
       const metaOverride = delivery ? { meta: delivery.meta } : {};
       // The stored task name is only a fallback; the live stream usually exposes the real
       // anchor. Both the XML metadata and `{name}` should use the real anchor once known.
@@ -391,6 +431,10 @@ program
       };
       const stallTimeoutMs = secondsSetting(o.streamUploadStallSec, DEFAULT_STALL_TIMEOUT_MS);
       const recoverWindowMs = secondsSetting(o.streamUploadRecoverSec, DEFAULT_RECOVERY_WINDOW_MS);
+      const ratioRaw = Number(o.streamUploadRatioAlert);
+      const mediaWallAlertRatio = Number.isFinite(ratioRaw) && ratioRaw >= 0 && ratioRaw <= 1
+        ? ratioRaw
+        : DEFAULT_MEDIA_WALL_ALERT_RATIO;
       // A resumed session keeps the archive identity from its state file; only a fresh session
       // uses this title. `--name` is the anchor/output name, not a title override, so hub title
       // templates remain effective for named tasks.
@@ -502,6 +546,7 @@ program
       const abort = new AbortController();
       const onSig = (sig: string): void => {
         console.log(`[直播直传] 收到 ${sig},停止录制并中止当前分 P`);
+        noteRecorderSignal(sig);
         abort.abort();
       };
       process.on("SIGINT", () => onSig("SIGINT"));
@@ -516,6 +561,7 @@ program
       const drain = new AbortController();
       process.on("SIGUSR2", () => {
         if (drain.signal.aborted) return; // the daemon re-sends every tick; idempotent
+        noteRecorderDraining();
         drain.abort();
       });
       const run = runLivePump({
@@ -578,16 +624,19 @@ program
         maxMs: streamPartMaxMs(o.streamUploadSec, o.segment),
         stallTimeoutMs,
         recoverWindowMs,
+        mediaWallAlertRatio,
         maxSegments: 0,
         submit: true,
-        spoolMode: o.streamUploadSpool === "none" ? "none" : "full",
+        spoolMode: "full",
         signal: abort.signal,
         drainSignal: drain.signal,
         // Wait in-process for the next broadcast instead of exiting (issue #308).
         waitForBroadcast: true,
+        onPhase: (p) => setRecorderPhase(p),
         danmu,
         log: (m) => console.log(m),
         onAlert: (message) => { void notifier.notify({ kind: "error", stage: "直播直传", message }).catch(() => {}); },
+        reporter: liveReporter,
         // Managed nodes share the account's submission window with the node's other uploads and
         // report part progress to the master console (issue #331).
         ...(delivery ? {
@@ -602,7 +651,7 @@ program
         if (reporter) {
           // Managed side node: the master owns the ledger. Persist an immutable receipt the master
           // polls (`_zero-disk-report`); this node's own ledger is never written.
-          const fin = reporter.finish({ ok: res.ok, ...(res.bvid ? { bvid: res.bvid } : {}), ...(res.error ? { error: res.error } : {}), segments: res.segments.length });
+          const fin = reporter.finish({ ok: res.ok, ...(res.bvid ? { bvid: res.bvid } : {}), ...(res.error ? { error: res.error } : {}), segments: res.segments.filter((x) => !x.uploadError).length, ...(res.lostParts ? { lostParts: res.lostParts } : {}), ...(res.unknownParts ? { unknownParts: res.unknownParts } : {}) });
           if (fin.receiptError) {
             // The archive exists but the master cannot learn about it: say so loudly.
             console.error(`[直播直传] ⚠️ ${fin.receiptError}`);
@@ -611,18 +660,24 @@ program
             console.log(`[直播直传] 回执已写入,等待 master 拉取并记台账: ${res.bvid}`);
           }
         } else if (res.ok && res.bvid) {
+          if (res.lostParts) console.log(`[直播直传] ⚠️ 本场有 ${res.lostParts} 个分 P 在停止时丢失,其余已入稿,照常记台账`);
           const r = recordStreamUpload({
             syncDbPath: syncDbPathFor(dbPathForDataRoot(process.env.DOUYIN_REC_ROOT ?? process.cwd())),
             // Own key namespace + real start time, so a regular recording of the same room and day is
             // never mistaken for this job and skipped (issue #324).
             streamKey: zeroDiskStreamKey(platform.id, roomSlug, streamStartMs),
             bvid: res.bvid,
-            parts: res.segments.length,
+            // Only parts that reached the archive: a segment kept with an upload error is not a part.
+            parts: res.segments.filter((x) => !x.uploadError).length,
             startMs: streamStartMs,
           });
-          console.log(r.ok
-            ? `[直播直传] 台账已记录: ${r.bvid}${r.alreadyTerminal ? "(已是终态,未覆盖)" : ""}`
-            : `[直播直传] ⚠️ 台账记录失败(不影响已上传稿件): ${r.error}`);
+          // 收尾台账结果统一出口(issue #428):失败除日志外走告警通道(与上方受管分支的
+          // receiptError 同款)——稿件已上传但台账没记,房间看不到这场结果,不能只 console.log。
+          // 收尾后马上 process.exit,notify 必须 await,否则 webhook 被截断。
+          await reportStreamUploadLedgerResult(r, {
+            log: (m) => console.log(m),
+            notify: (message) => notifier.notify({ kind: "error", stage: "直播直传", message }),
+          });
         }
         // `ok:true` covers three endings: parts delivered, `idle` and `no-stream`. With
         // `waitForBroadcast` the pump never gives up waiting on its own (issue #308); `idle` means
@@ -632,6 +687,8 @@ program
         // callers only) stays a failure as a backstop (review #280 P1).
         // An `ok:false` run may already have delivered parts, so only its error text is logged.
         const clean = res.ok && res.outcome !== "no-stream";
+        const outcome = clean ? "finished" : abort.signal.aborted || drain.signal.aborted ? "stopped" : "failed";
+        liveReporter.event({ at: Date.now(), kind: "run_end", outcome, ...(res.error ? { message: res.error } : {}) });
         if (res.ok && res.outcome === "idle") {
           console.log("[直播直传] 本次未录到分 P(等待中被停止,或开播后立即断流),正常退出");
         } else if (res.ok && res.outcome === "no-stream") {
@@ -642,6 +699,7 @@ program
         process.exit(clean ? 0 : 1);
       }).catch((e) => {
         console.error(`[直播直传] 失败: ${(e as Error).message}`);
+        liveReporter.event({ at: Date.now(), kind: "run_end", outcome: "failed", message: (e as Error).message });
         reporter?.failed((e as Error).message);
         process.exit(1);
       });
@@ -707,6 +765,7 @@ program
     const shutdown = (sig: string) => {
       if (stopping) return;
       stopping = true;
+      noteRecorderSignal(sig);
       console.log(`\n[rec] 收到 ${sig}，正在停止…`);
       void session.stop().then(() => closeRemuxQueue()).then(() => {
         console.log("[rec] 已停止");
@@ -725,6 +784,7 @@ program
     process.on("SIGUSR2", () => {
       if (stopping || draining) return;
       draining = true;
+      noteRecorderDraining();
       console.log("[rec] 收到 SIGUSR2，窗口结束排空：等待当前直播自然收播…");
       void session.drain().then(() => closeRemuxQueue()).then(() => {
         console.log("[rec] 排空完成，已停止");
@@ -1177,6 +1237,15 @@ program
 // app 不直接依赖 @drec/orchestrator（orchestrator 依赖 app），由 cli 作为 L5 入口注入。
 // web API 在 hub 规则/worker 变更后立即触发一次任务同步(不等 60s 周期 tick)。
 let hubSyncTasks: ((opts?: { force?: boolean }) => Promise<void>) | undefined;
+/**
+ * Issue #480: reason sets already warned about, so a persistent bad-spec bug warns once per distinct set
+ * instead of on every sync tick for the life of the process.
+ */
+const warnedSkipReasons = new Set<string>();
+/** Master side of the fleet long connection (plans/042); null when `fleet.controllerUrl` is not configured. */
+let hubFleet: import("@drec/orchestrator").FleetController | null = null;
+/** For every SshTransport this process builds: fleet first, ssh otherwise (read per call). */
+const fleetLink = (): import("@drec/orchestrator").FleetLink | null => hubFleet?.link ?? null;
 
 const hubSyncGate = new SyncGate();
 const requestHubSync = (opts?: { force?: boolean }): void => {
@@ -1199,16 +1268,46 @@ let hubRunNow:
 let hubRecordingSnapshot = new Map<string, RecordingWorkerStatusDTO[]>();
 /** Zero-disk side-node status snapshot (issue #331); replaced wholesale on each hub sync tick, display only. */
 let hubZeroDiskSnapshot = new Map<string, ZeroDiskNodeStatusDTO[]>();
+let hubZeroDiskLive: ((platform: string, roomSlug: string) => Array<{
+  workerId: string; workerName: string;
+  current?: import("@drec/core").LiveUploadSnapshot;
+  previous?: import("@drec/core").LiveUploadSnapshot;
+  history?: import("@drec/core").LiveUploadSnapshot[];
+}>) | undefined;
 /** 各节点边录边传的实时进度(F1;随 5 秒状态轮询整体替换,只读展示)。 */
 let hubDeliverySnapshot: RollingDeliveryDTO[] = [];
 /** probeAllWorkers 的结果缓存 TTL。 */
 const PROBE_CACHE_MS = 30_000;
 const readRollingDelivery = (): RollingDeliveryDTO[] => hubDeliverySnapshot;
 const recordingSnapshotKey = (platform: string, roomSlug: string): string => `${platform}:${roomSlug}`;
+
+/**
+ * Issue #481: the rule file stem is the identity, but the SOURCE TASK decides which room is actually synced.
+ * A divergent stem (rule.room edited / task room edited after creation) must not drop the room from desired —
+ * that would make task-sync delete the remote managed task. Warn once per (stem -> task room) pair.
+ */
+const warnedRuleIdentity = new Set<string>();
+const warnRuleIdentityMismatch = (
+  rule: { key: string; platform: string; roomSlug: string },
+  sync: { platform: string; roomSlug: string; mismatched: boolean },
+  warn: (m: string) => void,
+): void => {
+  if (!sync.mismatched) return;
+  const token = `${rule.key}->${sync.platform}.${sync.roomSlug}`;
+  if (warnedRuleIdentity.has(token)) return;
+  warnedRuleIdentity.add(token);
+  warn(`[hub] 规则 ${rule.key} 的 stem(${rule.platform}.${rule.roomSlug})与绑定源任务房间(${sync.platform}.${sync.roomSlug})不一致;按源任务房间继续同步`);
+};
 const readRecordingWorkers = (platform: string, roomSlug: string): RecordingWorkerStatusDTO[] =>
   hubRecordingSnapshot.get(recordingSnapshotKey(platform, roomSlug)) ?? [];
 const readZeroDiskStatus = (platform: string, roomSlug: string): ZeroDiskNodeStatusDTO[] =>
   hubZeroDiskSnapshot.get(recordingSnapshotKey(platform, roomSlug)) ?? [];
+const readZeroDiskLive = (platform: string, roomSlug: string): Array<{
+  workerId: string; workerName: string;
+  current?: import("@drec/core").LiveUploadSnapshot;
+  previous?: import("@drec/core").LiveUploadSnapshot;
+  history?: import("@drec/core").LiveUploadSnapshot[];
+}> => hubZeroDiskLive?.(platform, roomSlug) ?? [];
 /** master 资源池快照提供者(由 hubStarter.start 注入,读同一 ResourcePool 实例);未启动 → undefined。 */
 let hubPoolSnapshot: (() => HubPoolSnapshotDTO) | undefined;
 /** Blocked-broadcast provider (injected by hubStarter.start from the live Reconciler); hub not started → empty. */
@@ -1257,7 +1356,7 @@ const requestNodeTaskLogs = async (workerId: string, taskId: number, lines: numb
   const w = workerStore.listWorkers(rootHubConfig()).find((x) => x.id === workerId);
   if (!w) return { workerId, taskId, lines: [], error: `未配置的 worker id: ${workerId}` };
   if (w.kind === "local") return { workerId, taskId, lines: [], error: "本机节点:日志就在 master 的任务详情页" };
-  const t = new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot! });
+  const t = new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot!, fleet: fleetLink });
   try {
     const r = await t.taskLogs(taskId, lines);
     return { workerId, taskId, lines: r.lines, ...(r.error ? { error: r.error } : {}) };
@@ -1276,13 +1375,41 @@ const requestNodeTasks = async (workerId: string): Promise<NodeTasksDTO> => {
   const w = workerStore.listWorkers(rootHubConfig()).find((x) => x.id === workerId);
   if (!w) return { workerId, tasks: [], error: `未配置的 worker id: ${workerId}` };
   if (w.kind === "local") return { workerId, tasks: [], error: "本机节点:日志就在 master 的任务详情页" };
-  const t = new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot! });
+  const t = new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot!, fleet: fleetLink });
   try {
     const r = await t.listTasks();
     return { workerId, tasks: r.tasks };
   } catch (e) {
     return { workerId, tasks: [], error: (e as Error)?.message ?? String(e) };
   }
+};
+
+/**
+ * 主控拉取某个节点的通知发件箱(issue #405)。
+ * 本机节点直接读本地库;远端走既有 SSH 通道,不开新端口。
+ */
+const requestNotifyOutbox = async (
+  workerId: string,
+  after: number,
+  limit: number,
+  ackIds: number[] = [],
+): Promise<Array<{ id: number; at: number; taskId: number | null; room: string | null; wantWebhook: boolean; event: import("@drec/core").NotifyEvent }>> => {
+  const { workerStore, rootHubConfig, NotifyOutbox, drecRoot } = await import("@drec/app");
+  const w = workerStore.listWorkers(rootHubConfig()).find((x) => x.id === workerId);
+  if (!w) return [];
+  if (w.kind === "local") {
+    const box = new NotifyOutbox(`${w.dataRoot ?? drecRoot()}/db/notify-outbox.db`);
+    try {
+      if (ackIds.length > 0) box.ack(ackIds);
+      return box.list(after, limit);
+    } finally {
+      box.close();
+    }
+  }
+  const { SshTransport } = await import("@drec/orchestrator");
+  const t = new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot!, fleet: fleetLink });
+  const rows = await t.notifyOutbox(after, limit, ackIds);
+  return (rows ?? []) as Array<{ id: number; at: number; taskId: number | null; room: string | null; wantWebhook: boolean; event: import("@drec/core").NotifyEvent }>;
 };
 
 const requestHubRunNow = async (
@@ -1293,11 +1420,14 @@ const requestHubRunNow = async (
 };
 
 const hubStarter: HubStarter = {
+  fleetUpgrade: (req, socket, head) => hubFleet?.upgrade(req, socket, head) ?? false,
   requestSyncTasks: requestHubSync,
   recordingWorkers: readRecordingWorkers,
   zeroDiskStatus: readZeroDiskStatus,
+  readZeroDiskLive,
   nodeTaskLogs: requestNodeTaskLogs,
   nodeTasks: requestNodeTasks,
+  notifyOutbox: requestNotifyOutbox,
   rollingDelivery: readRollingDelivery,
   blockedBroadcasts: readBlockedBroadcasts,
   poolSnapshot: readPoolSnapshot,
@@ -1315,7 +1445,7 @@ const hubStarter: HubStarter = {
     const { ffprobeVideo } = await import("@drec/post-process");
     const { handleEnqueue, handleProcStatus, handleProcCancel } = await import("@drec/app");
     const { statSync } = await import("node:fs");
-    const { uploadPlain, appendGroup, countVideoParts, hubStore, workerStore, rootHubDir, rootHubConfig, rootConfigDir, rootStageDir, rootLogsDir, drecRoot, listNodeTasks, applyRemoteTasks, resolveTaskStreamCookies } = await import("@drec/app");
+    const { uploadPlain, appendGroup, countVideoParts, hubStore, resolveRuleSyncRoom, desiredSpecsForWorker, workerStore, rootHubDir, rootHubConfig, rootConfigDir, rootStageDir, rootLogsDir, drecRoot, listNodeTasks, applyRemoteTasks, resolveTaskStreamCookies, recordRoomSessions } = await import("@drec/app");
     const { FileLogger } = await import("@drec/observability");
     const { recordExpectedVersion, recordSyncError } = await import("@drec/app");
 
@@ -1332,7 +1462,7 @@ const hubStarter: HubStarter = {
       stageDir?: string;
       cookies?: string;
       cleanMaxGapSec?: number;
-      /** 断流重连合并窗(ms);缺省 10 分钟。 */
+      /** Reconnect wait window (ms); defaults to core `SAME_BROADCAST_GAP_MS` (30 min). */
       reconnectWindowMs?: number;
       /** Consecutive unreachable rounds after which a blocked broadcast turns needs_manual; default 12, <=0 disables. */
       blockedManualRounds?: number;
@@ -1362,6 +1492,11 @@ const hubStarter: HubStarter = {
         uploadRateWindowMs?: number;
         uploadCooldownMs?: number;
       };
+      /**
+       * Fleet long connection (plans/042). Opt-in: set `controllerUrl` to this master's address as the
+       * workers reach it (tailscale), e.g. "http://<master-tailscale-ip>:7860". Absent → ssh only, as before.
+       */
+      fleet?: { controllerUrl?: string };
     };
     if (!hubCfg) {
       opts.warn("[hub] --hub 已设置但 --hub-config / settings.hubConfig 未提供，跳过");
@@ -1385,21 +1520,30 @@ const hubStarter: HubStarter = {
       }
       return map;
     };
-    // 某 roomSlug 是否还在本机录制(local transport settle 用):匹配该 slug 的任务有在录的就算「未收播」,
-    // 防周期对账在录制中途就合并残片(settle 等录完才处理)。
-    const isRoomRecording = (slug: string): boolean =>
-      opts.store.listTasks().some(
+    // Lives for the whole serve process: repeated master sync rounds dedupe the legacy
+    // no-spool compatibility warning through this set (see task-sync ApplyTasksOptions).
+    const noSpoolWarnedKeys = new Set<string>();
+    // Local worker: same judgement as ssh / fleet nodes (state files + /proc fallback), NOT the serve-side
+    // `[状态]` flag, which flips to "not recording" on `录制停滞` while the tail part is still uploading.
+    // Hosts without /proc (macOS) cannot verify state files: there the serve-side flag is the only signal.
+    // Dev-only, non-Linux limitation: that flag still flips to "not recording" on `录制停滞` while a tail is
+    // uploading (the original #456 stall flip). Production masters run Linux/Docker and never take this path.
+    const { isRoomRecording, activeRecordingRooms } = localRoomProbes(drecRoot, undefined, {
+      isRoomRecording: (slug) => opts.store.listTasks().some(
         (t) => platformForRoom(t.room).extractRoomSlug(t.room) === slug && opts.manager.isRecording(t.id),
-      );
-    registerBuiltinTransports({
-      ffprobe,
-      taskRooms: buildTaskRooms,
-      isRoomRecording,
+      ),
       activeRecordingRooms: () => opts.store.listTasks().flatMap((t) => {
         if (!opts.manager.isRecording(t.id)) return [];
         const platform = platformForRoom(t.room);
         return [{ platform: platform.id, roomSlug: platform.extractRoomSlug(t.room) }];
       }),
+    });
+    registerBuiltinTransports({
+      ffprobe,
+      fleet: fleetLink,
+      taskRooms: buildTaskRooms,
+      isRoomRecording,
+      activeRecordingRooms,
       // local worker = master 自身:hub 任务同步直接落在本机 store(与远端 `_tasks` / `_apply-tasks` 同路径)。
       listTasks: () => listNodeTasks(opts.store),
       // 处理任务表通道(T9a):local worker 与远端 `_enqueue` / `_proc-status` 同一执行体(无派发方,仅可被调用)。
@@ -1411,6 +1555,7 @@ const hubStarter: HubStarter = {
       // adopt=false:本机源任务保持用户可编辑(managedBy 不置 hub),只有远端节点的同步任务才锁编辑。
       applyTasks: (input) => applyRemoteTasks(opts.store, input.desired, opts.log, {
         adopt: false,
+        noSpoolWarnedKeys,
         force: input.force === true,
         // 审计快照落 <数据根>/config/managed/(显式传目录,不从 DOUYIN_REC_ROOT 推导)。
         managedStateDir: join(rootConfigDir(), "managed"),
@@ -1425,6 +1570,20 @@ const hubStarter: HubStarter = {
       const fromFile = workerStore.listWorkers(rootHubConfig());
       return fromFile.length ? fromFile : workers;
     };
+    // Fleet long connection (plans/042): workers dial in; SshTransport consults it before spawning over ssh.
+    const fleetControllerUrl = hubCfg.fleet?.controllerUrl?.trim();
+    if (fleetControllerUrl) {
+      const { startFleetController } = await import("@drec/orchestrator");
+      hubFleet = startFleetController({
+        controllerUrl: fleetControllerUrl,
+        tokenPath: join(rootConfigDir(), "fleet-nodes.json"),
+        loadWorkers,
+        log: opts.log,
+        warn: opts.warn,
+        // A worker's recording rooms changed: refresh the console snapshot now (it reads the fresh heartbeat).
+        onRecordingChange: () => void refreshRecordingStatus(),
+      });
+    }
     let refreshingRecordingStatus = false;
     /** 状态探测与 pipeline 共用同一批 transport 实例(避免每 5s 重建 SshTransport)。 */
     let statusTransports: Map<string, ReturnType<typeof getTransport>> | null = null;
@@ -1471,8 +1630,9 @@ const hubStarter: HubStarter = {
           const source = opts.store.getTask(sourceId);
           if (!source) continue;
           const platform = platformForRoom(source.room);
-          const roomSlug = platform.extractRoomSlug(source.room);
-          if (roomSlug !== rule.roomSlug || platform.id !== rule.platform) continue;
+          const sync = resolveRuleSyncRoom(rule, source.room);
+          const roomSlug = sync.roomSlug;
+          warnRuleIdentityMismatch(rule, sync, opts.warn);
           const selectedIds = rule.workers?.length
             ? rule.workers
             : configuredWorkers.map((worker) => worker.id);
@@ -1532,18 +1692,25 @@ const hubStarter: HubStarter = {
       log: (m) => opts.log(m),
       alert: (message) => opts.onEvent({ kind: "error", stage: "直播直传", message }),
     });
+    hubZeroDiskLive = (platform, roomSlug) => loadWorkers()
+      .filter((w) => w.kind !== "local")
+      .flatMap((w) => {
+        const lv = zeroDiskFleet.live(w.id, platform, roomSlug);
+        return lv ? [{ workerId: w.id, workerName: w.name ?? w.id, ...lv }] : [];
+      });
     /** Targets the master currently expects to run zero-disk: (room, non-local node) pairs. */
     const zeroDiskTargetList = (): Array<{ workerId: string; platform: string; roomSlug: string }> => {
       const out: Array<{ workerId: string; platform: string; roomSlug: string }> = [];
       for (const rule of hubStore.listHubRules(hubDir)) {
         const src = rule.recording?.sourceTaskId ? opts.store.getTask(rule.recording.sourceTaskId) : null;
         if (!src?.streamUpload) continue;
-        const p = platformForRoom(src.room);
-        if (p.extractRoomSlug(src.room) !== rule.roomSlug) continue;
+        const sync = resolveRuleSyncRoom(rule, src.room);
+        const srcSlug = sync.roomSlug;
+        warnRuleIdentityMismatch(rule, sync, opts.warn);
         for (const w of loadWorkers()) {
           if (w.kind === "local" || w.id === "local") continue;
           if (!isWorkerAssigned(rule, w.id, w.capabilities)) continue;
-          out.push({ workerId: w.id, platform: p.id, roomSlug: rule.roomSlug });
+          out.push({ workerId: w.id, platform: sync.platform, roomSlug: srcSlug });
         }
       }
       return out;
@@ -1774,115 +1941,39 @@ const hubStarter: HubStarter = {
             },
           }
         : {}),
+      observeInventory: (workerId, sessions) => {
+        try {
+          recordRoomSessions(rootStatsDbPath(), workerId, sessions);
+        } catch (e) {
+          console.warn(`[stats] ${workerId} 采集失败:${String((e as Error)?.message ?? e)}`);
+        }
+      },
     });
 
     // hub 受管录制任务同步:对每个 worker 计算「期望任务」并下发。
     // 规则里 recording.sourceTaskId 绑定的 master 任务 → 推送到规则 workers 勾选的节点;
     // 节点侧 applyRemoteTasks 按 (platform, roomSlug) 对账(收编/更新/两阶段删除)。
-    const desiredFor = (workerId: string): RemoteTaskSpec[] => {
-      const out: RemoteTaskSpec[] = [];
-      const capsOfThis = loadWorkers().find((w) => w.id === workerId)?.capabilities;
-      for (const rule of hubStore.listHubRules(hubDir)) {
-        // T3 语义:「规则还在但被禁用 / 不再派给这个 worker」= 停用保留,**不是**删除。
-        // 所以这两种情况都要继续产出 enabled:false 条目,让节点把已有任务停掉;
-        // 只有「规则文件消失 / sourceTaskId 解绑 / 源任务不存在」才是缺席 → 两阶段删除。
-        //
-        // 早前这里对 !rule.enabled / 不在 workers / 能力不满足 都是 continue(直接缺席),
-        // 于是「停用」和「删除」在节点侧无法区分 —— 取消勾选一个 worker 就把它的房间删了。
-        // 归属判定 = core isWorkerAssigned(单一真理源,reconciler/状态探测/本机抑制共用)。
-        const src = rule.recording?.sourceTaskId ? opts.store.getTask(rule.recording.sourceTaskId) : null;
-        if (!src) continue;                        // 真删除意图:规则没绑源任务 / 源任务已删
-        const p = platformForRoom(src.room);
-        if (p.extractRoomSlug(src.room) !== rule.roomSlug) continue; // 绑定必须同房间
-        // 该 worker 不再被派发这个房间(规则禁用 / 未勾选 / 能力不满足)→ 产 enabled:false,
-        // 让节点**停用但保留**(T3)。字段与正常路径**同源构造**:早前写成两个 push 各抄一遍字段,
-        // 抄漏一个字段就是「禁用路径丢配置」的静默 bug(自审发现,已合为一条)。
-        const { assigned, enabled: specEnabledBase } = resolveSpecAssignment(rule, workerId, capsOfThis, src.enabled);
-        // Zero-disk on a side node (issue #331): the master ships the resolved upload metadata and the
-        // expected account; an old / unconfirmed node, or an unbuildable delivery, gets the task
-        // DISABLED with a visible reason, never defaults. One decision point: `planZeroDiskSpec`.
-        const workerDataRoot = loadWorkers().find((w) => w.id === workerId)?.dataRoot;
-        const zdKey = blockedKey(workerId, p.id, rule.roomSlug);
-        const zd = planZeroDiskSpec({
-          streamUpload: src.streamUpload,
-          workerId,
-          assigned,
-          enabled: specEnabledBase,
-          allowsPush: zeroDiskFleet.allowsPush(workerId),
-          ruleError: zeroDiskRuleError(src.streamUpload, { enabled: rule.enabled, mode: rule.pipeline?.upload?.mode, workers: rule.workers, steps: rule.pipeline?.steps }),
-          build: () => buildZeroDiskDelivery({
-            platform: p.id,
-            roomSlug: rule.roomSlug,
-            // The master's configured upload login (same file its own pipeline uploads with).
-            ...(hubCfg.cookies ? { masterCookiesPath: hubCfg.cookies } : {}),
-            ...(workerDataRoot ? { workerDataRoot } : {}),
-          }),
-          ...(zeroDiskLastGood.get(zdKey) ? { lastGood: zeroDiskLastGood.get(zdKey)! } : {}),
-        });
-        if (zd.delivery && !zd.stale) zeroDiskLastGood.set(zdKey, zd.delivery);
-        if (zd.stale && zeroDiskStaleWarned.get(zdKey) !== zd.stale) {
-          zeroDiskStaleWarned.set(zdKey, zd.stale);
-          opts.warn(`[zero-disk] 无法重建下发对象(${zd.stale});沿用上次的,避免停掉在传的稿件`);
-        }
-        if (!zd.stale) zeroDiskStaleWarned.delete(zdKey);
-        if (zd.blocked) zeroDiskBlocked.set(zdKey, zd.blocked);
-        const specEnabled = zd.enabled;
-        const zeroDiskDelivery = zd.delivery;
-        // ⚠️ **local(master 本机)是特例**:它的 applyTasks 写的是**源任务本身**,
-        // 而源任务的 enabled 是「用户要不要录这个房间」的**全局意图**,不是「本节点是否被选中」。
-        // 若这里也按 targeted 强制 false,那么「把 local 从某房间 workers 里移除」会被写成
-        // 「全局停录」→ 连 VPS1 一起停(线上实测:三节点全停)。
-        // 本机的「不该录」由**专门的抑制机制**处理(localSuppressedSourceTaskIds →
-        // startTask 只置意图不起子进程),不在这条路径上表达。
-        const isLocalWorker = workerId === "local";
-        const rollingFields = rollingSpecFields(
-          { enabled: rule.enabled, mode: rule.pipeline?.upload?.mode, workers: rule.workers, steps: rule.pipeline?.steps },
-          src.rollingUpload,
-          isLocalWorker,
-        );
-        out.push({
-          platform: p.id,
-          roomSlug: rule.roomSlug,
-          room: src.room,
-          name: src.name,
-          quality: src.quality,
-          engine: src.engine,
-          danmu: src.danmu,
-          segmentSec: src.segmentSec,
-          outputFormat: src.outputFormat,
-          scheduleStart: src.scheduleStart,
-          scheduleEnd: src.scheduleEnd,
-          // 本机(local)要分两种情况,不能一刀切:
-          //   ① 规则被**禁用** → 停用(source task enabled=false)。与远端节点一致:
-          //      「规则禁用 = 暂停该房间」是全节点语义,本机不该例外。
-          //   ② 规则启用、只是**没勾选本机** → 保持 src.enabled。本机的「不该录」由
-          //      抑制机制(localSuppressedSourceTaskIds)表达,写成 enabled=false 会污染全局意图。
-          // 远端节点:统一 `assigned && src.enabled`(停用保留时强制 false;见 core resolveSpecAssignment)。
-          enabled: specEnabled,
-          useCookie: src.useCookie,
-          cookies: resolveTaskStreamCookies(src, opts.store),
-          outDir: src.outDir,
-          webhook: src.webhook,
-          anchorName: src.anchorName,
-          // 归属标记(issue #73):节点据此默认隐藏「受管且未分配且未在录」的任务。旧节点忽略该字段。
-          assigned,
-          // 边录边传(issue #40):**唯一判定 = core resolveRollingPolicy**,只在 master 这里算一次
-          // (规则 mode=rolling / 旧任务开关迁移 / 规则 stage 优先 / 多节点重复投稿闸门),
-          // 结果作为只读派生字段 `rollingEffective` 下发;录制端只读它,不再自行读规则判定。
-          //   - 远端节点:`rollingUpload`(旧字段)同样下发生效值 —— 旧节点包只认它,行为与改前一致。
-          //   - 本机(local):applyTasks 写的是**源任务本身**,其旧 `rollingUpload` 是用户旧值
-          //     (迁移来源,不能被覆盖,同 enabled 的特例),故只更新派生字段 `rollingEffective`。
-          ...rollingFields,
-          // Zero-disk lives on the task, but the desired spec is a full task projection:
-          // omitting it makes local applyTasks write `false` back to the source task on every
-          // sync tick, silently turning zero-disk off.
-          streamUpload: src.streamUpload,
-          streamUploadSpool: src.streamUploadSpool,
-          ...(zeroDiskDelivery ? { zeroDiskDelivery } : {}),
-        });
-      }
-      return out;
-    };
+    // Issue #481: the room-list/spec builder lives in @drec/app so it can be driven by tests; this is only
+    // the adapter that injects the master live state.
+    const desiredFor = (workerId: string): RemoteTaskSpec[] => desiredSpecsForWorker(workerId, {
+      rules: hubStore.listHubRules(hubDir),
+      getTask: (id) => opts.store.getTask(id),
+      workers: loadWorkers(),
+      cookiesPath: hubCfg.cookies,
+      resolveCookies: (t) => resolveTaskStreamCookies(t, opts.store),
+      allowsPush: (id) => zeroDiskFleet.allowsPush(id),
+      blockedKey,
+      delivery: {
+        lastGood: (k) => zeroDiskLastGood.get(k),
+        remember: (k, d) => { zeroDiskLastGood.set(k, d); },
+        staleWarned: (k) => zeroDiskStaleWarned.get(k),
+        setStale: (k, reason) => { zeroDiskStaleWarned.set(k, reason); },
+        clearStale: (k) => { zeroDiskStaleWarned.delete(k); },
+        block: (k, reason) => { zeroDiskBlocked.set(k, reason); },
+      },
+      warn: opts.warn,
+      onRuleIdentityMismatch: (rule, sync) => warnRuleIdentityMismatch(rule, sync, opts.warn),
+    });
     // 周期 tick 与 web API 的「变更即同步」共用同一函数:内部守卫防重入,
     // 期间再有请求则合并成一轮补跑(期望任务是全量对账,不丢变更)。
     const syncTasks = async (req?: { force?: boolean }): Promise<void> => {
@@ -1935,6 +2026,9 @@ const hubStarter: HubStarter = {
               opts.warn(`[hub] 记录期望版本 ${w.id} 失败(忽略,继续同步): ${(e as Error).message}`);
             }
             const r = await t.applyTasks({ desired, force, ...(expectedVersion !== undefined ? { expectedVersion } : {}) });
+            for (const warning of r.warnings ?? []) {
+              opts.log(`[hub] 节点 ${w.id} 回执: ${warning}`);
+            }
             // A safety-valve rejection means the expected set was NOT fully applied:
             // keep it visible as syncError instead of clearing the receipt.
             try {
@@ -1961,6 +2055,18 @@ const hubStarter: HubStarter = {
             if (r.applied.length > 0 || r.removed.length > 0 || r.pending.length > 0) {
               opts.log(`[hub] 任务同步 ${w.id}: applied=${r.applied.length} removed=${r.removed.length}`
                 + ` pending=${r.pending.length}${force ? " (forced)" : ""}`);
+            }
+            // Issue #480: a node skips malformed specs instead of failing the whole batch — surface the count
+            // so a master bug does not look like a healthy sync. Old nodes never send the field.
+            if (r.skipped && r.skipped.length > 0) {
+              // Rate-limited per distinct reason set per process: a persistent master bug would otherwise warn
+              // on every sync tick for the life of the serve process.
+              const reasonSet = [...new Set(r.skipped.map((s) => s.reason))].sort().join("|");
+              if (!warnedSkipReasons.has(reasonSet)) {
+                warnedSkipReasons.add(reasonSet);
+                opts.warn(`[hub] 任务同步 ${w.id}: 节点跳过 ${r.skipped.length} 条坏配置`
+                  + `(其余照常应用;坏条目对应的本机任务不会被删除): ${r.skipped.map((s) => `#${s.index + 1} ${s.reason}`).join("; ")}`);
+              }
             }
             // 节点侧安全阀命中(T-2):必须让 master 侧看得见,否则「下发被拒」在 UI 上是静默的 ——
             // 用户只会看到任务没变,却不知道是节点在保护自己。
@@ -2155,11 +2261,14 @@ const hubStarter: HubStarter = {
     scheduleRecordingStatusProbe(RECORDING_IDLE_POLL_MS);
     opts.log(`[hub] 已启用，${loadWorkers().length} 个 worker`);
     return () => {
+      hubFleet?.stop();
+      hubFleet = null;
       stop();
       recordingProbeStopped = true;
       if (recordingStatusTimer) clearTimeout(recordingStatusTimer);
       hubRecordingSnapshot = new Map();
       hubZeroDiskSnapshot = new Map();
+      hubZeroDiskLive = undefined;
       hubSyncTasks = undefined;
       hubSyncGate.unbind(); // 必须解绑:否则 stop 之后的同步请求会打到已停的旧 runner(自审发现)
       hubRetryNode = undefined;
@@ -2192,7 +2301,7 @@ const hubStarter: HubStarter = {
           id, recordingsDir: `${cfg.dataRoot}/recordings`, taskRooms: {}, ffprobe,
           nodeIdentity: () => { const i = ensureNodeIdentity(cfg.dataRoot); return { nodeId: i.nodeId, hostname: i.hostname }; },
         })
-      : new SshTransport({ id, host: cfg.host!, dataRoot: cfg.dataRoot! });
+      : new SshTransport({ id, host: cfg.host!, dataRoot: cfg.dataRoot!, fleet: fleetLink });
     try {
       // ping 内置超时(local 瞬时;ssh 6s)。这里不再额外包 20s——探针本就轻量。
       await t.ping!();
@@ -2234,7 +2343,7 @@ const hubStarter: HubStarter = {
               return { appVersion: APP_VERSION, appliedVersion, appliedAt, appVersionAtApply, taskCount: 0, managedCount: 0 };
             },
           })
-        : new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot! });
+        : new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot!, fleet: fleetLink });
       await t.ping!();
       // 版本回执 / 磁盘剩余都是可选观测:拿不到(旧 bundle/不可达)就当没有 —— **绝不能因此让 status 失败**。
       // 两者并行,避免慢节点上串行叠加 ssh 超时。
@@ -2305,6 +2414,7 @@ taskCmd
         process.env.DISCORD_WEBHOOK ||
         undefined,
       hubStarter,
+      fleetCommands: NODE_COMMANDS,
     });
   });
 
@@ -2328,42 +2438,6 @@ program.addCommand(taskCmd);
 // ─── cookie 子命令组：管理全局抖音账号 cookie（所有任务共享）────────────────────
 program.addCommand(buildCookieCommand());
 
-/**
- * 扫 `/proc`,找出「有媒体下载孙进程(ffmpeg/mesio)」的 record 子进程,返回其房间身份。
- *
- * 唯一真理:`_is-done`(某房间是否仍在录)与 `_recording-status`(全部在录房间)共用这一个扫描,
- * 避免两处 `/proc` 解析逻辑各自漂移。非 Linux(本地 macOS 开发)无 `/proc` → 返回空数组。
- *
- * 判据:record 子进程命令行含 `--room <URL/房间号>`,且 `/proc/<pid>/task/<pid>/children`
- * 非空(= 正在写盘的 ffmpeg/mesio)。只在轮询等开播、无下载子进程 = 未在录。
- */
-function scanRecordingRooms(): { platform: string; roomSlug: string }[] {
-  const rooms = new Map<string, { platform: string; roomSlug: string }>();
-  try {
-    for (const entry of readdirSync("/proc", { withFileTypes: true })) {
-      if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
-      let cmdline: string[];
-      try {
-        cmdline = readFileSync(`/proc/${entry.name}/cmdline`, "utf8").split("\0").filter(Boolean);
-      } catch {
-        continue; // 进程刚退出 / 权限不足
-      }
-      const roomIdx = cmdline.indexOf("--room");
-      if (roomIdx < 0 || roomIdx + 1 >= cmdline.length) continue;
-      try {
-        const platform = platformForRoom(cmdline[roomIdx + 1]);
-        const roomSlug = platform.extractRoomSlug(cmdline[roomIdx + 1]);
-        const children = readFileSync(`/proc/${entry.name}/task/${entry.name}/children`, "utf8").trim();
-        if (children) rooms.set(`${platform.id}:${roomSlug}`, { platform: platform.id, roomSlug });
-      } catch {
-        /* 进程刚退出,或房间无法解析 */
-      }
-    }
-  } catch {
-    /* 非 Linux(本地开发)无 /proc → 视为无进程 */
-  }
-  return [...rooms.values()];
-}
 
 // ─── recheck-verify（T32 一次性重核工具）────────────────────────────────
 // 把「B站 pages 还没同步就核验」导致的假 mismatch(needs_manual)按 B站实况翻回 done。
@@ -2391,30 +2465,19 @@ program
 // ─── _is-done <dataRoot> <roomSlug>（隐藏子命令，供 master 通过 SSH 调用）────────
 // 只查「该房间」是否还有活着的下载进程(ffmpeg/mesio 子进程)在写盘,不再数全机 ffmpeg:
 // 之前用全局 ffmpeg 计数,别的房间还在录会把本房间也当成未收播,settle 一直空等。
-function roomRecordingAlive(roomSlug: string): boolean {
-  return scanRecordingRooms().some((room) => room.roomSlug === roomSlug);
-}
 
 program
   .command("_is-done <dataRoot> <roomSlug>", { hidden: true })
   .description("(内部) 判断该房间是否已收播(供 master ssh settle)")
-  .action((_dataRoot: string, roomSlug: string) => {
-    process.stdout.write((roomRecordingAlive(roomSlug) ? "false" : "true") + "\n");
+  .action(async (dataRoot: string, roomSlug: string) => {
+    await runNodeCommandCli("is-done", dataRoot, [roomSlug]);
   });
 
 program
   .command("_recording-status <dataRoot>", { hidden: true })
   .description("(内部) 输出当前正在录制的房间,供 master 控制台轮询")
   .action(async (dataRoot: string) => {
-    const rooms = scanRecordingRooms();
-    // F1:同时带回边录边传的实时进度(只读 sidecar;失败不影响 rooms,旧 master 忽略多出的字段)。
-    let rolling: unknown[] = [];
-    try {
-      const { join: pathJoin } = await import("node:path");
-      const { scanRollingSessions } = await import("@drec/orchestrator");
-      rolling = scanRollingSessions(pathJoin(dataRoot, "recordings"), rooms);
-    } catch { /* 进度是附加信息,拿不到就空 */ }
-    process.stdout.write(JSON.stringify({ rooms, rolling }) + "\n");
+    await runNodeCommandCli("recording-status", dataRoot, []);
   });
 
 // ─── _inventory <dataRoot>（隐藏子命令，供多节点编排 master 通过 SSH 调用）──────────
@@ -2425,36 +2488,7 @@ program
   .command("_inventory <dataRoot>", { hidden: true })
   .description("(内部) 扫描 <dataRoot>/recordings，输出 JSON 清单（供 master ssh 调用）")
   .action(async (dataRoot: string) => {
-    const { join: pathJoin } = await import("node:path");
-    const { statSync } = await import("node:fs");
-    const { TaskStore } = await import("@drec/app");
-    const { ffprobeVideo } = await import("@drec/post-process");
-    const { scanInventory, segmentSecByAnchorOf } = await import("@drec/orchestrator");
-
-    // 打开 slave 自身的 db，构建 taskRooms（anchorName/name → roomSlug）
-    const dbPath = pathJoin(dataRoot, "db", "douyin-rec.db");
-    const store = new TaskStore(dbPath);
-    const taskRooms: Record<string, string> = {};
-    const tasks = store.listTasks();
-    for (const task of tasks) {
-      try {
-        const slug = platformForRoom(task.room).extractRoomSlug(task.room);
-        if (task.name) taskRooms[task.name] = slug;
-        if (task.anchorName) taskRooms[task.anchorName] = slug;
-      } catch { /* skip tasks whose platform can't be resolved */ }
-    }
-    const segmentSecByAnchor = segmentSecByAnchorOf(tasks);
-
-    // ffprobe 适配器：durationMs via ffprobeVideo + mtime → startMs/endMs
-    const ffprobe = async (file: string): Promise<{ durationSec: number; startMs: number; endMs: number }> => {
-      const { durationMs } = await ffprobeVideo(file).catch(() => ({ durationMs: 0 }));
-      const endMs = statSync(file).mtimeMs;
-      return { durationSec: durationMs / 1000, endMs, startMs: endMs - durationMs };
-    };
-
-    const recordingsDir = pathJoin(dataRoot, "recordings");
-    const inventory = await scanInventory(recordingsDir, taskRooms, ffprobe, { segmentSecByAnchor });
-    process.stdout.write(JSON.stringify(inventory) + "\n");
+    await runNodeCommandCli("inventory", dataRoot, []);
   });
 
 // ─── _disk <dataRoot>（隐藏子命令，供 master 通过 SSH 调用）──────────────────────
@@ -2464,15 +2498,7 @@ program
   .command("_disk <dataRoot>", { hidden: true })
   .description("(内部) 输出数据根剩余空间 GB(供 master ssh 调用)")
   .action(async (dataRoot: string) => {
-    const { statfs } = await import("node:fs/promises");
-    try {
-      const st = await statfs(dataRoot);
-      const freeGB = freeGBOf(st);
-      process.stdout.write(JSON.stringify({ freeGB: Number(freeGB.toFixed(2)) }) + "\n");
-    } catch (e) {
-      process.stdout.write(JSON.stringify({ error: String((e as Error)?.message ?? e) }) + "\n");
-      process.exitCode = 1;
-    }
+    await runNodeCommandCli("disk", dataRoot, []);
   });
 
 // ─── _tasks <dataRoot>（隐藏子命令，供 master 通过 SSH 调用）──────────────────────
@@ -2488,15 +2514,33 @@ program
     process.stdout.write(JSON.stringify(ensureNodeIdentity()) + "\n");
   });
 
-// 输出本节点全部任务的隐私安全投影(无 cookies)。master 的任务同步对账用。
+// (internal) Join the fleet long connection (plans/042): the master writes this node's agent config
+// (controller URL + node id + token) over ssh. A running `task serve` picks it up within a minute.
+// The JSON payload is read from stdin so the token never shows up in argv / `ps`; it is never echoed back.
+program
+  .command("_fleet-join <dataRoot>", { hidden: true })
+  .description("(内部) 从 stdin 写入节点长连接配置 config/fleet.json(供 master ssh 调用)")
+  .action(async (dataRoot: string) => {
+    const { writeFleetConfig } = await import("@drec/app");
+    try {
+      const chunks: Buffer[] = [];
+      for await (const c of process.stdin) chunks.push(c as Buffer);
+      const cfg = writeFleetConfig(join(dataRoot, "config", "fleet.json"), JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      process.stdout.write(JSON.stringify({ ok: true, nodeId: cfg.nodeId, controllerUrl: cfg.controllerUrl }) + "\n");
+    } catch (e) {
+      const error = String((e as Error)?.message ?? e);
+      process.stdout.write(JSON.stringify({ ok: false, error }) + "\n");
+      // Also on stderr: the master's ssh runner reports stderr when the exit code is non-zero.
+      process.stderr.write(`_fleet-join: ${error}\n`);
+      process.exitCode = 1;
+    }
+  });
+
 program
   .command("_tasks <dataRoot>", { hidden: true })
   .description("(内部) 输出节点任务清单 JSON(供 master ssh 调用)")
   .action(async (dataRoot: string) => {
-    const { join: pathJoin } = await import("node:path");
-    const { TaskStore, listNodeTasks } = await import("@drec/app");
-    const store = new TaskStore(pathJoin(dataRoot, "db", "douyin-rec.db"));
-    process.stdout.write(JSON.stringify({ tasks: listNodeTasks(store) }) + "\n");
+    await runNodeCommandCli("tasks", dataRoot, []);
   });
 
 // ─── _apply-tasks <dataRoot> <base64>（隐藏子命令，供 master 通过 SSH 调用）────────
@@ -2506,61 +2550,7 @@ program
   .command("_apply-tasks <dataRoot> <base64>", { hidden: true })
   .description("(内部) 应用 master 下发的期望任务(供 master ssh 调用)")
   .action(async (dataRoot: string, b64: string) => {
-    const { join: pathJoin } = await import("node:path");
-    const { TaskStore, applyTasksPayload } = await import("@drec/app");
-    const store = new TaskStore(pathJoin(dataRoot, "db", "douyin-rec.db"));
-    // T16:payload 的 expectedVersion 由 applyTasksPayload 透传到快照;旧 master 缺字段 → 版本 0。
-    const result = applyTasksPayload(store, b64, undefined, {
-      // 审计快照:目录由 dataRoot 显式派生(本命令只带 dataRoot,无 DOUYIN_REC_ROOT —— 见 managed-state.ts)。
-      managedStateDir: pathJoin(dataRoot, "config", "managed"),
-    });
-    // 不再期望的受管任务必须**硬停**(而非排空):这是「用户停源任务/删规则」的明确意图,
-    // 排空会等到直播自然收播,hub 的 settle 因而一直卡着不建 job。
-    // `_apply-tasks` 是独立短命进程,没有 TaskManager 引用,只能走本机 serve 的
-    // POST /api/tasks/:id/stop → 由 serve 内的 manager 置 expected 停掉子进程(不会触发崩溃自愈重启)。
-    if (result.pending.length > 0) {
-      const apiBase = process.env.DREC_SERVE_API ?? "http://127.0.0.1:7860";
-      for (const key of result.pending) {
-        const task = store.listTasks().find((x) => {
-          try {
-            const p = platformForRoom(x.room);
-            return `${p.id}:${p.extractRoomSlug(x.room)}` === key;
-          } catch {
-            return false;
-          }
-        });
-        if (!task) continue;
-        try {
-          // internal=1 仅允许本机回环:serve 借此放行 hub 受管任务的硬停(外部 API 仍 403)。
-          const res = await fetch(`${apiBase}/api/tasks/${task.id}/stop?internal=1`, { method: "POST" });
-          if (!res.ok) {
-            console.error(`[task-sync] 硬停任务 id=${task.id}(${key}) 失败: HTTP ${res.status}`);
-          }
-        } catch (e) {
-          // serve 未起/重启中 → 下一轮对账会再进 pending 重试;若 serve 一直不可达则回落 daemon 排空兜底。
-          console.error(`[task-sync] 硬停任务 id=${task.id}(${key}) 失败: ${(e as Error).message}`);
-        }
-      }
-    }
-    // 新建或已有但 anchorName 仍为 null 的受管任务:通知本机 serve 后台重抓主播名。
-    // 短命进程无法自行调用 fetchAnchorName(依赖平台 vendor 包),转交给 serve 进程做(有完整运行时)。
-    // fire-and-forget:失败只 warn,下次 enable/disable 或开播时会再次触发。
-    // 逐个 await 会拖慢本命令(ssh 往返),故并发发 + 短超时:serve 慢/挂时不能阻塞同步对账。
-    const apiBase = process.env.DREC_SERVE_API ?? "http://127.0.0.1:7860";
-    const needsAnchor = store.listTasks().filter((t) => t.managedBy === "hub" && !t.anchorName);
-    await Promise.allSettled(
-      needsAnchor.map(async (t) => {
-        try {
-          await fetch(`${apiBase}/api/tasks/${t.id}/refresh-anchor`, {
-            method: "POST",
-            signal: AbortSignal.timeout(3000),
-          });
-        } catch {
-          // serve 未起/超时 → 忽略,开播时 task-manager 会从日志抓名字兜底。
-        }
-      }),
-    );
-    process.stdout.write(JSON.stringify(result) + "\n");
+    await runNodeCommandCli("apply-tasks", dataRoot, [b64]);
   });
 
 // (内部) 读本节点某任务的日志尾巴(F3):master 在 fleet 模式下代查节点日志,不必登节点看网页。
@@ -2570,29 +2560,7 @@ program
   .command("_task-logs <dataRoot> <taskId> <lines>", { hidden: true })
   .description("(内部) 输出某任务最近 n 行日志 JSON(供 master ssh 代查)")
   .action(async (dataRoot: string, taskIdRaw: string, linesRaw: string) => {
-    void dataRoot; // 数据根只用于与其它隐藏命令保持同一签名;日志来自 serve 进程,不经这里读盘。
-    const taskId = Number(taskIdRaw);
-    // 行数夹取:防一个调用把整段日志(上千行)拖过 ssh。默认 200,上限 1000。
-    const asked = Number(linesRaw);
-    const lines = Number.isFinite(asked) ? Math.min(1000, Math.max(1, Math.trunc(asked))) : 200;
-    const apiBase = process.env.DREC_SERVE_API ?? "http://127.0.0.1:7860"; // issue-guard: allow (回环地址,与 _apply-tasks 同一约定)
-    if (!Number.isFinite(taskId)) {
-      process.stdout.write(JSON.stringify({ lines: [], error: `taskId 非法: ${taskIdRaw}` }) + "\n");
-      return;
-    }
-    try {
-      const res = await fetch(`${apiBase}/api/tasks/${taskId}/logs`, { signal: AbortSignal.timeout(5000) });
-      if (!res.ok) {
-        process.stdout.write(JSON.stringify({ lines: [], error: `serve HTTP ${res.status}` }) + "\n");
-        return;
-      }
-      const body = (await res.json()) as { lines?: unknown };
-      const all = Array.isArray(body.lines) ? body.lines.filter((x): x is string => typeof x === "string") : [];
-      // 脱敏后才出节点:日志里可能带 cookie(vendored 取流代码在异常信息里打印整串)。
-      process.stdout.write(JSON.stringify({ lines: redactLogLines(all.slice(-lines)) }) + "\n");
-    } catch (e) {
-      process.stdout.write(JSON.stringify({ lines: [], error: `读本机 serve 失败: ${(e as Error)?.message ?? e}` }) + "\n");
-    }
+    await runNodeCommandCli("task-logs", dataRoot, [taskIdRaw, linesRaw]);
   });
 
 // (内部) 节点状态回执(T16):master 想知道「这台节点应用了哪一版期望、跑的是哪个 bundle」。
@@ -2602,54 +2570,20 @@ program
   .command("_node-status <dataRoot>", { hidden: true })
   .description("(内部) 输出节点应用回执 JSON(appVersion/appliedVersion/appliedAt/任务数;供 master ssh 调用)")
   .action(async (dataRoot: string) => {
-    const { join: pathJoin } = await import("node:path");
-    const { TaskStore, readManagedState } = await import("@drec/app");
-    const { APP_VERSION } = await import("@drec/app");
-    let appliedVersion: number | null = null;
-    let appliedAt: number | null = null;
-    let appVersionAtApply: string | null = null;
-    try {
-      // 快照目录与 _apply-tasks 同一推导(显式传 dataRoot,不从 env 推导)。
-      const st = readManagedState(pathJoin(dataRoot, "config", "managed"));
-      if (st) {
-        appliedVersion = st.version;
-        appliedAt = st.savedAt;
-        appVersionAtApply = st.appVersion ?? null;
-      }
-    } catch {
-      /* 读不到 = 从未同步过 / 目录缺失 → 保持 null(不是错误) */
-    }
-    let taskCount = 0;
-    let managedCount = 0;
-    try {
-      const store = new TaskStore(pathJoin(dataRoot, "db", "douyin-rec.db"));
-      const tasks = store.listTasks();
-      taskCount = tasks.length;
-      managedCount = tasks.filter((t) => t.managedBy === "hub").length;
-    } catch {
-      /* db 打不开 → 计数保持 0;不因此让整条命令失败(版本信息仍然有用) */
-    }
-    // 处理任务表活动快照(plans/036 T3):库不存在 → 全空;读失败 → 省略字段(旧 master 本就忽略)。
-    let procActive: ProcActiveDTO | undefined;
-    try {
-      const { readProcActive } = await import("@drec/proc-queue");
-      procActive = readProcActive(dataRoot);
-    } catch {
-      /* 任务表读不到不拖垮整条命令(版本信息仍有用) */
-    }
-    process.stdout.write(JSON.stringify({
-      appVersion: APP_VERSION,
-      appliedVersion,
-      appliedAt,
-      appVersionAtApply,
-      taskCount,
-      managedCount,
-      ...(procActive ? { procActive } : {}),
-    }) + "\n");
+    await runNodeCommandCli("node-status", dataRoot, []);
   });
 
 // (内部) 处理任务表人工清理(plans/036 §2.3):done/cancelled 超 7 天删;`--purge-failed` 额外删 failed。
 // uncertain 永不在此删(须先在任务表里 ack);库不存在 → 0,不创建文件。输出 {deleted}。
+program
+  .command("_notify-outbox <dataRoot>", { hidden: true })
+  .option("--after <id>", "只取 id 大于该游标的事件")
+  .option("--limit <n>", "本次最多返回多少条(默认 200)")
+  .option("--ack <ids>", "逗号分隔的事件 id,读取后一并确认")
+  .action(async (dataRoot: string, o: { after?: string; limit?: string; ack?: string }) => {
+    await runNodeCommandCli("notify-outbox", dataRoot, notifyOutboxArgs(o));
+  });
+
 program
   .command("_proc-gc <dataRoot>", { hidden: true })
   .option("--purge-failed", "额外清理 failed 行")
@@ -2676,16 +2610,7 @@ program
   .command("_enqueue <dataRoot> <base64>", { hidden: true })
   .description("(内部) 入队处理任务(仅 remux;供 master ssh 调用)")
   .action(async (dataRoot: string, b64: string) => {
-    try {
-      await applyNodeDataRoot(dataRoot);
-      const { decodeEnqueue } = await import("@drec/core");
-      const { handleEnqueue } = await import("@drec/app");
-      const capabilities = listProcessors().map((p) => p.kind);
-      process.stdout.write(JSON.stringify(handleEnqueue(dataRoot, decodeEnqueue(b64), { capabilities })) + "\n");
-    } catch (e) {
-      process.stdout.write(JSON.stringify({ error: String((e as Error)?.message ?? e) }) + "\n");
-      process.exitCode = 1;
-    }
+    await runNodeCommandCli("enqueue", dataRoot, [b64]);
   });
 
 // (内部) 处理任务回执(plans/036 §2.4 / T9a):请求 = base64(jobId 字符串数组);输出 {receipts: ProcessReceipt[]}。
@@ -2694,13 +2619,7 @@ program
   .command("_proc-status <dataRoot> <base64>", { hidden: true })
   .description("(内部) 查询处理任务回执(供 master ssh 调用)")
   .action(async (dataRoot: string, b64: string) => {
-    try {
-      const { decodeJobIds, handleProcStatus } = await import("@drec/app");
-      process.stdout.write(JSON.stringify({ receipts: handleProcStatus(dataRoot, decodeJobIds(b64)) }) + "\n");
-    } catch (e) {
-      process.stdout.write(JSON.stringify({ error: String((e as Error)?.message ?? e) }) + "\n");
-      process.exitCode = 1;
-    }
+    await runNodeCommandCli("proc-status", dataRoot, [b64]);
   });
 
 // (internal) Cancel processing jobs (plans/038): pending rows are cancelled directly; running rows are closed out by the runner after verification.
@@ -2708,13 +2627,7 @@ program
   .command("_proc-cancel <dataRoot> <base64>", { hidden: true })
   .description("(internal) cancel processing jobs (called by the master over ssh)")
   .action(async (dataRoot: string, b64: string) => {
-    try {
-      const { decodeJobIds, handleProcCancel } = await import("@drec/app");
-      process.stdout.write(JSON.stringify({ receipts: handleProcCancel(dataRoot, decodeJobIds(b64)) }) + "\n");
-    } catch (e) {
-      process.stdout.write(JSON.stringify({ error: String((e as Error)?.message ?? e) }) + "\n");
-      process.exitCode = 1;
-    }
+    await runNodeCommandCli("proc-cancel", dataRoot, [b64]);
   });
 
 // 节点侧上传(experimental,plans/027)的隐藏子命令隔离在独立文件,便于快速开关/回退。

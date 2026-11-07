@@ -37,6 +37,11 @@ export interface EventCenterOpts {
   /** 环形缓冲容量(默认 200)。 */
   max?: number;
   /**
+   * 每个事件落缓冲后的回调(issue #405)。受管节点用它把事件写进发件箱,
+   * 由主控统一发送;本机/独立部署不传,行为不变。
+   */
+  onEmit?: (e: AppEvent, meta: { webhook: boolean }) => void;
+  /**
    * 游标起始值(默认 0)。生产用 `Date.now()` 单调播种:进程重启后内存 seq 归零,而前端
    * 仍持有上一轮的高游标(如 150)→ 重启窗口内 emit 的事件 id(1,2…)会被 since(150) 过滤
    * 掉而静默丢失。用墙钟播种保证「新一轮的 id 永远高于任何上一轮发给前端的游标」,无需持久化。
@@ -51,11 +56,13 @@ export class EventCenter {
   private readonly makeNotifier?: (webhook: string | undefined) => Notifier;
   private readonly resolveWebhook?: (taskId: number | null) => string | undefined;
   private readonly webhookToggles?: () => NotifWebhookToggles;
+  private readonly onEmit?: (e: AppEvent, meta: { webhook: boolean }) => void;
 
   constructor(opts: EventCenterOpts = {}) {
     this.makeNotifier = opts.makeNotifier;
     this.resolveWebhook = opts.resolveWebhook;
     this.webhookToggles = opts.webhookToggles;
+    this.onEmit = opts.onEmit;
     this.max = opts.max ?? 200;
     this.seq = opts.initialSeq ?? 0;
   }
@@ -68,6 +75,11 @@ export class EventCenter {
     const e: AppEvent = { id: ++this.seq, at: Date.now(), taskId, event };
     this.buf.push(e);
     if (this.buf.length > this.max) this.buf.shift();
+    try {
+      this.onEmit?.(e, { webhook: opts?.webhook !== false });
+    } catch {
+      // 发件箱写失败不能反过来打断录制/上传流程;事件仍在本地流里。
+    }
     const toggles = this.webhookToggles?.() ?? DEFAULT_WEBHOOK_TOGGLES;
     if (opts?.webhook !== false && this.makeNotifier && shouldSendWebhook(toggles, event)) {
       const hook = this.resolveWebhook?.(taskId);

@@ -358,7 +358,12 @@ async function getRoomInfoByWeb(webRoomId, opts = {}) {
             },
         };
     }
-    assert(res.data.status_code === 0, `Unexpected resp, code ${res.data.status_code}, msg ${JSON.stringify(res.data.data)}, id ${webRoomId}, cookies: ${cookies}`);
+    // ⚠️ 我们的扩展(上游模板把整串登录串拼进错误消息,经 loadBalancer console.warn 进 docker logs,见 issue #425):
+    //    只打「有/无(长度)」。升级 vendor 时务必保留本改动。
+    assert(
+        res.data.status_code === 0,
+        `Unexpected resp, code ${res.data.status_code}, msg ${JSON.stringify(res.data.data)}, id ${webRoomId}, 登录串: ${cookies ? `有(${cookies.length})` : "无"}`,
+    );
     const data = res.data.data;
     const room = data?.data?.[0];
     return {
@@ -380,7 +385,8 @@ async function getRoomInfoByWeb(webRoomId, opts = {}) {
 }
 async function getRoomInfoByMobile(secUserId, opts = {}) {
     if (!secUserId) {
-        console.error(opts);
+        // ⚠️ 我们的扩展(issue #425):opts 里可能含 auth(登录串),不能整对象打印。
+        console.error("[stream_processor] Mobile API 缺少 secUserId", { hasAuth: !!opts?.auth, keys: Object.keys(opts ?? {}) });
         throw new Error("Mobile API need secUserId, please set uid field");
     }
     if (typeof secUserId === "number") {

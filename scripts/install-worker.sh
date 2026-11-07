@@ -283,26 +283,56 @@ esac
 # Upgrade guard: restarting the service kills a recording in progress, so refuse while the
 # node reports a task recording or an upload job running. An unreachable API means the node
 # is not running (fresh install / stopped service) and is not busy. Unknown answers are busy.
+# The helper writes only the final reason on stdout; diagnostics are never mistaken for a reason.
 node_busy_reason() {
-  command -v curl >/dev/null 2>&1 || { printf 'curl missing, cannot check'; return 0; }
   _n="${NODE_BIN:-$(command -v node || true)}"
-  { [ -n "$_n" ] && command -v "$_n" >/dev/null 2>&1; } || { printf 'node missing, cannot check'; return 0; }
-  # Only "connection refused" (curl 7) proves the service is down. An HTTP error, a timeout or any
-  # other failure means a node we cannot read, which must count as busy.
-  _rc=0
-  _tasks="$(curl -fsS -m 10 "${API_URL}/api/tasks" 2>/dev/null)" || _rc=$?
-  if [ "$_rc" -eq 7 ]; then return 1; fi
-  if [ "$_rc" -ne 0 ]; then printf 'task list unavailable (curl exit %s)' "$_rc"; return 0; fi
-  _proc="$(curl -sS -m 10 "${API_URL}/api/proc/active" 2>/dev/null || true)"
-  printf '%s\n%s' "$_tasks" "$_proc" | "$_n" -e '
-    const [t, p] = require("fs").readFileSync(0, "utf8").split("\n");
-    let rec = 0, up = 0;
-    try { rec = JSON.parse(t).filter((x) => x.recording === true).length; } catch { console.log("unreadable task list"); process.exit(0); }
-    try { up = (JSON.parse(p).running || {}).biliup || 0; } catch { /* old node without the queue: no upload signal */ }
-    if (rec > 0) console.log(rec + " task(s) recording");
-    else if (up > 0) console.log(up + " upload job(s) running");
-    else process.exit(1);
-  ' && return 0 || return 1
+  [ -n "$_n" ] || { printf 'node missing, cannot check\n'; return 0; }
+  "$_n" -e '
+    const http = require("node:http");
+    const api = process.argv[1];
+    const timeoutMs = Number(process.env.DREC_BUSY_TIMEOUT_MS) || 10000;
+    const uploadKinds = ["biliup", "upload-part", "upload-prep", "reconcile-part"];
+    const request = (path) => new Promise((resolve) => {
+      const req = http.get(api + path, { timeout: timeoutMs }, (res) => {
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => { body += chunk; });
+        res.on("end", () => resolve({ status: res.statusCode, body }));
+      });
+      req.on("timeout", () => req.destroy(new Error("timeout")));
+      req.on("error", (err) => resolve({ status: 0, error: err.code || err.message }));
+    });
+    const failClosed = (reason) => { console.log(reason); process.exit(0); };
+    const parseQueue = (answer) => {
+      if (answer.status === 404) return 0;
+      if (answer.status !== 200) return failClosed("upload queue unavailable (HTTP " + answer.status + ")");
+      let running;
+      try { running = JSON.parse(answer.body).running; } catch { return failClosed("unreadable upload queue"); }
+      if (!running || typeof running !== "object") return failClosed("unreadable upload queue");
+      let total = 0;
+      for (const kind of uploadKinds) {
+        const count = running[kind] ?? 0;
+        if (!Number.isInteger(count) || count < 0) return failClosed("unreadable upload queue");
+        total += count;
+      }
+      return total;
+    };
+    (async () => {
+      const tasks = await request("/api/tasks");
+      if (tasks.error === "ECONNREFUSED") process.exit(1);
+      if (tasks.status !== 200) return failClosed("task list unavailable (HTTP " + tasks.status + ")");
+      let recording = 0;
+      try {
+        const parsed = JSON.parse(tasks.body);
+        if (!Array.isArray(parsed)) throw new Error("not an array");
+        recording = parsed.filter((task) => task && task.recording === true).length;
+      } catch { return failClosed("unreadable task list"); }
+      const uploads = parseQueue(await request("/api/proc/active"));
+      if (recording > 0) return failClosed(recording + " task(s) recording");
+      if (uploads > 0) return failClosed(uploads + " upload job(s) running");
+      process.exit(1);
+    })();
+  ' "$API_URL"
 }
 
 if [ "$CHECK_BUSY" -eq 1 ]; then
@@ -410,6 +440,17 @@ else
   fi
 fi
 INSTALLED_VERSION="$(cat "$TMP/VERSION" 2>/dev/null || printf '%s' "$VERSION")"
+
+if [ "$START" -eq 1 ]; then
+  case "$INSTALLED_VERSION" in
+    latest)
+      _resolved="$(basename "$(curl -fsSL -o /dev/null -w '%{url_effective}' -m 10 "https://github.com/${REPO}/releases/latest" 2>/dev/null)")"
+      case "$_resolved" in v*) VERSION="${_resolved#v}" ;; *) VERSION="" ;; esac
+      ;;
+    dev) VERSION="" ;;
+    *) VERSION="$INSTALLED_VERSION" ;;
+  esac
+fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
   printf '✓ Dry run passed\n'
@@ -601,8 +642,8 @@ printf '\nLocal self-check:\n'
 printf '  node %s/dist/douyin-rec.mjs _tasks %s\n' "$ROOT" "$ROOT"
 
 if [ "$START" -eq 1 ] && command -v curl >/dev/null 2>&1; then
-  # The API reports "<x.y.z>-<sha>"; the release version must be its prefix, otherwise the
-  # node came back on something other than what was just installed.
+  # The API reports "<x.y.z>-<sha>"; released versions must match exactly. Development
+  # archives (VERSION=dev / latest with no VERSION file) only require the API to respond.
   _got=""
   for _i in 1 2 3 4 5 6 7 8 9 10; do
     sleep 2
@@ -613,10 +654,12 @@ if [ "$START" -eq 1 ] && command -v curl >/dev/null 2>&1; then
     printf '%s started but the API has not responded; check journalctl -u %s\n' "$ROLE" "$SERVICE" >&2
     exit 1
   fi
-  if version_ok "$INSTALLED_VERSION" "$_got"; then
+  if [ -z "$VERSION" ]; then
+    printf '✓ %s running %s at %s\n' "$ROLE" "$_got" "$API_URL"
+  elif version_ok "$VERSION" "$_got"; then
     printf '✓ %s running %s at %s\n' "$ROLE" "$_got" "$API_URL"
   else
-    printf 'Version mismatch: installed %s but the node reports %s\n' "$INSTALLED_VERSION" "$_got" >&2
+    printf 'Version mismatch: installed %s but the node reports %s\n' "$VERSION" "$_got" >&2
     exit 1
   fi
 fi

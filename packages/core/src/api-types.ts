@@ -4,6 +4,11 @@ import type { OutputFormat } from "./output-format.js";
 import type { NotifyEvent, NotifKey, NotifWebhookToggles } from "./notify.js";
 import type { ZeroDiskDelivery, ZeroDiskNodeStatusDTO } from "./zero-disk-delivery.js";
 export type { ZeroDiskNodeStatusDTO, ZeroDiskRunState, ZeroDiskRefusalCode } from "./zero-disk-delivery.js";
+export type {
+  LiveUploadSnapshot, LiveUploadState, LiveUploadMode, LiveEvent, LiveEventKind,
+  LivePartView, LivePartPhase, LivePumpReporter, LiveEventSession, LiveCurrentPart,
+  LiveUploadSummary,
+} from "./live-upload.js";
 export type { NotifyEvent, NotifKey, NotifWebhookToggles };
 
 /** hub 规则 `pipeline.upload.mode` 的取值。`rolling` = 合成并上传 + 录制端边录边传(issue #40)。 */
@@ -160,14 +165,15 @@ export interface RoomRecordingDTO {
    */
   streamUpload: boolean;
   /**
-   * 0 落盘流式直传是否保留本地 spool(plans/039):
-   *   - true(默认)= 每个分 P 仍写盘,失败可整文件回退、可本地 ffprobe 自检;
-   *   - false = 真 0 落盘,视频字节完全不落盘;代价是该分 P 上传失败时没有本地回退源。
-   * 仅 `streamUpload=true` 时有意义。
+   * 0 落盘流式直传的本地 spool(plans/039)。固定为 true(缺省亦按 true):每个分 P
+   * 仍写盘,失败可整文件回退、可本地 ffprobe 自检。false(真 0 落盘)已禁止写入;
+   * 历史 false 行启动时按 true 运行并告警一次。仅 `streamUpload=true` 时有意义。
    */
   streamUploadSpool: boolean;
   /** 输出格式(issue #137,缺省 original);投稿形态下后处理产物恒 mp4(见 core `effectiveStageFormat`)。 */
   outputFormat: OutputFormat;
+  /** 输出格式锁(后端 `nodeOutputFormatLock` 唯一判定;未锁省略)。房间编辑器据此锁定下拉并省略写入。 */
+  outputFormatLock?: OutputFormatLock;
 }
 
 export interface RoomDTO {
@@ -515,7 +521,7 @@ export interface UploadProgressDTO {
 export interface NodeUploadStatusDTO {
   nodeId: string;
   /** prep = the upload-prep job; biliup = the upload job; blocked = the order cannot advance. */
-  phase: "prep" | "biliup" | "blocked";
+  phase: "prep" | "biliup" | "part-chain" | "blocked";
   /** proc-queue job state (pending/running/done/failed/uncertain/cancelled) or enqueue result. */
   state: string | null;
   /** biliup step: gate_wait / transfer / submit. */
@@ -726,7 +732,7 @@ export interface RemoteTaskSpec {
    * 旧节点包不认识该字段会忽略。录制端把它翻译成 `record --stream-upload`。
    */
   streamUpload?: boolean;
-  /** 0 落盘是否保留 spool(可选;旧 master 不下发 → 默认保留,行为不变)。 */
+  /** 0 落盘是否保留 spool(可选;固定 true,旧 master 不下发 → 默认保留)。 */
   streamUploadSpool?: boolean;
   /**
    * Upload metadata + account key + fallback credential path a zero-disk run needs on a SIDE node (issue #331).
@@ -965,7 +971,7 @@ export interface TaskPayload {
    * 缺省 false = 走现有录制路径。
    */
   streamUpload?: boolean;
-  /** 0 落盘是否保留本地 spool(默认 true);false = 真 0 落盘、失败无本地回退。 */
+  /** 0 落盘是否保留本地 spool(固定 true);false = 已禁止写入。 */
   streamUploadSpool?: boolean;
   /** 输出格式(issue #137);服务端本就接受该字段,此前只是没写进 DTO 类型。 */
   outputFormat?: OutputFormat;
@@ -1052,6 +1058,8 @@ export interface TaskDTO {
   anchorName: string | null;
   /** 是否真正在录视频(区分 running 但等待开播)。 */
   recording: boolean;
+  /** 判活闸门中:任务已启动、未开播,**未占用录制进程**(running 仍为 true)。旧后端无此字段 = false。 */
+  gated?: boolean;
   /**
    * 硬停收尾中(已发停止信号、进程尚未退出;rolling 任务在传末段,最长约 10 分钟)。
    * UI 用它显示「停止中」并禁用「启动」,避免超时返回后被误当成没停。
@@ -1092,7 +1100,7 @@ export interface TaskDTO {
   rollingEffective: boolean;
   /** 流式直传(零落盘)开关;与边录边传互斥。 */
   streamUpload: boolean;
-  /** 0 落盘是否保留本地 spool(默认 true);false = 真 0 落盘、失败无本地回退。 */
+  /** 0 落盘是否保留本地 spool(固定 true);false = 已禁止写入。 */
   streamUploadSpool: boolean;
   /** 输出格式(issue #137,缺省 original)。 */
   outputFormat: OutputFormat;
@@ -1214,4 +1222,105 @@ export interface ProcActiveDTO {
   pending: Record<string, number>;
   /** 该 kind 是否有存活的租约持有者。 */
   leaseAlive: Record<string, boolean>;
+}
+
+// ── 直播统计(GET /api/stats;plans/041)──────────────────────────────────────────
+// 数据从**所有节点的录像清单**采集(master 对账时顺手落库),因此跨节点重复录制天然可去重;
+// 采集与查询都在 master,不改变录制侧任何行为。
+
+/** 采集输入:节点清单里与统计相关的字段子集(orchestrator → app 的窄接口,避免跨层 import)。 */
+export interface StatsSessionInput {
+  platform: string;
+  roomSlug: string;
+  sessionBase?: string;
+  /** 首段开录 epoch ms。 */
+  startMs: number;
+  /** 末段收录 epoch ms(录制中会随后续对账不断右移)。 */
+  endMs: number;
+  /** 分段时长之和(秒);endMs-startMs 含断流缺口。 */
+  durationSec: number;
+  totalGapSec?: number;
+  danmuCount?: number;
+  totalBytes?: number;
+  title?: string;
+}
+
+/** 热力图单元格:`dow` 0=周一 … 6=周日(与 JS `getDay()` 的 0=周日不同,前端按本定义画)。 */
+export interface StatsHeatmapCellDTO {
+  dow: number;
+  hour: number;
+  hours: number;
+}
+
+/** 节点负载:该节点窗口内实际录了多少场/多少小时,以及**峰值同时录制路数**。 */
+export interface StatsNodeLoadDTO {
+  workerId: string;
+  name: string | null;
+  /** 配置上分配给该节点的已启用房间数。 */
+  assignedRooms: number;
+  sessions: number;
+  hours: number;
+  peakConcurrent: number;
+}
+
+/** 单个直播间的统计行。 */
+export interface StatsRoomRowDTO {
+  /** `${platform}.${roomSlug}`。 */
+  key: string;
+  platform: string;
+  roomSlug: string;
+  anchorName: string | null;
+  enabled: boolean;
+  /** rolling / stage / upload(与 hub 规则的上传模式同口径)。 */
+  uploadMode: string;
+  outputFormat: string;
+  sessions: number;
+  totalHours: number;
+  /** totalHours / windowDays —— 与「节点均衡」用的口径一致。 */
+  perDayHours: number;
+  avgHours: number;
+  medianHours: number;
+  firstStartMs: number | null;
+  lastEndMs: number | null;
+  /** 出现次数最多的开播/收播整点(0-23),用于概括「典型时段」。 */
+  typicalStartHour: number | null;
+  typicalEndHour: number | null;
+  /** 窗口内有录制的天数。 */
+  days: number;
+  nodes: { workerId: string; name: string | null; sessions: number }[];
+  /** 同一场同时在录的最大节点数(>1 = 该房间存在多节点冗余录制)。 */
+  maxNodes: number;
+  heatmap: StatsHeatmapCellDTO[];
+}
+
+/** 配置维度总览(与录制数据无关,读任务/规则即时算)。 */
+export interface StatsOverviewDTO {
+  windowDays: number;
+  knownRooms: number;
+  enabledRooms: number;
+  observedRooms: number;
+  sessions: number;
+  /** 去重后的「实际在播时长」合计(小时)。 */
+  broadcastHours: number;
+  uploadModes: { mode: string; count: number }[];
+  outputFormats: { format: string; count: number }[];
+  platforms: { platform: string; count: number }[];
+  engines: { engine: string; count: number }[];
+  danmu: { on: number; off: number };
+  nodeLoad: StatsNodeLoadDTO[];
+}
+
+/** GET /api/stats 响应。 */
+export interface StatsDTO {
+  generatedAt: number;
+  timeZone: string;
+  windowDays: number;
+  overview: StatsOverviewDTO;
+  rooms: StatsRoomRowDTO[];
+  /** 全房间合并热力图(跨节点去重后的「在播小时数」)。 */
+  heatmap: StatsHeatmapCellDTO[];
+  /** 还没有任何采集数据(前端显示空态,而不是 0 值图表)。 */
+  empty: boolean;
+  /** 最近一次采集写入时间;null = 从未采集。 */
+  lastCollectedAt: number | null;
 }

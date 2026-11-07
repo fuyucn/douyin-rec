@@ -16,7 +16,7 @@
 import { resolve, join } from "node:path";
 import { mkdirSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
-import { createLogger, platformForRoom, recordingRoomDir, sanitizePathSegment, processTimeZone, zonedStamp, type AdmitDecision, type DownloadEngine, type Platform, type PlatformStream, type Recorder, type RecordOpts, type RecorderEvents } from "@drec/core";
+import { createLogger, platformForRoom, recordingRoomDir, sanitizePathSegment, sanitizeSessionFileBase, processTimeZone, zonedStamp, type AdmitDecision, type DownloadEngine, type Platform, type PlatformStream, type Recorder, type RecordOpts, type RecorderEvents } from "@drec/core";
 import { logStreamMeta, type StreamMetaSource } from "@drec/ffmpeg-recorder-extra";
 
 const log = createLogger("stream_recorder");
@@ -73,7 +73,7 @@ export function describeStreamIdentity(probe: Pick<PlatformStream, "url" | "live
 }
 
 /** Re-exported for existing importers; the rule itself lives in core output-paths (issue #333). */
-export { sanitizePathSegment };
+export { sanitizePathSegment, sanitizeSessionFileBase };
 
 export class PollingRecorder implements Recorder {
   readonly name: string;
@@ -126,6 +126,12 @@ export class PollingRecorder implements Recorder {
   private lastThrottledReason: string | null = null;
   /** 连续探到风控的次数(递进退避用;探到正常即清零)。 */
   private throttleHits = 0;
+  /**
+   * Issue #476: "the platform says live but handed no playable URL" has been alerted for the current
+   * broadcast. Re-armed when a URL shows up or the broadcaster goes offline, so each broadcast alerts
+   * exactly once while the recorder keeps polling at the normal interval.
+   */
+  private unplayableAlerted = false;
 
   /** 注入下载引擎(ffmpeg / mesio)。name 取引擎 id,便于日志/识别。 */
   constructor(engine: DownloadEngine) {
@@ -146,7 +152,10 @@ export class PollingRecorder implements Recorder {
     // bilibili 等无 raw 的平台 → streamInfoLine 返 undefined(只 ffprobe 设备,也无伤)。
     if (probe.raw) logStreamMeta(url, probe.raw as StreamMetaSource, this.quality);
 
-    const safe = sanitizePathSegment(this.outName || owner) || this.channelId;
+    // The session file base must be `%`-free: both engines expand `%…` in their output templates,
+    // so a `%` in the anchor name made the real files unrecognisable to the growth watchdog (#474).
+    // Directory names are untouched (renaming an existing room dir would orphan its files).
+    const safe = sanitizeSessionFileBase(this.outName || owner) || this.channelId;
     // Directory via the core resolver. Legacy: <out>/<name> (channel id when the name is empty), exactly as before.
     // Room layout: the suffix-matched `<name>_<platform>_<room>` dir (the one this process created on its first
     // spawn, or an earlier one; an anchor rename never moves it), else a new one. Old name dirs are history.
@@ -223,6 +232,23 @@ export class PollingRecorder implements Recorder {
       const probe = await this.platform.getStream(this.channelId, this.quality, this.cookies);
       this.probeFails = 0; // 取流成功 → 清零
       if (this.stopped) return;
+      // Issue #476: confirmed live without a playable URL (CDN not ready / risk control). Treating this
+      // as "offline" silently polls for the whole broadcast. Alert once per broadcast instead; keep the
+      // normal cadence (no spawn, no extra API calls) so a URL is picked up on the next poll. The alert
+      // is re-armed by a usable URL or by a confirmed-offline probe.
+      if (probe.living && !probe.url) {
+        if (!this.unplayableAlerted) {
+          this.unplayableAlerted = true;
+          const why = probe.unplayableReason?.trim();
+          const msg =
+            `平台显示直播中但取不到可播放地址${why ? `(${why})` : ""} —— 保持轮询,长时间不恢复即整场漏录,请检查。room=${this.channelId}`;
+          log.warn(msg);
+          this.ev?.onProbeError?.(msg);
+        }
+        this.scheduleNextPoll();
+        return;
+      }
+      this.unplayableAlerted = false;
       if (probe.throttledReason) {
         // 风控(平台页可达但被限流)→ 显式日志 + **递进退避**降频,避免把风控伪装成「主播没开播」掩盖漏录。
         // 持续被限时探测间隔逐次翻倍(5→10→20→30 分钟封顶):越打越冷,必须真正降下来才可能恢复。

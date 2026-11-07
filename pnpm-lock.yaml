@@ -84,6 +84,9 @@ importers:
       '@drec/record-engine':
         specifier: workspace:*
         version: link:../record-engine
+      '@drec/zero-upload':
+        specifier: workspace:*
+        version: link:../zero-upload
       commander:
         specifier: ^12.0.0
         version: 12.1.0
@@ -214,6 +217,13 @@ importers:
       '@drec/post-process':
         specifier: workspace:*
         version: link:../post-process
+      ws:
+        specifier: ^8.21.0
+        version: 8.21.0
+    devDependencies:
+      '@types/ws':
+        specifier: ^8.5.0
+        version: 8.18.1
 
   packages/post-process:
     dependencies:

@@ -44,10 +44,18 @@ import type {
   NodeTasksDTO,
   NodeTaskLogsDTO,
   RoomDTO,
+  StatsDTO,
   RoomPayload,
+  ProcActiveDTO,
   HubResources,
 } from "@drec/contracts";
-export type { Task, TaskDetail, TaskRuntime, CookieStatus, BiliupAuthStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobNodeStateDTO, HubJobCandidateDTO, HubJobEventDTO, HubJobsDTO, HubQueueDTO, RollingDeliveryDTO, QueueItemDTO, NodeUploadStatusDTO, HubPoolSnapshotDTO, HubBlockedBroadcastDTO, QueuePhase, HubJobStepDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, NotifWebhookToggles, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult, WorkerStatus, NodeTasksDTO, NodeTaskLogsDTO, RoomDTO, RoomPayload, HubResources };
+export type { Task, TaskDetail, TaskRuntime, CookieStatus, BiliupAuthStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobNodeStateDTO, HubJobCandidateDTO, HubJobEventDTO, HubJobsDTO, HubQueueDTO, RollingDeliveryDTO, QueueItemDTO, NodeUploadStatusDTO, HubPoolSnapshotDTO, HubBlockedBroadcastDTO, QueuePhase, HubJobStepDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, NotifWebhookToggles, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult, WorkerStatus, NodeTasksDTO, NodeTaskLogsDTO, RoomDTO, RoomPayload, HubResources, ProcActiveDTO, StatsDTO };
+
+/**
+ * POST /api/rooms 的入参:与 PUT 同一份 `RoomPayload`,但 `recording.room` 必填
+ * (新建必须能从房间地址判定平台与房间号;其余字段缺省 = 服务端默认值)。
+ */
+export type CreateRoomInput = RoomPayload & { recording: { room: string } };
 
 /** POST /api/login/qr → start a QR-login session. */
 export interface QrStart {
@@ -102,6 +110,8 @@ export const api = {
   getPlatforms: (): Promise<PlatformsDTO> => request("GET", "/api/platforms"),
   getTask: (id: number): Promise<TaskDetail> => request("GET", `/api/tasks/${id}`),
   getTaskLogs: (id: number): Promise<{ lines: string[] }> => request("GET", `/api/tasks/${id}/logs`),
+  getTaskLive: (id: number): Promise<{ entries: Array<{ workerId: string; workerName: string; current?: import("@drec/contracts").LiveUploadSnapshot; previous?: import("@drec/contracts").LiveUploadSnapshot; history?: import("@drec/contracts").LiveUploadSnapshot[] }> }> =>
+    request("GET", `/api/tasks/${id}/live`),
   createTask: (input: TaskPayload): Promise<Task> => request("POST", "/api/tasks", input),
   updateTask: (id: number, input: Partial<TaskPayload>): Promise<Task> =>
     request("PATCH", `/api/tasks/${id}`, input),
@@ -137,15 +147,26 @@ export const api = {
   // ── 统一房间(T9):一次读写「录制 + 处理」两半 ────────────────────────────────
   listRooms: (): Promise<RoomDTO[]> => request("GET", "/api/rooms"),
   getRoom: (key: string): Promise<RoomDTO> => request("GET", `/api/rooms/${encodeURIComponent(key)}`),
+  /** 一次新建一个房间(录制任务默认停用,需手动开启);重复房间 409。 */
+  createRoom: (input: CreateRoomInput): Promise<RoomDTO> => request("POST", "/api/rooms", input),
   /** 一次改两半(各自可选);后端第二步失败会回滚第一步,不会留半成功。 */
   updateRoom: (key: string, input: RoomPayload): Promise<RoomDTO> =>
     request("PUT", `/api/rooms/${encodeURIComponent(key)}`, input),
+  /** 删除整个房间:录制任务 + hub 规则一起删(守卫:受管/在录/有进行中 job 会被拒)。 */
+  deleteRoom: (key: string): Promise<{ ok: boolean; key: string; deletedHistory: number }> =>
+    request("DELETE", `/api/rooms/${encodeURIComponent(key)}`),
 
   /** 拖拽排序持久化:keys = 完整送序。 */
   reorderHubRules: (keys: string[]): Promise<HubRuleDTO[]> => request("POST", "/api/hub/rules/reorder", { keys }),
 
   // ── hub 任务(运行态:step/进度/ETA/日志)──────────────────────────────────────
   // room 给定=只列该房间的历次 run(独立历史页);省略=全房间最近 N(规则行取最近一条)。
+  /** 场次日志清理预览(只统计,不删)。 */
+  previewJobLogs: (days: number): Promise<{ dryRun: true; olderThanDays: number; count: number; bytes: number }> =>
+    request("GET", `/api/maintenance/job-logs?olderThanDays=${days}`),
+  /** 场次日志清理执行(必须 confirm;failed 为删除失败的文件名)。 */
+  cleanupJobLogs: (days: number): Promise<{ olderThanDays: number; deleted: number; bytes: number; failed: Array<{ file: string; error: string }> }> =>
+    request("POST", "/api/maintenance/job-logs", { olderThanDays: days, confirm: true }),
   listHubJobs: (opts: { room?: string; limit?: number; offset?: number; states?: string[] } = {}): Promise<HubJobsDTO> => {
     const q = new URLSearchParams();
     if (opts.room) q.set("room", opts.room);
@@ -162,6 +183,7 @@ export const api = {
   /** 每个房间最新一条 run(房间列表徽标用;不受分页影响)。 */
   getLatestRuns: (): Promise<{ rooms: Array<{ roomKey: string; streamKey: string; state: string; bv: string | null; updatedAt: number; manualPhase?: string | null }> }> =>
     request("GET", "/api/hub/latest-runs"),
+  getStats: (days = 30): Promise<StatsDTO> => request("GET", `/api/stats?days=${days}`),
   getHubQueue: (
     opts: { phase?: string[]; states?: string[]; platform?: string[]; q?: string; sort?: "newest" | "oldest" } = {},
   ): Promise<HubQueueDTO> => {
@@ -230,6 +252,8 @@ export const api = {
 
   // ── 版本号(About)──────────────────────────────────────────────────────────
   getVersion: (): Promise<{ version: string }> => request("GET", "/api/version"),
+
+  getProcActive: (): Promise<ProcActiveDTO> => request("GET", "/api/proc/active"),
 
   // ── mesio 二进制路径 ─────────────────────────────────────────────────────────
   // mesioPath = 用户覆盖值(空=用默认);default = 留空时实际会用的路径(供占位符提示)。

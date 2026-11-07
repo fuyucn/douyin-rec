@@ -12,7 +12,7 @@ import { ProcUnsupported, type Transport } from "./transport.js";
 import { uploadStatusOf } from "./node-upload-status.js";
 
 export interface UploadPollerOpts {
-  ledger: Pick<SyncLedger, "listUploadPlans" | "touch" | "setUploadStatus">;
+  ledger: Pick<SyncLedger, "listUploadPlans" | "touch" | "setUploadStatus" | "setUploadPlan">;
   /** Getter, not a map: the hub reloads transports from config between ticks. */
   transports: () => Map<string, Transport>;
   unreachableAlertMs: number;
@@ -28,7 +28,10 @@ interface NodeHealth { since: number; alerted: boolean }
 function parsePlan(json: string): UploadPlan | null {
   try {
     const p = JSON.parse(json) as UploadPlan;
-    return p?.v === 1 && typeof p.nodeId === "string" && p.input ? p : null;
+    return p && (p.v === 1 || (p.v === 2 && p.mode === "part-chain" && Array.isArray(p.uploadJobIds)
+      && p.uploadJobIds.every((id) => typeof id === "string" && id !== "")))
+      && typeof p.nodeId === "string" && typeof p.orderKey === "string" && typeof p.prepJobId === "string"
+      && Number.isSafeInteger(p.generation) && p.input ? p : null;
   } catch { return null; }
 }
 
@@ -51,7 +54,7 @@ export function createUploadQueuePoller(o: UploadPollerOpts): { poll(): Promise<
     if (!t) return fail(plan.nodeId, streamKey, "node is not in the current hub config", false);
     let d: UploadDispatch;
     try {
-      d = await advanceUpload(t, plan, { now });
+      d = await advanceUpload(t, plan, { now, persist: (p) => o.ledger.setUploadPlan(streamKey, JSON.stringify(p)) });
     } catch (e) {
       return fail(plan.nodeId, streamKey, (e as Error).message, e instanceof ProcUnsupported);
     }

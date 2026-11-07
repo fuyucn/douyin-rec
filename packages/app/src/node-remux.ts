@@ -31,20 +31,21 @@ import {
   type NodeRemuxDeps,
 } from "@drec/processors";
 import {
-  platformForRoom,
   sealedSegmentIndices,
   sessionBaseOf,
   STAGE_CONTAINERS,
   survivingArtifacts,
   isUploadingMode,
-  pipelineBurns,
+  burnFlags,
+  shouldUseNodeSideUpload,
   type OutputFormat,
   type OutputFormatLock,
   type RollingSegment,
   type StageFormat,
 } from "@drec/core";
 import type { RollingUploadHook } from "@drec/manager";
-import { listHubRules, hubKey, type HubRule } from "./hub-store.js";
+import type { HubRule } from "./hub-store.js";
+import { enabledHubRuleForTask } from "./hub-rule-match.js";
 import type { RemuxQueueLike } from "./remux-queue.js";
 import type { Task } from "./store.js";
 
@@ -321,6 +322,8 @@ export type NodeOutputFormatLock = OutputFormatLock;
 export function nodeOutputFormatLock(
   task: Pick<Task, "id" | "room" | "managedBy" | "rollingEffective" | "streamUpload">,
   hubDir: string,
+  /** Rollout/test seam: override the global kill switch. Omitted = the production constant. */
+  opts: { nodeSideUploadEnabled?: boolean } = {},
 ): NodeOutputFormatLock | undefined {
   // 0 落盘流式直传(plans/039):源录像不落盘 → 没有文件可转换,所选格式无对象可作用。
   // 先于其它原因判定:这一条与 hub/rolling 无关,纯粹是「本任务不会产出文件」。
@@ -331,9 +334,15 @@ export function nodeOutputFormatLock(
   // 仅按房间键命中(非源任务):收尾派发取不到本任务的格式 → 锁(与派发侧 cli 只认 sourceTaskId 同口径)。
   if (b.rule.recording?.sourceTaskId !== task.id) return "hub-rule";
   // 本任务是源任务:留存清单(与 orchestrator 清理 / 收尾转格式派发同一判定 core survivingArtifacts)里无源视频 → no-survivors。
-  // 节点侧上传(与 pipeline `shouldUseNodeSideUpload` 同条件)不往 stage 放源段副本 → stagePulled=false / stageHasXmlCopy=false。
+  // Node-side upload keeps no source copy on stage → stagePulled=false / stageHasXmlCopy=false.
+  // The verdict comes from core (the one definition the orchestrator also uses), so the global kill
+  // switch can never be missed here (issue #471).
   const p = b.rule.pipeline;
-  const nodeSide = !!p?.steps?.nodeSideUpload && isUploadingMode(p?.upload?.mode) && !pipelineBurns(p?.steps);
+  const nodeSide = shouldUseNodeSideUpload(
+    { uploadMode: isUploadingMode(p?.upload?.mode) ? "upload" : "stage", steps: p?.steps },
+    burnFlags(p?.steps),
+    opts.nodeSideUploadEnabled,
+  ).ok;
   const s = survivingArtifacts({ pipeline: { cleanup: p?.cleanup } }, { stageHasXmlCopy: !nodeSide, stagePulled: !nodeSide });
   return s.nodeSourceSegments || s.stageSourceSegments ? undefined : "no-survivors";
 }
@@ -348,11 +357,8 @@ function sealConversionBlocker(
 ): "hub-managed" | "rolling" | { rule: HubRule } | undefined {
   if (task.managedBy === "hub") return "hub-managed";
   if (task.rollingEffective) return "rolling";
-  const platform = platformForRoom(task.room);
-  const key = hubKey(platform.id, platform.extractRoomSlug(task.room));
   // 源任务规则优先于仅房间键命中的规则:任务既是某规则的源、又与另一规则同房间键时,收尾只认前者的格式。
-  const enabled = listHubRules(hubDir).filter((r) => r.enabled);
-  const rule = enabled.find((r) => r.recording?.sourceTaskId === task.id) ?? enabled.find((r) => r.key === key);
+  const rule = enabledHubRuleForTask(task, hubDir);
   return rule ? { rule } : undefined;
 }
 

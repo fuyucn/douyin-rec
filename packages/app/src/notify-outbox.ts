@@ -1,0 +1,117 @@
+/**
+ * notify-outbox.ts — node-side durable queue for notification events (issue #405).
+ *
+ * A managed node no longer sends Discord itself: every event is appended here and the master
+ * pulls it over the existing SSH channel, then acks. That keeps one sender (the master) and
+ * survives a master outage. Standalone (non-managed) nodes keep sending directly.
+ */
+import { DatabaseSync } from "node:sqlite";
+import type { NotifyEvent } from "@drec/core";
+
+export interface OutboxEvent {
+  id: number;
+  at: number;
+  /** The node's own task id: NOT the master's id space, only useful on the node. */
+  taskId: number | null;
+  /** Room URL/key, so the master can resolve the right task after sync. */
+  room: string | null;
+  /** Whether the master should deliver this to Discord (in-app-only events are false). */
+  wantWebhook: boolean;
+  event: NotifyEvent;
+}
+
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS notify_outbox (
+  id      INTEGER PRIMARY KEY AUTOINCREMENT,
+  at      INTEGER NOT NULL,
+  task_id INTEGER,
+  room    TEXT,
+  want_webhook INTEGER NOT NULL DEFAULT 1,
+  payload TEXT NOT NULL,
+  acked   INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS notify_outbox_unacked ON notify_outbox(acked, id);
+`;
+
+/** Hard cap on rows kept in the outbox; older rows are dropped beyond it (issue #409). */
+export const DEFAULT_MAX_ROWS = 10_000;
+/** Prune every N appends so a node without a polling master still stays bounded. */
+const APPEND_PRUNE_EVERY = 200;
+
+export class NotifyOutbox {
+  private readonly db: DatabaseSync;
+  private appends = 0;
+
+  constructor(path: string) {
+    this.db = new DatabaseSync(path);
+    // serve 与 `_notify-outbox` 命令是两个进程写同一个文件:WAL + busy_timeout 才不会一撞就丢事件。
+    this.db.exec("PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;");
+    this.db.exec(SCHEMA);
+    // 进程重启会重置计数:启动时先清一次,避免长期不停机/不轮询时永远等不到第 200 条。
+    try { this.prune(); } catch { /* 启动清理失败不影响使用 */ }
+  }
+
+  /** Append one event; returns its monotonic id (the master's cursor). */
+  append(taskId: number | null, room: string | null, event: NotifyEvent, wantWebhook = true, now = Date.now()): number {
+    // 每 200 条顺手清理一次:主控长期不拉取时也不会无限增长(issue #409)。
+    if (++this.appends % APPEND_PRUNE_EVERY === 0) {
+      try { this.prune(undefined, undefined, now); } catch { /* 清理失败不影响写入 */ }
+    }
+    const r = this.db
+      .prepare("INSERT INTO notify_outbox(at, task_id, room, want_webhook, payload) VALUES(?,?,?,?,?)")
+      .run(now, taskId, room, wantWebhook ? 1 : 0, JSON.stringify(event));
+    return Number(r.lastInsertRowid);
+  }
+
+  /** Unacked events with id > after, oldest first. */
+  list(after = 0, limit = 200): OutboxEvent[] {
+    const rows = this.db
+      .prepare("SELECT id, at, task_id, room, want_webhook, payload FROM notify_outbox WHERE acked = 0 AND id > ? ORDER BY id LIMIT ?")
+      .all(after, limit) as Array<{ id: number; at: number; task_id: number | null; room: string | null; want_webhook: number; payload: string }>;
+    const out: OutboxEvent[] = [];
+    for (const r of rows) {
+      try {
+        out.push({
+          id: r.id, at: r.at, taskId: r.task_id ?? null, room: r.room ?? null,
+          wantWebhook: r.want_webhook !== 0,
+          event: JSON.parse(r.payload) as NotifyEvent,
+        });
+      } catch {
+        // Corrupt row: ack it so it cannot block the queue forever.
+        this.ack([r.id]);
+      }
+    }
+    return out;
+  }
+
+  /** Mark delivered (or poison) rows as done. Returns how many changed. */
+  ack(ids: number[]): number {
+    if (ids.length === 0) return 0;
+    const stmt = this.db.prepare("UPDATE notify_outbox SET acked = 1 WHERE id = ?");
+    let n = 0;
+    for (const id of ids) n += Number(stmt.run(id).changes ?? 0);
+    return n;
+  }
+
+  /**
+   * Bound the queue: drop rows older than the retention window (acked or not) and then, if the
+   * table is still above `maxRows`, drop the oldest rows regardless of state. Without the second
+   * step a master that never polls lets the file grow forever.
+   */
+  prune(days = 7, maxRows = DEFAULT_MAX_ROWS, now = Date.now()): number {
+    const cap = Number.isFinite(maxRows) && maxRows > 0 ? maxRows : DEFAULT_MAX_ROWS;
+    const cut = now - days * 86_400_000;
+    let removed = Number(this.db.prepare("DELETE FROM notify_outbox WHERE at < ?").run(cut).changes ?? 0);
+    const total = Number((this.db.prepare("SELECT COUNT(*) AS n FROM notify_outbox").get() as { n: number }).n);
+    if (total > cap) {
+      removed += Number(this.db.prepare(
+        "DELETE FROM notify_outbox WHERE id IN (SELECT id FROM notify_outbox ORDER BY id LIMIT ?)",
+      ).run(total - cap).changes ?? 0);
+    }
+    return removed;
+  }
+
+  close(): void {
+    this.db.close();
+  }
+}

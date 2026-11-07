@@ -1,17 +1,26 @@
 /**
- * room-editor-form.ts — `/rooms` editor state ↔ `PUT /api/rooms/:key` payload. Pure, tested.
+ * room-editor-form.ts — `/rooms` editor state ↔ room payload (`POST /api/rooms` / `PUT /api/rooms/:key`).
+ * Pure, tested.
  *
  * Field dependencies (locks, upload-method fallback, burn effective values) are NOT decided here —
  * they come from room-form-rules (shared with the Hub rule dialog). This file only maps.
+ * Create and edit share the same mapping ({@link submitPayload}): the only differences are the
+ * required `recording.room` (create) and the node role (`withProcessing`).
  */
 import type { OutputFormat } from "@drec/output-format";
-import type { RoomDTO, RoomPayload } from "../api/client";
+import type { OutputFormatLock } from "@drec/contracts";
+import type { CreateRoomInput, PlatformDTO, RoomDTO, RoomPayload } from "../api/client";
 import { splitSchedule } from "./labels";
 import {
-  keepArchiveFromStored, methodFromStored, outputFormatFromStored, storedFromForm, type FormFacts, type UploadMethod,
+  keepArchiveFromStored, methodFromStored, outputFormatFromStored, storedFromForm, taskOutputFormatLock, type FormFacts, type UploadMethod,
 } from "./room-form-rules";
 
 export interface RoomForm {
+  /**
+   * 直播间地址。新建时是用户输入(必填);编辑时只是展示用的存量值 ——
+   * payload **从不**回写它(存量写回会触发房间校验副作用)。
+   */
+  room: string;
   name: string;
   quality: string;
   engine: string;
@@ -29,12 +38,15 @@ export interface RoomForm {
   uploadOn: boolean;
   method: UploadMethod;
   streamUpload: boolean;
+  /** Always true: the no-spool mode is no longer a selectable configuration. */
   streamUploadSpool: boolean;
   mergeSegments: boolean;
   burnDanmu: boolean;
   burnLivechat: boolean;
   tsDirect: boolean;
   outputFormat: OutputFormat;
+  /** 后端下发的输出格式锁(TaskDTO/RoomDTO 同一判定 `nodeOutputFormatLock`;未锁/旧后端 = null,降级不锁)。 */
+  outputFormatLock: OutputFormatLock | null;
   uploadPrivate: boolean;
   tid: string;
   tag: string;
@@ -111,6 +123,7 @@ export function formFromRoom(r: RoomDTO): RoomForm {
   const rec = r.recording;
   const p = r.processing?.pipeline ?? {};
   return {
+    room: r.room,
     name: rec?.name ?? "",
     quality: rec?.quality ?? "",
     engine: rec?.engine ?? "",
@@ -124,13 +137,14 @@ export function formFromRoom(r: RoomDTO): RoomForm {
     procEnabled: r.processing?.enabled ?? true,
     ...methodFromStored(p.upload?.mode, p.steps?.nodeSideUpload === true),
     streamUpload: rec?.streamUpload === true,
-    streamUploadSpool: rec?.streamUploadSpool !== false,
+    streamUploadSpool: true,
     // Burn defaults to ON (backend burnFlags reads `!== false`); `=== true` would silently save it off.
     mergeSegments: p.steps?.mergeSegments !== false,
     burnDanmu: p.steps?.burnDanmu !== false,
     burnLivechat: p.steps?.burnLivechat !== false,
     tsDirect: p.steps?.tsDirect === true,
     outputFormat: outputFormatFromStored(rec?.outputFormat),
+    outputFormatLock: rec?.outputFormatLock ?? null,
     uploadPrivate: p.upload?.private !== false,
     tid: String(p.upload?.tid ?? 21),
     tag: p.upload?.tag ?? "",
@@ -153,8 +167,12 @@ export function formFromRoom(r: RoomDTO): RoomForm {
 /** Room facts the rules need beyond the form itself. */
 export interface RoomContext {
   hasRecording: boolean;
-  /** The room already has a hub rule. A task-only room has none, so nothing can burn there. */
+  /** The room had a hub rule when the editor opened (not whether this save writes one). */
   hasRule: boolean;
+  /** This save also writes the rule half (master). A worker never does, even if a stale local rule exists. */
+  writesRule: boolean;
+  /** The user changed delivery fields in this edit; a stale zero-disk value must then be written back. */
+  deliveryTouched: boolean;
   danmuAvailable: boolean;
   cookieReady: boolean;
   cookieForStream: boolean;
@@ -183,7 +201,9 @@ export function ruleFactsOf(f: RoomForm, ctx: RoomContext): FormFacts {
   return factsOf(f, { ...ctx, hasRule: true });
 }
 
-export type PayloadResult = { ok: true; payload: RoomPayload } | { ok: false; error: "schedule" | "seasonSectionId" | "partSizeMiB" };
+export type PayloadError = "schedule" | "seasonSectionId" | "partSizeMiB" | "room";
+
+export type PayloadResult = { ok: true; payload: RoomPayload } | { ok: false; error: Exclude<PayloadError, "room"> };
 
 /**
  * Form → payload. `recording.enabled` is deliberately NOT sent: the list/detail switch owns it,
@@ -196,20 +216,28 @@ export function payloadFromForm(f: RoomForm, ctx: RoomContext): PayloadResult {
   if (f.uploadOn && !isValidSeasonSectionIdInput(f.seasonSectionId)) return { ok: false, error: "seasonSectionId" };
   if (f.uploadOn && !isValidPartSizeInput(f.partSizeMiB)) return { ok: false, error: "partSizeMiB" };
   const stored = storedFromForm(ruleFactsOf(f, ctx));
+  // 后端锁(managedBy/规则/边录边传/0 落盘)下的 outputFormat 不生效 → 省略(PATCH = 保持原值),
+  // 避免「改了但后端忽略」的静默无效。与表单依赖锁(投稿恒 mp4,`stored.outputFormat`)是两把锁,都要遵守。
+  const backendFormatLocked = taskOutputFormatLock({ outputFormatLock: f.outputFormatLock }).locked;
   const trimOrUndef = (s: string): string | undefined => s.trim() || undefined;
+  // Zero-disk fields are owned by the rule: only a save that writes it may update them.
+  // Write on an existing rule, a newly selected rolling mode, or an explicit delivery edit;
+  // otherwise omit (PATCH = keep) so stale values are not silently rewritten.
+  const writesZeroDisk = ctx.writesRule
+    && (ctx.hasRule || stored.mode === "rolling" || ctx.deliveryTouched);
+  const zeroDisk = writesZeroDisk
+    ? { streamUpload: stored.mode === "rolling" && f.streamUpload, streamUploadSpool: true }
+    : {};
   const recording: RoomPayload["recording"] = ctx.hasRecording
     ? {
         name: f.name.trim() || null,
         quality: f.quality,
         engine: f.engine,
         segmentSec: Number(f.segmentSec) || 1800,
-        outputFormat: stored.outputFormat,
+        ...(backendFormatLocked ? {} : { outputFormat: stored.outputFormat }),
         danmu: f.danmu ? 1 : 0,
         useCookie: f.useCookie,
-        // Zero-disk is only meaningful under rolling; other modes clear it so a later save
-        // cannot resurrect a hidden switch.
-        streamUpload: stored.mode === "rolling" && f.streamUpload,
-        streamUploadSpool: f.streamUploadSpool,
+        ...zeroDisk,
         ...sched,
         ...webhookPatch(f.webhook, f.webhookClear),
       }
@@ -253,4 +281,64 @@ export function payloadFromForm(f: RoomForm, ctx: RoomContext): PayloadResult {
       },
     },
   };
+}
+
+/** 新建房间的「编辑空房间」基准:与 formFromRoom 同一份默认,避免第二套默认值漂移。 */
+const EMPTY_ROOM: RoomDTO = { key: "", platform: "", roomSlug: "", room: "", recording: null, processing: null };
+
+/**
+ * 新增房间的表单初始值。除了 `room`(用户要填)与平台默认 quality/engine,其余都跟编辑空房间一致:
+ * segmentSec 1800、useCookie 开、templates = {@link DEFAULT_TITLE_TEMPLATES}、tid 21、上传关(存档)。
+ * `platform` 省略 = 平台未定(地址还没填)→ quality/engine 留空,待平台识别后再补默认。
+ * 弹幕默认 **开**(与旧「添加房间」弹窗一致):建房间不开播,开了也不会多录什么。
+ */
+export function blankForm(platform?: Pick<PlatformDTO, "defaultQuality" | "defaultEngine">): RoomForm {
+  return {
+    ...formFromRoom(EMPTY_ROOM),
+    room: "",
+    danmu: true,
+    quality: platform?.defaultQuality ?? "",
+    engine: platform?.defaultEngine ?? "",
+  };
+}
+
+/**
+ * 提交结果。create = `POST /api/rooms`(两半一次写完,`recording.room` 必填);
+ * edit = `PUT /api/rooms/:key`(不带 `room`,存量地址不回写)。
+ */
+export type SubmitResult =
+  | { ok: true; mode: "create"; payload: CreateRoomInput }
+  | { ok: true; mode: "edit"; payload: RoomPayload }
+  | { ok: false; error: PayloadError };
+
+/** 重载:调用点写死 mode,返回体才能不带联合(create 的 payload 才有 `recording.room`)。 */
+export function submitPayload(
+  f: RoomForm, ctx: RoomContext, o: { mode: "create"; withProcessing: boolean },
+): { ok: true; mode: "create"; payload: CreateRoomInput } | { ok: false; error: PayloadError };
+export function submitPayload(
+  f: RoomForm, ctx: RoomContext, o: { mode: "edit"; withProcessing: boolean },
+): { ok: true; mode: "edit"; payload: RoomPayload } | { ok: false; error: PayloadError };
+
+/**
+ * 新增与编辑**同一条**提交路径:同一套数值/排期校验({@link payloadFromForm})、同一份字段映射。
+ * - `mode: "create"` → 多一个必填的 `recording.room`(后端用它判定平台与房间号)。
+ * - `withProcessing: false`(worker:`nodeCaps().editPipeline === false`)→ 整段 `processing` 不发:
+ *   规则只在主控生效,worker 上写它无用且后端直接 400。
+ */
+export function submitPayload(
+  f: RoomForm,
+  ctx: RoomContext,
+  o: { mode: "create" | "edit"; withProcessing: boolean },
+): SubmitResult {
+  const base = payloadFromForm(f, ctx);
+  if (!base.ok) return base;
+  // `processing` 是 hub 规则字段:worker 上没有规则可写,整段省略(后端 PUT/POST 也会拒);
+  // spread + undefined 仍会保留键,必须重建不含 processing 的对象。
+  const payload: RoomPayload = o.withProcessing
+    ? base.payload
+    : (base.payload.recording ? { recording: base.payload.recording } : {});
+  if (o.mode === "edit") return { ok: true, mode: "edit", payload };
+  const room = f.room.trim();
+  if (!room) return { ok: false, error: "room" };
+  return { ok: true, mode: "create", payload: { ...payload, recording: { ...(payload.recording ?? {}), room } } };
 }

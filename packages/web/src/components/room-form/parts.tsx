@@ -19,7 +19,7 @@ export function SectionHeader({ title, toggle }: {
   );
 }
 
-export function ToggleRow({ label, hint, checked, onChange, lock, lockedChecked, nested, badge }: {
+export function ToggleRow({ label, hint, checked, onChange, lock, lockedChecked, nested, badge, icon }: {
   label: string;
   hint?: ReactNode;
   checked: boolean;
@@ -31,13 +31,15 @@ export function ToggleRow({ label, hint, checked, onChange, lock, lockedChecked,
   /** 缩进,表示依附于上一行。 */
   nested?: boolean;
   badge?: ReactNode;
+  /** 可选的小图标,与标签同一行;仅作视觉提示,label 仍完整表达含义。 */
+  icon?: ReactNode;
 }): ReactNode {
   const t = useT();
   const locked = lock?.locked === true;
   return (
     <label className={`switch-row${nested ? " ml-6" : ""}`} data-disabled={locked ? "true" : undefined}>
       <span className="flex flex-col min-w-0">
-        <span className="text-sm font-medium text-ink inline-flex items-center gap-1.5">{label}{badge}</span>
+        <span className="text-sm font-medium text-ink inline-flex flex-wrap items-center gap-1.5">{icon}{label}{badge}</span>
         {(locked || hint) && (
           <span className="text-xs text-muted mt-0.5">{locked && lock?.reasonKey ? t(lock.reasonKey) : hint}</span>
         )}

@@ -63,11 +63,13 @@ describe("record --stream-upload on a hub-managed node", () => {
 
 describe("master spec builder", () => {
   it("decides per node through planZeroDiskSpec and ships the delivery with the spec", () => {
-    expect(cli).toContain("planZeroDiskSpec({");
-    expect(cli).toContain("...(zeroDiskDelivery ? { zeroDiskDelivery } : {})");
-    expect(cli).toContain("allowsPush: zeroDiskFleet.allowsPush(workerId)");
-    expect(cli).toContain("ruleError: zeroDiskRuleError(src.streamUpload");
-    expect(cli).toContain("masterCookiesPath: hubCfg.cookies");
+    // Issue #481: the builder moved out of the CLI entry into @drec/app so it can be tested directly.
+    const builder = readFileSync(join(ROOT, "packages/app/src/hub-desired.ts"), "utf-8");
+    expect(builder).toContain("planZeroDiskSpec({");
+    expect(builder).toContain("...(zd.delivery ? { zeroDiskDelivery: zd.delivery } : {})");
+    expect(builder).toContain("allowsPush: ctx.allowsPush(workerId)");
+    expect(builder).toContain("ruleError: zeroDiskRuleError(src.streamUpload");
+    expect(builder).toContain("masterCookiesPath: ctx.cookiesPath");
   });
   it("probes capabilities before building specs and polls receipts after applying them", () => {
     const refresh = cli.indexOf("zeroDiskFleet.refreshSupport(");

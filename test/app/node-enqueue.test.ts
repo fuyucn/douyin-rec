@@ -1,7 +1,8 @@
 // plans/036 T9a:远端入队通道 —— 节点侧 `_enqueue` / `_proc-status` 执行体 + capabilities + Transport(ssh / local)。
 // 任务表是真 sqlite(临时目录);ssh 的 `run` 用进程内「假节点」调同一执行体,验证编解码往返。
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -10,7 +11,7 @@ import {
 import { ProcQueueStore, fileTagOf, procQueueDbPath } from "@drec/proc-queue";
 import { remuxProcessor, remuxTargetPath } from "@drec/processors";
 import {
-  assertJobInvariantsReal, decodeJobIds, handleEnqueue, handleProcStatus, nodeAllowedRoots,
+  assertJobInvariantsReal, decodeJobIds, handleEnqueue, handleProcStatus, nodeAllowedRoots, remoteEnqueueKinds,
 } from "../../packages/app/src/node-enqueue.js";
 import { SshTransport } from "../../packages/orchestrator/src/transport-ssh.js";
 import { LocalTransport } from "../../packages/orchestrator/src/transport-local.js";
@@ -216,8 +217,20 @@ describe("_enqueue:回执语义", () => {
 });
 
 describe("_proc-status", () => {
-  it("库不存在 → []", () => {
+  it("库不存在 → [](该节点确实什么都没排队)", () => {
     expect(handleProcStatus(root, ["remux:x#g1"])).toEqual([]);
+  });
+
+  it("库打不开 → 抛错,不是 [](issue #470)", () => {
+    // A directory at the db path makes the open itself fail.
+    mkdirSync(procQueueDbPath(root), { recursive: true });
+    expect(() => handleProcStatus(root, ["remux:x#g1"])).toThrow(/proc-queue status unavailable/);
+  });
+
+  it("查询抛错(库文件损坏)→ 抛错,不是 [](issue #470)", () => {
+    mkdirSync(dirname(procQueueDbPath(root)), { recursive: true });
+    writeFileSync(procQueueDbPath(root), "not a sqlite database", "utf-8");
+    expect(() => handleProcStatus(root, ["remux:x#g1"])).toThrow(/proc-queue status unavailable/);
   });
 
   it("回执含 state / leaseAlive / error;未知 jobId 不出现", () => {
@@ -241,7 +254,8 @@ describe("_proc-status", () => {
 
 /** 进程内「假节点」:把 ssh argv 路由到同一执行体(等价于节点上跑 `_enqueue` / `_proc-status`)。 */
 const fakeNodeRun = (dataRoot: string, o = opts()) => async (argv: string[]): Promise<string> => {
-  const [, , cmd, , b64] = argv[0].split(" ");
+  const [, , cmd, , quoted] = argv[0].split(" ");
+  const b64 = (quoted ?? "").replace(/^'|'$/g, ""); // SshTransport single-quotes every argument
   if (cmd === "_enqueue") return JSON.stringify(handleEnqueue(dataRoot, decodeEnqueue(b64), o)) + "\n";
   if (cmd === "_proc-status") return JSON.stringify({ receipts: handleProcStatus(dataRoot, decodeJobIds(b64)) }) + "\n";
   if (cmd === "_node-capabilities") return JSON.stringify({ biliup: true, cookies: true, diskFreeGB: 9, cjkFonts: false, processors: ["remux"] }) + "\n";
@@ -334,5 +348,42 @@ describe("registerBuiltinTransports.procChannel", () => {
     registerBuiltinTransports({ ffprobe: async () => ({ durationSec: 0, startMs: 0, endMs: 0 }) });
     const t = getTransport({ id: "local", kind: "local", dataRoot: root } as never);
     await expect(t.enqueue!(req())).rejects.toBeInstanceOf(ProcUnsupported);
+  });
+});
+
+describe("plan 046 PR5: upload-part remote enqueue", () => {
+  const partJob = (file: string, index: number, order = "order-pr5"): ProcessJob => ({
+    jobId: jobIdOf("upload-part", `${order}:part:${index}`, 1),
+    kind: "upload-part", logicalKey: `${order}:part:${index}`, generation: 1,
+    inputs: [file], params: { ctx: { v: 1, orderKey: order, index, file, fp: { size: 0, mtimeMs: 0 } } },
+    replaceInputs: false, owner: { taskId: 1 }, createdAt: 1, orderKey: order, seq: index, prepJobId: "prep",
+  });
+
+  it("advertises upload-part only when the node lists it", () => {
+    expect(remoteEnqueueKinds(["upload-prep"])).not.toContain("upload-part");
+    expect(remoteEnqueueKinds(["upload-part"])).toContain("upload-part");
+  });
+
+  it("req.batch enqueues the whole part chain atomically and fills the node-side fingerprint", async () => {
+    const a = file(rec, "p1.mp4");
+    const b = file(rec, "p2.mp4");
+    const jobs = [partJob(a, 1), partJob(b, 2)];
+    const r = handleEnqueue(root, { v: 1, jobs, batch: true }, { ...opts(), remoteKinds: ["upload-part"] });
+    expect(r.results.map((x) => x.state)).toEqual(["pending", "pending"]);
+    const stored = store().list();
+    expect(stored).toHaveLength(2);
+    for (const row of stored) {
+      const ctx = row.params.ctx as { file: string; fp: { size: number; mtimeMs: number } };
+      const st = statSync(ctx.file);
+      expect(ctx.fp).toEqual({ size: st.size, mtimeMs: st.mtimeMs });
+    }
+  });
+
+  it("a missing part file rejects the whole batch and leaves no rows", () => {
+    const a = file(rec, "p3.mp4");
+    const missing = join(rec, "missing.mp4");
+    const r = handleEnqueue(root, { v: 1, jobs: [partJob(a, 1), partJob(missing, 2)], batch: true }, { ...opts(), remoteKinds: ["upload-part"] });
+    expect(r.results.map((x) => x.state)).toEqual(["rejected", "rejected"]);
+    expect(store().list()).toHaveLength(0);
   });
 });

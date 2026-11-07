@@ -6,7 +6,10 @@ import type {
 import { XmlDanmuWriter } from "./danmu-xml/index.js";
 import { writeSessionSidecar } from "./session-sidecar.js";
 export { writeSessionSidecar, type SidecarWriteHooks } from "./session-sidecar.js";
-import { createLogger, decorateRecordEvent, platformForRoom, processTimeZone, sessionBaseOf, stripVideoExt } from "@drec/core";
+import {
+  announceRecorderStatus, createLogger, decorateRecordEvent, platformForRoom, processTimeZone, sessionBaseOf, setRecorderPhase, setRecorderSession,
+  SAME_BROADCAST_GAP_MS, stripVideoExt,
+} from "@drec/core";
 
 // 0 落盘流式直传(plans/039)在 record 进程里自己连弹幕,不复用 RecordingSession;
 // 它需要同一个 writer 保证 xml 格式一致,所以从这里公开导出(格式的唯一实现仍在 danmu-xml)。
@@ -26,10 +29,12 @@ export const SHORT_LIVED_ALARM = 10;
 
 /**
  * 「同场断流重连」的有效窗口(ms):自断流起算,窗口内的重启才按同一场放行闸门;超窗后按新一场处理。
- * 与 hub 的断流重连合并窗(默认 10 分钟)同口径。必要性:收播那刻判活可能滞后 / 抛错(都落成「仍在播」),
- * 若标志永不过期,几小时后的**下一场**开播会被误当同场而绕过闸门(审计发现)。
+ * 取值 = core 的 `SAME_BROADCAST_GAP_MS`(issue #475):同场口径的唯一真理源是
+ * `packages/core/src/broadcast-window.ts`,本常量只是 manager 侧对它的别名,不再自带一套容差。
+ * 窗口本身存在的必要性:收播那刻判活可能滞后 / 抛错(都落成「仍在播」),若标志永不过期,
+ * 几小时后的**下一场**开播会被误当同场而绕过磁盘准入闸门(审计发现)。
  */
-export const SAME_BROADCAST_WINDOW_MS = 10 * 60_000;
+export const SAME_BROADCAST_WINDOW_MS = SAME_BROADCAST_GAP_MS;
 
 export interface SessionOpts {
   /** Seconds to wait before reconnecting after an unexpected stream drop. Default: 5. */
@@ -138,6 +143,8 @@ export class RecordingSession {
   private sameBroadcastReconnect = false;
   /** 同场重连标志的过期时刻(epoch ms);超过后 admit 按新一场处理。 */
   private sameBroadcastUntil = 0;
+  /** Issue #477: a sidecar-write failure was already alerted in this session (re-armed by start()). */
+  private sidecarAlerted = false;
   /** 上一次被拒绝的原因(同一原因只告警一次;放行后复位)。 */
   private lastAdmitDenied: string | null = null;
   /** 本会话的边录边传钩子(每次 _startInner 新建)。 */
@@ -266,6 +273,7 @@ export class RecordingSession {
     this.sessionStart = null;
     this.currentLiveSessionId = null;
     this.sessionLiveId = null;
+    this.sidecarAlerted = false;
 
     mkdirSync(opts.outDir, { recursive: true });
     await this._startInner();
@@ -285,7 +293,7 @@ export class RecordingSession {
 
     // 进程已起、录制器在轮询开播但尚未拿到流 → 「等待开播」。父进程 TaskManager 解析
     // `[状态] X` → UI 区分「等待开播中」vs「录制中」（避免未开播也显示录制中）。
-    console.log(`[状态] 等待开播`);
+    announceRecorderStatus("等待开播", "polling");
 
     const ev: RecorderEvents = {
       onLive: (i) => {
@@ -301,7 +309,7 @@ export class RecordingSession {
         // 判据 = offlineNotified(offline 时查权威 getLiving=false → 已确认下播);
         // 抖动断流(仍在播)不清 —— 同一场重连保留首值,避免被后续空值清掉。
         if (this.offlineNotified) this.liveTitle = "";
-        console.log(`[状态] 录制中`); // 真正拿到流、开始录视频
+        announceRecorderStatus("录制中", "recording"); // 真正拿到流、开始录视频
         const resolved = i.anchorName || this.anchor;
         // 抓到主播名后打一行可解析日志（父进程 TaskManager 解析 → UI 显示主播名）。
         // 只在首次拿到非空主播名、且与上次不同时打，避免重连刷屏。
@@ -367,6 +375,7 @@ export class RecordingSession {
       },
       // Only open our writer for a new segment when we are responsible for the xml.
       onSegment: (tsPath) => {
+        setRecorderSession(sessionBaseOf(tsPath)); // state file: the session now being written
         if (ownWriter) this.openWriterForSegment(tsPath);
         else log.info(`新分段 (biliLive 自管 xml): ${tsPath}`);
         // 边录边传(T-33):通知钩子有新分段(未封口;由钩子自己按封口规则决定何时上传)。
@@ -406,6 +415,8 @@ export class RecordingSession {
     if (this.draining) { await this._finishDrain(); return; }
     if (this.reconnecting) return;       // already reconnecting — ignore duplicate event
     this.reconnecting = true;
+    // No longer pulling; the previous session's tail (seal / rolling upload / remux) may still be in flight.
+    setRecorderPhase("finalizing");
 
     // 标记断流缺口起点(重连成功 onLive 时用于算中断时长 + 区分「重连」vs「首次开播」)。
     this.offlineSince = Date.now();
@@ -453,6 +464,8 @@ export class RecordingSession {
 
     // Check again after async teardown — user may have called stop() during teardown
     if (this.userStopped) { this.reconnecting = false; return; }
+    // Previous session fully finalized: from here on we only wait to reconnect to the next broadcast.
+    setRecorderPhase("polling", null);
 
     // 指数退避 + 封顶:_startInner 持续抛错(如短链解析/取流初始化失败)时不再每隔
     // reconnectDelaySec 死循环刷屏/打 API。delay = reconnectDelaySec * 2^fails,封顶 300s。
@@ -557,9 +570,39 @@ export class RecordingSession {
     // 会话**开始**即写身份 sidecar `{base}.session.json`:roomSlug(web_rid)+ platform = 唯一身份。
     // 从第一秒就有、跨节点一致、不依赖主播名解析。停录时同名覆盖、补上 gaps(见 _writeSession)。
     // 一个 sidecar 同时承载「身份(聚类)」+「缺口(选优)」,不再分 meta/gaps 两个文件。
+    void this._writeSessionSafe(xmlPath.replace(/\.xml$/i, ""));
+  }
+
+  /**
+   * Issue #477: write the session sidecar without ever touching recording. Every failure is logged
+   * with its reason, and the FIRST failure of each session also raises one alert — hub clusters and
+   * selects nodes by this file, so a missing sidecar must be operator-visible.
+   *
+   * Dedup is per session ({@link start}), not per sidecar base: a same-broadcast reconnect builds a
+   * NEW stamped name, so a base-keyed flag re-armed on every flap under a persistent EACCES/ENOSPC.
+   * The stop path awaits the bounded notifier so the alert is not lost when the caller exits the
+   * process right after stop().
+   */
+  private async _writeSessionSafe(base: string, withGaps = false): Promise<void> {
     try {
-      this._writeSession(xmlPath.replace(/\.xml$/i, ""));
-    } catch { /* sidecar 写失败不影响录制 */ }
+      this._writeSession(base, withGaps);
+    } catch (e) {
+      const reason = (e as Error)?.message ?? String(e);
+      log.warn(`会话边车写入失败(${withGaps ? "收尾" : "开录"}):`, reason);
+      if (this.sidecarAlerted) return;
+      this.sidecarAlerted = true;
+      const event: NotifyEvent = {
+        kind: "error",
+        stage: "边车",
+        message:
+          `会话边车 ${basename(base)}.session.json 写入失败:${reason}。hub 可能无法按该场聚类/选优;` +
+          `录制继续进行,不受影响。请检查输出目录权限与磁盘剩余空间。`,
+      };
+      try {
+        if (withGaps) await this.notifyAwait(event);
+        else this.notify(event);
+      } catch { /* a throwing notifier must never touch recording */ }
+    }
   }
 
   /**
@@ -609,6 +652,7 @@ export class RecordingSession {
   async stop(reason = "手动停止"): Promise<void> {
     if (this.userStopped) return;
     this.userStopped = true;
+    setRecorderPhase("finalizing"); // stop pulling, then seal + wait for the tail hook; the process exits after
     if (!this.recorder.providesDanmu && this.danmu) {
       await this.danmu.stop().catch(() => {});
       this.danmu = null;
@@ -624,11 +668,9 @@ export class RecordingSession {
       catch (e) { log.error("边录边传钩子 onSessionEnd 抛错(忽略):", (e as Error)?.message ?? e); }
     }
     // 停录:同名覆盖 session.json,补上缺口(身份字段不变)。供多节点选优用。
-    try {
-      if (this.currentXmlPath || this.lastXmlPath) {
-        this._writeSession((this.currentXmlPath ?? this.lastXmlPath!).replace(/\.xml$/i, ""), true);
-      }
-    } catch { /* sidecar 失败不影响停止 */ }
+    if (this.currentXmlPath || this.lastXmlPath) {
+      await this._writeSessionSafe((this.currentXmlPath ?? this.lastXmlPath!).replace(/\.xml$/i, ""), true);
+    }
     // await(带 timeout):stop() 后调用方常立刻 process.exit,fire-and-forget 会丢这条 recordEnd。
     // 只有本会话**真开录过**才发 recordEnd —— 整窗口没开播的空等会话收尾静默
     // (否则每晚主播不播,窗口一关照样推「录制结束(窗口结束收播)」,纯属打扰)。

@@ -6,7 +6,7 @@
  * 编辑、删除。删除走两阶段：先在录/启用的只置 enabled=false，等 daemon 自然停录后
  * 下一轮再 removeTask。
  */
-import { platformForRoom, readOutputFormat, type ApplyTasksResult, type NodeTaskDTO, type RemoteTaskSpec } from "@drec/core";
+import { platformForRoom, readOutputFormat, STREAM_UPLOAD_SPOOL_REQUIRED, type ApplyTasksResult, type NodeTaskDTO, type RemoteTaskSpec } from "@drec/core";
 import { writeManagedState } from "./managed-state.js";
 import { APP_VERSION } from "./version.js";
 import type { TaskStore } from "./store.js";
@@ -21,11 +21,50 @@ function slugOf(room: string): { platform: string; roomSlug: string } {
   return { platform: p.id, roomSlug: p.extractRoomSlug(room) };
 }
 
+/**
+ * Issue #480: best-effort slug of a room that may come from an untrusted source (a master spec or an old
+ * local task row). Returns null instead of throwing: a malformed room must never abort a whole batch.
+ */
+function trySlugOf(room: unknown): { platform: string; roomSlug: string } | null {
+  if (typeof room !== "string" || !room.trim()) return null;
+  try {
+    const s = slugOf(room);
+    return s.platform && s.roomSlug ? s : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A master spec that failed validation; `index` is its position in the delivered batch (no cookies are logged). */
+export interface SkippedTaskSpec { index: number; room?: string; reason: string }
+
+/**
+ * Validate ONE delivered spec (issue #480). A malformed item (master bug / truncated payload) is skipped and
+ * logged instead of aborting the batch, so every other room on this node is still applied.
+ */
+function validateSpec(raw: unknown): { ok: true; spec: RemoteTaskSpec } | { ok: false; room?: string; reason: string } {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, reason: "不是对象" };
+  const spec = raw as Partial<RemoteTaskSpec>;
+  const room = typeof spec.room === "string" ? spec.room.trim() : "";
+  if (!room) return { ok: false, reason: "缺少 room" };
+  const slug = trySlugOf(room);
+  if (!slug) return { ok: false, room, reason: "room 无法解析出房间身份" };
+  if (typeof spec.platform !== "string" || !spec.platform.trim()) return { ok: false, room, reason: "缺少 platform" };
+  if (typeof spec.roomSlug !== "string" || !spec.roomSlug.trim()) return { ok: false, room, reason: "缺少 roomSlug" };
+  // The trimmed value is only a validation aid: the stored spec keeps the master's bytes untouched, so an
+  // all-good batch stays byte-identical (issue #480 review).
+  return { ok: true, spec: spec as RemoteTaskSpec };
+}
+
 /** `_tasks` 隐藏子命令 / local transport 的输出：节点上全部任务的隐私安全投影(无 cookies)。 */
 export function listNodeTasks(store: TaskStore): NodeTaskDTO[] {
-  return store.listTasks().map((t) => {
-    const { platform, roomSlug } = slugOf(t.room);
-    return {
+  // A local row whose room cannot be parsed is skipped instead of aborting the whole projection: one bad
+  // legacy row must not make this node invisible to the master (issue #480 review).
+  return store.listTasks().flatMap((t) => {
+    const slug = trySlugOf(t.room);
+    if (!slug) return [];
+    const { platform, roomSlug } = slug;
+    return [{
       id: t.id,
       platform,
       roomSlug,
@@ -49,7 +88,7 @@ export function listNodeTasks(store: TaskStore): NodeTaskDTO[] {
       streamUpload: t.streamUpload,
       streamUploadSpool: t.streamUploadSpool,
       outputFormat: t.outputFormat,
-    };
+    }];
   });
 }
 
@@ -77,8 +116,8 @@ const SHRINK_RATIO = 0.5;
  */
 function hasLocalTask(store: TaskStore, spec: RemoteTaskSpec): boolean {
   return store.listTasks().some((t) => {
-    const s = slugOf(t.room);
-    return s.platform === spec.platform && s.roomSlug === spec.roomSlug;
+    const s = trySlugOf(t.room);
+    return !!s && s.platform === spec.platform && s.roomSlug === spec.roomSlug;
   });
 }
 
@@ -110,6 +149,11 @@ export interface ApplyTasksOptions {
    */
   adopt?: boolean;
   /**
+   * 每房间 key 的「旧 master 下发已废弃的真 0 落盘」去重集合；跨调用持久，同一房间
+   * 反复下发 false 也只告警一次。省略 = 每次调用独立（测试/单批场景行为不变）。
+   */
+  noSpoolWarnedKeys?: Set<string>;
+  /**
    * 「上次成功应用」审计快照的落盘目录（`<dir>/rooms.json`）。
    *
    * **必须由调用方显式传入**：远端 `_apply-tasks <dataRoot>` 只带 dataRoot、不带
@@ -139,15 +183,16 @@ export interface ApplyTasksOptions {
  *  - 受管但不在 desired 的任务 → 两阶段删除。
  * per-node override = cookies / useCookie / outDir / webhook(保留 node 本地配置)。
  *
- * **删除语义矩阵**(T3;唯一真理源 = 函数体内删除循环处的注释):
- * | master 侧表达            | 本节点行为                                   |
- * |-------------------------|----------------------------------------------|
- * | 期望含 enabled:true      | 新建/更新并启用                              |
- * | 期望含 enabled:false     | **停用但保留**任务(不删、不新建)              |
- * | 期望缺席(规则消失/解绑)  | 两阶段删除:先停用,下一轮真删                 |
- * | 期望含 deleted:true      | 一律当缺席;关=两阶段删,`DREC_EXPLICIT_DELETE=1`=直接删 |
- * | force / DREC_ALLOW_SHRINK| 合法缩容/清空,跳过骤减守卫照常删              |
- * 「禁用」与「删除」必须分开:取消勾选一个 worker、临时停用一条规则都**不该**删掉节点上的任务。
+ * **删除语义矩阵**(T3 + #442;唯一真理源 = 函数体内删除循环处的注释):
+ * | master 侧表达                      | 本节点行为                                   |
+ * |-----------------------------------|----------------------------------------------|
+ * | 期望含 enabled:true                 | 新建/更新并启用                              |
+ * | 期望含 enabled:false(未点名删除)    | **停用但保留**任务(不删、不新建)              |
+ * | 期望含 deleted:true(#442 点名)      | 两阶段删除:先停用,下一轮真删(env 开=直接删) |
+ * | 期望缺席(规则消失/解绑)             | 两阶段删除:先停用,下一轮真删                 |
+ * | force / DREC_ALLOW_SHRINK           | 合法缩容/清空,跳过骤减守卫照常删              |
+ * 「禁用」与「删除」必须分开:临时停用一条规则都**不该**删掉节点上的任务;
+ * 而「取消勾选」(#442)是用户明确的重配意图,master 会点名 deleted:true(守卫放行,见 decideGuard)。
  */
 export function applyRemoteTasks(
   store: TaskStore,
@@ -156,10 +201,29 @@ export function applyRemoteTasks(
   opts: ApplyTasksOptions = {},
 ): ApplyTasksResult {
   const adopt = opts.adopt !== false;
+  /** One-shot compatibility warning per room key for a legacy no-spool delivery. */
+  const warnedNoSpool = opts.noSpoolWarnedKeys ?? new Set<string>();
+  /** 兼容告警随回执 warnings 上抛:短命 _apply-tasks 进程的 logger 不可靠,master 侧打印。 */
+  const warnings: string[] = [];
   const applied: string[] = [];
   const removed: string[] = [];
   const pending: string[] = [];
-  const desiredKeys = new Set(desired.map((d) => `${d.platform}:${d.roomSlug}`));
+
+  // Issue #480: validate each delivered spec on its own. One malformed item (master bug / truncated payload)
+  // must not abort the batch, so the remaining rooms are still applied. Cookies are never logged.
+  const skipped: SkippedTaskSpec[] = [];
+  const valid: RemoteTaskSpec[] = [];
+  desired.forEach((raw, index) => {
+    const v = validateSpec(raw);
+    if (v.ok) { valid.push(v.spec); return; }
+    skipped.push({ index, ...(v.room ? { room: v.room } : {}), reason: v.reason });
+    log?.(`[task-sync] 跳过第 ${index + 1} 条期望(room=${v.room ?? "-"}): ${v.reason}`);
+  });
+  if (skipped.length > 0) {
+    log?.(`[task-sync] 本轮期望 ${desired.length} 条,跳过 ${skipped.length} 条坏条目;其余照常应用`);
+  }
+
+  const desiredKeys = new Set(valid.map((d) => `${d.platform}:${d.roomSlug}`));
   const force = opts.force === true || envAllowsShrink();
 
   // T3:deleted:true 的条目**一律不算「还在期望里」**(= 缺席),开关只决定「缺席后是否跳过第 1 轮」。
@@ -170,10 +234,26 @@ export function applyRemoteTasks(
   // 当缺席处理则两种开关状态都安全:关=两阶段删除(默认口径),开=直接删。
   const explicitDelete = envExplicitDelete();
   const deletedKeys = new Set(
-    desired.filter((d) => d.deleted === true).map((d) => `${d.platform}:${d.roomSlug}`),
+    valid.filter((d) => d.deleted === true).map((d) => `${d.platform}:${d.roomSlug}`),
   );
   /** 真正「要保持存在」的期望 keys(deleted 条目已剔除)。 */
   const retainedKeys = new Set([...desiredKeys].filter((k) => !deletedKeys.has(k)));
+
+  /**
+   * Issue #480 delete-phase safety. A skipped item is **not** "absent from the desired set": deleting a local
+   * managed task because its spec failed to parse would turn a master bug into data loss on the node.
+   *  - every skipped item whose room slug is derivable -> those keys are protected (never deleted/disabled);
+   *  - any skipped item whose room cannot be parsed at all -> the room is unknown, so we cannot tell which
+   *    local task it belongs to: skip ALL deletions this round (keep every existing task untouched).
+   * The upsert phase is unaffected: good specs are still applied and their rooms keep working.
+   */
+  const unknownSkipped = skipped.some((s) => !s.room || !trySlugOf(s.room));
+  const protectedKeys = new Set<string>();
+  for (const s of skipped) {
+    const slug = s.room ? trySlugOf(s.room) : null;
+    if (slug) protectedKeys.add(`${slug.platform}:${slug.roomSlug}`);
+  }
+  const skipDeletions = unknownSkipped;
 
   /**
    * 立即删除 master 显式标记 `deleted:true` 的受管任务(仅 DREC_EXPLICIT_DELETE=1 时调用)。
@@ -183,9 +263,16 @@ export function applyRemoteTasks(
   const removeDeleted = (): void => {
     for (const t of store.listTasks()) {
       if (t.managedBy !== "hub") continue;
-      const s = slugOf(t.room);
+      const s = trySlugOf(t.room);
+      if (!s) continue; // unparsable local row: never guess, never delete
       const key = `${s.platform}:${s.roomSlug}`;
       if (!deletedKeys.has(key)) continue;
+      // A skipped spec for the same room means we cannot trust the "delete" outcome either. (The unknown-room
+      // case never reaches this loop: the whole fast path is gated on !skipDeletions at the call site.)
+      if (protectedKeys.has(key)) {
+        log?.(`[task-sync] 保留受管任务 ${t.id}: ${key}(本轮该房间的期望条目无法解析,不删除)`);
+        continue;
+      }
       store.removeTask(t.id);
       removed.push(key);
       log?.(`[task-sync] 显式删除受管任务 ${t.id}: ${key}(deleted:true,DREC_EXPLICIT_DELETE=1)`);
@@ -193,9 +280,14 @@ export function applyRemoteTasks(
   };
   const upsert = (spec: RemoteTaskSpec, key: string): void => {
     const existing = store.listTasks().find((t) => {
-      const s = slugOf(t.room);
-      return s.platform === spec.platform && s.roomSlug === spec.roomSlug;
+      const s = trySlugOf(t.room);
+      return !!s && s.platform === spec.platform && s.roomSlug === spec.roomSlug;
     });
+      if ((spec.streamUpload ?? false) && spec.streamUploadSpool === false && !warnedNoSpool.has(key)) {
+        warnedNoSpool.add(key);
+        log?.(`[task-sync] 任务 ${existing?.id ?? "新建"}(${spec.platform}) 旧 master 下发了已废弃的真 0 落盘,已按保留回退文件运行`);
+        warnings.push(`任务 ${existing?.id ?? "新建"}(${spec.platform}) 旧 master 下发了已废弃的真 0 落盘,已按保留回退文件运行`);
+      }
     if (existing) {
       // 远端:收编为受管;master 本地:保持用户可编辑(顺带清掉历史遗留的 hub 标记)。
       // 保留 node 本地 cookies/useCookie/outDir/webhook。
@@ -220,7 +312,7 @@ export function applyRemoteTasks(
         rollingEffective: spec.rollingEffective ?? spec.rollingUpload,
         // 0 落盘边录边传(plans/039):普通用户开关,旧 master 不带 → false(行为不变)。
         streamUpload: spec.streamUpload ?? false,
-        streamUploadSpool: spec.streamUploadSpool ?? true,
+        streamUploadSpool: STREAM_UPLOAD_SPOOL_REQUIRED,
         // Zero-disk metadata (issue #331): store what the master ships as-is (raw JSON, parsed strictly at the use
         // site); not shipped -> null. Overwritten every round, so a rule change (visibility / title template)
         // reaches the node on the next sync.
@@ -258,7 +350,7 @@ export function applyRemoteTasks(
         anchorName: spec.anchorName ?? null,
         rollingUpload: spec.rollingUpload,
         streamUpload: spec.streamUpload ?? false,
-        streamUploadSpool: spec.streamUploadSpool ?? true,
+        streamUploadSpool: STREAM_UPLOAD_SPOOL_REQUIRED,
         zeroDiskDelivery: deliveryJson(spec),
         outputFormat: readOutputFormat(spec.outputFormat),
       });
@@ -292,30 +384,65 @@ export function applyRemoteTasks(
    */
   const decideGuard = (): Guard | null => {
     if (force || totalManaged === 0) return null;
+    // #442:master 对每个被移出的受管任务**点名 deleted:true** = 明确的删除意图 —— master 只有
+    // 读到了自己的配置才会逐房间点名;配置读不可信时 desired 连条目都不会有。这种缩容不走守卫:
+    // 守卫保护的是「master 误读」(缺席但无点名),不是「用户明确要删」。
+    const shrinkIsExplicit = managedTasks.every((t) => {
+      const s = trySlugOf(t.room);
+      if (!s) return false; // unknown local identity: never treat it as explicitly accounted for
+      const k = `${s.platform}:${s.roomSlug}`;
+      return retainedKeys.has(k) || deletedKeys.has(k);
+    });
+    if (shrinkIsExplicit) return null;
     // 「被移出期望」= 不在 retainedKeys 里(缺席,或带 deleted 提示)。
     // 显式删除比「骤减」更强,所以 deleted 的房间不进守卫的 disableOnly,由删除循环直接处理。
     const disableOnly = () =>
       managedTasks
-        .filter((t) => !retainedKeys.has(`${slugOf(t.room).platform}:${slugOf(t.room).roomSlug}`))
-        .filter((t) => !deletedKeys.has(`${slugOf(t.room).platform}:${slugOf(t.room).roomSlug}`))
+        .filter((t) => {
+          const s = trySlugOf(t.room);
+          // Issue #480: a room whose delivered spec failed to parse is protected here too — the valve must not
+          // disable what the deletion phase is told to leave alone.
+          const key = s ? `${s.platform}:${s.roomSlug}` : "";
+          return !!s && !retainedKeys.has(key) && !deletedKeys.has(key) && !protectedKeys.has(key);
+        })
         .filter((t) => t.enabled || liveStatuses.has(t.status))
-        .map((t) => ({ id: t.id, key: `${slugOf(t.room).platform}:${slugOf(t.room).roomSlug}` }));
+        .map((t) => {
+          const s = trySlugOf(t.room)!;
+          return { id: t.id, key: `${s.platform}:${s.roomSlug}` };
+        });
 
-    if (retainedKeys.size === 0 && !explicitDelete) {
+    // Issue #480 (review 2): a protected key only counts toward "how much of the desired set survived" when
+    // this node actually has a managed task for that room. A protected room the node never had is not a reason
+    // to keep tasks for other rooms alive (a batch of unknown-room garbage must still be rejected).
+    const localManagedKeys = new Set(
+      managedTasks.flatMap((t) => {
+        const s = trySlugOf(t.room);
+        return s ? [`${s.platform}:${s.roomSlug}`] : [];
+      }),
+    );
+    const expectedKeys = new Set([...retainedKeys, ...protectedKeys].filter((k) => {
+      return retainedKeys.has(k) || localManagedKeys.has(k);
+    }));
+    const expectedSize = expectedKeys.size;
+    if (retainedKeys.size === 0 && !explicitDelete && expectedSize === 0) {
       return { rejected: "empty-desired", totalManaged, enabledManaged, disableOnly: disableOnly() };
     }
     // enabledManaged ≤ 1 时不存在「数量级塌陷」(1→0 已被空期望守卫覆盖),不拦。
     if (enabledManaged <= 1) return null;
-    if (retainedKeys.size > Math.floor(enabledManaged * SHRINK_RATIO)) return null;
+    if (expectedSize > Math.floor(enabledManaged * SHRINK_RATIO)) return null;
     return { rejected: "mass-shrink", totalManaged, enabledManaged, disableOnly: disableOnly() };
   };
 
   // 显式删除先于守卫执行:master 逐个房间点名 deleted:true 是**明确意图**,不该被
   // 「期望骤减」或「空期望」守卫拦成「只停用」或直接丢弃(自审发现:守卫分支早退时
   // deleted 条目被无声忽略,用户点了删除却什么都没发生)。
-  if (explicitDelete && deletedKeys.size > 0) removeDeleted();
+  // Issue #480: an unparsable item with an unknown room means we cannot tell which local task it belongs to,
+  // so no deletion may run this round — including the explicit-delete fast path.
+  if (explicitDelete && deletedKeys.size > 0 && !skipDeletions) removeDeleted();
 
-  const guard = decideGuard();
+  // With an unknown skipped room the deletion phase is skipped entirely, so the safety valves (which exist to
+  // stop deletions/disables) must not fire either — they would disable tasks the round is meant to leave alone.
+  const guard = skipDeletions ? null : decideGuard();
   if (guard) {
     if (guard.rejected === "empty-desired") {
       // 空期望:连「停用」都不做 —— 此刻 master 状态不可信,任何写操作都可能把损失扩大
@@ -323,7 +450,7 @@ export function applyRemoteTasks(
       //  比原来的 bug 更难察觉 —— 任务还在、也不录了)。判定与执行严格按分支隔离。
       log?.(`[task-sync] 拒绝整轮下发:期望为空但本地有 ${guard.totalManaged} 个受管任务(rejected=empty-desired);`
         + `疑似 master 配置不可读;确认要清空请用 force / DREC_ALLOW_SHRINK=1`);
-      return { applied, removed, pending: [], rejected: guard.rejected };
+      return { applied, removed, pending: [], rejected: guard.rejected, ...(warnings.length ? { warnings } : {}), ...(skipped.length ? { skipped } : {}) };
     }
     // 骤减:只停用不删除(语义同两阶段删除)—— 下一轮仍然骤减才继续,用户确认后 force 即真删。
     for (const { id, key } of guard.disableOnly) {
@@ -333,17 +460,17 @@ export function applyRemoteTasks(
     log?.(`[task-sync] 期望骤减 ${retainedKeys.size}/${guard.enabledManaged}(≤ ${Math.floor(guard.enabledManaged * SHRINK_RATIO)}):`
       + `${guard.disableOnly.length} 个受管任务只停用不删除(rejected=mass-shrink);`
       + `确认要缩容请用 force / DREC_ALLOW_SHRINK=1`);
-    for (const spec of desired) {
+    for (const spec of valid) {
       // deleted 条目不下发(它是删除提示、不是配置);enabled:false 只更新不新建(见正常路径注释)。
       if (deletedKeys.has(`${spec.platform}:${spec.roomSlug}`)) continue;
       if (spec.enabled === false && !hasLocalTask(store, spec)) continue;
       upsert(spec, `${spec.platform}:${spec.roomSlug}`);
     }
-    writeSnapshot(opts, desired, log);
-    return { applied, removed, pending, rejected: guard.rejected };
+    writeSnapshot(opts, valid, log, skipped);
+    return { applied, removed, pending, rejected: guard.rejected, ...(warnings.length ? { warnings } : {}), ...(skipped.length ? { skipped } : {}) };
   }
 
-  for (const spec of desired) {
+  for (const spec of valid) {
     // deleted 条目不下发(它是删除提示、不是配置):upsert 会先把它「复活」再删。
     if (deletedKeys.has(`${spec.platform}:${spec.roomSlug}`)) continue;
     // T3:enabled:false 的条目是「停用保留」信号,**只对本节点已有的受管任务有意义**。
@@ -355,15 +482,38 @@ export function applyRemoteTasks(
     upsert(spec, `${spec.platform}:${spec.roomSlug}`);
   }
 
+  if (skipDeletions) {
+    log?.(`[task-sync] 本轮有无法解析房间的期望条目,跳过全部删除/停用(保留 ${managedTasks.length} 个受管任务)`);
+    writeSnapshot(opts, valid, log, skipped);
+    return { applied, removed, pending, ...(warnings.length ? { warnings } : {}), ...(skipped.length ? { skipped } : {}) };
+  }
+
   for (const t of store.listTasks()) {
     if (t.managedBy !== "hub") continue;
-    const s = slugOf(t.room);
+    const s = trySlugOf(t.room);
+    if (!s) { log?.(`[task-sync] 跳过无法解析身份的受管任务 ${t.id}(不删除)`); continue; }
     const key = `${s.platform}:${s.roomSlug}`;
-    // T3 语义矩阵(唯一真理源 = 下面这几行;文档与测试都以此为准):
-    //   期望里有且 enabled:false → 停用但**保留**任务(规则还在,只是不录了)
-    //   期望里没有(缺席)          → 两阶段删除(先停,下轮真删),受 T2 守卫保护
-    //   deleted:true(开关已开)    → 跳过第 1 轮直接删(用户已确认)
-    //   force / DREC_ALLOW_SHRINK  → 合法缩容/清空,跳过守卫照常删
+    // Issue #480: a skipped spec for this room is NOT "absent" — never delete/disable the local task.
+    if (protectedKeys.has(key)) {
+      log?.(`[task-sync] 保留受管任务 ${t.id}: ${key}(本轮期望里该房间的条目无法解析,不按缺席处理)`);
+      continue;
+    }
+    // #442(rework-2,review 低危项):master 本机(adopt=false)上的 managedBy='hub' 只可能是旧版本
+    // 同步的遗留标记,不是真正的受管任务 —— 清标记,绝不删源任务(点名/缺席都不删)。
+    // 否则「未勾选本机的房间不再 upsert」后,遗留标记会让本机源任务走进两阶段删除。
+    if (!adopt) {
+      store.setManagedBy(t.id, null);
+      log?.(`[task-sync] 清除本机遗留受管标记 ${t.id}: ${key}(不删除)`);
+      continue;
+    }
+    // T3 + #442 语义矩阵(唯一真理源 = 下面这几行;文档与测试都以此为准):
+    //   期望里有且 enabled:false(未点名删除) → 停用但**保留**任务(规则停用等可逆状态)
+    //   期望里没有(缺席)                     → 两阶段删除(先停,下轮真删),受 T2 守卫保护
+    //   deleted:true(#442 点名)              → 默认两阶段删除(先停,下轮真删);
+    //                                          env 开(DREC_EXPLICIT_DELETE)=跳过第 1 轮直接删
+    //   force / DREC_ALLOW_SHRINK             → 合法缩容/清空,跳过守卫照常删
+    //   注意:守卫触发(误读保护)的那一轮,被点名但不在期望里的房间**既不停也不删**(保守,
+    //   等误读消失后下一轮再走两阶段);与旧行为(enabled:false 会停)不同,属已知取舍。
     if (retainedKeys.has(key)) continue;
     // 开关开:交给 removeDeleted 直接删(不走两阶段)。
     // 开关关:deleted 条目按**普通缺席**处理 —— 即两阶段删除(与「规则消失」完全同一条路径)。
@@ -380,9 +530,9 @@ export function applyRemoteTasks(
     }
   }
 
-  writeSnapshot(opts, desired, log);
+  writeSnapshot(opts, valid, log, skipped);
 
-  return { applied, removed, pending };
+  return { applied, removed, pending, ...(warnings.length ? { warnings } : {}), ...(skipped.length ? { skipped } : {}) };
 }
 
 /** 审计快照(T-1)落盘:记录本轮期望。**失败只 warn,绝不影响任务下发结果** ——
@@ -393,6 +543,7 @@ function writeSnapshot(
   opts: ApplyTasksOptions,
   desired: RemoteTaskSpec[],
   log?: (msg: string) => void,
+  skipped: SkippedTaskSpec[] = [],
 ): void {
   if (!opts.managedStateDir) return;
   try {
@@ -400,7 +551,9 @@ function writeSnapshot(
       version: opts.expectedVersion ?? 0,
       // T16:同时记下「是哪个 bundle 版本应用了这份期望」,供 _node-status 回吐做版本漂移告警。
       appVersion: APP_VERSION,
+      // Only specs that actually applied: a malformed item must never look like an applied room (issue #480).
       desired: [...desired],
+      ...(skipped.length ? { skipped } : {}),
     });
   } catch (e) {
     log?.(`[task-sync] 写审计快照失败(忽略): ${(e as Error)?.message ?? e}`);

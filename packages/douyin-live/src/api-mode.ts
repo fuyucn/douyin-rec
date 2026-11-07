@@ -15,6 +15,12 @@
  */
 import { normalizeDouyinApiMode } from "@drec/core";
 
-export function resolveApiMode(): string {
-  return normalizeDouyinApiMode(process.env.DOUYIN_REC_API_MODE);
+/**
+ * Resolve the API mode for a call: an explicit per-call value (issue #479) wins over the process env
+ * (`DOUYIN_REC_API_MODE`, injected by the serve spawner for record children); neither -> the default.
+ * Both sources go through `normalizeDouyinApiMode`, so an unknown value can never select a bogus endpoint.
+ */
+export function resolveApiMode(explicit?: string): string {
+  const fromCall = String(explicit ?? "").trim();
+  return normalizeDouyinApiMode(fromCall || process.env.DOUYIN_REC_API_MODE);
 }

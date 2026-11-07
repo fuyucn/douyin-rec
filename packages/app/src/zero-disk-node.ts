@@ -9,7 +9,7 @@
  * Receipts and status are plain JSON files: read-only for the master, written atomically.
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join, posix } from "node:path";
+import { dirname, join, posix } from "node:path";
 import {
   biliAccountKeyFromCookiesJson,
   isKnownAccountKey,
@@ -18,11 +18,17 @@ import {
   normalizeZeroDiskStatus,
   parseZeroDiskDelivery,
   zeroDiskAccountVerdict,
+  normalizeLiveUploadSnapshot,
+  capLiveUploadSnapshot,
+  LIVE_HISTORY_LIMIT,
+  REPORT_EVENT_LIMIT,
+  REPORT_PART_LIMIT,
   type ZeroDiskDelivery,
   type ZeroDiskNodeStatus,
   type ZeroDiskReceipt,
   type ZeroDiskRefusal,
   type ZeroDiskReport,
+  type LiveUploadSnapshot,
   type UploadGateStore,
   openUploadLimitStore,
 } from "@drec/core";
@@ -82,6 +88,7 @@ export function zeroDiskNodePreflight(
   try { parsed = JSON.parse(rawDelivery); } catch { return refuse("delivery_missing", "delivered zero-disk metadata is not valid JSON"); }
   const d = parseZeroDiskDelivery(parsed);
   if (!d.ok) return refuse("delivery_missing", d.error);
+  const readFile = o.readFile ?? ((p: string) => readFileSync(p, "utf-8"));
   const cred = resolveNodeUploadCredential({
     ...(o.env ? { env: o.env } : {}),
     ...(o.nodeDefaultPath ? { nodeDefaultPath: o.nodeDefaultPath } : {}),
@@ -89,15 +96,40 @@ export function zeroDiskNodePreflight(
     ...(o.exists ? { exists: o.exists } : {}),
   });
   if (!cred) return refuse("credential_missing", "no upload login file found on this node");
-  let nodeKey: string;
-  try {
-    nodeKey = biliAccountKeyFromCookiesJson((o.readFile ?? ((p: string) => readFileSync(p, "utf-8")))(cred.path));
-  } catch {
-    return refuse("credential_missing", "upload login file on this node is unreadable");
+  const readAccountKey = (p: string): string | null => {
+    try { return biliAccountKeyFromCookiesJson(readFile(p)); } catch { return null; }
+  };
+  let nodeKey = readAccountKey(cred.path);
+  let chosen = cred;
+  if (nodeKey === null) {
+    // An unreadable chosen login must not block a readable alternate: the master-delivered
+    // path or the node default may still work. Only the *primary* being unreadable triggers this;
+    // a readable login with an unknown/mismatched account still fails loudly (verdict below).
+    // Alternates whose content identifies no account are skipped too: a corrupt file must not
+    // hide the next valid one. The first *known-account* alternate wins even if it mismatches the
+    // master's account: that refusal stays loud (account_mismatch) rather than hunting for a
+    // matching login — this path only exists because the primary could not be read at all.
+    const envPath = (o.env ?? process.env).BILIUP_COOKIE?.trim();
+    const alternates = [
+      ...(envPath ? [{ path: envPath, source: "env" as const }] : []),
+      { path: o.nodeDefaultPath ?? rootBiliupCookies(), source: "node-default" as const },
+      ...(d.value.credentialPath ? [{ path: d.value.credentialPath, source: "delivered-path" as const }] : []),
+    ];
+    for (const alt of alternates) {
+      if (alt.path === cred.path || !(o.exists ?? existsSync)(alt.path)) continue;
+      const key = readAccountKey(alt.path);
+      if (key === null || !isKnownAccountKey(key)) continue;
+      nodeKey = key;
+      chosen = { path: alt.path, source: alt.source };
+      break;
+    }
+    if (nodeKey === null) {
+      return refuse("credential_unreadable", "the node's upload login file could not be read into a usable login (check ownership/permissions and file contents; the service user must be able to read it)");
+    }
   }
   const verdict = zeroDiskAccountVerdict(d.value.accountKey, nodeKey);
   if (verdict) return { ok: false, refusal: verdict };
-  return { ok: true, delivery: d.value, cookiesPath: cred.path, credentialSource: cred.source };
+  return { ok: true, delivery: d.value, cookiesPath: chosen.path, credentialSource: chosen.source };
 }
 
 /**
@@ -129,7 +161,7 @@ export function zeroDiskNodeDir(): string {
 const safeName = (s: string): string => s.replace(/[^A-Za-z0-9_.-]/g, "_");
 
 /** Atomic JSON write (tmp + rename): the master may read at any moment. */
-function writeJsonAtomic(path: string, value: unknown): void {
+export function writeJsonAtomic(path: string, value: unknown): void {
   mkdirSync(join(path, ".."), { recursive: true });
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(value) + "\n");
@@ -140,6 +172,116 @@ type StatusFile = ZeroDiskNodeStatus & { pid?: number };
 
 const statusPath = (platform: string, roomSlug: string): string =>
   join(zeroDiskNodeDir(), "status", `${safeName(platform)}.${safeName(roomSlug)}.json`);
+
+export interface LiveFile {
+  v: 1;
+  platform: string;
+  roomSlug: string;
+  pid: number;
+  updatedAt: number;
+  current?: LiveUploadSnapshot;
+  previous?: LiveUploadSnapshot;
+}
+
+export const liveUploadPath = (platform: string, roomSlug: string): string =>
+  join(zeroDiskNodeDir(), "live", `${safeName(platform)}.${safeName(roomSlug)}.json`);
+
+/** Read one room's timeline; a dead pid turns a non-terminal current into `stopped`. */
+export function readLiveUploadFile(
+  path: string,
+  opts: { isAlive?: (pid: unknown) => boolean } = {},
+): { current?: LiveUploadSnapshot; previous?: LiveUploadSnapshot } | null {
+  let raw: LiveFile;
+  try {
+    raw = JSON.parse(readFileSync(path, "utf-8")) as LiveFile;
+  } catch {
+    return null;
+  }
+  if (!raw || raw.v !== 1) return null;
+  const alive = opts.isAlive ?? pidAlive;
+  const current = raw.current ? normalizeLiveUploadSnapshot(raw.current) : undefined;
+  const previous = raw.previous ? normalizeLiveUploadSnapshot(raw.previous) : undefined;
+  if (current && raw.pid > 0 && !alive(raw.pid)
+    && current.state !== "finished" && current.state !== "failed" && current.state !== "stopped") {
+    current.state = "stopped";
+    current.updatedAt = Math.max(current.updatedAt, raw.updatedAt ?? current.updatedAt);
+  }
+  return current || previous ? { ...(current ? { current } : {}), ...(previous ? { previous } : {}) } : null;
+}
+
+/** Per-room history of finished runs (issue #413): one small file per room, newest first, capped. */
+export const liveHistoryPath = (platform: string, roomSlug: string): string =>
+  join(zeroDiskNodeDir(), "history", `${safeName(platform)}.${safeName(roomSlug)}.json`);
+
+/** Finished runs of one room, newest first. A missing or torn file reads as no history. */
+export function readLiveHistory(platform: string, roomSlug: string): LiveUploadSnapshot[] {
+  try {
+    const raw = JSON.parse(readFileSync(liveHistoryPath(platform, roomSlug), "utf-8")) as { v?: unknown; runs?: unknown };
+    if (!raw || raw.v !== 1 || !Array.isArray(raw.runs)) return [];
+    return raw.runs.flatMap((r) => {
+      const s = normalizeLiveUploadSnapshot(r);
+      return s ? [s] : [];
+    }).slice(0, LIVE_HISTORY_LIMIT);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Record runs that are no longer running. The caller passes only snapshots it knows are not running
+ * (the rotated-away previous run, or a current run that reached a terminal state). A run that was
+ * cut off before it finished is stored as `stopped`. Keyed by sessionId: a later write of the same run
+ * replaces the earlier one, so repeated calls are idempotent. Best effort, like the status file.
+ */
+export function upsertLiveHistory(platform: string, roomSlug: string, snaps: Array<LiveUploadSnapshot | undefined>): boolean {
+  const incoming = snaps.flatMap((s): LiveUploadSnapshot[] => {
+    if (!s?.sessionId) return [];
+    const done = s.state === "finished" || s.state === "failed" || s.state === "stopped";
+    return [done ? s : { ...s, state: "stopped" }];
+  });
+  if (incoming.length === 0) return true;
+  try {
+    const ids = new Set(incoming.map((s) => s.sessionId));
+    const runs = [...incoming, ...readLiveHistory(platform, roomSlug).filter((s) => !ids.has(s.sessionId))]
+      .sort((a, b) => b.startedAt - a.startedAt)
+      .slice(0, LIVE_HISTORY_LIMIT);
+    const path = liveHistoryPath(platform, roomSlug);
+    mkdirSync(dirname(path), { recursive: true });
+    writeJsonAtomic(path, { v: 1, platform, roomSlug, runs });
+    return true;
+  } catch {
+    // Observability only: report the failure to the caller, which retries on its next change.
+    return false;
+  }
+}
+
+/** Remove stale live files; mirrors receipt retention. */
+export function pruneLiveFiles(now = Date.now()): void {
+  // History follows the live files' retention: a room's history file is never newer than its live file.
+  for (const sub of ["live", "history"]) {
+    const dir = join(zeroDiskNodeDir(), sub);
+    try {
+      for (const f of readdirSync(dir)) {
+        if (!f.endsWith(".json")) continue;
+        const p = join(dir, f);
+        if (now - statSync(p).mtimeMs > ZERO_DISK_RECEIPT_TTL_MS) rmSync(p, { force: true });
+      }
+    } catch { /* best effort */ }
+  }
+}
+
+/** Per-room 1s read cache; never share one room's data with another. */
+export function createLiveFileCache(ttlMs = 1000, now: () => number = Date.now) {
+  const cache = new Map<string, { at: number; data: ReturnType<typeof readLiveUploadFile> }>();
+  return (platform: string, roomSlug: string): ReturnType<typeof readLiveUploadFile> => {
+    const key = `${platform}:${roomSlug}`;
+    const hit = cache.get(key);
+    if (hit && now() - hit.at < ttlMs) return hit.data;
+    const data = readLiveUploadFile(liveUploadPath(platform, roomSlug));
+    cache.set(key, { at: now(), data });
+    return data;
+  };
+}
 
 /** Write the per-room status. Failures are swallowed: status is observability, never a reason to stop uploading. */
 export function writeZeroDiskStatus(s: Omit<ZeroDiskNodeStatus, "v" | "updatedAt">, now: number = Date.now()): void {
@@ -183,7 +325,7 @@ function readJsonDir(dir: string): unknown[] {
   return out;
 }
 
-function pidAlive(pid: unknown): boolean {
+export function pidAlive(pid: unknown): boolean {
   if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return false;
   try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; }
 }
@@ -192,6 +334,12 @@ function pidAlive(pid: unknown): boolean {
  * `_zero-disk-report` body: receipts + per-room status. A status stuck at "running" whose process
  * is gone is reported as "stopped" (killed / crashed), so the console never shows a dead run as live.
  */
+/** Report projection of one room's history; empty object when there is none. */
+function historyOf(platform: string, roomSlug: string): { history?: LiveUploadSnapshot[] } {
+  const history = readLiveHistory(platform, roomSlug).map((s) => capLiveUploadSnapshot(s, { events: REPORT_EVENT_LIMIT, parts: REPORT_PART_LIMIT }));
+  return history.length ? { history } : {};
+}
+
 export function buildZeroDiskReport(o: { isAlive?: (pid: unknown) => boolean } = {}): ZeroDiskReport {
   const alive = o.isAlive ?? pidAlive;
   const receipts = readJsonDir(join(zeroDiskNodeDir(), "receipts"))
@@ -205,7 +353,28 @@ export function buildZeroDiskReport(o: { isAlive?: (pid: unknown) => boolean } =
     const pid = (raw as { pid?: unknown }).pid;
     status.push(s.state === "running" && !alive(pid) ? { ...s, state: "stopped" } : s);
   }
-  return { v: 1, receipts, status };
+  const live: NonNullable<ZeroDiskReport["live"]> = [];
+  const liveDir = join(zeroDiskNodeDir(), "live");
+  try {
+    for (const f of readdirSync(liveDir)) {
+      if (!f.endsWith(".json")) continue;
+      const p = join(liveDir, f);
+      const r = readLiveUploadFile(p, { isAlive: alive });
+      if (!r?.current) continue;
+      const raw = JSON.parse(readFileSync(p, "utf-8")) as Partial<LiveFile>;
+      if (typeof raw.platform !== "string" || typeof raw.roomSlug !== "string") continue;
+      const terminal = r.current.state === "finished" || r.current.state === "failed" || r.current.state === "stopped";
+      const recent = Date.now() - r.current.updatedAt < 24 * 60 * 60_000;
+      live.push({
+        platform: raw.platform,
+        roomSlug: raw.roomSlug,
+        ...(terminal && !recent ? {} : { current: capLiveUploadSnapshot(r.current) }),
+        ...(!terminal || recent ? (r.previous ? { previous: capLiveUploadSnapshot(r.previous) } : {}) : {}),
+        ...historyOf(raw.platform, raw.roomSlug),
+      });
+    }
+  } catch { /* no live dir yet */ }
+  return { v: 1, receipts, status, ...(live.length ? { live } : {}) };
 }
 
 // ───────────────────────── master side: what to ship ─────────────────────────
@@ -363,7 +532,7 @@ export function createZeroDiskReporter(o: {
   running(): void;
   partConfirmed(info: { count: number; bvid?: string }): void;
   /** `receiptError` is set when the archive exists but the receipt could not be persisted. */
-  finish(res: { ok: boolean; bvid?: string; error?: string; segments: number }): { receiptWritten: boolean; receiptError?: string };
+  finish(res: { ok: boolean; bvid?: string; error?: string; segments: number; lostParts?: number; unknownParts?: number }): { receiptWritten: boolean; receiptError?: string };
   failed(message: string): void;
 } {
   const now = o.now ?? Date.now;
@@ -400,7 +569,9 @@ export function createZeroDiskReporter(o: {
         const atMs = now();
         const streamKey = zeroDiskStreamKey(o.platform, o.roomSlug, startMs);
         const r = writeZeroDiskReceipt({ id: `${o.platform}:${o.roomSlug}:${startMs}`, platform: o.platform, roomSlug: o.roomSlug, streamKey, startMs, bvid: res.bvid, parts, atMs }, atMs);
-        write("finished");
+        // The receipt has no field for it; the status message carries the loss to the master console.
+        const note = res.lostParts ? `${res.lostParts} 个分 P 在停止时丢失` : res.unknownParts ? `${res.unknownParts} 个分 P 提交结果未知` : undefined;
+        write("finished", note);
         return { receiptWritten: r.written };
       } catch (e) {
         const msg = `archive uploaded but the receipt could not be written, the master ledger will not record it: ${(e as Error).message}`;

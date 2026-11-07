@@ -37,11 +37,12 @@ describe("record --stream-upload wiring (zero-disk)", () => {
   const block = streamUploadBlock(src);
 
   it("normalizes the room before getStream / pump state", () => {
-    expect(block).toContain("zeroDiskRoom(platform, o.room)");
+    // Room/dir resolution is the shared helper (also used by the serve-side live gate).
+    expect(block).toContain("resolveZeroDiskPumpDirs({");
     expect(block).toContain("room: pumpRoom");
     expect(block).toContain("livePumpStatePath(pumpFilesDir, pumpRoom)");
     // A broadcast that already has a legacy state stays at the root (sticky, no migration).
-    expect(block).toContain("resolvePumpDir(pumpSpoolDir, opts.outDir, pumpRoom)");
+    expect(readFileSync(join(ROOT, "packages/app/src/live-gate.ts"), "utf-8")).toContain("resolvePumpDir(pumpSpoolDir, a.outDir, pumpRoom)");
     // Rollback check must read the room dir, not the legacy root (round-10 review).
     expect(block).toContain("livePumpStatePath(roomDir, pumpRoom)");
     expect(block).not.toContain("room: o.room");

@@ -90,6 +90,7 @@ flowchart TB
   app --> procq
   app --> procs
   app --> engine
+  app --> zeroup
   manager --> core
   bilibili --> core
   douyin --> core

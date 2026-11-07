@@ -7,7 +7,7 @@
 import {
   isUploadingMode, normalizeUploadMode, pipelineBurns, resolveRollingPolicy, rollingReasonText, listPlatforms, platformForRoom, validateTitleTemplate, validateLooseTitleTemplate,
   isValidPartSizeMiB, PART_SIZE_MIB_MIN, PART_SIZE_MIB_MAX,
-  zeroDiskRuleError, redactTaskSecrets, recordingRoomDir, recordingRoomDirCandidates,
+  zeroDiskRuleError, redactTaskSecrets, recordingRoomDir, recordingRoomDirCandidates, liveUploadSummary,
   type WorkerDTO, type HubPipelineConfig, type HubRulePayload, type HubRuleDTO, type BiliupAuthStatus, type RecordingWorkerStatusDTO, type ZeroDiskNodeStatusDTO,
 } from "@drec/core";
 import * as hubStore from "../../hub-store.js";
@@ -18,6 +18,7 @@ import { readBiliupCookieHeader } from "../../upload/biliup.js";
 import { listHubJobs } from "../../hub-jobs.js";
 import { nodeOutputFormatLock } from "../../node-remux.js";
 import { readManagedState } from "../../managed-state.js";
+import { createLiveFileCache } from "../../zero-disk-node.js";
 import { hasSessionCookie, parseCookieExpiry } from "../../cookie-utils.js";
 import type { ApiDeps, ApiResult, CookieStatus, TaskView, TaskDetailView } from "./types.js";
 
@@ -120,6 +121,7 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
   // 节点侧归属标记(issue #73):读 master 下发快照 rooms.json(现读,1s 缓存摊薄列表 N 次读)。
   // 缺快照/损坏/旧 master 不带字段 → 空 map → 视为归属(旧行为,全显示)。
   let assignedCache: { at: number; map: Map<string, boolean> } | null = null;
+  const readLiveCached = createLiveFileCache();
   const assignedMap = (): Map<string, boolean> => {
     const dir = deps.managedStateDir;
     if (!dir) return new Map();
@@ -139,11 +141,23 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
     let zeroDisk: ZeroDiskNodeStatusDTO[] | undefined;
     const stopping = manager.isStopping(t.id) || undefined;
     let hubRule: TaskView["hubRule"];
+    const platform = platformForRoom(t.room);
+    const roomSlug = platform.extractRoomSlug(t.room);
+    if (t.streamUpload) {
+      const managed = deps.zeroDiskStatus?.(platform.id, roomSlug) ?? [];
+      zeroDisk = [...managed];
+      if (t.managedBy !== "hub") {
+        const snap = readLiveCached(platform.id, roomSlug)?.current ?? readLiveCached(platform.id, roomSlug)?.previous;
+        if (snap) zeroDisk.push({
+          workerId: "local", workerName: "本机", state: "ok",
+          run: snap.state === "waiting" ? "running" : snap.state === "finished" ? "finished" : snap.state === "failed" ? "failed" : snap.state === "stopped" ? "stopped" : "running",
+          live: liveUploadSummary(snap), checkedAt: Date.now(),
+        });
+      }
+      if (!zeroDisk.length) zeroDisk = undefined;
+    }
     if (deps.recordingWorkers || deps.hubEnabled) {
-      const platform = platformForRoom(t.room);
-      const roomSlug = platform.extractRoomSlug(t.room);
       if (deps.recordingWorkers) workers = deps.recordingWorkers(platform.id, roomSlug);
-      if (deps.zeroDiskStatus && t.streamUpload) zeroDisk = deps.zeroDiskStatus(platform.id, roomSlug);
       if (deps.hubEnabled) {
         const rule = hubStore.getHubRule(hubDir, hubStore.hubKey(platform.id, roomSlug));
         if (rule) {
@@ -153,7 +167,9 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
           if (p.steps?.burnLivechat !== false) steps.push("livechat");
           let lastRun: { state: string; bv: string | null } | null = null;
           if (deps.syncDbPath) {
-            const r = listHubJobs(deps.syncDbPath, { room: rule.key, limit: 1 }).jobs[0];
+            // Issue #481: ledger rows are keyed by the TASK's room (streamKey), not by the rule filename stem.
+            // Using rule.key would lose last-run info for a divergent rule.
+            const r = listHubJobs(deps.syncDbPath, { room: hubStore.hubKey(platform.id, roomSlug), limit: 1 }).jobs[0];
             if (r) lastRun = { state: r.state, bv: r.bv };
           }
           hubRule = {
@@ -180,6 +196,8 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
       ...(stopping ? { stopping } : {}),
       anchorName: manager.getAnchorName(t.id) ?? t.anchorName,
       recording: manager.isRecording(t.id),
+      // Waiting behind the live gate: running but no recorder process is held (see TaskManager).
+      ...(manager.isGated?.(t.id) ? { gated: true } : {}),
       ...(rollingStatus ? { rollingApplied: rollingStatus.applied, ...(rollingStatus.drift ? { rollingPending: true } : {}) } : {}),
       // 空数组不下发:前端 recordingWorkers?.length 判定依赖它。
       ...(workers && workers.length > 0 ? { recordingWorkers: workers } : {}),
@@ -243,11 +261,10 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
 
   // hub 规则 → DTO:补 anchorName(若有同 roomSlug 的录制任务,显示其主播名/任务名)。
   const hubRuleView = (r: hubStore.HubRule): HubRuleDTO => {
+    // Issue #481: a bound rule belongs to its source task regardless of the filename stem; matching by id
+    // keeps the anchor name / task name / rolling display for divergent rules (same identity as sync).
     const srcTask = r.recording?.sourceTaskId
-      ? store.listTasks().find(
-          (task) => task.id === r.recording!.sourceTaskId &&
-            platformForRoom(task.room).extractRoomSlug(task.room) === r.roomSlug,
-        ) ?? null
+      ? store.listTasks().find((task) => task.id === r.recording!.sourceTaskId) ?? null
       : null;
     const t = srcTask ?? store.listTasks().find(
       (task) => platformForRoom(task.room).extractRoomSlug(task.room) === r.roomSlug,

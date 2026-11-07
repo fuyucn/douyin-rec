@@ -1,16 +1,16 @@
 import { abortJob, effectiveReconnectWindowMs, isJobAbort, isJobLive, resolveDiskMinGB, SAME_BROADCAST_GAP_MS, USER_STOP } from "@drec/core";
-import type { Transport, NodeInventory } from "./transport.js";
+import type { Transport, NodeInventory, NodeRecording } from "./transport.js";
 import type { UnclaimedSegment } from "./unclaimed.js";
-import type { JobState, SyncLedger } from "./ledger.js";
+import type { JobState, StepName, SyncLedger } from "./ledger.js";
 import type { PipelineDeps, PipelineCfg } from "./pipeline.js";
-import { runPipeline } from "./pipeline.js";
+import { runPipeline, CLEANUP_BACKFILL_MAX } from "./pipeline.js";
 import { pollFollowups } from "./finalize-format.js";
 import { createUploadQueuePoller, type UploadPollerOpts } from "./node-upload-poll.js";
 import { isDerivedKey, runNowConflict } from "./run-now-guard.js";
 import { DEFAULT_NODE_UPLOAD, type NodeUploadConfig } from "./node-upload-config.js";
 import { completeFromDispatch } from "./node-upload-complete.js";
 import { clusterBroadcasts, type Broadcast } from "./identity.js";
-import type { HubBlockedBroadcastDTO } from "@drec/core";
+import type { HubBlockedBroadcastDTO, StatsSessionInput } from "@drec/core";
 import { gateWorkers, explainRejections, isWorkerAssigned, isWorkerTargeted } from "@drec/core";
 import { JobDispatcher } from "./job-dispatcher.js";
 
@@ -32,6 +32,11 @@ export interface ReconcilerDeps {
   sleep?: (ms: number) => Promise<void>;
   /** 单个租户 listInventory 的超时(ms);挂起即降级为空,防一个 hung 节点锁死整轮对账。默认 60s。 */
   inventoryTimeoutMs?: number;
+  /**
+   * 每轮清单成功后回调(workerId + 该节点清单里的会话子集),用于直播统计落库(plans/041)。
+   * **旁路**:回调内部的异常被吞掉,绝不影响对账/录制;未注入 = 不采集。
+   */
+  observeInventory?: (workerId: string, sessions: StatsSessionInput[]) => void;
   /** 节点连续多少轮清单失联(超时/报错)后发一次「节点失联」通知。默认 6;<=0 关闭。 */
   unreachableAlertRounds?: number;
   /**
@@ -116,6 +121,22 @@ const DEFAULT_MAX_CONCURRENT_PIPELINES = 2;
 const ACK_NOTE_MAX = 500;
 const DEFAULT_SLEEP = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/** 清单行 → 统计采集输入(只取统计需要的字段;orchestrator 不碰统计库)。 */
+function toStatsInput(r: NodeRecording): StatsSessionInput {
+  return {
+    platform: r.platform,
+    roomSlug: r.roomSlug,
+    sessionBase: r.sessionBase,
+    startMs: r.startMs,
+    endMs: r.endMs,
+    durationSec: r.durationSec,
+    totalGapSec: r.totalGapSec,
+    danmuCount: r.danmuCount,
+    totalBytes: r.totalBytes,
+    title: r.title,
+  };
+}
+
 const RETRYABLE = new Set<JobState>(["pending", "failed"]);
 const UNSAFE_RETRY_NODES = new Set(["upload_plain", "append_danmu", "append_livechat"]);
 
@@ -134,6 +155,8 @@ export class Reconciler {
   private settle: SettleConfig;
   private sleep: (ms: number) => Promise<void>;
   private inventoryTimeoutMs: number;
+  /** 清单采集旁路(直播统计);未注入 = 不采集。 */
+  private observeInventory?: (workerId: string, sessions: StatsSessionInput[]) => void;
   private unreachableAlertRounds: number;
   private blockedManualRounds: number;
   /** Broadcasts currently blocked by an unreachable selected worker (rebuilt each reconcileAll round). */
@@ -185,6 +208,7 @@ export class Reconciler {
     this.settle = deps.settle ?? DEFAULT_SETTLE;
     this.sleep = deps.sleep ?? DEFAULT_SLEEP;
     this.inventoryTimeoutMs = deps.inventoryTimeoutMs ?? DEFAULT_INVENTORY_TIMEOUT_MS;
+    this.observeInventory = deps.observeInventory;
     this.unreachableAlertRounds = deps.unreachableAlertRounds ?? DEFAULT_UNREACHABLE_ALERT_ROUNDS;
     this.blockedManualRounds = deps.blockedManualRounds ?? DEFAULT_BLOCKED_MANUAL_ROUNDS;
     this.maxRetries = deps.maxRetries ?? DEFAULT_MAX_RETRIES;
@@ -263,6 +287,23 @@ export class Reconciler {
       console.warn(segs === undefined
         ? `[reconciler] worker ${inv.workerId} orphan state unknown (worker does not report unclaimed segments)`
         : `[reconciler] worker ${inv.workerId} unclaimed segments: ${segs.length} in ${sessions.length} sessions (truncated ${truncated})`);
+    }
+  }
+
+  /**
+   * 把本轮清单里的会话写进统计库(plans/041)。**旁路**:任何异常只记一行,不影响对账。
+   * unreachable 的节点整轮跳过 —— 它这一轮「不知道有没有新录像」,写进去等于把「不知道」当成事实。
+   */
+  private recordStats(invs: InventoryResult[]): void {
+    const observe = this.observeInventory;
+    if (!observe) return;
+    for (const inv of invs) {
+      if (inv.status === "unreachable" || inv.recordings.length === 0) continue;
+      try {
+        observe(inv.workerId, inv.recordings.map(toStatsInput));
+      } catch (e) {
+        console.warn(`[reconciler] worker ${inv.workerId} 统计采集失败(不影响对账): ${String((e as Error)?.message ?? e)}`);
+      }
     }
   }
 
@@ -490,6 +531,7 @@ export class Reconciler {
       console.warn(`[reconciler] worker ${i.workerId} 清单失联(${i.reason}),不当作「无录像」;涉及它的场本轮不选优`);
     }
     this.logUnclaimedSummary(invs);
+    this.recordStats(invs);
 
     const broadcasts = clusterBroadcasts(
       invs.map((i) => ({ workerId: i.workerId, recordings: i.recordings })),
@@ -577,7 +619,9 @@ private alertUnclaimedOnDone(b: Broadcast, job: { bv?: string | null }): void {
  *
  * @returns 可补跑的节点名(供日志);null = 无需补跑。
  */
-private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string | null {
+private cleanupBackfillDue(streamKey: string, segmentMode = false): string | null {
+  // 分段模式(mergeSegments=false)清理失败只告警、不补跑:补跑会重跑整条管线并把整场源拉回 master(见下「已撤回」注释)。
+  if (segmentMode) return null;
   const nodes = this.ledger.getNodeStates(streamKey);
   const now = Date.now();
   const due: string[] = [];
@@ -587,6 +631,8 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
     // 为一个只剩观察意义的软状态付这个代价不值得;存量 pending 场次的源需人工清理。
     const matches = CLEANUP_BACKFILL_NODES.has(n.node) && n.state === "failed";
     if (!matches) continue;
+    // 合并模式补跑上限(issue #429):attempts = 已发起的补跑次数(派发时 +1,清理成功复位为 0)。耗尽后只剩已发出的那次告警。
+    if (n.attempts >= CLEANUP_BACKFILL_MAX) continue;
     // `Math.max(0, ...)`:台账的 now() 是**进程内单调递增**(同毫秒多次调用会 +1 递推),
     // 而这里用 Date.now() 读墙钟 → 同一 tick 内 `Date.now() - updatedAt` 可能是**负数**
     // (updatedAt 是未来 1ms 的递推值)。不夹到 0 的话,throttleMs=0 也会被当成「刚失败」而跳过。
@@ -605,7 +651,6 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
   // 正确做法(留 T33 后续):删源**不该借道 pipeline**,应有一个**只删源、不做 select/pull/
   // append/上传**的独立收尾入口(或 pipeline 支持「只跑 cleanup」的收尾模式)。
   // 在那之前,积压源录像**保持现状**(安全第一:源不能因为清理动作本身被重复上传)。
-  void sourceAfterDone;
   return due.length > 0 ? due.join(",") : null;
 }
 
@@ -715,20 +760,28 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
         // 复用 pipeline 已有的幂等续跑(bv 已在库 → 只补 append + 收尾闸门),
         // 成员清单来自本轮 inventory —— 清理失败的源文件**仍在节点上**(没删成),故能被扫到。
         if (job?.state === "done") {
-          // sourceAfterDone 从**该房间当前配置**读:没开清理就不该补删源(与 cleanupSources 同口径)。
-          const due = this.cleanupBackfillDue(b.streamKey, cfg.cleanup?.sourceAfterDone === true);
+          // 分段模式按**该房间当前配置**判(cleanupBackfillDue 对其恒 false)。
+          const due = this.cleanupBackfillDue(b.streamKey, cfg.steps?.mergeSegments === false);
           if (due) {
             jlogInfo(`[reconciler] ${b.streamKey} 上传后收尾未完成(${due}) → 补跑`);
             // 也派发出去(收尾补跑同样是长 IO)—— 失败**不改终态**:上传已成功,
             // 不该把 job 打成 failed(会诱导重传 = 重复稿)。只记日志 + 下轮再来。
-            dispatched.push(this.dispatcher.dispatch(b.streamKey, async () => {
+            const settled = this.dispatcher.tryDispatch(b.streamKey, async () => {
               try {
                 await this._runPipeline(b, { ...this.pipelineDeps, transports, cfg });
               } catch (err) {
                 if (isJobAbort(err)) { this.ledger.setState(b.streamKey, "needs_manual", { error: USER_STOP }); return; }
                 console.error(`[reconciler] ${b.streamKey} 收尾补跑失败:`, err);
               }
-            }));
+            });
+            // 补跑次数只在派发真正被接受时 +1(被活动去重挡掉不计);不依赖补跑里是否又记了失败:补跑抛错 / 提前返回也必须收敛。
+            if (settled) {
+              dispatched.push(settled);
+              for (const node of due.split(",")) {
+                const row = this.ledger.getNodeState(b.streamKey, node as StepName);
+                if (row) this.ledger.syncNodeState(b.streamKey, node as StepName, row.state, { error: row.error, attempts: row.attempts + 1 });
+              }
+            }
           }
           this.alertUnclaimedOnDone(b, job);
           continue;

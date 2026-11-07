@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { JobLogCleanup } from "../components/JobLogCleanup";
 import { useAtomValue, useSetAtom } from "jotai";
 import { ClipboardPaste } from "lucide-react";
 import { api, type HubResources } from "../api/client";
@@ -251,7 +252,7 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
       setTimezone(r.timezone);
       setTzDefault(r.default);
       setTzEffective(r.effective);
-      // 全局 atom 也要同步,否则 TaskList/TaskDetail/CreateEditTaskDialog 的时区显示要等下次刷新页面才会变。
+      // 全局 atom 也要同步,否则房间列表/详情(RoomPage 的排期与开始时间)的时区显示要等下次刷新页面才会变。
       setServerTimezone(r.effective || r.default);
       toast(t("settings.tzSaved"), "success");
     } catch (e) {
@@ -484,6 +485,7 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
         <div className="settings-tab-body space-y-4">
           <h4 className="form-section">{t("settings.resourcesSection")}</h4>
           <p className="text-xs text-muted">{t("settings.resourcesHint")}</p>
+          <JobLogCleanup />
           {!resources ? (
             <p className="text-sm text-muted">{t("settings.resourcesUnavailable")}</p>
           ) : (

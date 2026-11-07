@@ -2,7 +2,9 @@
  * paths.ts — 单一数据根(DOUYIN_REC_ROOT)+ 固定内部布局。
  *
  *   <root>/db/douyin-rec.db          数据库(含抖音账号 cookie)
+ *   <root>/db/room-stats.db          直播统计(节点会话起止/时长;plans/041)
  *   <root>/recordings/               录像输出
+ *   <root>/run/rec-<taskId>.json     录制子进程状态文件(子进程唯一写者;路径由 core recorderStatePath(drecRoot(), id) 给出;plans/044)
  *   <root>/stage/                    hub 合成暂存(合并/烧录中间产物)
  *   <root>/logs/hub/<平台>_<房间号>/  hub 场次日志(永久保留;不放 stage,清理 stage 不会带走日志)
  *   <root>/config/biliup/cookies.json  biliup B站上传 cookie
@@ -20,6 +22,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { parseOutputLayout, type PathLayout } from "@drec/core";
 import { procQueueDbPath as procQueueDbPathOf } from "@drec/proc-queue";
+import { roomStatsDbPath } from "./room-stats.js";
 import { hostname as osHostname } from "node:os";
 
 /** 未设 DOUYIN_REC_ROOT 时的默认数据根(相对启动 cwd)。db/recordings/stage/config 都收在这一个目录下。 */
@@ -94,6 +97,11 @@ export function rootDbPath(): string {
 /** <root>/db/proc-queue.db —— 处理任务表;路径单点在 `@drec/proc-queue`,此处只转发(不受 `--db` 覆盖)。 */
 export function procQueueDbPath(): string {
   return procQueueDbPathOf(drecRoot());
+}
+
+/** <root>/db/room-stats.db —— 直播统计(plans/041);路径单点在 `../room-stats.ts`。 */
+export function rootStatsDbPath(): string {
+  return roomStatsDbPath(drecRoot());
 }
 
 /** <root>/recordings。 */

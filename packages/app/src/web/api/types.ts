@@ -37,6 +37,10 @@ export interface ManagerLike {
   getAnchorName(id: number): string | null;
   /** 是否真正在录视频（区分「录制中」vs running 但「等待开播中」）。 */
   isRecording(id: number): boolean;
+  /** Waiting behind the live gate (no child process held). Optional: older mocks omit it. */
+  isGated?(id: number): boolean;
+  /** Spawn every gated task now (liveGate turned off); returns how many. */
+  releaseGates?(): number;
   /** 边录边传「实际生效 vs 期望」(issue #89);不在跑 → null。可选:旧的测试替身可不实现。 */
   rollingStatus?(id: number): { applied: boolean; desired: boolean; drift: boolean } | null;
   /** Per-task captured log lines (oldest → newest) for the 日志 console. */
@@ -114,6 +118,12 @@ export interface ApiDeps {
   recordingWorkers?: (platform: string, roomSlug: string) => RecordingWorkerStatusDTO[];
   /** Cached zero-disk side-node status reader (issue #331); only on a master hub. */
   zeroDiskStatus?: (platform: string, roomSlug: string) => ZeroDiskNodeStatusDTO[];
+  /** Full current/previous timeline entries for a room (managed nodes; local is read directly). */
+  zeroDiskLive?: (platform: string, roomSlug: string) => Array<{
+    workerId: string; workerName: string; current?: import("@drec/core").LiveUploadSnapshot;
+    previous?: import("@drec/core").LiveUploadSnapshot;
+    history?: import("@drec/core").LiveUploadSnapshot[];
+  }>;
   /**
    * 节点侧 master 下发快照目录(`<数据根>/config/managed`)。提供时,受管任务视图带 `assigned`
    * (取自快照里 master 算好的归属标记;缺失/旧 master 不带 → 省略 = 视为归属)。省略 = 不带(master/单机)。
@@ -204,7 +214,7 @@ export interface CreateTaskInput {
    * 前者不写盘、后者靠文件滚动上传,同时为真 API 回 400。
    */
   streamUpload?: boolean;
-  /** 0 落盘是否保留本地 spool(默认 true);false = 真 0 落盘、失败无本地回退。 */
+  /** 0 落盘是否保留本地 spool(固定 true);false = 400 拒绝写入。 */
   streamUploadSpool?: boolean;
   /** 输出格式(issue #137;白名单见 core `OUTPUT_FORMATS`,非法值(含空串)→ 400;缺省 = original / 不改)。 */
   outputFormat?: string;
@@ -237,11 +247,18 @@ export interface UpdateTaskInput {
    * 前者不写盘、后者靠文件滚动上传,同时为真 API 回 400。
    */
   streamUpload?: boolean;
-  /** 0 落盘是否保留本地 spool(默认 true);false = 真 0 落盘、失败无本地回退。 */
+  /** 0 落盘是否保留本地 spool(固定 true);false = 400 拒绝写入。 */
   streamUploadSpool?: boolean;
   /** 输出格式(issue #137;白名单见 core `OUTPUT_FORMATS`,非法值(含空串)→ 400;缺省 = original / 不改)。 */
   outputFormat?: string;
 }
+
+/**
+ * POST /api/rooms 的入参:与 PUT 同一份 `RoomPayload`,但 `recording.room` **必填** ——
+ * 新建必须能从房间地址判定平台与房间号;其余字段可选(缺省 = store 默认值)。
+ * 类型只放 app 域,core 不新增导出(避免契约面扩大)。
+ */
+export type CreateRoomInput = RoomPayload & { recording: { room: string } };
 
 /** Public status of one platform cookie (never leaks the raw value). */
 export interface CookieStatus {
@@ -261,6 +278,7 @@ export interface Api {
   getTask(id: number): ApiResult;
   /** GET /api/tasks/:id/logs — captured recorder log lines. 404 if missing. */
   getTaskLogs(id: number): ApiResult;
+  getTaskLive(id: number): ApiResult;
   deleteTask(id: number): Promise<ApiResult>;
   /** POST /api/tasks/:id/refresh-anchor — 触发后台重新抓取主播名(匿名,fire-and-forget)。供 _apply-tasks 在 VPS 侧调用。 */
   refreshTaskAnchor(id: number): ApiResult;
@@ -303,6 +321,10 @@ export interface Api {
   /** POST /api/douyin-api-mode { mode } — 设抖音 API 模式(balance/web/webHTML/mobile/random);
    *  非法值回落默认 balance。改设置下次 spawn 生效(经 env 注入录制子进程)。 */
   setDouyinApiMode(input: { mode?: string }): ApiResult;
+  /** GET /api/live-gate — 判活闸门开关(settings.liveGate;默认开)。 */
+  getLiveGate(): ApiResult;
+  /** POST /api/live-gate { enabled } — 开关判活闸门;关闭时闸门中的任务立即启动录制进程(released=数量)。 */
+  setLiveGate(input: { enabled?: boolean }): ApiResult;
   /** GET /api/timezone — 当前生效时区(settings.timezone,留空=默认)+ 默认值。 */
   getTimezone(): ApiResult;
   /** POST /api/timezone { timezone } — 设时区(config 驱动,覆盖 host 环境变量,立即生效不用重启);
@@ -328,8 +350,12 @@ export interface Api {
   listRooms(): ApiResult;
   /** GET /api/rooms/:key — 单个房间;两半都没有 → 404。 */
   getRoom(key: string): ApiResult;
+  /** POST /api/rooms — 一次新建两半(录制任务默认停用);重复房间 409,节点上带 processing 400。 */
+  createRoom(input: CreateRoomInput): ApiResult;
   /** PUT /api/rooms/:key — 一次改两半(各自可选);第二步失败回滚第一步,不留半成功。 */
   updateRoom(key: string, input: RoomPayload): ApiResult;
+  /** DELETE /api/rooms/:key — 删除整个房间(录制任务 + hub 规则),含与两个旧端点一致的守卫。 */
+  deleteRoom(key: string): ApiResult;
   /** POST /api/hub/apply[?force=1] — 立刻触发一次全节点任务同步;force=跳过节点骤减安全阀(T-2)。 */
   applyHubTasks(opts?: { force?: boolean }): ApiResult;
   /** GET /api/hub/rules — 所有多节点 hub 后处理规则(按 {platform}.{roomSlug})。 */
@@ -346,6 +372,8 @@ export interface Api {
   listHubJobs(opts?: { room?: string; limit?: number; offset?: number; states?: string[] }): ApiResult;
   /** GET /api/hub/latest-runs — 每个房间最新一条 run 摘要(Hub 房间列表徽标用,不受分页影响)。 */
   latestRuns(): ApiResult;
+  /** GET /api/stats[?days=N] — 直播统计(节点会话起止/时长/热力图;plans/041)。 */
+  getStats(opts?: { days?: number }): ApiResult;
   /**
    * GET /api/hub/queue[?phase=&platform=&q=] — 处理队列视图:进行中(做了什么/正在做什么/下面做什么)
    * + 最近完成 + 资源池占用。phase/platform 可重复传(逗号分隔亦可);q = 主播名/房间号/streamKey 子串。

@@ -13,9 +13,10 @@ import { applyTimezone, isValidTimezone, DEFAULT_TIMEZONE } from "../../timezone
 import type { NotifWebhookToggles } from "@drec/observability";
 import { resolveWebhookToggles, DEFAULT_WEBHOOK_TOGGLES } from "@drec/observability";
 import { readResources, writeResources, validateResources, DEFAULT_HUB_RESOURCES, type HubResources } from "../../hub-config-store.js";
+import { statSync, accessSync, constants as fsConstants } from "node:fs";
 
 export function buildSettings(ctx: ApiCtx) {
-  const { deps, store, manager, hubDir, hubConfigPath,
+  const { deps, store, manager, hubDir,
     err } = ctx;
   return {
     /**
@@ -23,6 +24,9 @@ export function buildSettings(ctx: ApiCtx) {
      *
      * 回 `source` 让 UI 知道「改完会写去哪」:arg-file/root-file 写文件、settings 写 settings 表、
      * inline 无法持久化(此时 PUT 直接 400,而不是假装保存成功)。
+     *
+     * 读的是**实际生效的那份配置**(resolved 的 json 优先):inline / settings 来源的内容不在文件里,
+     * 只按 path 读会显示根文件或默认值(issue #473)。
      */
     getHubResources(): ApiResult {
       const resolved = deps.hubConfigSource?.();
@@ -30,7 +34,7 @@ export function buildSettings(ctx: ApiCtx) {
       return {
         status: 200,
         body: {
-          resources: readResources(resolved.path ?? hubConfigPath),
+          resources: readResources(resolved),
           source: resolved.source,
           path: resolved.path ?? null,
           defaults: DEFAULT_HUB_RESOURCES,
@@ -67,9 +71,12 @@ export function buildSettings(ctx: ApiCtx) {
         if (!resolved.path) return err(400, "无法定位 hub 配置文件");
         writeResources(resolved.path, patch);
       }
+      // Re-resolve so the response reflects what was just written (file reads / settings rows are
+      // cheap and uncached); the pre-write snapshot would be stale for every source.
+      const fresh = deps.hubConfigSource?.() ?? resolved;
       return {
         status: 200,
-        body: { resources: readResources(resolved.path ?? hubConfigPath), source: resolved.source },
+        body: { resources: readResources(fresh), source: resolved.source },
       };
     },
 
@@ -135,7 +142,25 @@ export function buildSettings(ctx: ApiCtx) {
 
     setMesioPath(input: { mesioPath?: string }): ApiResult {
       // 空串=清除 → spawn 时不注入 MESIO_PATH → 引擎回落 bin/mesio 默认。改设置下次起录即生效(无需重启)。
-      store.setSetting("mesioPath", (input.mesioPath ?? "").trim());
+      // issue #427 P1:该路径经 MESIO_PATH 注入录制子进程执行,web 入口必须验证它确是一个可执行文件,
+      // 不允许(CSRF/误操作)指向任意路径。非空 → 绝对路径 + 存在 + 普通文件 + 可执行,否则 400。
+      const raw = (input.mesioPath ?? "").trim();
+      if (raw) {
+        if (!raw.startsWith("/")) return err(400, `mesioPath 必须是绝对路径(空串=清除): ${raw}`);
+        let st;
+        try {
+          st = statSync(raw);
+        } catch {
+          return err(400, `路径不存在或不可访问: ${raw}`);
+        }
+        if (!st.isFile()) return err(400, `不是普通文件: ${raw}`);
+        try {
+          accessSync(raw, fsConstants.X_OK);
+        } catch {
+          return err(400, `文件不可执行: ${raw}`);
+        }
+      }
+      store.setSetting("mesioPath", raw);
       return {
         status: 200,
         body: { mesioPath: store.getSetting("mesioPath") ?? "", default: resolveMesioBin() },
@@ -161,6 +186,19 @@ export function buildSettings(ctx: ApiCtx) {
         status: 200,
         body: { mode, default: DEFAULT_DOUYIN_API_MODE, effective: mode, options: [...DOUYIN_API_MODES] },
       };
+    },
+
+    getLiveGate(): ApiResult {
+      // Default on: only an explicit "false" disables the live gate.
+      return { status: 200, body: { enabled: store.getSetting("liveGate") !== "false" } };
+    },
+
+    setLiveGate(input: { enabled?: boolean }): ApiResult {
+      if (typeof input.enabled !== "boolean") return err(400, "enabled 必须是布尔值");
+      store.setSetting("liveGate", input.enabled ? "true" : "false");
+      // Turning the gate off is the live fallback to the old behaviour: gated tasks spawn right now.
+      const released = input.enabled ? 0 : (manager.releaseGates?.() ?? 0);
+      return { status: 200, body: { enabled: input.enabled, released } };
     },
 
     getTimezone(): ApiResult {

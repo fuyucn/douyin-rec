@@ -89,10 +89,12 @@ export function parseSessionStamp(sessionBase: string): (TitleParts & { hasTime:
   return null;
 }
 
-export function zonedStamp(ms: number, timeZone?: string): Omit<TitleParts, "name"> {
-  const tz = resolveTimeZone(timeZone);
-  const bag: Record<string, string> = {};
-  for (const part of new Intl.DateTimeFormat("en-US", {
+/** 按时区缓存 Intl.DateTimeFormat(zonedStamp 每切一个整点都会被调一次,new 一个 formatter 很贵)。 */
+const formatterCache = new Map<string, Intl.DateTimeFormat>();
+function formatterFor(tz: string): Intl.DateTimeFormat {
+  const cached = formatterCache.get(tz);
+  if (cached) return cached;
+  const fmt = new Intl.DateTimeFormat("en-US", {
     timeZone: tz,
     year: "numeric",
     month: "2-digit",
@@ -101,7 +103,15 @@ export function zonedStamp(ms: number, timeZone?: string): Omit<TitleParts, "nam
     minute: "2-digit",
     second: "2-digit",
     hourCycle: "h23",
-  }).formatToParts(new Date(ms))) {
+  });
+  formatterCache.set(tz, fmt);
+  return fmt;
+}
+
+export function zonedStamp(ms: number, timeZone?: string): Omit<TitleParts, "name"> {
+  const tz = resolveTimeZone(timeZone);
+  const bag: Record<string, string> = {};
+  for (const part of formatterFor(tz).formatToParts(new Date(ms))) {
     if (part.type !== "literal") bag[part.type] = part.value;
   }
   return {

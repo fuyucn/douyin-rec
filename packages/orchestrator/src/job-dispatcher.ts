@@ -78,6 +78,11 @@ export class JobDispatcher {
     return this.slot(key, run) ?? Promise.resolve();
   }
 
+  /** 同 dispatch,但被活动去重挡掉时返回 null(调用方据此区分「真的排上了」与「被去重」)。 */
+  tryDispatch(key: string, run: () => Promise<void>): Promise<void> | null {
+    return this.slot(key, run);
+  }
+
   private slot(key: string, run: () => Promise<void>): Promise<void> | null {
     if (this.active.has(key)) {
       this.dedupedCount++;

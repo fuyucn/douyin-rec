@@ -150,6 +150,25 @@ Transport 查询各 worker 的活动录制房间，按房间规则选出参与�
   `state ∈ pending|settling|syncing|merging|uploading|done|failed|needs_manual`；记录 seen 租户 + 各自 coverage + 胜者 + BV + 时间戳 + 错误。**幂等**（一场一作业）、**可续**（master 重启按 state 续跑）、**绝不重复投稿**。
 - **`{base}.gaps.json` sidecar（各节点）**：`{ sessionBase, gaps: [{startMs, endMs}], totalGapSec, coverage }`。由节点的 session 在 `recordReconnect`/offline 时累积写入。
 
+### 台账 sqlite 的并发口径（WAL）：宿主机禁止读写打开 `-sync.db`（issue #428）
+
+`<db>-sync.db`（master 侧台账）由 SyncLedger 切成 **WAL + busy_timeout**：写端有三个（serve 长连接、
+直播直传收尾的 record 子进程、删除房间历史），撞上他人写事务时等锁（至多约 5s）而不是报 BUSY。
+由此对**人工 / 脚本在宿主机上直接开库**有一条硬约束：
+
+- **宿主机禁止以任何方式打开在线台账**（含 `sqlite3 -readonly`、`.backup`、裸 `sqlite3 <db> "<sql>"`）。
+  master 的 `docker-data/` 走 Docker bind mount，宿主（如 macOS）与容器（Linux VM）**跨 VM**：
+  `-readonly` 连接仍会写/重建 `-shm`，锁也不跨 VM 共享，可能干扰甚至损坏容器侧正在使用的台账。
+  宿主**只允许** `file:<db>?immutable=1` 只读快照（不建 `-shm`、不加锁；可能读到旧/撕裂数据，仅作参考）。
+- **查台账**进容器只读（与 [dev-multi-node.md](./dev-multi-node.md)「台账状态」同款；`douyin-rec` = docker-compose 的 container_name）：
+  `docker exec douyin-rec node -e "const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync('/output-data/db/douyin-rec-sync.db',{readOnly:true});console.log(JSON.stringify(d.prepare('select streamKey,state,bv,error from sync_jobs').all()))"`；
+  `scripts/reinforce-metrics.py` 默认走这条通道（`--db-container` / `--db-container-path` 可改）。
+- **备份在容器内执行**（`VACUUM INTO` 产出一致的单文件快照，目标文件须不存在）：
+  `docker exec douyin-rec node -e "const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync('/output-data/db/douyin-rec-sync.db',{readOnly:true});d.exec(\"VACUUM INTO '/output-data/db/backup-$(date +%Y%m%d%H%M%S).db'\");d.close()"`
+  （备份文件落在挂载目录，宿主侧直接拷走；`$(date …)` 由宿主 shell 展开）。
+  或先停 `serve`，再把主文件 **连同 `-wal`** 一起拷走；**只拷主文件会漏 `-wal`** —— WAL 里已提交但未
+  checkpoint 的事务全丢，恢复出来的是旧账。
+
 ## 配置
 
 hub 全局配置为 **JSON**，路径 `<root>/config/hub.config.json`（旧名 `hub-config.json` 自动兼容）。解析优先级：`--hub-config`（文件路径 → 读文件 / 否则当内联 JSON 串）> settings 表 `hubConfig` > 自动读 `<root>/config/hub.config.json`。**约定（推荐）**：数据根初始化时自动复制一份模板到 `<root>/config/hub.config.example.json`，改成同目录 `hub.config.json` 后直接 `task serve --hub`（无需 `--hub-config`）自动加载；三者都没有则跳过、warn。模板单一真相 = 仓库源文件 [`configs/hub.config.example.json`](../configs/hub.config.example.json)（打包时 esbuild 内联进 bundle）。

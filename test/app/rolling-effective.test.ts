@@ -40,6 +40,27 @@ describe("rollingSpecFields — master 下发的派生字段", () => {
   });
 });
 
+describe("refreshLocalRollingEffective — 规则 stem 与源任务房间不一致时仍生效 (issue #481)", () => {
+  it("divergent stem: bound rule still computes the derived value (not NULL)", () => {
+    const s = new TaskStore(join(dir, "tasks.db"));
+    const t = s.addTask({ room: "https://live.douyin.com/222", rollingUpload: false });
+    // File stem is room 111, but the rule is bound to the task whose room is 222 (room edited after creation).
+    writeRule("111", {
+      room: "https://live.douyin.com/222",
+      enabled: true,
+      pipeline: { steps: NB, upload: { mode: "rolling" } },
+      recording: { sourceTaskId: t.id },
+      workers: ["vps2"],
+    });
+    const logs: string[] = [];
+    const n = refreshLocalRollingEffective(s, hubDir, undefined, (m) => logs.push(m));
+    expect(n).toBe(1);
+    expect(s.getTask(t.id)!.rollingEffective).toBe(true); // main's effective behaviour: bound => apply
+    expect(logs.some((m) => m.includes("不一致"))).toBe(true);
+    s.close();
+  });
+});
+
 describe("Task.rollingEffective — 读取时迁移", () => {
   it("旧库/无派生值(NULL)→ 按旧开关迁移:true ≡ rolling,false 不开", () => {
     const s = new TaskStore(":memory:");
@@ -95,12 +116,13 @@ describe("refreshLocalRollingEffective — 启动时先用唯一判定刷新本�
     expect(s.getTask(solo.id)!.rollingEffective).toBe(true);
     expect(s.getTask(managed.id)!.rollingEffective).toBe(true); // master 下发值,本机不重算
   });
-  it("规则绑定的房间与任务房间不一致 → 不按该规则算", () => {
+  it("规则文件名/房间与任务房间不一致时仍按源任务应用(issue #481;不再清 NULL)", () => {
+    // 绑定关系由 recording.sourceTaskId 决定;stem 只是文件身份。该规则是多节点 rolling → 生效值 false。
     const s = new TaskStore(":memory:");
     const t = s.addTask({ room: "111", rollingUpload: true });
     writeRule("999", { workers: ["a", "b"], recording: { sourceTaskId: t.id }, pipeline: { steps: NB, upload: { mode: "rolling" } } });
-    refreshLocalRollingEffective(s, hubDir);
-    expect(s.getTask(t.id)!.rollingEffective).toBe(true); // 迁移值,未被错房间的多节点规则误拦
+    expect(refreshLocalRollingEffective(s, hubDir)).toBe(1);
+    expect(s.getTask(t.id)!.rollingEffective).toBe(false); // 按绑定的多节点规则算,不再回落旧开关
   });
 });
 

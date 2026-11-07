@@ -6,7 +6,11 @@ import {
   RollingUploader, looksLikeRecordProcess, makeRollingUploadHookFactory, resolveRollingUploadMeta, resolveStreamUploadMeta,
   resolveStreamUploadTitle, resolveStreamPartTitle,
 } from "./rolling-upload.js";
-import { UploadGate, rollingUploadSingleNode, type SeasonAddOutcome } from "@drec/core";
+import {
+  UploadGate, RecorderStateWriter, parseRecorderState, recorderActivity, recorderStatePath, rollingUploadSingleNode,
+  type ProcProbe, type RecorderActivity, type SeasonAddOutcome,
+} from "@drec/core";
+import type { AckSample } from "@drec/processors";
 
 const seasonHook = vi.hoisted(() => ({
   calls: [] as Array<{ bvid: string; persistedBv?: string; persistedState?: string; reconcileFirst?: boolean }>,
@@ -512,7 +516,52 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     } finally {
       chmodSync(recDir, 0o755); // 恢复权限,留待系统清理 tmp
     }
+  });  it("hub-owned seal writes skipped rows and never uploads/deletes (plan 046 PR7)", async () => {
+    const { paths } = mkSession(segNames(2));
+    const up = vi.fn(async () => "BAD");
+    const ap = vi.fn(async () => {});
+    const remove = vi.fn(noRemove);
+    const skipped: number[] = [];
+    const u = new RollingUploader({
+      room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: ap, removeFile: remove,
+      now: futureNow, minSegmentSec: 0,
+      uploadOwner: () => "master",
+      enqueueHubSkipped: (info) => { skipped.push(info.index); },
+    });
+    for (const p of paths) u.noteSegment(p);
+    const r = await u.flush({ recordingActive: false });
+    expect(skipped).toEqual([0, 1]);
+    expect(r.uploaded).toEqual([]);
+    expect(up).not.toHaveBeenCalled();
+    expect(ap).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    await u.flush({ recordingActive: false });
+    expect(skipped).toEqual([0, 1]);
   });
+
+  it("binding change applies to the next sealed part, not retroactively", async () => {
+    const { paths } = mkSession(segNames(2));
+    let owner: "node" | "master" = "master";
+    const up = vi.fn(async () => "BAD2");
+    const skipped: number[] = [];
+    const u = new RollingUploader({
+      room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove,
+      now: futureNow, minSegmentSec: 0, uploadOwner: () => owner,
+      enqueueHubSkipped: (info) => { skipped.push(info.index); },
+    });
+    u.noteSegment(paths[0]);
+    await u.flush({ recordingActive: false });
+    expect(skipped).toEqual([0]);
+    owner = "node";
+    u.noteSegment(paths[1]);
+    const r = await u.flush({ recordingActive: false });
+    expect(r.uploaded).toEqual([1]);
+    expect(up).toHaveBeenCalledTimes(1);
+    expect(skipped).toEqual([0]);
+  });
+
+
+
 });
 
 // Issue #148: reconnect sessions of one broadcast continue the same submission.
@@ -1516,5 +1565,131 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
     expect(plain).not.toHaveBeenCalled();
     expect(u.ambiguousIndices).toEqual([0]);
     expect(readA(f)).toMatchObject({ confirmed: [0], ownerPid: DEAD_PID }); // predecessor untouched
+  });
+});
+
+describe("RollingUploader finalizing progress from the biliup child (plans/044)", () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  const ALIVE: ProcProbe = { startTicks: () => 7, bootId: () => "b" };
+  const STEP = 30_000;
+
+  /** One rolling upload whose biliup "child" stays pending until the end; returns the judge's view after `minutes`. */
+  async function scenario(opts: {
+    readAcked: (pid: number) => AckSample;
+    minutes: number;
+    spawns?: number; // sequential children inside the one upload call (line retries)
+    block?: "gate" | "slot"; // the upload is held back before any child starts (rate-limit window / node slot)
+  }): Promise<{ verdict: RecorderActivity; timersAfter: number }> {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW_MS);
+    const dir = mkdtempSync(path.join(tmpdir(), "rolling-progress-"));
+    try {
+      const w = new RecorderStateWriter({
+        file: recorderStatePath(dir, 7), taskId: 7, platform: "douyin", roomSlug: "123", mode: "rolling",
+        owner: { pid: 4242, startTicks: 7, bootId: "b" },
+      });
+      w.start();
+      w.setPhase("finalizing");
+      const { paths } = mkSession(segNames(1));
+      let release: () => void = () => {};
+      const gateOpen = new Promise<void>((r) => { release = r; });
+      const spawns = opts.spawns ?? 1;
+      class BlockedGate extends UploadGate {
+        async run<T>(_key: string, fn: () => Promise<T>): Promise<T> { await gateOpen; return fn(); }
+      }
+      const blockedSlot = {
+        index: 0, acquire: async () => { await gateOpen; return true; }, release: () => {}, touch: () => {}, close: () => {},
+      };
+      const u = new RollingUploader({
+        room, uploadMeta, gate: opts.block === "gate" ? new BlockedGate() : new FakeGate(),
+        ...(opts.block === "slot" ? { slot: blockedSlot } : {}),
+        appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0,
+        readAcked: opts.readAcked, noteProgress: () => w.noteProgress(), shouldSample: () => true, progressIntervalMs: STEP,
+        uploadPlainRaw: async (o) => {
+          for (let i = 0; i < spawns - 1; i++) { o.hooks?.onSpawn?.(4242 + i); o.hooks?.onClose?.(); } // retried lines: children that died
+          o.hooks?.onSpawn?.(9999); // the last child hangs
+          if (!opts.block) await gateOpen;
+          o.hooks?.onClose?.();
+          return FAKE_BV;
+        },
+      });
+      u.noteSegment(paths[0]);
+      const done = u.flush({ recordingActive: false });
+      for (let t = 0; t < opts.minutes * 60_000; t += STEP) await vi.advanceTimersByTimeAsync(STEP);
+      const st = parseRecorderState(JSON.parse(readFileSync(recorderStatePath(dir, 7), "utf-8")))!;
+      const verdict = recorderActivity(st, Date.now(), ALIVE);
+      release();
+      await done;
+      w.markExited(0); // stops the writer's own heartbeat timer, so only the uploader's could remain
+      const timersAfter = vi.getTimerCount();
+      return { verdict, timersAfter };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("no output for 50 min but acked bytes keep growing: the judge stays active", async () => {
+    let acked = 0;
+    const r = await scenario({ readAcked: () => new Map([["a>b", (acked += 1_000_000)]]), minutes: 50 });
+    expect(r.verdict).toBe("active");
+  });
+
+  it("acked reader unavailable (null) with the child alive counts as progress: stays active", async () => {
+    const r = await scenario({ readAcked: () => null, minutes: 50 });
+    expect(r.verdict).toBe("active");
+  });
+
+  it("empty reading (ss cannot see the child's sockets) with the child alive is no evidence: stays active", async () => {
+    const r = await scenario({ readAcked: () => new Map(), minutes: 50 });
+    expect(r.verdict).toBe("active");
+  });
+
+  it("acked flat for 46 min with the child alive: dead", async () => {
+    const r = await scenario({ readAcked: () => new Map([["a>b", 5_000_000]]), minutes: 46 });
+    expect(r.verdict).toBe("dead");
+  });
+
+  it("waiting for the node upload slot for 50 min (no child yet) is not a stall", async () => {
+    const r = await scenario({ readAcked: () => new Map([["a>b", 1]]), minutes: 50, block: "slot" });
+    expect(r.verdict).toBe("active");
+    expect(r.timersAfter).toBe(0);
+  });
+
+  it("waiting in the upload gate (rate-limit window / cooldown) for 50 min is not a stall", async () => {
+    const r = await scenario({ readAcked: () => new Map([["a>b", 1]]), minutes: 50, block: "gate" });
+    expect(r.verdict).toBe("active");
+    expect(r.timersAfter).toBe(0);
+  });
+
+  it("a socket closing and a new one carrying bytes counts as progress (per-socket comparison)", async () => {
+    let n = 0;
+    const r = await scenario({ readAcked: () => new Map([[`sock${n++}`, 1_000]]), minutes: 50 });
+    expect(r.verdict).toBe("active");
+  });
+
+  it("does not sample (no ss) while the recorder is not finalizing", async () => {
+    const read = vi.fn(() => new Map([["a>b", 1]]));
+    vi.useFakeTimers();
+    const { paths } = mkSession(segNames(1));
+    let release: () => void = () => {};
+    const gateOpen = new Promise<void>((r) => { release = r; });
+    const u = new RollingUploader({
+      room, uploadMeta, gate: new FakeGate(), appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0,
+      readAcked: read, noteProgress: () => {}, shouldSample: () => false, progressIntervalMs: STEP,
+      uploadPlainRaw: async (o) => { o.hooks?.onSpawn?.(9999); await gateOpen; o.hooks?.onClose?.(); return FAKE_BV; },
+    });
+    u.noteSegment(paths[0]);
+    const done = u.flush({ recordingActive: false });
+    await vi.advanceTimersByTimeAsync(10 * STEP);
+    expect(read).not.toHaveBeenCalled();
+    release();
+    await done;
+  });
+
+  it("the sampling interval is cleared after close and across retries (no leaked timers)", async () => {
+    const r = await scenario({ readAcked: () => null, minutes: 2, spawns: 3 });
+    expect(r.verdict).toBe("active");
+    expect(r.timersAfter).toBe(0);
   });
 });
