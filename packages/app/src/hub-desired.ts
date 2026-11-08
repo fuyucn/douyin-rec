@@ -67,10 +67,11 @@ export function desiredSpecsForWorker(workerId: string, ctx: HubDesiredCtx): Rem
     const sync = resolveRuleSyncRoom(rule, src.room);
     const srcSlug = sync.roomSlug;
     ctx.onRuleIdentityMismatch?.(rule, sync);
-    // #442:删除意图只来自「未勾选」这一个维度。
-    const ruleDisabled = rule.enabled === false;
+    // #442:删除意图只来自「未勾选」这一个维度 —— 且与规则是否停用无关:房间既然没派给本节点,
+    // 这里就不该再有它的任务。此前把「规则停用」也当成跳过删除的理由,于是规则一停用(可逆状态),
+    // 未勾选的房间就被当成「停用保留」永远留在节点上(用户反馈:已停用的房间还挂在节点下)。
     const targeted = isWorkerTargeted(rule, workerId);
-    if (!ruleDisabled && !targeted) {
+    if (!targeted) {
       out.push({
         platform: sync.platform,
         roomSlug: srcSlug,

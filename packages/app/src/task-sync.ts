@@ -319,6 +319,11 @@ export function applyRemoteTasks(
         zeroDiskDelivery: deliveryJson(spec),
         // 旧 master 不下发 / 非白名单值 → original(现状);不抛,免得一个坏值拒掉整批同步。
         outputFormat: readOutputFormat(spec.outputFormat),
+        // 账号开关与录制凭证以 master 为准:此前更新路径刻意“保留节点本地值”,
+        // 结果是 master 后开的 useCookie / 轮换的 cookie 永远到不了已存在的节点任务。
+        // 但 master 自己没凭证(该平台未设)时,别把节点自备的那份抹掉。
+        useCookie: spec.useCookie,
+        cookies: spec.cookies ?? existing.cookies ?? null,
       });
       log?.(`[task-sync] 收编任务 ${existing.id}: ${key}`);
       // 期望任务已禁用但节点上还在录/待起:必须硬停,不能等 daemon 排空到自然收播。

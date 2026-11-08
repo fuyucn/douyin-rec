@@ -471,3 +471,46 @@ describe("T3 删除语义", () => {
     });
   });
 });
+
+// 凭证同步(2026-11-08):master 的 useCookie / cookie 必须能刷新**已存在**的节点任务。
+// 之前更新路径不动这两个字段,后果是 master 后开的「带账号信息」与轮换后的 cookie
+// 永远到不了节点 —— 节点继续匿名录制,礼物/入场弹幕全丢(线上 VPS1 已实际出现)。
+describe("凭证与账号开关随同步刷新", () => {
+  let dir: string;
+  let store: TaskStore;
+  const spec = (over: Partial<RemoteTaskSpec> = {}): RemoteTaskSpec => ({
+    platform: "douyin", roomSlug: "123456", room: "https://live.douyin.com/123456",
+    name: "主播A", quality: "origin", engine: "ffmpeg", danmu: 1, segmentSec: 1800,
+    scheduleStart: null, scheduleEnd: null, enabled: true, useCookie: true,
+    cookies: null, outDir: null, webhook: null, anchorName: null, rollingUpload: false, rollingEffective: false, ...over,
+  });
+
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "creds-")); store = new TaskStore(join(dir, "tasks.db")); });
+  afterEach(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
+
+  it("master 后开的 useCookie + 下发的 cookie → 写到已存在的任务", () => {
+    const t = store.addTask({ room: "123456", managedBy: "hub", enabled: true, useCookie: false });
+    applyRemoteTasks(store, [spec({ useCookie: true, cookies: "SESSION=master" })]);
+    const after = store.getTask(t.id)!;
+    expect(after.useCookie).toBe(true);
+    expect(after.cookies).toBe("SESSION=master");
+  });
+
+  it("master 轮换 cookie → 覆盖节点上的旧串", () => {
+    const t = store.addTask({ room: "123456", managedBy: "hub", enabled: true, useCookie: true, cookies: "SESSION=old" });
+    applyRemoteTasks(store, [spec({ useCookie: true, cookies: "SESSION=new" })]);
+    expect(store.getTask(t.id)!.cookies).toBe("SESSION=new");
+  });
+
+  it("master 关掉 useCookie → 节点也跟着关(即使节点有本地 cookie)", () => {
+    const t = store.addTask({ room: "123456", managedBy: "hub", enabled: true, useCookie: true, cookies: "SESSION=local" });
+    applyRemoteTasks(store, [spec({ useCookie: false, cookies: null })]);
+    expect(store.getTask(t.id)!.useCookie).toBe(false);
+  });
+
+  it("master 没有该平台凭证 → 不抹掉节点自备的 cookie", () => {
+    const t = store.addTask({ room: "123456", managedBy: "hub", enabled: true, useCookie: true, cookies: "SESSION=node-local" });
+    applyRemoteTasks(store, [spec({ useCookie: true, cookies: null })]);
+    expect(store.getTask(t.id)!.cookies).toBe("SESSION=node-local");
+  });
+});

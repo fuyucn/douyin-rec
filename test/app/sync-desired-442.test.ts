@@ -1,9 +1,8 @@
 /**
  * #442 wiring guard: the master's desiredFor lives in the platform-vendor-dependent CLI entry
  * (vitest cannot import it), so the sync-semantics split is pinned at the source level:
- * deletion intent comes ONLY from "rule enabled but node unselected" (a deleted:true marker);
- * a disabled rule / unmet capabilities must still ship enabled:false (stop-and-keep), because
- * the local source task's stop depends on that entry and reversible states must not delete.
+ *   未勾选(unassigned)= deleted:true —— **与规则是否停用无关**(房间没派给本节点,节点就不该留着它);
+ *   规则停用但仍勾选 / 能力不满足 = enabled:false 停用保留(可逆,恢复时原地复活)。
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -15,15 +14,16 @@ const cli = readFileSync(join(root, "packages/app/src/hub-desired.ts"), "utf-8")
 const sync = readFileSync(join(root, "packages/app/src/task-sync.ts"), "utf-8");
 
 describe("#442 只下发启用且分配的房间(下发侧语义钉死)", () => {
-  it("未勾选 = 点名 deleted:true,而不是静默缺席(缺席会让节点守卫拦成只停不删)", () => {
-    expect(cli).toMatch(/!ruleDisabled && !targeted/);
+  it("未勾选 = 点名 deleted:true,且不再受 ruleDisabled 影响(规则停用+未勾选同样要清)", () => {
+    expect(cli).toMatch(/if \(!targeted\) \{/);
     expect(cli).toMatch(/deleted:\s*true/);
+    // 旧口径:规则停用会被当成「停用保留」,未勾选的房间永远留在节点上(2026-11-08 修)。
+    expect(cli).not.toMatch(/!ruleDisabled && !targeted/);
   });
 
-  it("规则停用不进删除意图:enabled:false 条目仍在(本机停用靠它写回源任务)", () => {
-    // ruleDisabled 维度的条目必须继续走停用保留路径,而不是被跳过。
-    expect(cli).toMatch(/const ruleDisabled = rule\.enabled === false;/);
+  it("规则停用但仍勾选 → 走停用保留(enabled:false 条目仍在,本机停用靠它写回源任务)", () => {
     expect(cli).toMatch(/const targeted = isWorkerTargeted\(rule, workerId\);/);
+    expect(cli).toContain("resolveSpecAssignment");
   });
 
   it("节点侧:点名删除的缩容守卫放行(shrinkIsExplicit),缺席无点名仍被守卫拦", () => {
