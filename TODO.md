@@ -19,6 +19,16 @@
 - [~] **T-157 房间详情页重排（issue [#553](https://github.com/fuyucn/douyin-rec/issues/553) → PR [#556](https://github.com/fuyucn/douyin-rec/pull/556)，已合并 ecff51f2，版本 0.0.319，2026-11-07）** — **待部署验证**。review 打回一轮（P1 cfg CSS 漏移植等）返工后 APPROVE。核对项：详情页首屏、配置四域、图标操作、受管只读。
 - [~] **T-163 Queue 页信息架构重做（已由 PR [#551](https://github.com/fuyucn/douyin-rec/pull/551) 合并，2026-11-07 实际收口）**
   — 与 T-156 的 queue 部分重叠：#552 实现时基于 #551 产物只做视觉走查残余差异（dev/queue-visual-review.html 的 9 条修订）。
+- [~] **T-166 hy4 评审修复(F1-F12 采纳项)（0.0.331-b89fa233，已部署三节点，2026-11-08）**
+  — hy4(group/plan) 读码评审:两类确定性缺陷 + 四类一致性,全部采纳并上线。
+  **F1** 队列页头数字打两遍(<b>{n}</b> 与文案 {n} 同值,实测「00 running」)——删 b 包装,CSS 删 .queue-overview-count b,回归测试反转断言。
+  **F2** field-label margin 覆盖残留(2374 行 margin:0 压过新声部,表单标签贴住输入框)——删旧定义。
+  **F5/F6** 禁用态透明度三档统一 0.5;主按钮禁用掉回中性(修好全部弹窗禁用键);节点卡 disabled 点从 hairline 改 muted。
+  **F8** 5 处 10.5px 清完。**F10** 详情页历史全 done(≥6)折叠摘要行+最近日期锚;节点队列全零折叠「N 个执行器全部空闲」。**F12** 数据空值统一 ASCII「-」。
+  **部署发现**:VPS web/dist 是 0.0.327 时代的旧产物(biliup bundle 只带 APP_VERSION 不带新 UI)——已 scp 新 web/dist 原子替换,VPS1/VPS2 UI 现为 0.0.331。
+  **推迟单独开票**:①停止方块语义(enabled≠recording)、⑤Stats breakdown 纵向留白、⑧1024-1100 表格挤、⑨Upload 列补词、F4 --r-pill 未定义、F9 死 CSS 80 行。
+  **验收**:typecheck/test 4870 全绿、check-i18n 绿、线上实测 F1「0 running」/F2 marginBottom 6px/F10 两处折叠(凌晴页「Last 20 runs all succeeded」)。
+
 - [~] **T-165 全局 design 统一 pass(用户反馈「每个页面每个组件风格不统一」+ edit 等表单也统一)**
   — 顾问卡点 1 过审(reviewer group/plan):四轮页面迭代留下代差;两 PR 落地。
   **PR1(0.0.328-6965ca89)**:标签声部唯一插入点(field-label 双定义合并——2371 行无作用域覆盖 386 行的 font-size/margin 是「标签贴输入框」根因;telemetry/metric/section/form/field 五份重复声明合一);散文标签去 uppercase(CSS 14 处 + tsx 4 处,机器 token 大写交给数据);字号下限 10px→11px(CSS 6 + tsx 7,rt-pill/tr-pill height→min-height 防溢出);H1 统一 .page-h1 28→32px(7 处)。
