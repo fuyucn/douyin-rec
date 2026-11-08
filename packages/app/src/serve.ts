@@ -460,28 +460,26 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     }, 60_000);
 
     // cookie 临期看门狗:剩 ≤ N 天(或已过期)→ 告警(过期后静默降级匿名,丢礼物/入场)。
-    // Issue #563:判定读**实际生效**的平台串(`getPlatformCookies`,抖音优先 platformCookies 再回落兼容键),
-    // 而不是只读兼容键 —— 分头读会让「告警的串」与「录制实际用的串」再次分叉(节点上两份都能存在)。
-    // 去重仍是进程内:重启会重报一次;它现在只在登录态真的临期时才会报,而不是每次重启都报同一个旧串。
-    const COOKIE_WARN_DAYS = Number(process.env.DOUYIN_COOKIE_WARN_DAYS ?? process.env.DOUYIN_REC_COOKIE_WARN_DAYS ?? 3);
-    const PLATFORM_LABEL: Record<string, string> = { douyin: "抖音", bilibili: "B站", kuaishou: "快手" };
-    const warnedCookiePlatforms = new Set<string>();
+    // Issue #563:判定读**实际生效**的平台串(`getPlatformCookies`,抖音优先 platformCookies 再回落兼容键);
+    // 去重**跨重启**(settings 里记「已报过的到期时刻」)—— 进程内布尔在重启就归零,而节点重启很频繁,
+    // 升级后每次重启都会把同一条旧串再报一遍(部署实测见 issue #563)。
+    const COOKIE_WARN_DAYS_RAW = Number(process.env.DOUYIN_COOKIE_WARN_DAYS ?? process.env.DOUYIN_REC_COOKIE_WARN_DAYS ?? 3);
+    // 非法 env → NaN 会让 `days <= NaN` 恒 false(看门狗静默停摆),回落默认 3 天。
+    const COOKIE_WARN_DAYS = Number.isFinite(COOKIE_WARN_DAYS_RAW) ? COOKIE_WARN_DAYS_RAW : 3;
+    const PLAT_LABEL: Record<string, string> = { douyin: "抖音", bilibili: "B站", kuaishou: "快手" };
+    const COOKIE_WARN_SETTING = "cookieWarned";
     const checkCookieExpiry = async (): Promise<void> => {
       try {
-        const { dueCookieAlerts } = await import("./cookie-utils.js");
+        const { dueCookieAlerts, planCookieAlerts } = await import("./cookie-utils.js");
         const due = dueCookieAlerts(
           listPlatforms().map((p) => ({ platform: p.id, value: store.getPlatformCookies(p.id) })),
           Date.now(),
           COOKIE_WARN_DAYS,
         );
-        const duePlatforms = new Set(due.map((d) => d.platform));
-        for (const platform of warnedCookiePlatforms) {
-          if (!duePlatforms.has(platform)) warnedCookiePlatforms.delete(platform); // 回升/续期 → 复位
-        }
-        for (const { platform, days } of due) {
-          if (warnedCookiePlatforms.has(platform)) continue;
-          warnedCookiePlatforms.add(platform);
-          const label = PLATFORM_LABEL[platform] ?? platform;
+        const plan = planCookieAlerts(due, store.getSetting(COOKIE_WARN_SETTING));
+        // 先送达、后记账:写 settings 失败绝不能把这一轮的告警吞掉(at-least-once,重复一条远好于漏一条)。
+        for (const { platform, days } of plan.alerts) {
+          const label = PLAT_LABEL[platform] ?? platform;
           events.emit(null, {
             kind: "error",
             stage: "cookie",
@@ -490,8 +488,17 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
               : `账号 cookie(${label})${days} 天后过期,请尽快续期,否则丢礼物/入场`,
           });
         }
-      } catch {
-        /* ignore */
+        if (plan.changed) {
+          try {
+            store.setSetting(COOKIE_WARN_SETTING, plan.nextRaw);
+          } catch (e) {
+            // 记不上就下轮再报一次(多报),不静默。
+            serveLog.error("[cookie] 记录告警去重标记失败(下轮可能重复告警):", e);
+          }
+        }
+      } catch (e) {
+        // 整轮失败(如坏串解析异常):至少留痕,别静默停摆。
+        serveLog.error("[cookie] 临期检查失败(本轮):", e);
       }
     };
     void checkCookieExpiry();
