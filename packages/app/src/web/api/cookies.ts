@@ -36,6 +36,9 @@ export function buildCookies(ctx: ApiCtx) {
       const cookie = (input.cookie ?? "").trim();
       if (!cookie) return err(400, "cookie 不能为空");
       store.setPlatformCookies(platform, cookie);
+      // Issue #563:登录源变了 → 立即让 master 推一轮到节点,不等周期 tick。
+      // 注意：清空(clearCookie)**不**反向清节点 —— 节点侧的“空值永不删”是故意的安全阀。
+      deps.requestSyncTasks?.();
       return { status: 200, body: cookieStatus(platform, cookie, "settings") };
     },
 

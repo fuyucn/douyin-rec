@@ -84,7 +84,7 @@
 ### ✅ hub 中心化任务管理 —— 已实现(2026-08-07,`e6da56b`)
 
 - 之前(2026-07-01)评估过收益/成本后暂缓;节点 ≥3、per-node 差异化配置成为真实需求后实现:**hub 规则绑定 source task**(`recording.sourceTaskId`,房间身份从任务派生,不再手填房间 URL)+ 勾选目标节点(`workers`)→ master 按 `(platform, roomSlug)` 自动下发/对账。
-- 实现要点(与当年设计一致):远端任务 `managedBy='hub'` 只读(Web API/UI 禁改删启停,只能在 master 操作);走 Transport 轴隐藏命令 `_tasks`/`_apply-tasks`(local 直写 store,`adopt=false` 不锁本机源任务);desired-state 周期对账(启动即跑 + 1min + 变更即同步)而非一次性推送;per-node override(cookies/useCookie/outDir/webhook)保留,防弹幕 WS 相撞等真实约束。
+- 实现要点(与当年设计一致):远端任务 `managedBy='hub'` 只读(Web API/UI 禁改删启停,只能在 master 操作);走 Transport 轴隐藏命令 `_tasks`/`_apply-tasks`(local 直写 store,`adopt=false` 不锁本机源任务);desired-state 周期对账(启动即跑 + 1min + 变更即同步)而非一次性推送;per-node override 保留 ```outDir/webhook```；2026-11 起受管任务的 `cookies`/`useCookie` 由 master 拥有（见 `docs/multi-node-sync.md` 写侧段），原「cookies 也可节点覆盖」的口径已作废。
 - 任务定义仍存 `tasks` 表(受管任务 = 普通行 + `managedBy='hub'`),规则文件 `config/hub/{platform}.{roomSlug}.json` 仍为真理源。
 
 ## 测试备注

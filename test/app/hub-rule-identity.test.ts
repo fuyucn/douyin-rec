@@ -159,7 +159,6 @@ describe("desired spec builder (extracted from cli) — issue #481 review 2", ()
     rules: [rule],
     getTask: (id: number) => (id === 1 ? srcTask() : null),
     workers: [{ id: "vps2" }],
-    resolveCookies: () => null,
     allowsPush: () => false,
     blockedKey: (w: string, p: string, r: string) => w + "|" + p + "|" + r,
     delivery: {

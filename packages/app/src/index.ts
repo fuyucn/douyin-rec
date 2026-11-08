@@ -36,10 +36,13 @@ export type { ManagedState } from "./managed-state.js";
 export {
   desiredFingerprint, nextExpectedVersion, expectedVersionKey, syncErrorKey,
   readExpectedVersion, recordExpectedVersion, recordSyncError, readSyncError, withMasterReceipt,
+  cookiesFingerprint, cookiesAppliedKey, readCookiesApplied, recordCookiesApplied, shouldPushCookies, cookiesPushVerdict, COOKIE_REVERIFY_MS,
 } from "./sync-receipt.js";
-export type { ExpectedVersionState, ReceiptSettings } from "./sync-receipt.js";
+export type { CookiesAppliedState, CookiesPushVerdict, ExpectedVersionState, ReceiptSettings } from "./sync-receipt.js";
 export { parseApplyTasksPayload, applyTasksPayload } from "./apply-payload.js";
 export type { ApplyTasksPayload } from "./apply-payload.js";
+export { decodeApplyCookies, applyPlatformCookies, collectPlatformCookies } from "./apply-cookies.js";
+export type { CookieStore } from "./apply-cookies.js";
 export { applyTimezone, applyTimezoneFromDb, dbPathForDataRoot, syncDbPathFor, effectiveTimezone, isValidTimezone, DEFAULT_TIMEZONE } from "./timezone.js";
 /** 应用版本号({root package.json version}-{commit6},由 pnpm bundle 注入;非打包环境回落 dev)。 */
 export { APP_VERSION } from "./version.js";

@@ -5,9 +5,9 @@ import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { encodeEnqueue, isJobAbort, normalizeNodeResultFile, normalizeZeroDiskReport, type ZeroDiskReport, registerChild, throwIfAborted, type EnqueueRequest, type EnqueueResponse, type ProcessReceipt, type RemoteTaskSpec } from "@drec/core";
 import type { ActiveRecordingRoom, ApplyTasksResult, NodeInventory, NodeRecording, NodeRecordingStatus, NodeRollingSession, NodeTasks, RecoverOrderRequest, RecoverOrderResult, Transport } from "./transport.js";
-import { ProcUnsupported } from "./transport.js";
+import { CookieSyncUnsupported, ProcUnsupported } from "./transport.js";
 import { parseUnclaimedPayload } from "./unclaimed.js";
-import type { NodeCapabilities, NodeStatus, NodePipelineResult, NodePipelineResultFile, NodePipelineSpec } from "@drec/core";
+import type { NodeCapabilities, NodeStatus, NodePipelineResult, NodePipelineResultFile, NodePipelineSpec, ApplyCookiesPayload, ApplyCookiesResult } from "@drec/core";
 
 export interface SshOpts {
   id: string; host: string; dataRoot: string;
@@ -288,6 +288,32 @@ export class SshTransport implements Transport {
     const b64 = Buffer.from(JSON.stringify(input), "utf-8").toString("base64");
     const out = await this.node("apply-tasks", [b64]);
     return JSON.parse(out) as ApplyTasksResult;
+  }
+
+  /**
+   * 下发平台登录态(隐藏 `_apply-cookies`,issue #563)。
+   *
+   * 旧 bundle 没有该命令 → 抛 `CookieSyncUnsupported`:调用方据此「告警一次 + 不记已应用」,
+   * 而不是把「命令没报错」误读成「节点已用上新串」。ssh 超时会**去掉命令前缀**(argv 里装着整串登录态)
+   * 后再抛,并保留通用 ssh 错误与节点 stderr 末尾。
+   */
+  async applyCookies(input: ApplyCookiesPayload): Promise<ApplyCookiesResult> {
+    const b64 = Buffer.from(JSON.stringify(input), "utf-8").toString("base64");
+    try {
+      // 短预算(status=8s):登录态是一行写操作,不能像上传那样把整轮同步拖到 45s。
+      const out = await this.node("apply-cookies", [b64], "status");
+      return JSON.parse(out) as ApplyCookiesResult;
+    } catch (e) {
+      if (isUnknownCommandError(e)) throw new CookieSyncUnsupported();
+      // argv 里装着整串登录态:ssh 超时消息会回显命令前缀,这里只保留失败种类(不放大暴露面)。
+      const raw = e instanceof Error ? e.message : String(e);
+      if (/ssh 超时/.test(raw)) {
+        // 只丢含 argv 的前缀;节点 stderr 末尾(超时时唯一的现场线索)要留下。
+        const tail = raw.match(/节点 stderr 末尾: ([\s\S]*)$/)?.[1];
+        throw new Error(`_apply-cookies 下发超时(节点无响应;命令内容不回显)${tail ? `; 节点 stderr 末尾: ${tail}` : ""}`);
+      }
+      throw e;
+    }
   }
 
   /** 远端数据根剩余空间 GB(隐藏 `_disk`;master 侧磁盘看门狗用,不依赖 worker webhook 配置)。 */

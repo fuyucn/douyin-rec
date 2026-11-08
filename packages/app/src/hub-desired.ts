@@ -34,8 +34,6 @@ export interface HubDesiredCtx {
   workers: readonly HubDesiredWorker[];
   /** Master upload login file (same one its own pipeline uses); undefined = none. */
   cookiesPath?: string;
-  /** Node-local cookie resolution for the source task. */
-  resolveCookies(task: Task): string | null;
   /** Zero-disk capability gate for one node. */
   allowsPush(workerId: string): boolean;
   /** Node-side blocked-reason key (workerId|platform|roomSlug); supplied so app stays independent of orchestrator. */
@@ -141,7 +139,10 @@ export function desiredSpecsForWorker(workerId: string, ctx: HubDesiredCtx): Rem
       scheduleEnd: src.scheduleEnd,
       enabled: zd.enabled,
       useCookie: src.useCookie,
-      cookies: ctx.resolveCookies(src),
+      // Issue #563: only the master's **explicit** per-task override is shipped. The platform credential
+      // itself travels on its own channel (`_apply-cookies`), so a worker task must not pin the master's
+      // current string at creation time — that pin is exactly what made later logins invisible on nodes.
+      cookies: src.cookies?.trim() ? src.cookies.trim() : null,
       outDir: src.outDir,
       webhook: src.webhook,
       anchorName: src.anchorName,

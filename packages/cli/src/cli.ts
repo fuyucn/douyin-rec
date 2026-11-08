@@ -43,7 +43,7 @@ import { applyTimezoneFromDb, dbPathForDataRoot, effectiveTimezone, rootStatsDbP
 import type { UploadOpts } from "@drec/core";
 import { zeroDiskStreamKey } from "@drec/core";
 import type { PipelineCfg, SyncLedger, WorkflowNodeKey } from "@drec/orchestrator";
-import { recordStreamUpload, recordZeroDiskReceipt } from "@drec/orchestrator";
+import { recordStreamUpload, recordZeroDiskReceipt, CookieSyncUnsupported } from "@drec/orchestrator";
 import { reportStreamUploadLedgerResult } from "./stream-upload-ledger-report.js";
 import { DEFAULT_SEGMENT_CAP } from "@drec/zero-upload";
 
@@ -1242,6 +1242,14 @@ let hubSyncTasks: ((opts?: { force?: boolean }) => Promise<void>) | undefined;
  * instead of on every sync tick for the life of the process.
  */
 const warnedSkipReasons = new Set<string>();
+/** Issue #563: workers already warned as "cannot apply platform credentials" (old bundle). One warning per node. */
+const warnedCookieUnsupported = new Set<string>();
+/** Issue #563: last failure message per worker, so a permanently broken link does not warn every tick. */
+const cookieWarnSeen = new Map<string, string>();
+/** Issue #563: worker|platform pairs already reported as "this bundle has no such platform" (one line each). */
+const cookieUnsupportedSeen = new Set<string>();
+/** Issue #563: last "cannot read platform credentials" message, so a busy db does not warn every tick. */
+let cookieReadWarn = "";
 /** Master side of the fleet long connection (plans/042); null when `fleet.controllerUrl` is not configured. */
 let hubFleet: import("@drec/orchestrator").FleetController | null = null;
 /** For every SshTransport this process builds: fleet first, ssh otherwise (read per call). */
@@ -1445,9 +1453,9 @@ const hubStarter: HubStarter = {
     const { ffprobeVideo } = await import("@drec/post-process");
     const { handleEnqueue, handleProcStatus, handleProcCancel } = await import("@drec/app");
     const { statSync } = await import("node:fs");
-    const { uploadPlain, appendGroup, countVideoParts, hubStore, resolveRuleSyncRoom, desiredSpecsForWorker, workerStore, rootHubDir, rootHubConfig, rootConfigDir, rootStageDir, rootLogsDir, drecRoot, listNodeTasks, applyRemoteTasks, resolveTaskStreamCookies, recordRoomSessions } = await import("@drec/app");
+    const { uploadPlain, appendGroup, countVideoParts, hubStore, resolveRuleSyncRoom, desiredSpecsForWorker, workerStore, rootHubDir, rootHubConfig, rootConfigDir, rootStageDir, rootLogsDir, drecRoot, listNodeTasks, applyRemoteTasks, recordRoomSessions } = await import("@drec/app");
     const { FileLogger } = await import("@drec/observability");
-    const { recordExpectedVersion, recordSyncError } = await import("@drec/app");
+    const { recordExpectedVersion, recordSyncError, cookiesFingerprint, readCookiesApplied, recordCookiesApplied, shouldPushCookies, cookiesPushVerdict, collectPlatformCookies } = await import("@drec/app");
 
     const hubCfg = JSON.parse(opts.hubConfigJson ?? "null") as null | {
       platform?: string;
@@ -1960,7 +1968,6 @@ const hubStarter: HubStarter = {
       getTask: (id) => opts.store.getTask(id),
       workers: loadWorkers(),
       cookiesPath: hubCfg.cookies,
-      resolveCookies: (t) => resolveTaskStreamCookies(t, opts.store),
       allowsPush: (id) => zeroDiskFleet.allowsPush(id),
       blockedKey,
       delivery: {
@@ -2010,9 +2017,67 @@ const hubStarter: HubStarter = {
         } catch (e) {
           opts.warn(`[zero-disk] 能力探测失败(按不支持处理): ${(e as Error).message}`);
         }
+        // Issue #563:平台登录态单向下发(master = 唯一登录源)。**必须先于任务下发** ——
+        // 任务侧会清掉节点上残留的陈旧任务级串(回落到平台串),所以平台串得先就位。
+        // 读设置可能因 SQLITE_BUSY / 坏值抛错,而 tick 的 promise 是 void 掉的:这里必须自己兜住,
+        // 否则一次读失败 = 整轮同步 reject(unhandled)。
+        let cookiesPayload = { platformCookies: {} as Record<string, string> };
+        try {
+          cookiesPayload = collectPlatformCookies(opts.store);
+        } catch (e) {
+          const msg = `[hub] 读取平台登录态失败(本轮不下发): ${(e as Error).message}`;
+          if (cookieReadWarn !== msg) opts.warn(msg);
+          cookieReadWarn = msg;
+        }
+        const cookiesFp = cookiesFingerprint(cookiesPayload);
+        const hasCookies = Object.keys(cookiesPayload.platformCookies).length > 0;
         for (const w of loadWorkers()) {
           const t = buildTransports().get(w.id);
           if (!t?.applyTasks) continue; // 该 transport 不支持任务同步 → 跳过(下轮再试)
+          // 本机 = master 自己:store 就是源头,没有任何东西可下发。
+          if (w.kind !== "local" && hasCookies) {
+            try {
+              if (!shouldPushCookies(readCookiesApplied(opts.store, w.id), cookiesFp, Date.now())) {
+                // 同一内容且在复核窗口内：本轮不推。
+              } else if (!t.applyCookies) {
+                throw new CookieSyncUnsupported("transport 未注入登录态下发");
+              } else {
+                const r = await t.applyCookies(cookiesPayload);
+                // 判定见 `cookiesPushVerdict`：applied ∪ unchanged ∪ unsupported 算「有交代」；
+                // rejected / missing 不算 —— 后者若记指纹就再也不会补发（静默失败）。
+                const verdict = cookiesPushVerdict(cookiesPayload, r);
+                for (const p of verdict.unsupported) {
+                  const key = `${w.id}|${p}`;
+                  if (!cookieUnsupportedSeen.has(key)) {
+                    cookieUnsupportedSeen.add(key);
+                    opts.warn(`[hub] 节点 ${w.id} 没有平台 ${p}(旧 bundle),该平台不对它下发`);
+                  }
+                }
+                if (!verdict.ok) {
+                  const msg = `[hub] 登录态下发 ${w.id} 未完全应用(missing=${verdict.missing.join(",") || "-"} rejected=${verdict.rejected.join(",") || "-"}),下轮重试`;
+                  if (cookieWarnSeen.get(w.id) !== msg) opts.warn(msg);
+                  cookieWarnSeen.set(w.id, msg);
+                } else {
+                  recordCookiesApplied(opts.store, w.id, cookiesFp);
+                  cookieWarnSeen.delete(w.id);
+                  if (r.applied.length > 0) opts.log(`[hub] 登录态下发 ${w.id}: applied=${r.applied.join(",")}`);
+                }
+              }
+            } catch (e) {
+              // 「旧 bundle 不支持」与「这次没送到」必须分开:前者不记已应用(升级后下一轮自动补发),
+              // 否则节点升级完也要等到 master 下次改登录才补。
+              if (e instanceof CookieSyncUnsupported) {
+                if (!warnedCookieUnsupported.has(w.id)) {
+                  warnedCookieUnsupported.add(w.id);
+                  opts.warn(`[hub] 节点 ${w.id} 不支持登录态下发(旧 bundle),升级后自动补发`);
+                }
+              } else {
+                const msg = `[hub] 登录态下发 ${w.id} 失败(下轮重试): ${(e as Error).message}`;
+                if (cookieWarnSeen.get(w.id) !== msg) opts.warn(msg);
+                cookieWarnSeen.set(w.id, msg);
+              }
+            }
+          }
           try {
             const desired = desiredFor(w.id);
             // T16:版本由内容派生;周期 tick 内容不变时复用同一版,避免假的 syncLag。
@@ -2536,6 +2601,14 @@ program
   .description("(内部) 应用 master 下发的期望任务(供 master ssh 调用)")
   .action(async (dataRoot: string, b64: string) => {
     await runNodeCommandCli("apply-tasks", dataRoot, [b64]);
+  });
+
+// (内部) 应用 master 下发的平台登录态(issue #563)。空值不删:下发的 payload 里没有的平台一律不碰。
+program
+  .command("_apply-cookies <dataRoot> <base64>", { hidden: true })
+  .description("(内部) 应用 master 下发的平台登录态(供 master ssh 调用)")
+  .action(async (dataRoot: string, b64: string) => {
+    await runNodeCommandCli("apply-cookies", dataRoot, [b64]);
   });
 
 // (内部) 读本节点某任务的日志尾巴(F3):master 在 fleet 模式下代查节点日志,不必登节点看网页。

@@ -51,6 +51,11 @@ function validateSpec(raw: unknown): { ok: true; spec: RemoteTaskSpec } | { ok: 
   if (!slug) return { ok: false, room, reason: "room 无法解析出房间身份" };
   if (typeof spec.platform !== "string" || !spec.platform.trim()) return { ok: false, room, reason: "缺少 platform" };
   if (typeof spec.roomSlug !== "string" || !spec.roomSlug.trim()) return { ok: false, room, reason: "缺少 roomSlug" };
+  // `cookies` is normalized with `.trim()` during upsert (issue #563); a non-string would throw and abort
+  // the whole batch, which is exactly what per-item validation exists to prevent (issue #480).
+  if (!(spec.cookies === undefined || spec.cookies === null || typeof spec.cookies === "string")) {
+    return { ok: false, room, reason: "cookies 类型非法" };
+  }
   // The trimmed value is only a validation aid: the stored spec keeps the master's bytes untouched, so an
   // all-good batch stays byte-identical (issue #480 review).
   return { ok: true, spec: spec as RemoteTaskSpec };
@@ -181,7 +186,10 @@ export interface ApplyTasksOptions {
  *    adopt=false(master 本地)→ 保持用户可编辑并清掉历史遗留的 hub 标记；
  *  - 不存在 → 新建；
  *  - 受管但不在 desired 的任务 → 两阶段删除。
- * per-node override = cookies / useCookie / outDir / webhook(保留 node 本地配置)。
+ * per-node override = outDir / webhook(保留 node 本地配置);受管任务的 `cookies`/`useCookie` 以 master 为准。
+ * **登录态的归属例外(issue #563)**：受管任务(adopt=true)的 `cookies` 由 master 拥有 ——
+ * 更新时按下发值写入(下发 null 且节点有平台串可回落时清空),节点上残留的旧串/占位串因此自动回落;
+ * 本机(adopt=false)不碰 `cookies`(`useCookie` 恒以 master 为准;本机写回同值,无副作用)。
  *
  * **删除语义矩阵**(T3 + #442;唯一真理源 = 函数体内删除循环处的注释):
  * | master 侧表达                      | 本节点行为                                   |
@@ -290,7 +298,7 @@ export function applyRemoteTasks(
       }
     if (existing) {
       // 远端:收编为受管;master 本地:保持用户可编辑(顺带清掉历史遗留的 hub 标记)。
-      // 保留 node 本地 cookies/useCookie/outDir/webhook。
+      // 保留 node 本地 outDir/webhook(账号开关与凭证归 master,见 issue #563)。
       store.setManagedBy(existing.id, adopt ? "hub" : null);
       // **不下发 anchorName**(T-4):主播名由各节点**自行维护**——worker 录制时从
       // `[主播] xxx` 日志抓取并持久化(task-manager),master 侧只在创建/改房间时抓一次、
@@ -306,6 +314,11 @@ export function applyRemoteTasks(
         scheduleStart: spec.scheduleStart,
         scheduleEnd: spec.scheduleEnd,
         enabled: spec.enabled,
+        // Issue #563:受管任务的登录态归 master。下发 null = 清掉节点上的残留串，让任务回落到 master
+        // 经 `_apply-cookies` 下发的平台串 —— 但**只在节点确实有平台串可回落时**才清：否则（master 推送
+        // 失败 / 节点还是旧 bundle）宁可保留节点已有的那份，不能把人家的凭据删成匿名。
+        // 本机(adopt=false)不写该字段。
+        ...(adopt ? { cookies: spec.cookies?.trim() ? spec.cookies.trim() : (store.getPlatformCookies(spec.platform) ? null : (existing.cookies ?? null)) } : {}),
         // 边录边传:旧开关随 master 下发(远端 = 生效值,兼容旧节点包;本机 = 用户旧值),
         // 生效值由 master 算好下发(issue #40),节点只存不判;旧 master 不带该字段 → 回落旧开关(旧行为)。
         rollingUpload: spec.rollingUpload,
@@ -319,11 +332,9 @@ export function applyRemoteTasks(
         zeroDiskDelivery: deliveryJson(spec),
         // 旧 master 不下发 / 非白名单值 → original(现状);不抛,免得一个坏值拒掉整批同步。
         outputFormat: readOutputFormat(spec.outputFormat),
-        // 账号开关与录制凭证以 master 为准:此前更新路径刻意“保留节点本地值”,
-        // 结果是 master 后开的 useCookie / 轮换的 cookie 永远到不了已存在的节点任务。
-        // 但 master 自己没凭证(该平台未设)时,别把节点自备的那份抹掉。
+        // 账号开关以 master 为准(2026-11-08):此前更新路径刻意“保留节点本地值”,于是 master 后开的
+        // useCookie 永远到不了已存在的节点任务(节点继续匿名录制)。
         useCookie: spec.useCookie,
-        cookies: spec.cookies ?? existing.cookies ?? null,
       });
       log?.(`[task-sync] 收编任务 ${existing.id}: ${key}`);
       // 期望任务已禁用但节点上还在录/待起:必须硬停,不能等 daemon 排空到自然收播。
@@ -342,7 +353,7 @@ export function applyRemoteTasks(
         segmentSec: spec.segmentSec,
         scheduleStart: spec.scheduleStart,
         scheduleEnd: spec.scheduleEnd,
-        cookies: spec.cookies,
+        cookies: spec.cookies?.trim() ? spec.cookies.trim() : null,
         useCookie: spec.useCookie,
         outDir: spec.outDir,
         webhook: spec.webhook,

@@ -9,7 +9,7 @@
  */
 import { existsSync, mkdirSync, statfsSync } from "node:fs";
 import { join } from "node:path";
-import { createLogger, freeBytesOf, freeGBOf, platformForRoom } from "@drec/core";
+import { createLogger, freeBytesOf, freeGBOf, listPlatforms, platformForRoom } from "@drec/core";
 import { TaskStore, resolveTaskWebhook } from "./store.js";
 import { resolveDbPath } from "./db.js";
 import { EventCenter } from "@drec/observability";
@@ -176,7 +176,11 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
           : platform === "kuaishou"
             ? new KuaishouQrLogin({ log: (m) => console.log(m) })
             : new PlaywrightQrLogin({ log: (m) => console.log(m) }),
-      { log: (m) => console.log(m) },
+      {
+        log: (m) => console.log(m),
+        // Issue #563:登录成功 = master 登录源变了 → 立即推一轮到节点,不等 60s 周期 tick。
+        onSaved: () => hubStarter?.requestSyncTasks?.(),
+      },
     );
 
     // 站内事件中枢:每个事件 → 本地事件流(web/tui 轮询)+ 按「任务 webhook ?? 全局」发 Discord。
@@ -456,29 +460,35 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     }, 60_000);
 
     // cookie 临期看门狗:剩 ≤ N 天(或已过期)→ 告警(过期后静默降级匿名,丢礼物/入场)。
-    const COOKIE_WARN_DAYS = Number(process.env.DOUYIN_REC_COOKIE_WARN_DAYS ?? 3);
-    let cookieWarned = false;
+    // Issue #563:判定读**实际生效**的平台串(`getPlatformCookies`,抖音优先 platformCookies 再回落兼容键),
+    // 而不是只读兼容键 —— 分头读会让「告警的串」与「录制实际用的串」再次分叉(节点上两份都能存在)。
+    // 去重仍是进程内:重启会重报一次;它现在只在登录态真的临期时才会报,而不是每次重启都报同一个旧串。
+    const COOKIE_WARN_DAYS = Number(process.env.DOUYIN_COOKIE_WARN_DAYS ?? process.env.DOUYIN_REC_COOKIE_WARN_DAYS ?? 3);
+    const PLATFORM_LABEL: Record<string, string> = { douyin: "抖音", bilibili: "B站", kuaishou: "快手" };
+    const warnedCookiePlatforms = new Set<string>();
     const checkCookieExpiry = async (): Promise<void> => {
       try {
-        const { parseCookieExpiry } = await import("./cookie-utils.js");
-        const c = store.getDefaultCookies();
-        if (!c) return;
-        const exp = parseCookieExpiry(c);
-        if (exp == null) return;
-        const days = Math.floor((exp - Date.now()) / 86400000);
-        if (days <= COOKIE_WARN_DAYS) {
-          if (!cookieWarned) {
-            cookieWarned = true;
-            events.emit(null, {
-              kind: "error",
-              stage: "cookie",
-              message: days < 0
-                ? `账号 cookie 已过期 ${-days} 天,弹幕已降级匿名(丢礼物/入场),请重新登录`
-                : `账号 cookie ${days} 天后过期,请尽快续期,否则丢礼物/入场`,
-            });
-          }
-        } else {
-          cookieWarned = false;
+        const { dueCookieAlerts } = await import("./cookie-utils.js");
+        const due = dueCookieAlerts(
+          listPlatforms().map((p) => ({ platform: p.id, value: store.getPlatformCookies(p.id) })),
+          Date.now(),
+          COOKIE_WARN_DAYS,
+        );
+        const duePlatforms = new Set(due.map((d) => d.platform));
+        for (const platform of warnedCookiePlatforms) {
+          if (!duePlatforms.has(platform)) warnedCookiePlatforms.delete(platform); // 回升/续期 → 复位
+        }
+        for (const { platform, days } of due) {
+          if (warnedCookiePlatforms.has(platform)) continue;
+          warnedCookiePlatforms.add(platform);
+          const label = PLATFORM_LABEL[platform] ?? platform;
+          events.emit(null, {
+            kind: "error",
+            stage: "cookie",
+            message: days < 0
+              ? `账号 cookie(${label})已过期 ${-days} 天,弹幕已降级匿名(丢礼物/入场),请重新登录`
+              : `账号 cookie(${label})${days} 天后过期,请尽快续期,否则丢礼物/入场`,
+          });
         }
       } catch {
         /* ignore */

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JobAbortedError, isJobAbort } from "@drec/core";
 import { SshTransport, buildRsyncArgs } from "./transport-ssh.js";
-import { ProcUnsupported, recordingStatusWorkerIds, type NodeRecording } from "./transport.js";
+import { CookieSyncUnsupported, ProcUnsupported, recordingStatusWorkerIds, type NodeRecording } from "./transport.js";
 import { summarizeRsyncStderr } from "./transport-ssh.js";
 
 describe("recordingStatusWorkerIds", () => {
@@ -658,5 +658,64 @@ describe("SshTransport.cleanup(失败不再吞,issue #429)", () => {
     const t = mkT(async () => { throw new Error("ssh 超时 45000ms 被杀"); });
     await expect(t.cleanup(["/r/a.ts"])).rejects
       .toThrow(/远端清理失败: 1\/1 个路径未删.*ssh 超时/);
+  });
+});
+
+describe("SshTransport.applyCookies（issue #563：平台登录态下发）", () => {
+  const mkT = (run: (argv: string[]) => Promise<string>) =>
+    new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec", run, rsync: async () => {} });
+
+  it("走隐藏命令 _apply-cookies 并解析回执", async () => {
+    const calls: string[] = [];
+    const t = mkT(async (argv) => {
+      calls.push(argv.join(" "));
+      return JSON.stringify({ applied: ["douyin"], unchanged: [] });
+    });
+    const result = await t.applyCookies({ platformCookies: { douyin: "sessionid=NEW" } });
+    expect(result).toEqual({ applied: ["douyin"], unchanged: [] });
+    expect(calls.join("\n")).toContain("apply-cookies");
+  });
+
+  it("旧 bundle 未知命令 → CookieSyncUnsupported（与「这次没送到」区分）", async () => {
+    const t = mkT(async () => {
+      throw new Error("unknown command: apply-cookies");
+    });
+    await expect(t.applyCookies({ platformCookies: { douyin: "x" } }))
+      .rejects.toBeInstanceOf(CookieSyncUnsupported);
+  });
+
+  it("ssh 失败原样抛出（不能被当成「节点不支持」而永久跳过）", async () => {
+    const t = mkT(async () => {
+      throw new Error("ssh: connect to host h port 22: Connection timed out");
+    });
+    await expect(t.applyCookies({ platformCookies: { douyin: "x" } }))
+      .rejects.toThrow(/timed out/);
+  });
+});
+
+describe("SshTransport.applyCookies 超时脱敏（issue #563 review F8）", () => {
+  const mkT = (run: (argv: string[]) => Promise<string>) =>
+    new SshTransport({ id: "vps", host: "h", dataRoot: "/d", run, rsync: async () => {} });
+
+  it("ssh 超时：丢掉命令前缀（argv 里有登录串），保留节点 stderr 末尾", async () => {
+    const t = mkT(async () => {
+      throw new Error("ssh 超时 8000ms 被杀: h -- 'node /d/dist/douyin-rec.mjs _apply-cookies /d BRLgLS1jb29raWVz' | 节点 stderr 末尾: SQLITE_BUSY");
+    });
+    let message = "";
+    try {
+      await t.applyCookies({ platformCookies: { douyin: "D" } });
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toContain("_apply-cookies 下发超时");
+    expect(message).toContain("SQLITE_BUSY"); // the only on-site clue survives
+    expect(message).not.toContain("BRLgLS1jb29raWVz"); // argv payload does not
+  });
+
+  it("rc!=0 的 stderr 原样上抛（不被当成超时脱敏）", async () => {
+    const t = mkT(async () => {
+      throw new Error("ssh rc=1: 登录态下发 payload 不是合法 base64/JSON");
+    });
+    await expect(t.applyCookies({ platformCookies: { douyin: "D" } })).rejects.toThrow(/payload/);
   });
 });
