@@ -36,4 +36,22 @@ describe("T16 sync receipt wiring", () => {
     expect(cli).toContain("appVersionAtApply = st?.appVersion ?? null");
     expect(nodeCommands).toContain("appVersionAtApply = st.appVersion ?? null");
   });
+
+  // Issue #563: the push decision is the silent-failure guard (record the fingerprint only when the node
+  // really applied everything). Pin the call sites so a refactor cannot quietly drop it.
+  it("master records the credential fingerprint only behind verdict/share gate", () => {
+    expect(cli).toContain("shouldPushCookies(readCookiesApplied(opts.store, w.id)");
+    expect(cli).toContain("cookiesPushVerdict(cookiesPayload, r)");
+    // Record must live in the **success branch**: the `!verdict.ok` branch may only warn/retry.
+    const verdictAt = cli.indexOf("cookiesPushVerdict(cookiesPayload, r)");
+    const elseAt = cli.indexOf("} else {", verdictAt);
+    expect(verdictAt).toBeGreaterThan(-1);
+    expect(elseAt).toBeGreaterThan(verdictAt);
+    expect(cli.slice(verdictAt, elseAt)).not.toContain("recordCookiesApplied");
+    expect(cli.slice(elseAt, elseAt + 400)).toContain("recordCookiesApplied");
+  });
+
+  it("node applies the credential push through the single write path", () => {
+    expect(nodeCommands).toContain("applyPlatformCookies(store, decodeApplyCookies(b64))");
+  });
 });

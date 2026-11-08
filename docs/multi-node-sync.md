@@ -14,7 +14,7 @@
 
 容易误当成数据库 **master-slave 复制**，但要拆成两个方向看，**两侧都已实现**：
 
-- **写侧（已实现，2026-08）= 受管任务下发**：Hub 规则绑定 master 上的源任务（`recording.sourceTaskId`），`workers` 明确该房间要在哪些 worker 录制；master 对每个选中 worker 计算期望任务并对账（local 直接写本机 store，ssh/tailscale-ssh 走隐藏 `_apply-tasks`）。远端任务标记为 `managedBy='hub'`，Web 只读、禁止改删启停；master 的源任务保持用户可编辑。任务页的启停状态表达录制意图，Hub 按规则把该状态同步给选中节点。若 worker 只选 VPS、不含 `local`，master daemon 会抑制源任务的本机录制；选 `local` 与 VPS 则两边都录。cookies 单向下发，节点本地 override（cookies/useCookie/outDir/webhook）保留；移除任务时先停，再于后续对账清理。同步在启动、周期 1min、规则/worker/源任务变更时执行，失败下轮重试。
+- **写侧（已实现，2026-08）= 受管任务下发**：Hub 规则绑定 master 上的源任务（`recording.sourceTaskId`），`workers` 明确该房间要在哪些 worker 录制；master 对每个选中 worker 计算期望任务并对账（local 直接写本机 store，ssh/tailscale-ssh 走隐藏 `_apply-tasks`）。远端任务标记为 `managedBy='hub'`，Web 只读、禁止改删启停；master 的源任务保持用户可编辑。任务页的启停状态表达录制意图，Hub 按规则把该状态同步给选中节点。若 worker 只选 VPS、不含 `local`，master daemon 会抑制源任务的本机录制；选 `local` 与 VPS 则两边都录。登录态单向下发（2026-11，issue #563）：master 是唯一登录源，平台串经 `_apply-cookies` 比对指纹后推给节点（同一内容每 6h 再复核一次），节点无需逐节点扫码；**下发空值永不删除节点登录态**（master 未登录/读取失败不得清空节点鉴权）。受管任务的 `cookies` 由 master 拥有：下发 null 且节点确实有平台串可回落时才清空节点残留串，任务级 override 仍支持；`useCookie` 随 master 同步（2026-11 追加），`outDir`/`webhook` 仍保留节点本地 override。移除任务时先停，再于后续对账清理。同步在启动、周期 1min、规则/worker/源任务变更时执行，失败下轮重试。
 - **读侧（已实现）= 按规则收集副本并 read-repair**：master 扫描注册 worker 的录像清单，但每个房间只保留规则选中节点的成员参与 settle 和选优。只有多个 worker 被选中时才有副本可选；单 worker 场景直接使用该节点录像。master 按覆盖度选择最完整副本，拉取后 merge/burn/发布；都断流时保留源文件并挂起交人工。文件由 master 主动读取（SSH inventory + rsync），worker 不主动 report。
 
 所以一句话：**master 通过控制台管理录制意图与节点分配，选中节点负责录制，master 负责发现、拉取、后处理与发布；冗余录制是按需选择的。**
@@ -53,7 +53,7 @@ interface Transport {
 实现：`local`（master 自己）/ `ssh` / `tailscale-ssh`。认证（ssh key / tailscale 身份）封装在各实现内。
 
 **远端走 SSH 隐藏命令**，不要求 worker 跑额外服务：`_tasks`（任务清单，无 cookies）、
-`_apply-tasks`（下发期望任务）、`_inventory`（扫描录像清单）、`_is-done`（该房间是否仍在录）、
+`_apply-tasks`（下发期望任务）、`_apply-cookies`（下发平台登录态）、`_inventory`（扫描录像清单）、`_is-done`（该房间是否仍在录）、
 `_disk`（数据根剩余空间）、`_recording-status`（当前正在录制的房间集合，仅轻量扫 `/proc`）。
 `_recording-status` 用于主控控制台显示远端录制状态；尚未更新 bundle 的旧 worker 会回退到
 `_tasks` + `_is-done` 查询，功能不变。
@@ -218,7 +218,10 @@ hub 规则（`config/hub/{platform}.{roomSlug}.json`）新增 `recording.sourceT
 2. 在 Web「Hub」页建/编辑规则时绑定该任务（`recording.sourceTaskId`，房间身份从任务派生，不再手填房间 URL）并选择参与节点（`workers`）。
 3. master 对每个 worker 计算期望任务：启用的规则 + 绑定的源任务 + worker 在房间规则 `workers` 里。旧规则若未写 `workers`，为兼容行为会同步给全部 worker；控制台编辑规则时应明确选择目标节点。
 4. 源任务的 enabled 状态表示录制意图，并同步到选中的节点。规则选 `["vps2"]` 时，本机 daemon 抑制对应源任务，避免 master 与 VPS 双重录制；规则选 `["local","vps2"]` 时才会两边都录。
-5. 下发走 Transport 轴：local = 直接写本机 store（`adopt=false`，源任务保持可编辑）；ssh/tailscale-ssh = 远端隐藏命令 `_tasks` / `_apply-tasks`（`_tasks` 输出无 cookies 的隐私投影；cookies 只随下发通道单向传递）。
+5. 下发走 Transport 轴：local = 直接写本机 store（`adopt=false`，源任务保持可编辑）；ssh/tailscale-ssh = 远端隐藏命令 `_tasks` / `_apply-tasks`（`_tasks` 输出无 cookies 的隐私投影；任务级 override 随 `_apply-tasks`、平台登录态随 `_apply-cookies`，两者都单向下行）。
+   平台登录态同一通道先行下发（`_apply-cookies`）：master 按内容指纹比对（变化才推 + 同一内容每 6h 复核一次）；旧 bundle 未知命令 → 告警一次且**不记已应用**（节点升级后下一轮自动补发）。清空 master 侧登录态**不会**清节点（空值永不删）。
+   下发值在节点侧立即落 settings；**长驻 `record` 子进程在 spawn 时读串**，正在录的那一场仍用旧串，下次 spawn/重连才换。
+   节点回执里：本节点未注册的平台记 `unsupported`（算已覆盖，不会每 tick 重推）；值非法/超长记 `rejected`（不记指纹、下轮重试）。
 6. 远端按 `(platform, roomSlug)` 对账：新建或收编更新受管任务（`managedBy='hub'`），不再期望的任务两阶段删除（先停，等 daemon 收播后下一轮删）。受管任务 Web API/UI 禁止改删启停，只能在 master 操作。
 7. 同步触发：启动即跑 + 周期 `syncIntervalMs`（默认 1min）+ 规则/worker/源任务变更后立即触发；节点离线只 warn，下轮对账自愈。
 

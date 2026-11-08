@@ -475,6 +475,8 @@ describe("T3 删除语义", () => {
 // 凭证同步(2026-11-08):master 的 useCookie / cookie 必须能刷新**已存在**的节点任务。
 // 之前更新路径不动这两个字段,后果是 master 后开的「带账号信息」与轮换后的 cookie
 // 永远到不了节点 —— 节点继续匿名录制,礼物/入场弹幕全丢(线上 VPS1 已实际出现)。
+// 平台级登录态的通道本身(下发/解码/回执)由 `test/app/apply-cookies.test.ts` 与
+// `test/app/cookies-applied-state.test.ts` 覆盖;这里只钉任务级字段的归属。
 describe("凭证与账号开关随同步刷新", () => {
   let dir: string;
   let store: TaskStore;
@@ -508,9 +510,95 @@ describe("凭证与账号开关随同步刷新", () => {
     expect(store.getTask(t.id)!.useCookie).toBe(false);
   });
 
-  it("master 没有该平台凭证 → 不抹掉节点自备的 cookie", () => {
+  it("节点自己没有平台串 → 保留节点自备的 cookie(判定在节点侧,不看 master 有没有)", () => {
     const t = store.addTask({ room: "123456", managedBy: "hub", enabled: true, useCookie: true, cookies: "SESSION=node-local" });
     applyRemoteTasks(store, [spec({ useCookie: true, cookies: null })]);
     expect(store.getTask(t.id)!.cookies).toBe("SESSION=node-local");
+  });
+});
+
+describe("登录态归属（issue #563：受管任务由 master 拥有）", () => {
+  let dir: string;
+  let store: TaskStore;
+  const spec = (over: Partial<RemoteTaskSpec> = {}): RemoteTaskSpec => ({
+    platform: "douyin",
+    roomSlug: "123456",
+    room: "https://live.douyin.com/123456",
+    name: null,
+    quality: "origin",
+    engine: "ffmpeg",
+    danmu: 1,
+    segmentSec: 1800,
+    scheduleStart: null,
+    scheduleEnd: null,
+    enabled: true,
+    useCookie: true,
+    cookies: null,
+    outDir: null,
+    webhook: null,
+    anchorName: null,
+    rollingUpload: false, rollingEffective: false,
+    ...over,
+  });
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "task-sync-cookies-"));
+    store = new TaskStore(join(dir, "tasks.db"));
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("受管任务：master 显式 override 会覆盖节点上的旧串", () => {
+    const t = store.addTask({ room: "123456", cookies: "sessionid=OLD" });
+    applyRemoteTasks(store, [spec({ cookies: "sessionid=NEW" })]);
+    expect(store.getTask(t.id)!.cookies).toBe("sessionid=NEW");
+  });
+
+  it("受管任务：下发 null 且有平台串可回落 → 清掉节点残留串", () => {
+    store.setPlatformCookies("douyin", "sessionid=PLATFORM");
+    const t = store.addTask({ room: "123456", cookies: "sessionid=STALE" });
+    applyRemoteTasks(store, [spec({ cookies: null })]);
+    expect(store.getTask(t.id)!.cookies).toBeNull();
+  });
+
+  it("受管任务：下发的只是空白串 → 视同 null（有平台串则清空）", () => {
+    store.setPlatformCookies("douyin", "sessionid=PLATFORM");
+    const t = store.addTask({ room: "123456", cookies: "sessionid=STALE" });
+    applyRemoteTasks(store, [spec({ cookies: "   " })]);
+    expect(store.getTask(t.id)!.cookies).toBeNull();
+  });
+
+  it("坏条目（cookies 非字符串）被跳过而不是整批中止", () => {
+    const good = store.addTask({ room: "123456" });
+    const logs: string[] = [];
+    applyRemoteTasks(
+      store,
+      [spec({ roomSlug: "999", room: "https://live.douyin.com/999", cookies: 42 as unknown as string }), spec()],
+      (m) => logs.push(m),
+    );
+    expect(store.getTask(good.id)!.name).toBeNull();
+    expect(logs.join("\n")).toContain("cookies 类型非法");
+  });
+
+  it("受管任务：下发 null 但节点没有平台串 → 保留节点已有的那份（不清成匿名）", () => {
+    const t = store.addTask({ room: "123456", cookies: "sessionid=ONLY" });
+    applyRemoteTasks(store, [spec({ cookies: null })]);
+    expect(store.getTask(t.id)!.cookies).toBe("sessionid=ONLY");
+  });
+
+  it("本机（adopt=false）：不碰 cookies —— 那是 master 自己的源任务", () => {
+    const t = store.addTask({ room: "123456", cookies: "sessionid=LOCAL" });
+    applyRemoteTasks(store, [spec({ cookies: "sessionid=NEW" })], undefined, { adopt: false });
+    expect(store.getTask(t.id)!.cookies).toBe("sessionid=LOCAL");
+  });
+
+  it("新建受管任务：只有显式 override 才带任务级串", () => {
+    const r = applyRemoteTasks(store, [spec({ cookies: null })]);
+    expect(r.applied).toEqual(["douyin:123456"]);
+    const created = store.listTasks().find((x) => x.room.includes("123456"))!;
+    expect(created.cookies).toBeNull();
   });
 });

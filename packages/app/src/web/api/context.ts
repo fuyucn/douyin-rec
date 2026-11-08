@@ -111,7 +111,8 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
       }
       if (deps.resolveAnchor) {
         const t = store.getTask(taskId);
-        const cookies = t ? resolveTaskCookies(t, store.getDefaultCookies()) : null;
+        // Issue #563:用得着的那份串 = 实际生效的平台串(与录制/看门狗同源),不是只读抖音兼容键。
+        const cookies = t ? resolveTaskCookies(t, store.getPlatformCookies(t.platform)) : null;
         const name = await deps.resolveAnchor(r, cookies).catch(() => null);
         if (name) store.setAnchorName(taskId, name);
       }

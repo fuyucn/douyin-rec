@@ -29,3 +29,34 @@ export function parseCookieExpiry(cookie: string): number | null {
   if (!Number.isFinite(loginTs) || !Number.isFinite(maxAge) || loginTs <= 0) return null;
   return (loginTs + maxAge) * 1000;
 }
+
+/** 一条「登录态即将过期」判定(供 serve 看门狗直接发告警)。 */
+export interface CookieDueAlert {
+  /** 平台 id(douyin / bilibili / ...)。 */
+  platform: string;
+  /** 取整后的剩余天数;负数 = 已过期。 */
+  days: number;
+}
+
+/**
+ * 哪些平台的有效登录态已到/超过阈值(issue #563)。
+ *
+ * 纯函数,输入是**实际生效**的那份串(`store.getPlatformCookies(platform)`) —— 看门狗只读兼容键时
+ * 会漏掉/误报 `platformCookies` 里真正在用的那份。目前只有抖音的串带到期信息,其余平台解析不出
+ * (`parseCookieExpiry` 返回 null) → 不参与判定。
+ */
+export function dueCookieAlerts(
+  cookies: ReadonlyArray<{ platform: string; value: string | null }>,
+  nowMs: number,
+  warnDays: number,
+): CookieDueAlert[] {
+  const due: CookieDueAlert[] = [];
+  for (const { platform, value } of cookies) {
+    if (!value) continue;
+    const exp = parseCookieExpiry(value);
+    if (exp == null) continue;
+    const days = Math.floor((exp - nowMs) / 86_400_000);
+    if (days <= warnDays) due.push({ platform, days });
+  }
+  return due;
+}

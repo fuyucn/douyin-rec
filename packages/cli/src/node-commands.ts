@@ -326,6 +326,13 @@ export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freez
     return json({ tasks: await withTaskStore(dataRoot, listNodeTasks) });
   },
 
+  // Apply the master's platform credential push (issue #563). Write-only and never deletes: an empty
+  // payload means "nothing to deliver", not "clear the worker's login".
+  "apply-cookies": async (dataRoot, [b64]) => {
+    const { applyPlatformCookies, decodeApplyCookies } = await import("@drec/app");
+    return withTaskStore(dataRoot, (store) => json(applyPlatformCookies(store, decodeApplyCookies(b64))));
+  },
+
   // Apply the master's desired tasks.
   "apply-tasks": async (dataRoot, [b64]) => {
     const { applyTasksPayload } = await import("@drec/app");

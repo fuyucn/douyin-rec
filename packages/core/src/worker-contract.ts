@@ -28,6 +28,36 @@ export interface WorkerConfig {
   capabilities?: string[];
 }
 
+/**
+ * master 下发的平台登录态(`_apply-cookies` payload,issue #563)。
+ *
+ * master 是唯一登录源:worker 不再需要逐节点扫码。键 = 平台 id,值 = 该平台的会话串。
+ * **空值/缺省一律忽略、永不删除** —— master 未登录或读取失败时,节点必须保留还能用的登录态,
+ * 不能静默降级成匿名(与「期望任务为空」触发两阶段删除是同一类风险,这里宁可什么都不写)。
+ */
+export interface ApplyCookiesPayload {
+  platformCookies: Record<string, string>;
+}
+
+/** 节点侧应用登录态的结果(只报告变更与否,不含任何串本身 —— 回执会被日志/UI 消费)。 */
+export interface ApplyCookiesResult {
+  /** 本轮真正写入(值有变化)的平台。 */
+  applied: string[];
+  /** 值已与下发一致、无需写入的平台。 */
+  unchanged: string[];
+  /**
+   * 本节点根本没有这个平台(版本落后 / 该 bundle 未注册)。
+   * 这不是失败:节点永远不可能应用它,重复下发只会每 tick 重推。master 把它算作「已覆盖」,
+   * 只在日志里说明一次。
+   */
+  unsupported?: string[];
+  /**
+   * 下发了但值不可用(非字符串 / 超长)。这**是**失败(master 侧 bug 或传输截断),
+   * master 不能记指纹,必须重试并告警。
+   */
+  rejected?: string[];
+}
+
 /** master 下发期望任务后,节点侧对账结果(_apply-tasks / local transport 返回)。 */
 export interface ApplyTasksResult {
   /** 新建或收编成功(键 = `{platform}:{roomSlug}`)。 */

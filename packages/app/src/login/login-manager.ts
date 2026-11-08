@@ -50,12 +50,18 @@ interface Session {
 
 export interface QrLoginManagerOpts {
   log?: (m: string) => void;
+  /**
+   * Called after a confirmed login was persisted (issue #563). The hub master uses it to push the new
+   * platform credential to its workers immediately instead of waiting for the next sync tick.
+   */
+  onSaved?: () => void;
 }
 
 export class QrLoginManager {
   private readonly store: SettingsStore;
   private readonly factory: QrLoginFactory;
   private readonly log: (m: string) => void;
+  private readonly onSaved: (() => void) | undefined;
   private active: Session | null = null;
   private seq = 0;
 
@@ -63,6 +69,7 @@ export class QrLoginManager {
     this.store = store;
     this.factory = factory;
     this.log = opts.log ?? ((): void => {});
+    this.onSaved = opts.onSaved;
   }
 
   /**
@@ -98,6 +105,12 @@ export class QrLoginManager {
       if (s.platform === "douyin") this.store.setSetting(DEFAULT_COOKIES_KEY, r.cookie);
       this.store.setPlatformCookies?.(s.platform, r.cookie);
       this.log(`[login-mgr] 会话 ${sessionId} 已保存 ${s.platform} cookie`);
+      try {
+        this.onSaved?.();
+      } catch (e) {
+        // 推送失败不能让登录本身失败(串已落库,下一次同步 tick 仍会补推)。
+        this.log(`[login-mgr] 登录后触发下发失败(忽略): ${(e as Error).message}`);
+      }
       return { state: "confirmed", cookie: r.cookie };
     }
     if (r.state === "expired") {

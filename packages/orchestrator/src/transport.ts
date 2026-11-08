@@ -1,5 +1,5 @@
 import { isWorkerTargeted } from "@drec/core";
-import type { ZeroDiskReport, ApplyTasksResult, EnqueueRequest, EnqueueResponse, NodeCapabilities, NodePipelineResult, NodePipelineResultFile, NodePipelineSpec, NodeStatus, NodeTaskDTO, ProcessReceipt, ProcessJob, RemoteTaskSpec, WorkerConfig } from "@drec/core";
+import type { ZeroDiskReport, ApplyCookiesPayload, ApplyCookiesResult, ApplyTasksResult, EnqueueRequest, EnqueueResponse, NodeCapabilities, NodePipelineResult, NodePipelineResultFile, NodePipelineSpec, NodeStatus, NodeTaskDTO, ProcessReceipt, ProcessJob, RemoteTaskSpec, WorkerConfig } from "@drec/core";
 
 import type { UnclaimedSegment } from "./unclaimed.js";
 
@@ -141,6 +141,17 @@ export class ProcUnsupported extends Error {
   }
 }
 
+/**
+ * 节点不支持平台登录态下发(旧 bundle 无 `_apply-cookies`,issue #563)。
+ * 与「ssh 失败」必须区分:前者是「这台节点升级后会自己好」,后者是「这次没送到」。
+ */
+export class CookieSyncUnsupported extends Error {
+  constructor(message = "节点不支持登录态下发(旧 bundle)") {
+    super(message);
+    this.name = "CookieSyncUnsupported";
+  }
+}
+
 export interface Transport {
   readonly id: string;
   listInventory(): Promise<NodeInventory>;
@@ -185,6 +196,11 @@ export interface Transport {
    * 两种情况看成同一件事;force 是后者的唯一合法出口。
    */
   applyTasks?(input: { desired: RemoteTaskSpec[]; force?: boolean; expectedVersion?: number }): Promise<ApplyTasksResult>;
+  /**
+   * 下发 master 的平台登录态(隐藏 `_apply-cookies`,issue #563)。
+   * 可选:无此能力(旧 bundle)→ 抛 `CookieSyncUnsupported`,调用方据此「告警一次 + 不记已应用」。
+   */
+  applyCookies?(input: ApplyCookiesPayload): Promise<ApplyCookiesResult>;
   /**
    * 节点应用回执(T16):这台节点应用了哪一版期望、跑的是哪个 bundle。
    * **可选**:旧 bundle 没有 `_node-status` → 返回 null(UI 显示 unknown,不报错)。
