@@ -443,5 +443,3 @@ export function makeBiliupProcessor(deps: BiliupDeps = {}): Processor {
     async recover(): Promise<"uncertain"> { return "uncertain"; },
   };
 }
-
-export const biliupProcessor: Processor = makeBiliupProcessor();

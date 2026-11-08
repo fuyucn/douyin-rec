@@ -12,9 +12,6 @@ import { openDb } from "./db.js";
 export type TaskStatus = "stopped" | "running" | "error" | "pending" | "draining";
 /** 下载引擎 id(由 Platform.engines 决定:ffmpeg / mesio;通用层用 string,不写死平台)。 */
 export type EngineKind = string;
-/** @deprecated 旧名(原 recorder provider id);保留为 EngineKind 别名,避免外部 import 断裂。 */
-export type RecorderKind = EngineKind;
-
 /** A persisted recording task. */
 export interface Task {
   id: number;

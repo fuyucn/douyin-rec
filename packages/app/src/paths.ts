@@ -67,11 +67,6 @@ export function rootHubDir(): string {
   return join(rootConfigDir(), "hub");
 }
 
-/** <root>/config/hub/{roomSlug}.json —— 单个房间的 hub 任务配置文件路径。 */
-export function rootHubTaskConfig(roomSlug: string): string {
-  return join(rootHubDir(), `${roomSlug}.json`);
-}
-
 /**
  * 数据根初始化时**复制一份多节点编排配置模板**到 `<root>/config/hub.config.example.json`。
  * 内容逐字来自仓库源文件 `configs/hub.config.example.json`(见 `hubConfigExampleText`,bundle 内联 / dev 读源文件)。

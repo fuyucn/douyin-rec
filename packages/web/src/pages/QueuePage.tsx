@@ -37,7 +37,6 @@ const NODE_QUEUE_POLL_MS = 10_000;
 /** Known proc-queue kinds (must stay in sync with providers-register.ts): the UI gives these
  * dedicated labels; anything else folds into the "unknown" aggregate row, never exposing raw keys. */
 export const NODE_QUEUE_KINDS = ["upload-part", "cleanup-part", "reconcile-part", "remux", "upload-prep", "biliup"] as const;
-export type NodeQueueKnownKind = (typeof NODE_QUEUE_KINDS)[number];
 type NodeQueueState = { data: ProcActiveDTO | null; available: boolean; loaded: boolean };
 const INITIAL_NODE_QUEUE_STATE: NodeQueueState = { data: null, available: true, loaded: false };
 

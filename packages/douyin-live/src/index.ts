@@ -22,12 +22,8 @@ export { resolveApiMode } from "./api-mode.js";
 
 /** 抖音画质档(从高到低)。通用层用 string;此处是抖音的具体取值。 */
 export const DOUYIN_QUALITIES = ["origin", "uhd", "hd", "sd", "ld"] as const;
-export type DouyinQuality = (typeof DOUYIN_QUALITIES)[number];
-
 /** 抖音可用下载引擎(douyinPlatform.engines 的唯一真理源)。 */
 export const DOUYIN_ENGINES = ["ffmpeg", "mesio"] as const;
-export type DouyinEngine = (typeof DOUYIN_ENGINES)[number];
-
 export { probeStream } from "./probe.js";
 export type { StreamProbe, QualityInfo } from "./probe.js";
 

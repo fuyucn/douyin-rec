@@ -23,8 +23,6 @@ export const PART_KINDS = Object.freeze({
   cleanup: "cleanup-part",
   reconcile: "reconcile-part",
 } as const);
-export type PartChainKind = (typeof PART_KINDS)[keyof typeof PART_KINDS];
-
 /**
  * Plan 046 PR6 switch: when on, the recorder's seal hook only enqueues upload-part rows (方案 A)
  * instead of uploading from the recorder process. Default off: the legacy path stays byte-identical.

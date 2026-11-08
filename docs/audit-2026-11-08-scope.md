@@ -95,6 +95,7 @@
 | TUI 删除（376 行 + ink/react 依赖 + `dist/tui.mjs` + release 打包位） | **已完成** | 0.0.335 |
 | 设计原型 8 个（5335 行）移入 `docs/design-archive/` | **已完成** | 0.0.336 |
 | 已合并 `codex/*` 分支 222 个（逐个核对已在 origin/main） | **已完成** | — |
+| 死导出 24 个 + 3 个无引用组件/助手（`DanmuBadge`、`RollingProgressRows`、`NotifySection` 等） | **已完成** | 0.0.338 |
 | 26 个带独有提交的未合并分支 | **保留**（未合并，删了会丢提交） | — |
 | `/hub` 栈、Stats、`finalize-format` | 等访问计数一周结果 + 拍板 | — |
 

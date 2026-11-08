@@ -1,6 +1,5 @@
 import type { ReactNode } from "react";
 import type { Task } from "../api/client";
-import { DANMU_BADGE_CLASS, danmuKind } from "../lib/labels";
 import { useT } from "../lib/i18n";
 import { useTicker } from "../lib/hooks";
 import { PHASE_STYLE, taskPhase } from "../lib/task-status";
@@ -97,11 +96,4 @@ export function StatusBadge({
       {showGated ? <span className="ml-1 opacity-70">{t("badge.gated")}</span> : null}
     </Badge>
   );
-}
-
-/** 关闭 / 含礼物 / 匿名 badge driven by danmu + useCookie. */
-export function DanmuBadge({ task }: { task: Pick<Task, "danmu" | "useCookie"> }): ReactNode {
-  const t = useT();
-  const kind = danmuKind(task);
-  return <Badge tone={DANMU_BADGE_CLASS[kind]}>{t(`danmuKind.${kind}`)}</Badge>;
 }

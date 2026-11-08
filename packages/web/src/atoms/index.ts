@@ -11,8 +11,6 @@ import type { CookieStatus } from "../api/client";
 
 /** Connection indicator for the list header. */
 export type ConnState = { ok: boolean; at: number } | null;
-export const connAtom = atom<ConnState>(null);
-
 /** Global cookie status pill state (null = not yet loaded / errored). */
 export const cookieStatusAtom = atom<CookieStatus | null>(null);
 

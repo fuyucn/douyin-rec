@@ -153,34 +153,6 @@ export function segmentStem(dateName: string, index: number): string {
   return `${dateName}_${String(index).padStart(3, "0")}`;
 }
 
-/**
- * 给 stage 产物改出「分 P 视频标题」用的文件名。
- *
- * biliup 的分 P 标题取自**文件名 stem**(见 `uploader/line.rs`:`video.title` 为空时用
- * `file_stem()`)。所以要让分 P 显示成自定义标题,唯一办法是**在上传前把文件改成那个名字**。
- *
- * 返回新文件名(含扩展名);不需要改时返回 null(调用方保持原样)。
- * 同目录同名冲突 → 加 `-2`、`-3` 后缀,绝不覆盖已有文件。
- */
-export function planPartFilename(
-  dir: string,
-  originalBasename: string,
-  desiredStem: string | null,
-  takenNames: ReadonlySet<string>,
-): string | null {
-  if (!desiredStem) return null;
-  const ext = originalBasename.slice(originalBasename.lastIndexOf("."));
-  const currentStem = originalBasename.slice(0, originalBasename.length - ext.length);
-  if (currentStem === desiredStem) return null; // 已经一致,不用动
-  let candidate = `${desiredStem}${ext}`;
-  let n = 2;
-  while (takenNames.has(candidate) || existsSync(joinPath(dir, candidate))) {
-    candidate = `${desiredStem}-${n}${ext}`;
-    n++;
-  }
-  return candidate;
-}
-
 /** 上传别名集中放这里(stage 内子目录),收尾时整体删除。 */
 export const UPLOAD_ALIAS_DIR = ".upload";
 

@@ -30,8 +30,6 @@ export const STAGE_READY = "已存档待人工上传(stage 模式正常收口)";
 
 /** 终态集合(reconciler 不再推进;UI 也不再显示「进行中」)。 */
 export const HUB_TERMINAL_STATES = ["done", "failed", "needs_manual"] as const satisfies readonly HubJobState[];
-export type HubTerminalState = (typeof HUB_TERMINAL_STATES)[number];
-
 /**
  * 细粒度子步骤规范名(流程图节点;upload/append 仅 upload 模式打点)。
  *

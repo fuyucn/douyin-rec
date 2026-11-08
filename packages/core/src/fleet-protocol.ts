@@ -118,9 +118,6 @@ export interface FleetPing {
   t: "ping";
 }
 
-export type FleetNodeFrame = FleetHello | FleetHeartbeat | FleetResponse;
-export type FleetMasterFrame = FleetWelcome | FleetRequest | FleetPing;
-
 /** Parse one text frame; returns null for anything that is not a well-formed object with a string `t`. */
 export function parseFleetFrame(text: string): { t: string; [k: string]: unknown } | null {
   if (text.length > FLEET_MAX_FRAME_BYTES) return null;

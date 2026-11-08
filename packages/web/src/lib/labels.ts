@@ -2,14 +2,6 @@
 import type { PlatformDTO, RoomDTO, Task } from "../api/client";
 import { fmtDateTimeInTz } from "./tz";
 
-export const QUALITY_SHORT: Record<string, string> = {
-  origin: "原画",
-  uhd: "超清",
-  hd: "高清",
-  sd: "标清",
-  ld: "流畅",
-};
-
 export const QUALITY_FULL: Record<string, string> = {
   // douyin 档位
   origin: "原画 OD",
@@ -43,26 +35,12 @@ export function platformLabel(p: string): string {
   return PLATFORM_LABEL[p] ?? p;
 }
 
-export const QUALITY_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: "origin", label: "原画 OD" },
-  { value: "uhd", label: "超清 UHD" },
-  { value: "hd", label: "高清 HD" },
-  { value: "sd", label: "标清 SD" },
-  { value: "ld", label: "流畅 LD" },
-];
-
 /** Danmu badge classification: 关闭 / 含礼物 / 匿名. */
 export type DanmuKind = "off" | "gift" | "anon";
 export function danmuKind(t: Pick<Task, "danmu" | "useCookie">): DanmuKind {
   if (!t.danmu) return "off";
   return t.useCookie ? "gift" : "anon";
 }
-
-export const DANMU_LABEL: Record<DanmuKind, string> = {
-  off: "关闭",
-  gift: "含礼物",
-  anon: "匿名",
-};
 
 export const DANMU_BADGE_CLASS: Record<DanmuKind, string> = {
   off: "badge-muted",
@@ -101,11 +79,6 @@ export function roomName(room: RoomDTO): string {
 }
 
 /** 房间可点击链接(详情页「打开直播间」用):规范 https URL。 */
-export function roomHref(room: string): string {
-  if (/^https?:\/\//.test(room)) return room; // 已是 URL(入库已归一化、剥 query)
-  const id = roomId(room);
-  return /^\d+$/.test(id) ? `https://live.douyin.com/${id}` : room;
-}
 
 /** "HH:MM-HH:MM" string for the schedule input from a task. */
 export function scheduleInput(t: Pick<Task, "scheduleStart" | "scheduleEnd">): string {
@@ -152,7 +125,6 @@ export function pickPlatform(room: string, platforms: PlatformDTO[]): PlatformDT
   }
   return platforms[0];
 }
-
 
 /** "HH:MM-HH:MM" → 成对端点;空串 = 全天(两端 null);拆不开 → null。真正的格式校验在后端 parseSchedule。 */
 export function splitSchedule(sched: string): { scheduleStart: string | null; scheduleEnd: string | null } | null {

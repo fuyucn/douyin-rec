@@ -42,15 +42,6 @@ export const HUB_FLOW_ORDER: readonly HubFlowNode[] = [
   "merge", "burn_danmu", "burn_livechat", "upload_plain", "append_danmu", "append_livechat",
 ];
 
-/** 节点直接后继(去重,保持声明序)。 */
-export function nextNodesOf(node: string): HubFlowNode[] {
-  const out: HubFlowNode[] = [];
-  for (const [from, to] of HUB_FLOW_EDGES) {
-    if (from === node && !out.includes(to)) out.push(to);
-  }
-  return out;
-}
-
 /**
  * 给定「已完成/已跳过」节点集合,推导**下一步该跑的节点**(所有前驱已满足的 pending 节点)。
  * 纯拓扑推导,不含资源/配置(禁用步骤由调用方从 cfg 过滤)。
@@ -70,15 +61,6 @@ export function readyNodes(doneOrSkipped: ReadonlySet<string>): HubFlowNode[] {
     const ps = parents.get(n) ?? [];
     return ps.every((p) => doneOrSkipped.has(p));
   });
-}
-
-/**
- * 步骤名 → 是否 pipeline 节点(供 web 过滤前奏/收尾)。
- * `node_upload` 是 pull 的替代前奏(节点本地 remux + 上传),**不是** DAG 节点 → 恒返回 false。
- */
-export function isHubFlowNode(step: string): step is HubFlowNode {
-  return (["merge", "burn_danmu", "burn_livechat", "upload_plain", "append_danmu", "append_livechat"] as const)
-    .includes(step as HubFlowNode);
 }
 
 /**

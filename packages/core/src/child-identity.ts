@@ -14,8 +14,6 @@ export interface ChildFingerprint {
   cmdline: string;
 }
 
-export type PlatformProbe = (pid: number) => ChildFingerprint | null;
-
 function linuxProbe(pid: number): ChildFingerprint | null {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
