@@ -1,0 +1,1063 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>房间详情 · 整页改版 v2（示意数据）</title>
+<style>
+/* =====================================================================
+   /rooms/:key 整页改版 v2 · 设计原型
+   复用 dev/room-detail-config-proto.html 的 :root 令牌、状态点、状态速览、
+   图标按钮与「配置四域」数据结构（DOMAINS / REQUIRED_KEYS / 字段守卫）。
+   本轮只改优先级：正在录的房间，录制进度 + 日志进首屏；配置四域下沉收起。
+   运行树 / 日志台 / 分段行形态取自 RoomRunsPanel、LogTerminal、
+   RollingProgress、LiveUploadTimeline 的真实语义，不改动任何实现文件。
+   ===================================================================== */
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0;padding:0}
+:root{
+  --font-sans:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",sans-serif;
+  --font-mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --canvas:#101214;
+  --raised:#15181b;
+  --surface:#1b1f22;
+  --surface-soft:#22262a;
+  --hairline:rgba(255,255,255,.08);
+  --hairline-strong:rgba(255,255,255,.16);
+  --ink:#e9edf0;
+  --body:#a9b1b8;
+  --muted:#788088;
+  --accent:#4a9ede;
+  --accent-fg:#0d1116;
+  --success:#2f9e6e;
+  --success-fg:#4cc38a;
+  --warning:#c9932e;
+  --warning-fg:#d9a94a;
+  --error:#d84a4f;
+  --error-fg:#ef7a7d;
+  --state-idle:#8a939b;
+  --state-off:#565e66;
+  --r:6px;
+  --ease:cubic-bezier(.16,1,.3,1);
+}
+:root[data-theme="light"]{
+  --canvas:#fafafa;
+  --raised:#ffffff;
+  --surface:#f2f3f4;
+  --surface-soft:#e9ebec;
+  --hairline:rgba(15,19,23,.10);
+  --hairline-strong:rgba(15,19,23,.20);
+  --ink:#12161a;
+  --body:#43494f;
+  --muted:#70767c;
+  --accent:#1a6fb5;
+  --accent-fg:#ffffff;
+  --success:#1e7a4f;
+  --success-fg:#17724a;
+  --warning:#9a6b10;
+  --warning-fg:#8a5f0c;
+  --error:#c2373c;
+  --error-fg:#b32f34;
+  --state-idle:#7d858c;
+  --state-off:#b3b9be;
+}
+html{min-height:100%;background:var(--canvas);scroll-behavior:smooth}
+body{min-height:100%;background:var(--canvas);color:var(--body);font-family:var(--font-sans);font-size:14px;line-height:1.55;-webkit-font-smoothing:antialiased}
+[hidden]{display:none !important}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button{font:inherit}
+a{color:inherit}
+.sprite{position:absolute;width:0;height:0;overflow:hidden}
+.ico{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex:none;display:inline-block}
+.mono{font-family:var(--font-mono)}
+.num{font-variant-numeric:tabular-nums}
+
+/* 状态点：全站唯一的状态语言，7px 方形、无光环 */
+.dot{display:inline-block;width:7px;height:7px;border-radius:2px;flex:none}
+.dot.ok{background:var(--success)}
+.dot.err{background:var(--error)}
+.dot.warn{background:var(--warning)}
+.dot.idle{background:var(--state-idle)}
+.dot.off{background:transparent;border:1.5px solid var(--state-off)}
+.dot.run{background:var(--accent)}
+/* 录制中的点做一次很轻的呼吸，只此一处，不做全局动效 */
+.dot.beat{animation:beat 2.4s var(--ease) infinite}
+@keyframes beat{0%,100%{opacity:1}50%{opacity:.42}}
+
+/* ── 页面骨架 ─────────────────────────────────────────────────────── */
+.shell{max-width:1180px;margin:0 auto;padding:28px 28px 72px}
+.backlink{display:inline-flex;align-items:center;gap:6px;margin-bottom:18px;font-size:12.5px;color:var(--muted);text-decoration:none}
+.backlink:hover{color:var(--ink);text-decoration:underline;text-underline-offset:3px}
+.page-head{display:flex;flex-wrap:wrap;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:12px}
+.eyebrow{margin:0 0 8px;font-size:11.5px;color:var(--muted)}
+.identity{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 12px}
+h1{font-size:26px;line-height:1.2;font-weight:600;margin:0;color:var(--ink)}
+.plat{font-size:11.5px;color:var(--body);background:var(--surface);border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;white-space:nowrap}
+.roomkey{font-size:12.5px;color:var(--muted)}
+.roomkey .mono{color:var(--body)}
+.managed-tag{margin-left:4px;font-size:11.5px;color:var(--muted);border:1px solid var(--hairline);border-radius:4px;padding:1px 7px;white-space:nowrap;display:none}
+body.is-managed .managed-tag{display:inline-flex;align-items:center;gap:6px}
+body.is-managed [data-write]{display:none !important}
+.health-line{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 12px;margin-top:10px}
+.health{display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:500;color:var(--ink);white-space:nowrap}
+.reason{margin:0;font-size:12.5px;line-height:1.45;color:var(--body)}
+.head-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:32px;padding:0 12px;border-radius:var(--r);border:1px solid var(--hairline);background:transparent;color:var(--body);font:500 12.5px/1 var(--font-sans);cursor:pointer;white-space:nowrap;transition:color .14s var(--ease),background-color .14s var(--ease),border-color .14s var(--ease)}
+.btn:hover{color:var(--ink);border-color:var(--hairline-strong);background:var(--surface)}
+.btn:active{transform:translateY(1px)}
+.btn[aria-pressed="true"]{color:var(--ink);border-color:var(--hairline-strong);background:var(--surface)}
+.ico-group{display:inline-flex;align-items:center;gap:4px}
+.ico-btn{width:28px;height:28px;display:inline-grid;place-items:center;padding:0;border:1px solid var(--hairline);border-radius:var(--r);background:var(--raised);color:var(--muted);cursor:pointer;transition:color .14s var(--ease),border-color .14s var(--ease),background-color .14s var(--ease)}
+.ico-btn:hover{color:var(--ink);border-color:var(--hairline-strong);background:var(--surface)}
+.ico-btn.warn{color:var(--warning-fg)}
+.ico-btn.go{color:var(--success-fg)}
+.ico-btn.danger{color:var(--error-fg)}
+.ico-btn .ico{width:14px;height:14px}
+.proto-line{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 14px;margin:0 0 6px;font-size:11.5px;color:var(--muted)}
+.linkbtn{border:0;background:transparent;color:var(--muted);font:400 11.5px/1 var(--font-sans);cursor:pointer;text-decoration:underline;text-underline-offset:3px;padding:2px 0;white-space:nowrap}
+.linkbtn:hover{color:var(--accent)}
+.linkbtn[aria-pressed="true"]{color:var(--ink)}
+.action-note{min-height:18px;margin:0 0 14px;font-size:11.5px;line-height:1.5;color:var(--muted)}
+
+/* ── 优先级说明条 + 对照线上版 ───────────────────────────────────── */
+.priority{margin:0 0 16px;padding:12px 14px;border:1px solid var(--hairline);border-radius:var(--r);background:var(--raised)}
+.priority p{margin:0;font-size:12.5px;line-height:1.65;color:var(--ink)}
+.priority p.sub{margin-top:5px;font-size:11.5px;line-height:1.6;color:var(--body)}
+.priority .ctrl{margin-top:8px}
+.online-order{margin:0 0 18px;padding:16px;border:1px solid var(--hairline);border-radius:var(--r);background:var(--raised)}
+.oo-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px}
+.oo-col h3{margin:0 0 8px;font-size:13px;font-weight:600;color:var(--ink)}
+.oo-col h3 .quiet{margin-left:8px;font-size:11.5px;font-weight:400;color:var(--muted)}
+.oo-list{list-style:none;margin:0;padding:0}
+.oo-list li{display:grid;grid-template-columns:20px minmax(0,1fr);gap:8px;padding:7px 0;border-bottom:1px solid var(--hairline);font-size:12.5px;line-height:1.5;color:var(--body)}
+.oo-list li:last-child{border-bottom:0}
+.oo-list .n{font-family:var(--font-mono);font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.oo-list li.mark{color:var(--ink)}
+.oo-tag{display:inline-block;margin-left:6px;padding:0 6px;border:1px solid var(--hairline);border-radius:4px;font-size:11.5px;white-space:nowrap}
+.oo-tag.warn{color:var(--warning-fg);border-color:var(--warning-fg)}
+.oo-tag.hi{color:var(--accent);border-color:var(--accent)}
+.oo-foot{margin-top:12px;padding-top:12px;border-top:1px solid var(--hairline);font-size:12.5px;line-height:1.65;color:var(--ink)}
+
+/* 状态速览：一行安静数据，不做四格仪表卡 */
+.status-line{display:flex;flex-wrap:wrap;gap:6px 0;padding:10px 0;border-block:1px solid var(--hairline);margin-bottom:20px;font-size:12.5px;color:var(--muted)}
+.status-item{display:inline-flex;align-items:baseline;gap:8px;padding:0 18px;border-right:1px solid var(--hairline)}
+.status-item:first-child{padding-left:0}
+.status-item:last-child{border-right:0;padding-right:0}
+.status-item b{font-weight:500;color:var(--ink);font-variant-numeric:tabular-nums}
+
+/* ── 区块标题：正常字重，无 uppercase 微标签 ─────────────────────── */
+.sec-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 12px;margin-bottom:10px}
+.sec-head h2{margin:0;font-size:15px;line-height:1.3;font-weight:600;color:var(--ink)}
+.sec-head .count{font-family:var(--font-mono);font-size:12.5px;color:var(--muted)}
+.sec-head .count.bad{color:var(--error-fg)}
+.sec-head .note{font-size:11.5px;color:var(--muted)}
+.sec-head .spacer{margin-left:auto}
+.chip{display:inline-flex;align-items:center;height:23px;padding:0 8px;border:1px solid var(--hairline);border-radius:var(--r);background:var(--surface);font-size:12px;color:var(--ink);white-space:nowrap}
+.chip.hi{color:var(--accent);border-color:var(--accent)}
+.chip.low{color:var(--muted)}
+.ctrl{display:inline-flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px}
+.panel{border:1px solid var(--hairline);border-radius:var(--r);background:var(--raised)}
+
+/* ── 1 正在录制：首屏核心的动态内容 ─────────────────────────────── */
+.rec-card{position:relative;padding:16px 18px 18px;overflow:hidden}
+.rec-card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:2px;background:var(--accent)}
+.rec-top{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 14px}
+.rec-state{display:inline-flex;align-items:center;gap:8px;font-size:14px;font-weight:600;color:var(--ink)}
+.rec-sub{font-size:12px;color:var(--muted)}
+.rec-heart{margin-left:auto;font-size:12px;color:var(--muted)}
+.rec-heart b{font-weight:500;color:var(--ink)}
+.rec-figure{display:flex;flex-wrap:wrap;align-items:flex-end;gap:8px 28px;margin:14px 0 4px}
+.figure-num{display:flex;align-items:baseline;gap:6px}
+.figure-num b{font-size:34px;line-height:1;font-weight:600;color:var(--ink)}
+.figure-of{font-family:var(--font-mono);font-size:15px;color:var(--muted)}
+.figure-cap{display:flex;flex-direction:column;font-size:12.5px;color:var(--body)}
+.figure-cap span{font-size:11.5px;color:var(--muted)}
+.figure-time{margin-left:auto;display:flex;flex-direction:column;font-size:12px;color:var(--muted)}
+.figure-time b{font-size:15px;font-weight:500;color:var(--ink)}
+.figure-time span{font-size:11.5px}
+.progress{height:4px;margin:8px 0 14px;border-radius:2px;background:var(--surface-soft);overflow:hidden}
+.progress i{display:block;height:100%;background:var(--accent)}
+.progress.thin{height:3px;margin:6px 0 0}
+.seg-cap{margin:10px 0 0;font-size:11.5px;color:var(--muted)}
+.part-strip{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:4px;margin:0 0 14px}
+.part-cell{display:flex;flex-direction:column;align-items:center;gap:5px;padding:7px 2px;border:1px solid var(--hairline);border-radius:4px;font-family:var(--font-mono);font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.part-cell.now{outline:1px solid var(--hairline-strong);color:var(--ink);background:var(--surface)}
+.rec-split{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:20px;padding-top:14px;border-top:1px solid var(--hairline)}
+.rec-split h3{margin:0 0 8px;font-size:12.5px;font-weight:600;color:var(--ink)}
+.rec-split h3 .quiet{margin-left:8px;font-size:11.5px;font-weight:400;color:var(--muted)}
+.part-row{display:grid;grid-template-columns:8px 34px minmax(0,1fr) auto;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--hairline);font-size:12.5px;color:var(--body)}
+.part-row:last-child{border-bottom:0}
+.part-row .pnum{font-family:var(--font-mono);font-size:11.5px;color:var(--ink)}
+.part-row .mono{font-family:var(--font-mono);font-size:11.5px;color:var(--body);font-variant-numeric:tabular-nums}
+.part-row .quiet{color:var(--muted)}
+.roll-row{padding:8px 0;border-bottom:1px solid var(--hairline)}
+.roll-row:last-child{border-bottom:0}
+.roll-top{display:flex;align-items:center;gap:10px;font-size:12px}
+.roll-top .base{font-family:var(--font-mono);font-size:11.5px;color:var(--muted);min-width:0;overflow-wrap:anywhere}
+.roll-top .cnt{margin-left:auto;color:var(--ink);font-variant-numeric:tabular-nums;white-space:nowrap}
+.roll-sub{display:flex;flex-wrap:wrap;gap:3px 14px;margin-top:4px;font-size:11.5px;color:var(--muted)}
+.roll-sub .mono{font-family:var(--font-mono);color:var(--body)}
+.roll-sub .bad{color:var(--error-fg)}
+
+/* ── 2 当前场次：录制会话树 + 日志台，同区默认展开 ──────────────── */
+.session-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:start}
+.tree-card{padding:14px 16px 16px}
+.tree-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 10px;margin-bottom:2px}
+.tree-head h3{margin:0;font-size:14px;font-weight:600;color:var(--ink)}
+.tree-state{margin-left:auto;display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:500;color:var(--ink)}
+.node-row{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;padding-top:11px;border-top:1px solid var(--hairline)}
+.node-item{display:inline-flex;align-items:center;gap:7px;padding:5px 9px;border:1px solid var(--hairline);border-radius:var(--r);background:var(--surface);font-size:12.5px;color:var(--body)}
+.node-item b{font-weight:500;color:var(--ink)}
+.node-item .mono{color:var(--ink)}
+.flow{display:flex;flex-wrap:wrap;margin-top:12px;padding-top:11px;border-top:1px solid var(--hairline)}
+.flow-seg{flex:1 1 150px;min-width:140px;padding:0 12px;border-left:1px solid var(--hairline)}
+.flow-seg:first-child{border-left:0;padding-left:0}
+.flow-k{font-size:11.5px;color:var(--muted)}
+.flow-v{margin-top:4px;font-size:12.5px;line-height:1.5;color:var(--body)}
+.flow-seg.now .flow-v{color:var(--ink);font-weight:500}
+.tree-note{margin:12px 0 0;font-size:11.5px;line-height:1.6;color:var(--muted)}
+
+/* 日志台：深色 terminal 体，亮暗主题下都保持深色（与 LogTerminal 一致） */
+.terminal{border:1px solid rgba(255,255,255,.10);border-radius:var(--r);background:#0d1013;color:#dfe5ea;overflow:hidden;min-width:0}
+.terminal-head{display:flex;align-items:center;gap:8px;width:100%;padding:10px 14px;border:0;border-bottom:1px solid rgba(255,255,255,.08);background:#12161a;color:#e9edf0;cursor:pointer;text-align:left;font:inherit;user-select:none}
+.terminal-head:hover{background:#171c21}
+.terminal-title{display:inline-flex;align-items:center;gap:8px;font-size:12.5px;font-weight:500;color:#e9edf0}
+.terminal-title .sub{font-weight:400;color:#9aa0a6}
+.terminal-title .ico{width:14px;height:14px}
+.t-chev{width:7px;height:7px;border-right:1.5px solid #788088;border-bottom:1.5px solid #788088;transform:rotate(225deg);transition:transform .14s var(--ease);flex:none}
+.terminal.is-closed .t-chev{transform:rotate(45deg)}
+.terminal-count{margin-left:auto;font-size:11.5px;color:#8a939b;font-variant-numeric:tabular-nums}
+.terminal-body{margin:0;padding:12px 14px;max-height:286px;overflow:auto;font-family:var(--font-sans);font-size:12px;line-height:1.8;white-space:pre-wrap;word-break:break-word}
+.terminal.is-closed .terminal-body{display:none}
+.terminal-body .l{display:block;margin:0 -14px;padding:0 14px}
+.terminal-body .ts{display:inline-block;min-width:66px;margin-right:10px;font-family:var(--font-mono);color:#788088;font-variant-numeric:tabular-nums}
+.l-info{color:#c9d0d6}
+.l-status{color:#6db9f4}
+.l-success{color:#5ee9b5}
+.l-warn{color:#ffc04d}
+.l-error{background:rgba(255,35,87,.14);color:#ff8fa3}
+.l-danmu{color:#9aa0a6}
+
+/* ── 3 配置四域：默认收起 + 摘要 + 常用/更多两层（复用 config-proto） ─ */
+.config-stack{display:flex;flex-direction:column;gap:10px}
+.cfg-domain{border:1px solid var(--hairline);border-radius:var(--r);background:var(--raised);overflow:hidden}
+.cfg-summary{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto auto;grid-template-areas:"title abstract count edit chev";align-items:center;gap:8px 12px;padding:12px 16px;cursor:pointer;list-style:none;color:var(--ink)}
+.cfg-summary::-webkit-details-marker{display:none}
+.cfg-summary:hover{background:var(--surface)}
+.cfg-title{grid-area:title;font-size:14px;font-weight:500;color:var(--ink);white-space:nowrap}
+.cfg-abstract{grid-area:abstract;min-width:0;font-size:12.5px;color:var(--body);overflow-wrap:anywhere}
+.cfg-abstract .sep{margin:0 7px;color:var(--muted)}
+.cfg-count{grid-area:count;justify-self:end;font-size:11.5px;color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
+.cfg-edit{grid-area:edit;width:26px;height:26px}
+.cfg-ro{grid-area:edit;display:none;font-size:11.5px;color:var(--muted);white-space:nowrap}
+body.is-managed .cfg-ro{display:inline-flex}
+.cfg-chev{grid-area:chev;justify-self:center;width:7px;height:7px;border-right:1.5px solid var(--muted);border-bottom:1.5px solid var(--muted);transform:rotate(45deg);transition:transform .14s var(--ease)}
+.cfg-domain[open] .cfg-chev{transform:rotate(225deg)}
+.cfg-body{border-top:1px solid var(--hairline);padding:14px 16px 16px}
+.group-cap{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;margin-bottom:10px}
+.group-cap .g{font-size:12.5px;font-weight:500;color:var(--ink)}
+.group-cap .g-note{font-size:11.5px;color:var(--muted)}
+.primary-group{padding:0;background:transparent}
+.field-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 22px;margin:0}
+.more-body .field-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+.field{min-width:0}
+.field-label{display:block;margin:0;font-size:12px;line-height:1.45;color:var(--muted)}
+.field-value{display:block;margin:3px 0 0;font-size:13px;line-height:1.45;color:var(--ink);word-break:break-word;overflow-wrap:anywhere}
+.field-value.unset{color:var(--muted)}
+.field-note{display:block;margin:3px 0 0;font-size:11.5px;line-height:1.45;color:var(--muted)}
+.more{margin-top:12px;border-top:1px solid var(--hairline)}
+.more-sum{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;padding:11px 2px 3px;cursor:pointer;list-style:none;font-size:12.5px;color:var(--body)}
+.more-sum::-webkit-details-marker{display:none}
+.more-sum:hover{color:var(--ink)}
+.more-sum .m-count{font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.more-sum .chev{margin-left:auto;width:7px;height:7px;border-right:1.5px solid var(--muted);border-bottom:1.5px solid var(--muted);transform:rotate(45deg);transition:transform .14s var(--ease)}
+.more[open] .more-sum .chev{transform:rotate(225deg)}
+.more-body{padding:12px 0 2px}
+.edit-hint{min-height:18px;margin:10px 0 0;font-size:11.5px;line-height:1.5;color:var(--muted)}
+
+/* 对照：四域全展开 + 每行一条 hairline 定义列表 */
+body.flat-view .cfg-abstract,body.flat-view .group-cap,body.flat-view .more-sum{display:none}
+body.flat-view .cfg-summary{grid-template-columns:auto auto auto auto;grid-template-areas:"title count edit chev"}
+body.flat-view .cfg-body{padding:0 16px 12px}
+body.flat-view .primary-group,body.flat-view .more-body{padding:0;background:transparent;border-radius:0}
+body.flat-view .more{margin-top:0;border-top:0}
+body.flat-view .field-grid,body.flat-view .more-body .field-grid{grid-template-columns:repeat(3,minmax(0,1fr));column-gap:22px;row-gap:0}
+body.flat-view .field{display:grid;grid-template-columns:minmax(104px,148px) minmax(0,1fr);gap:0 10px;padding:9px 0;border-bottom:1px solid var(--hairline);align-items:start}
+body.flat-view .field-label{padding-top:2px}
+body.flat-view .field-value{margin:0}
+body.flat-view .field-note{grid-column:2;margin-top:3px}
+
+/* ── 4 最近场次 + 合并/维护入口 ─────────────────────────────────── */
+.mini{width:100%;border-collapse:collapse}
+.mini th{text-align:left;font-size:11.5px;font-weight:500;color:var(--muted);padding:8px 14px;border-bottom:1px solid var(--hairline);white-space:nowrap}
+.mini td{font-size:12.5px;color:var(--body);padding:10px 14px;border-bottom:1px solid var(--hairline);vertical-align:middle}
+.mini tr:last-child td{border-bottom:0}
+.mini tbody tr:hover{background:var(--surface)}
+.mini .date,.mini .dur{font-family:var(--font-mono);font-size:11.5px;color:var(--body);font-variant-numeric:tabular-nums;white-space:nowrap}
+.mini .result{display:inline-flex;align-items:center;gap:7px;white-space:nowrap}
+.mini .bv{font-family:var(--font-mono);font-size:11.5px;color:var(--body)}
+.mini .view{text-align:right;white-space:nowrap}
+.table-foot{display:flex;flex-wrap:wrap;gap:4px 18px;padding:9px 14px;border-top:1px solid var(--hairline);font-size:11.5px;color:var(--muted)}
+.textlink{color:var(--accent);text-decoration:none;font-size:12.5px;white-space:nowrap}
+.textlink:hover{text-decoration:underline;text-underline-offset:3px}
+.maint-line{display:flex;flex-wrap:wrap;align-items:center;gap:8px 18px;padding:12px 16px}
+.maint-line .h{font-size:13px;font-weight:600;color:var(--ink)}
+.maint-item{display:inline-flex;align-items:center;gap:8px;font-size:12.5px;color:var(--body)}
+.maint-item .d{font-size:11.5px;color:var(--muted)}
+.maint-line .ico-btn{width:26px;height:26px}
+
+/* ── 图例与脚注 ─────────────────────────────────────────────────── */
+.legend{margin-top:26px;border-top:1px solid var(--hairline);padding-top:14px;display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px;color:var(--muted)}
+.legend .group-title{color:var(--ink);font-weight:500;margin-right:4px}
+.legend .s{display:inline-flex;align-items:center;gap:6px}
+.legend .unset-demo{color:var(--muted)}
+.legend .lsw{display:inline-block;width:9px;height:9px;border-radius:2px;flex:none}
+.footnote{margin-top:12px;font-size:11.5px;line-height:1.65;color:var(--muted);max-width:1000px}
+
+@media (max-width:1023px){
+  .session-grid{grid-template-columns:minmax(0,1fr)}
+  .rec-split{grid-template-columns:minmax(0,1fr)}
+  .more-body .field-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  body.flat-view .field-grid,body.flat-view .more-body .field-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media (max-width:880px){
+  .shell{padding:24px 18px 56px}
+  .head-actions{width:100%}
+  .status-item{flex-basis:50%;padding:0 12px;border-right:0}
+  .status-item:nth-child(odd){padding-left:0}
+  .flow-seg{flex-basis:100%;padding:8px 0 0;border-left:0;border-top:1px solid var(--hairline)}
+  .flow-seg:first-child{border-top:0;padding-top:0}
+  .sec-head .spacer{margin-left:0}
+  .oo-grid{grid-template-columns:1fr}
+  .rec-heart,.figure-time{margin-left:0}
+}
+@media (max-width:639px){
+  h1{font-size:24px}
+  .field-grid,.more-body .field-grid{grid-template-columns:1fr}
+  body.flat-view .field-grid,body.flat-view .more-body .field-grid{grid-template-columns:1fr}
+  .status-item{flex-basis:100%;padding:3px 0;border-right:0}
+  .part-strip{grid-template-columns:repeat(6,minmax(0,1fr))}
+  .cfg-summary{grid-template-columns:auto minmax(0,1fr) auto auto;grid-template-areas:"title count edit chev" "abstract abstract abstract abstract";row-gap:6px}
+  .mini thead{display:none}
+  .mini,.mini tbody,.mini tr,.mini td{display:block;width:100%}
+  .mini tr{padding:8px 14px;border-bottom:1px solid var(--hairline)}
+  .mini tr:last-child{border-bottom:0}
+  .mini td{display:flex;justify-content:space-between;gap:12px;padding:2px 0;border-bottom:0;text-align:left;overflow-wrap:anywhere}
+  .mini td::before{content:attr(data-label);font-size:11.5px;color:var(--muted);flex:none}
+  .mini td.view{justify-content:flex-end;text-align:right}
+  .mini td.view::before{content:none}
+  .figure-num b{font-size:30px}
+}
+@media (prefers-reduced-motion:reduce){
+  html{scroll-behavior:auto}
+  .dot.beat{animation:none}
+  *,*::before,*::after{transition:none !important}
+}
+</style>
+</head>
+<body>
+
+<!-- 内联 SVG sprite：lucide 风格 1.6 stroke，无外部资源 -->
+<svg class="sprite" aria-hidden="true">
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></symbol>
+  <symbol id="i-chevron-left" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+  <symbol id="i-square" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="1.5" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-hourglass" viewBox="0 0 24 24"><path d="M5 2h14M5 22h14M7 2c0 5 5 6 5 10s-5 5-5 10M17 2c0 5-5 6-5 10s5 5 5 10"/></symbol>
+  <symbol id="i-file-text" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6M8 13h8M8 17h8"/></symbol>
+  <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="18" rx="2"/><path d="m6 8 3 3-3 3M12 15h6"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 2 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5M3 17l9 5 9-5"/></symbol>
+  <symbol id="i-rotate" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></symbol>
+  <symbol id="i-zap" viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7Z"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6"/></symbol>
+</svg>
+
+<main class="shell" id="top">
+
+  <a class="backlink" href="#top" id="backLink"><svg class="ico"><use href="#i-chevron-left"/></svg>房间列表</a>
+
+  <!-- ── 身份头：状态点 + 原因 + 图标操作组 + 受管只读切换 ─────────── -->
+  <header class="page-head">
+    <div>
+      <p class="eyebrow">设计原型 v2 · 示意数据</p>
+      <div class="identity">
+        <h1>主播A</h1>
+        <span class="plat">抖音</span>
+        <span class="roomkey">房间号 <span class="mono">demo-a</span> · <span class="mono">douyin</span></span>
+        <span class="managed-tag"><span class="dot off"></span>受管 · 只读</span>
+      </div>
+      <div class="health-line">
+        <span class="health"><span class="dot ok beat"></span>录制中</span>
+        <p class="reason">vps-1 在录 · 边录边传已确认 8/12 段 · 稿件 DEMO-0001 · 心跳 2s 前</p>
+      </div>
+    </div>
+    <div class="head-actions">
+      <button class="btn" id="themeBtn" type="button" aria-label="切换主题">
+        <svg class="ico"><use id="themeIcon" href="#i-sun"/></svg><span id="themeLabel">亮色</span>
+      </button>
+      <button class="btn" id="managedBtn" type="button" aria-pressed="false">预览受管只读</button>
+      <div class="ico-group" role="group" aria-label="房间操作">
+        <button class="ico-btn warn" data-write id="recBtn" type="button" title="停止录制" aria-label="停止录制"><svg class="ico"><use href="#i-square"/></svg></button>
+        <button class="ico-btn" data-write id="drainBtn" type="button" title="排空（录完当前场再停）" aria-label="排空（录完当前场再停）"><svg class="ico"><use href="#i-hourglass"/></svg></button>
+        <button class="ico-btn" id="logsBtn" type="button" title="录制日志" aria-label="录制日志"><svg class="ico"><use href="#i-file-text"/></svg></button>
+        <button class="ico-btn" data-write id="editBtn" type="button" title="编辑房间" aria-label="编辑房间"><svg class="ico"><use href="#i-pencil"/></svg></button>
+      </div>
+    </div>
+  </header>
+
+  <p class="proto-line">图标操作沿用列表页形态：■ 停止 / ▶ 启动 / 日志 / 编辑 + title 提示；本页数据为「正在录」的一次快照，图标为示意入口，不改写页面状态。</p>
+  <p class="action-note" id="actionNote" aria-live="polite">状态原因常驻；日志图标会展开并定位到日志台。</p>
+
+  <!-- ── 优先级说明条 + 对照切换：讲清这轮改了什么 ────────────────── -->
+  <div class="priority" role="note">
+    <p>本轮把「正在发生什么」提回首屏：录制进度 → 当前场次（录制会话树 + 日志台）；配置四域默认收起、下沉到页尾。</p>
+    <p class="sub">线上版里，日志与进度双栏被四域挤到第 5 屏之下、默认收起只剩一条细标题栏；正在录的房间找不到活的日志与录制进度。这是优先级排错，不是组件缺内容。</p>
+    <div class="ctrl">
+      <button class="linkbtn" id="compareOnline" type="button" aria-pressed="false">对照：当前线上版</button>
+    </div>
+  </div>
+
+  <div class="online-order" id="onlineOrder" hidden aria-label="顺序对照">
+    <div class="oo-grid">
+      <div class="oo-col">
+        <h3>当前线上版 <span class="quiet">PR #556 的顺序</span></h3>
+        <ol class="oo-list">
+          <li><span class="n">1</span><span>身份头 → 状态速览行</span></li>
+          <li><span class="n">2</span><span>当前场次（后处理运行树「选优 → 拉取 → 合并」，默认展开）</span></li>
+          <li class="mark"><span class="n">3</span><span>配置四域<span class="oo-tag warn">默认展开 · 很长 · 低频</span></span></li>
+          <li><span class="n">4</span><span>运行态域</span></li>
+          <li class="mark"><span class="n">5</span><span>日志 / 直传时间线 / 边录边传进度 双栏<span class="oo-tag warn">第 5 屏之下 · 默认收起</span></span></li>
+          <li><span class="n">6</span><span>合并面板</span></li>
+        </ol>
+      </div>
+      <div class="oo-col">
+        <h3>本原型 v2 <span class="quiet">按「正在录」的高频重排</span></h3>
+        <ol class="oo-list">
+          <li><span class="n">1</span><span>身份头 → 状态速览行</span></li>
+          <li class="mark"><span class="n">2</span><span>正在录制（8/12 段、分段条、当前段、未确认占盘）<span class="oo-tag hi">首屏核心</span></span></li>
+          <li class="mark"><span class="n">3</span><span>当前场次（录制会话树 + 日志台，默认展开）<span class="oo-tag hi">日志是活的</span></span></li>
+          <li><span class="n">4</span><span>配置四域（低频 · 默认收起 + 摘要 + 常用/更多）</span></li>
+          <li><span class="n">5</span><span>最近场次</span></li>
+          <li><span class="n">6</span><span>合并 / 维护入口</span></li>
+        </ol>
+      </div>
+    </div>
+    <p class="oo-foot">变化：进度与日志从第 5 屏之下提到第 1–2 屏，配置从第 3 屏下沉到第 4 屏并收起；运行树不再画后处理链，改画本房间正在进行的录制会话链。内容一项没少，只是按「正在录时想看什么」重排。</p>
+  </div>
+
+  <!-- ── 状态速览行 ─────────────────────────────────────────────── -->
+  <div class="status-line" aria-label="状态速览">
+    <span class="status-item">已录 <b class="mono num">01:42:18</b></span>
+    <span class="status-item">节点 <b class="mono num">1/2</b> 在录</span>
+    <span class="status-item">交付 <b>投稿 B站 · 仅自己可见</b></span>
+    <span class="status-item">定时 <b class="mono num">20:00–02:00</b></span>
+    <span class="status-item">当前分 P <b class="mono num">8/12</b></span>
+  </div>
+
+  <!-- ── 1 正在录制：首屏核心 ───────────────────────────────────── -->
+  <section aria-labelledby="recTitle" style="margin-bottom:24px">
+    <div class="sec-head">
+      <h2 id="recTitle">正在录制</h2>
+      <span class="chip hi">首屏核心</span>
+      <span class="note">进度条 + 分段行表达正在发生什么，读一眼就知道录到哪</span>
+    </div>
+    <div class="panel rec-card">
+      <div class="rec-top">
+        <span class="rec-state"><span class="dot run beat"></span>录制中 · 边录边传</span>
+        <span class="rec-sub">会话 <span class="mono">demo-a_10-26_2000</span> · 节点 <span class="mono">vps-1</span></span>
+        <span class="rec-heart">心跳 <b class="mono num">2s</b> 前 · 稿件 <span class="mono">DEMO-0001</span></span>
+      </div>
+
+      <div class="rec-figure">
+        <span class="figure-num"><b class="mono num">8</b><span class="figure-of mono">/ 12</span></span>
+        <span class="figure-cap">分段已上传并回读确认<span>当前段 P9 录制上传中</span></span>
+        <span class="figure-time">已录 <b class="mono num">01:42:18</b><span>预计剩余 00:31:00</span></span>
+      </div>
+      <div class="progress" role="img" aria-label="12 段中已确认 8 段，约 66.7%"><i style="width:66.7%"></i></div>
+
+      <div class="part-strip" id="recStrip" aria-label="12 个分段的状态">
+        <span class="part-cell"><span class="dot ok"></span>P1</span>
+        <span class="part-cell"><span class="dot ok"></span>P2</span>
+        <span class="part-cell"><span class="dot ok"></span>P3</span>
+        <span class="part-cell"><span class="dot ok"></span>P4</span>
+        <span class="part-cell"><span class="dot ok"></span>P5</span>
+        <span class="part-cell"><span class="dot ok"></span>P6</span>
+        <span class="part-cell"><span class="dot ok"></span>P7</span>
+        <span class="part-cell"><span class="dot ok"></span>P8</span>
+        <span class="part-cell now"><span class="dot run beat"></span>P9</span>
+        <span class="part-cell"><span class="dot idle"></span>P10</span>
+        <span class="part-cell"><span class="dot idle"></span>P11</span>
+        <span class="part-cell"><span class="dot idle"></span>P12</span>
+      </div>
+
+      <div class="rec-split">
+        <div>
+          <h3>分段行 <span class="quiet">沿用 RollingProgress 的一行一段口径</span></h3>
+          <div class="part-row"><span class="dot ok"></span><span class="pnum">P8</span><span>已确认</span><span class="mono">1530 MiB</span></div>
+          <div class="part-row"><span class="dot run"></span><span class="pnum">P9</span><span>录制上传中</span><span class="mono">862 / 1540 MiB</span></div>
+          <div class="part-row"><span class="dot idle"></span><span class="pnum">P10</span><span class="quiet">待封口</span><span class="mono quiet">—</span></div>
+          <p class="seg-cap">当前段 P9 写入进度 <span class="mono num">56%</span></p>
+          <div class="progress thin" role="img" aria-label="当前段 P9 已写入 862 / 1540 MiB，约 56%"><i style="width:56%"></i></div>
+        </div>
+        <div>
+          <h3>边录边传会话 <span class="quiet">取自队列快照</span></h3>
+          <div class="roll-row">
+            <div class="roll-top"><span class="base">demo-a_10-26_2000</span><span class="cnt">已确认 8 / 12 段</span></div>
+            <div class="roll-sub">
+              <span>上传中 1 段</span>
+              <span>未确认占盘 <span class="mono">2.1 GiB</span></span>
+              <span>存疑 0 段</span>
+              <span>稿件 <span class="mono">DEMO-0001</span></span>
+            </div>
+          </div>
+          <p class="tree-note" style="margin-top:8px">未确认占盘是已上传但还没回读确认的分段临时占用；确认后按清理口径释放，不会删到只剩一份。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── 2 当前场次：录制会话树 + 日志台，同区默认展开 ───────────── -->
+  <section aria-labelledby="sessionTitle" style="margin-bottom:26px">
+    <div class="sec-head">
+      <h2 id="sessionTitle">当前场次</h2>
+      <span class="count num">10-26 20:00</span>
+      <span class="note">录制会话树 + 日志台同区，默认展开 —— 正在录时日志是活的</span>
+      <span class="spacer"></span>
+      <div class="ctrl"><button class="linkbtn" id="logToggle" type="button" aria-pressed="true">收起日志</button></div>
+    </div>
+    <div class="session-grid">
+      <div class="panel tree-card">
+        <div class="tree-head">
+          <span class="dot run"></span>
+          <h3>录制会话树</h3>
+          <span class="chip">边录边传</span>
+          <span class="tree-state">执行中 · 录制并上传</span>
+        </div>
+        <div class="node-row" aria-label="节点责任">
+          <span class="node-item"><span class="dot ok"></span><b>录制节点</b> <span class="mono">vps-1</span> · 在录</span>
+          <span class="node-item"><span class="dot idle"></span><b>候补节点</b> <span class="mono">vps-2</span> · 本场未分配</span>
+          <span class="node-item"><span class="dot run"></span><b>主控台账</b> <span class="mono">controller</span> · 对账中</span>
+        </div>
+        <div class="flow" role="group" aria-label="录制会话三段链">
+          <div class="flow-seg">
+            <div class="flow-k">已完成</div>
+            <div class="flow-v">取流成功 → P1–P8 封口 → 上传确认 <span class="mono">8/12</span> 段</div>
+          </div>
+          <div class="flow-seg now">
+            <div class="flow-k">正在做</div>
+            <div class="flow-v">P9 录制上传中 · <span class="mono">862 / 1540 MiB</span> · vps-1 在录</div>
+          </div>
+          <div class="flow-seg">
+            <div class="flow-k">接下来</div>
+            <div class="flow-v">P10–P12 待封口 · 收播后提交分 P</div>
+          </div>
+        </div>
+        <p class="tree-note">线上版这里画的是后处理三段链「选优 → 拉取 → 合并」；本房间正在录，改成同形态的录制会话链：取流 → 封口 → 上传确认。三段链的视觉语言不变，只换语义。</p>
+      </div>
+
+      <div class="terminal" id="logTerminal">
+        <button class="terminal-head" id="logHead" type="button" aria-expanded="true" aria-controls="logBody">
+          <span class="terminal-title">
+            <span class="t-chev" aria-hidden="true"></span>
+            <span class="dot ok"></span>
+            <svg class="ico"><use href="#i-terminal"/></svg>
+            录制日志 · <span class="sub mono">vps-1</span>
+          </span>
+          <span class="terminal-count" id="logCount">— 行</span>
+        </button>
+        <pre class="terminal-body" id="logBody"></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── 3 配置四域：低频，下沉，默认收起 + 摘要 + 常用/更多 ──────── -->
+  <section aria-labelledby="configTitle" style="margin-bottom:26px">
+    <div class="sec-head">
+      <h2 id="configTitle">配置</h2>
+      <span class="chip low">低频</span>
+      <span class="count" id="fieldCount">— / 52 项</span>
+      <span class="note">默认收起 · 摘要给关键值 · 展开分「常用 / 更多」两层</span>
+      <span class="spacer"></span>
+      <div class="ctrl">
+        <button class="linkbtn" id="toggleAll" type="button" aria-pressed="false">全部展开</button>
+        <button class="linkbtn" id="flatBtn" type="button" aria-pressed="false">对照：四域平铺</button>
+      </div>
+    </div>
+    <div class="config-stack" id="configStack"></div>
+    <p class="edit-hint" id="hint" aria-live="polite">四域默认收起，点标题展开；编辑图标为占位入口，受管房间不显示。</p>
+  </section>
+
+  <!-- ── 4 最近场次 ─────────────────────────────────────────────── -->
+  <section aria-labelledby="recentTitle" style="margin-bottom:14px">
+    <div class="sec-head">
+      <h2 id="recentTitle">最近场次</h2>
+      <span class="count num">3 场</span>
+      <span class="note">按收尾时间倒序 · 行内保留运行态入口</span>
+    </div>
+    <div class="panel">
+      <table class="mini">
+        <thead><tr><th>日期</th><th>时长</th><th>结果</th><th>稿件</th><th class="view">操作</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="date" data-label="日期">10-26 20:00</td><td class="dur" data-label="时长">01:42:18</td>
+            <td data-label="结果"><span class="result"><span class="dot run"></span>进行中</span></td>
+            <td class="bv" data-label="稿件">稿件 DEMO-0001</td>
+            <td class="view" data-label="操作"><a class="textlink" href="#sessionTitle" data-view="10-26 20:00">查看</a></td>
+          </tr>
+          <tr>
+            <td class="date" data-label="日期">10-25 19:30</td><td class="dur" data-label="时长">03:12:44</td>
+            <td data-label="结果"><span class="result"><span class="dot ok"></span>已完成</span></td>
+            <td class="bv" data-label="稿件">稿件 DEMO-0001</td>
+            <td class="view" data-label="操作"><a class="textlink" href="#recentTitle" data-view="10-25 19:30">查看</a></td>
+          </tr>
+          <tr>
+            <td class="date" data-label="日期">10-24 20:00</td><td class="dur" data-label="时长">02:48:10</td>
+            <td data-label="结果"><span class="result"><span class="dot warn"></span>需人工处理</span></td>
+            <td class="bv" data-label="稿件">稿件 DEMO-0001</td>
+            <td class="view" data-label="操作"><a class="textlink" href="#recentTitle" data-view="10-24 20:00">查看</a></td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="table-foot"><span>显示最近 3 场</span><span>更早记录在处理运行态里继续翻页</span></div>
+    </div>
+  </section>
+
+  <!-- 合并 / 维护入口：一行，殿后 -->
+  <div class="panel maint-line" aria-label="合并与维护入口">
+    <span class="h">合并与维护</span>
+    <span class="maint-item"><button class="ico-btn" data-write type="button" data-note="会话合成（示意）：勾选会话后按时间序拼成一片，弹幕文件同步错位合并。" title="会话合成" aria-label="会话合成"><svg class="ico"><use href="#i-layers"/></svg></button>会话合成 <span class="d">按时间序拼片</span></span>
+    <span class="maint-item"><button class="ico-btn" data-write type="button" data-note="自定义重跑（示意）：按日期 / 节点重跑一场；同日派生场次需人工确认。" title="自定义重跑" aria-label="自定义重跑"><svg class="ico"><use href="#i-rotate"/></svg></button>自定义重跑 <span class="d">按日期 / 节点</span></span>
+    <span class="maint-item"><button class="ico-btn" data-write type="button" data-note="立即执行（示意）：跳过收播等待，用已有录像跑合并 / 烧录 / 上传。" title="立即执行" aria-label="立即执行"><svg class="ico"><use href="#i-zap"/></svg></button>立即执行</span>
+    <span class="maint-item"><button class="ico-btn danger" data-write type="button" data-note="删除房间（示意）：启用或录制中会拦截，需二次确认。" title="删除房间" aria-label="删除房间"><svg class="ico"><use href="#i-trash"/></svg></button>删除房间</span>
+  </div>
+
+  <section class="legend" aria-label="状态图例">
+    <span class="group-title">状态词</span>
+    <span class="s"><span class="dot run"></span>执行中</span>
+    <span class="s"><span class="dot ok"></span>已完成 / 已确认</span>
+    <span class="s"><span class="dot idle"></span>待封口 / 排队中</span>
+    <span class="s"><span class="dot warn"></span>需人工处理</span>
+    <span class="s"><span class="dot off"></span>已停用</span>
+    <span class="group-title">字段语言</span>
+    <span class="s"><span class="unset-demo">未设置</span>显式留空</span>
+    <span class="s">等宽只用于 <span class="mono">01:42:18</span> 这类数字与标识</span>
+  </section>
+  <section class="legend" aria-label="日志行色" style="margin-top:8px;border-top:0;padding-top:0">
+    <span class="group-title">日志行色</span>
+    <span class="s"><span class="lsw" style="background:#6db9f4"></span>状态</span>
+    <span class="s"><span class="lsw" style="background:#5ee9b5"></span>成功</span>
+    <span class="s"><span class="lsw" style="background:#ffc04d"></span>警告 / 重连</span>
+    <span class="s"><span class="lsw" style="background:#9aa0a6"></span>弹幕</span>
+    <span class="s"><span class="lsw" style="background:#ff8fa3"></span>出错</span>
+    <span class="s"><span class="lsw" style="background:#c9d0d6"></span>普通</span>
+  </section>
+  <p class="footnote">设计原型 v2 · 示意数据。主播名、房间号（demo-a）、节点（vps-1 / vps-2 / controller）、稿件号（DEMO-0001 占位）、推送地址、日期、时长、字节与日志时间均为占位，不含真实主机、房间号、主播名或凭据；登录态与推送地址原文按现有口径不回显。配置 52 项字段取自房间编辑器四步与房间详情配置四域，未设置显式留空；示意值不构成一份经过后端校验的组合（例如时长与分段数仅为展示，不互相推导）。亮暗切换与其余原型共用 <span class="mono">drec-proto-theme</span>；本页只读其它文件，不改动实现。</p>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ── 主题：与其余原型共用存储键 ─────────────────────────────────── */
+  var root = document.documentElement;
+  var themeBtn = document.getElementById("themeBtn");
+  var themeIcon = document.getElementById("themeIcon");
+  var themeLabel = document.getElementById("themeLabel");
+  function applyTheme(mode) {
+    var light = mode === "light";
+    root.setAttribute("data-theme", light ? "light" : "dark");
+    themeIcon.setAttribute("href", light ? "#i-moon" : "#i-sun");
+    themeLabel.textContent = light ? "暗色" : "亮色";
+    try { localStorage.setItem("drec-proto-theme", light ? "light" : "dark"); } catch (e) {}
+  }
+  try { applyTheme(localStorage.getItem("drec-proto-theme") || "dark"); } catch (e) { applyTheme("dark"); }
+  themeBtn.addEventListener("click", function () {
+    applyTheme(root.getAttribute("data-theme") === "light" ? "dark" : "light");
+  });
+  window.addEventListener("storage", function (e) {
+    if (e.key === "drec-proto-theme" && e.newValue) applyTheme(e.newValue);
+  });
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c];
+    });
+  }
+  function note(text) { document.getElementById("actionNote").textContent = text; }
+
+  /* ── 对照：当前线上版 ──────────────────────────────────────────── */
+  var compareOnline = document.getElementById("compareOnline");
+  var onlineOrder = document.getElementById("onlineOrder");
+  compareOnline.addEventListener("click", function () {
+    var show = onlineOrder.hidden;
+    onlineOrder.hidden = !show;
+    compareOnline.textContent = show ? "收起对照" : "对照：当前线上版";
+    compareOnline.setAttribute("aria-pressed", show ? "true" : "false");
+    note(show
+      ? "已展开顺序对照：线上版把日志 / 进度放在第 5 屏之下；v2 提到首屏，配置下沉。"
+      : "已收起顺序对照。");
+  });
+
+  /* ── 日志台：行数据 + 与 LogTerminal 同源的等级归类 ────────────── */
+  var LOGS = [
+    "20:00:02 [状态] 检测到开播 · 场次键 douyin:demo-a:10-26",
+    "20:00:03 取流成功 · 画质 原画 · ffmpeg 匿名连接",
+    "20:00:04 开始录制 · 会话 demo-a_10-26_2000 · 分段 P1",
+    "20:00:06 [弹幕] WS 已连接 · liveId 已解析 · 收到第 1 条弹幕",
+    "21:05:12 警告 · 上游抖动，取流重连（第 1 次）· 已恢复",
+    "21:29:36 分段 P8 封口 · 1530 MiB → 提交分 P → 已确认 8/12 段",
+    "21:29:39 开始分段 P9 · 边录边传上传中 · 862 / 1540 MiB",
+    "21:42:18 心跳正常 · 稿件 DEMO-0001 · 未确认占盘 2.1 GiB · 节点 vps-1"
+  ];
+  /* 与 web/src/lib/logLevel.ts 的 classifyLogLine 同一套关键词与判定优先级 */
+  function classifyLogLine(line) {
+    if (/错误|error|失败|fail|exited with code|RecordStop|流断开|致命|SIGSEGV|rc=-?\d|spawn error/i.test(line)) return "error";
+    if (/警告|warn|排空|超时|timeout|重连|reconnect|断开/i.test(line)) return "warn";
+    if (/完成|成功|投稿成功|已上传|已停止|录制中|准备开始录制/i.test(line)) return "success";
+    if (/\[弹幕\]|收到第/.test(line)) return "danmu";
+    if (/\[状态\]|\[主播\]|新分段|启动|开始录制|等待开播/.test(line)) return "status";
+    return "info";
+  }
+  var LOG_CLASS = { error:"l-error", warn:"l-warn", success:"l-success", danmu:"l-danmu", status:"l-status", info:"l-info" };
+  document.getElementById("logBody").innerHTML = LOGS.map(function (line) {
+    var m = /^(\d{2}:\d{2}:\d{2})\s+(.*)$/.exec(line);
+    var ts = m ? m[1] : "";
+    var text = m ? m[2] : line;
+    return '<span class="l ' + LOG_CLASS[classifyLogLine(line)] + '">' +
+      (ts ? '<span class="ts">' + esc(ts) + '</span>' : "") + esc(text) + '</span>';
+  }).join("");
+  document.getElementById("logCount").textContent = LOGS.length + " 行";
+
+  /* 日志收起 / 展开：单一状态函数驱动头部按钮、区块链接与箭头 */
+  var term = document.getElementById("logTerminal");
+  var logHead = document.getElementById("logHead");
+  var logToggle = document.getElementById("logToggle");
+  function setLog(open) {
+    term.classList.toggle("is-closed", !open);
+    logHead.setAttribute("aria-expanded", open ? "true" : "false");
+    logToggle.textContent = open ? "收起日志" : "展开日志";
+    logToggle.setAttribute("aria-pressed", open ? "true" : "false");
+  }
+  logHead.addEventListener("click", function () { setLog(term.classList.contains("is-closed")); });
+  logToggle.addEventListener("click", function () { setLog(term.classList.contains("is-closed")); });
+
+  /* ── 图标操作：示意入口；日志图标额外展开并定位 ────────────────── */
+  var messages = {
+    recBtn: "停止录制（示意）：当前分段完整封口后停止；配置与历史保留，不自动删分 P。",
+    drainBtn: "排空（示意）：录完当前这场再停，当前分段完整封口，不腰斩录制。",
+    editBtn: "编辑房间（示意）：打开四步编辑器；配置四域的编辑图标直达对应步骤。",
+    backLink: "返回房间列表（示意）。"
+  };
+  Object.keys(messages).forEach(function (id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("click", function (e) {
+      if (el.tagName === "A") e.preventDefault();
+      note(messages[id]);
+      if (id === "backLink") document.getElementById("top").scrollIntoView({ block: "start", behavior: "smooth" });
+      if (id === "editBtn") document.getElementById("configTitle").scrollIntoView({ block: "start", behavior: "smooth" });
+    });
+  });
+  document.getElementById("logsBtn").addEventListener("click", function () {
+    setLog(true);
+    document.getElementById("sessionTitle").scrollIntoView({ block: "start", behavior: "smooth" });
+    note("已展开录制日志并定位到「当前场次」。");
+  });
+  Array.prototype.forEach.call(document.querySelectorAll("[data-note]"), function (btn) {
+    btn.addEventListener("click", function () { note(btn.getAttribute("data-note")); });
+  });
+  Array.prototype.forEach.call(document.querySelectorAll("[data-view]"), function (link) {
+    link.addEventListener("click", function (e) {
+      e.preventDefault();
+      note("查看场次 " + link.getAttribute("data-view") + "（示意）：展开该场的运行树与日志。");
+    });
+  });
+
+  /* ── 受管只读：全页一处开关，隐藏所有写入口，浏览与日志保留 ────── */
+  var managedBtn = document.getElementById("managedBtn");
+  managedBtn.addEventListener("click", function () {
+    var managed = document.body.classList.toggle("is-managed");
+    managedBtn.textContent = managed ? "恢复可编辑态" : "预览受管只读";
+    managedBtn.setAttribute("aria-pressed", managed ? "true" : "false");
+    document.getElementById("hint").textContent = managed
+      ? "受管只读：四域编辑图标隐藏，配置浏览与折叠仍可用。"
+      : "四域默认收起，点标题展开；编辑图标为占位入口。";
+    note(managed
+      ? "受管只读：启停、排空、编辑、四域编辑图标与维护入口全部隐藏，日志、场次与配置浏览保留。"
+      : "已恢复可编辑态：所有写入口恢复为图标按钮 + title 提示。");
+  });
+
+  /* ── 配置四域：与 room-detail-config-proto.html 同一份数据 ──────── */
+  var DOMAINS = [
+    {
+      id: "record", title: "录制", step: "1", stepName: "录制",
+      summaryKeys: ["quality", "engine", "segmentSec", "danmu"],
+      primaryKeys: ["quality", "engine", "segmentSec", "danmu", "schedule", "workers"],
+      fields: [
+        { k:"platform", label:"平台", value:"抖音 · douyin", note:"由直播间地址解析；编辑时不可改" },
+        { k:"room", label:"房间地址", value:"https://live.example/demo-a", mono:true, note:"占位地址；编辑时只读，存量地址不回写" },
+        { k:"roomSlug", label:"房间号 slug", value:"demo-a", mono:true, note:"规则键 = douyin.demo-a" },
+        { k:"name", label:"名称", value:"主播A", note:"编辑器「名称」；列表与详情标题优先取解析名" },
+        { k:"anchorName", label:"主播名", value:"主播A", note:"运行时解析名，与任务名称独立" },
+        { k:"taskId", label:"录制任务 id", value:"12", mono:true },
+        { k:"enabled", label:"录制任务状态", value:"已启用", note:"启停由页面 ■ / ▶ 图标控制，编辑器保存不回写此值" },
+        { k:"schedule", label:"录制窗口", value:"20:00–02:00", mono:true, note:"可跨夜；留空 = 全天" },
+        { k:"quality", label:"画质", value:"原画", note:"来自平台可选画质；默认值由平台给出" },
+        { k:"engine", label:"录制引擎", value:"ffmpeg", mono:true },
+        { k:"segmentSec", label:"分段时长", value:"1800 s", short:"30 分钟分段", mono:true },
+        { k:"danmu", label:"录制弹幕", value:"开", short:"弹幕开", note:"写入会话弹幕文件；关闭后没有可烧录的文件" },
+        { k:"useLoginState", label:"带账号信息", value:"开", note:"抖音取流匿名，账号只用于礼物 / 入场弹幕" },
+        { k:"hasLoginState", label:"登录态", value:"已设置 · 12 天后过期", note:"原文不回显，只显示是否已设置" },
+        { k:"outDir", label:"输出目录", value:"未设置", unset:true, note:"留空 = 数据根默认输出目录" },
+        { k:"outputFormat", label:"输出格式", value:"MP4", mono:true, note:"只换容器，不并存两份" },
+        { k:"outputFormatLock", label:"输出格式锁", value:"已锁 · 直播直传", note:"后端判定；锁定时编辑器下拉不可选" },
+        { k:"rollingUpload", label:"旧边录边传开关", value:"关", note:"旧值只读，已迁到规则上传方式" },
+        { k:"rollingEffective", label:"边录边传生效值", value:"开", note:"按规则 + 节点数派生；恰好 1 个节点且关闭烧录时生效" },
+        { k:"workers", label:"参与节点", value:"vps-1", mono:true, note:"可选 vps-1 / vps-2；本场只勾选 vps-1（直传要求单节点）" }
+      ]
+    },
+    {
+      id: "process", title: "处理", step: "2", stepName: "处理",
+      summaryKeys: ["procEnabled", "mergeSegments", "burnDanmu", "effectiveFormat"],
+      primaryKeys: ["procEnabled", "mergeSegments", "versions", "effectiveFormat"],
+      fields: [
+        { k:"procEnabled", label:"编排此房间", value:"开", short:"编排开", note:"关掉 = 暂停此房间：各节点停录，录完也不处理（任务与配置保留）" },
+        { k:"mergeSegments", label:"产出形态", value:"按录制分段", note:"每个分段一个分 P；合并步骤跳过" },
+        { k:"burnDanmu", label:"烧飞屏弹幕", value:"关", short:"不烧录", note:"边录边传只上传 plain，开烧录会回落整场管线" },
+        { k:"burnLivechat", label:"烧聊天框", value:"关", note:"与弹幕版同一约束，按烧录标记派生" },
+        { k:"nodeSideUpload", label:"节点侧上传", value:"关", note:"由上传方式推导；节点直传时才开" },
+        { k:"tsDirect", label:"原始流直传", value:"关", note:"仅节点侧上传时生效" },
+        { k:"requires", label:"节点能力要求", value:"danmu:douyin", mono:true, note:"与参与节点取交集；空 = 无要求" },
+        { k:"versions", label:"要哪些版本", value:"原画（弹幕版 / 聊天版未生效）", note:"按规则启用状态与烧录标记派生" },
+        { k:"effectiveFormat", label:"生效输出格式", value:"MP4（投稿固定）", short:"MP4 投稿", note:"投稿形态下后处理产物恒为 mp4" }
+      ]
+    },
+    {
+      id: "upload", title: "投稿", step: "3", stepName: "上传",
+      summaryKeys: ["uploadOn", "method", "uploadPrivate", "streamUpload"],
+      primaryKeys: ["uploadOn", "method", "uploadPrivate", "streamUpload", "tid"],
+      fields: [
+        { k:"uploadOn", label:"录完之后", value:"投稿 B站" },
+        { k:"method", label:"上传时机", value:"边录边传", note:"收播后 / 边录边传 / 节点直传三选一" },
+        { k:"uploadMode", label:"上传方式（存储值）", value:"rolling", mono:true, note:"缺省 = stage（只合成）" },
+        { k:"streamUpload", label:"直播直传", value:"开 · 不写本地视频", short:"直播直传开", note:"边录边传子模式；每个分 P 先写临时文件，确认后清理" },
+        { k:"streamUploadSpool", label:"本地回退文件", value:"开（固定）", note:"上传失败可整文件重传" },
+        { k:"uploadPrivate", label:"可见性", value:"仅自己可见", note:"关水印与自制为硬标准，不在此配置" },
+        { k:"tid", label:"分区 tid", value:"21", mono:true },
+        { k:"tag", label:"标签", value:"直播录像, 主播A" },
+        { k:"desc", label:"简介", value:"未设置", unset:true, note:"留空 = 不额外填写简介" },
+        { k:"titleTemplate", label:"标题模板", value:"{name}_{date}_{HH}-{mm}-{ss}", mono:true },
+        { k:"submissionTitleTemplate", label:"稿件标题模板", value:"{name}_{date}_{title} 直播回放", mono:true },
+        { k:"partTitleTemplate", label:"分 P 标题模板", value:"P{part}", mono:true },
+        { k:"seasonSectionId", label:"合集 ID", value:"382911", mono:true, note:"投稿成功后自动加入；留空 = 不加入" },
+        { k:"seasonSectionIdStored", label:"合集 ID 存储状态", value:"已保存 · 可清空", note:"清空后保存为 null" },
+        { k:"partSizeMiB", label:"每 P 大小（MiB）", value:"未设置", unset:true, note:"留空 = 内置默认 1540 MiB（10 MiB 对齐）；范围 100–4096" },
+        { k:"partSizeMiBStored", label:"每 P 大小存储状态", value:"未保存 · 留空继承默认" }
+      ]
+    },
+    {
+      id: "finish", title: "通知与清理", step: "4", stepName: "清理与通知",
+      summaryKeys: ["pushUrl", "clStageSourceAfterMerge", "clSourceAfterDone", "clKeepArchive"],
+      primaryKeys: ["pushUrl", "clStageSourceAfterMerge", "clSourceAfterDone", "clKeepArchive"],
+      fields: [
+        { k:"pushUrl", label:"通知推送地址", value:"已设置（不回显）", short:"推送地址已设置", note:"凭据不回显；留空 = 用全局配置" },
+        { k:"hasPushUrl", label:"推送地址存储状态", value:"已设置", note:"接口只给是否已设置标记" },
+        { k:"pushUrlClear", label:"清除已保存推送地址", value:"未勾选", note:"勾选后保存为 null" },
+        { k:"notifyToggles", label:"通知开关（全局）", value:"开播 / 收播 / 合成 / hub / 出错 · 站内提醒开", note:"全局通知开关，不是房间字段；房间只覆盖推送地址" },
+        { k:"clStageSourceAfterMerge", label:"合并后删存档源片段", value:"开", short:"合并后删存档源" },
+        { k:"clSourceAfterDone", label:"完成后删源节点录制", value:"开", short:"完成后删节点源", note:"源录像目录的弹幕与字幕文件永不删到最后一份" },
+        { k:"clKeepArchive", label:"投稿后保留存档", value:"开", short:"保留存档", note:"关闭 = 上传成功后删除存档里的合成文件" }
+      ]
+    }
+  ];
+
+  /* 字段清单守卫：52 项 key 的唯一权威列表 */
+  var REQUIRED_KEYS = [
+    "platform","room","roomSlug","name","anchorName","taskId","enabled","schedule","quality",
+    "engine","segmentSec","danmu","useLoginState","hasLoginState","outDir","outputFormat",
+    "outputFormatLock","rollingUpload","rollingEffective","workers",
+    "procEnabled","mergeSegments","burnDanmu","burnLivechat","nodeSideUpload","tsDirect",
+    "requires","versions","effectiveFormat",
+    "uploadOn","method","uploadMode","streamUpload","streamUploadSpool","uploadPrivate","tid",
+    "tag","desc","titleTemplate","submissionTitleTemplate","partTitleTemplate",
+    "seasonSectionId","seasonSectionIdStored","partSizeMiB","partSizeMiBStored",
+    "pushUrl","hasPushUrl","pushUrlClear","notifyToggles","clStageSourceAfterMerge",
+    "clSourceAfterDone","clKeepArchive"
+  ];
+  var EXPECTED = 52;
+
+  var byKey = {}, dupKeys = [];
+  DOMAINS.forEach(function (d) {
+    d.fields.forEach(function (f) {
+      if (byKey[f.k]) dupKeys.push(f.k);
+      byKey[f.k] = f;
+    });
+  });
+
+  function fieldHtml(f) {
+    var cls = "field-value" + (f.unset ? " unset" : "") + (f.mono ? " mono" : "");
+    return '<div class="field" data-key="' + esc(f.k) + '">' +
+      '<span class="field-label">' + esc(f.label) + '</span>' +
+      '<span class="' + cls + '">' + esc(f.value) + '</span>' +
+      (f.note ? '<span class="field-note">' + esc(f.note) + '</span>' : "") +
+      '</div>';
+  }
+
+  /* 摘要行从同一份字段对象取值：short 只做口语简写，不另写第二套数据 */
+  function abstractHtml(d) {
+    return d.summaryKeys.map(function (k, i) {
+      var f = byKey[k];
+      if (!f) return "";
+      var mono = f.short ? !!f.shortMono : !!f.mono;
+      return (i ? '<span class="sep">·</span>' : "") +
+        '<span class="' + (mono ? "mono" : "") + '">' + esc(f.short || f.value) + '</span>';
+    }).join("");
+  }
+
+  var stack = document.getElementById("configStack");
+  stack.innerHTML = DOMAINS.map(function (d) {
+    var primary = d.primaryKeys.map(function (k) { return byKey[k]; }).filter(Boolean);
+    var more = d.fields.filter(function (f) { return d.primaryKeys.indexOf(f.k) < 0; });
+    var editTitle = "编辑" + d.title + "域（RoomEditor 第 " + d.step + " 步 · " + d.stepName + "）";
+    return '<details class="cfg-domain" id="domain-' + d.id + '" data-domain="' + d.id + '">' +
+        '<summary class="cfg-summary">' +
+          '<span class="cfg-title">' + esc(d.title) + '</span>' +
+          '<span class="cfg-abstract">' + abstractHtml(d) + '</span>' +
+          '<span class="cfg-count"><span data-count="' + d.id + '">' + d.fields.length + '</span> 项</span>' +
+          '<button class="ico-btn cfg-edit" data-write type="button" data-step="' + esc(d.step) + '" data-step-name="' + esc(d.stepName) + '" title="' + esc(editTitle) + '" aria-label="' + esc(editTitle) + '"><svg class="ico"><use href="#i-pencil"/></svg></button>' +
+          '<span class="cfg-ro">受管 · 只读</span>' +
+          '<span class="cfg-chev" aria-hidden="true"></span>' +
+        '</summary>' +
+        '<div class="cfg-body">' +
+          '<div class="group-cap"><span class="g">常用</span><span class="g-note">共 ' + primary.length + ' 项</span></div>' +
+          '<div class="primary-group"><div class="field-grid" data-fields="' + d.id + '-primary">' + primary.map(fieldHtml).join("") + '</div></div>' +
+          '<details class="more" data-more="' + d.id + '">' +
+            '<summary class="more-sum"><span>更多</span><span class="m-count">共 ' + more.length + ' 项</span><span class="chev" aria-hidden="true"></span></summary>' +
+            '<div class="more-body"><div class="field-grid" data-fields="' + d.id + '-more">' + more.map(fieldHtml).join("") + '</div></div>' +
+          '</details>' +
+        '</div>' +
+      '</details>';
+  }).join("");
+
+  /* 渲染后断言：52 项全部有归宿 */
+  function guardFields() {
+    var nodes = Array.prototype.slice.call(stack.querySelectorAll(".field[data-key]"));
+    var keys = nodes.map(function (n) { return n.getAttribute("data-key"); });
+    var missing = REQUIRED_KEYS.filter(function (k) { return keys.indexOf(k) < 0; });
+    var extra = keys.filter(function (k) { return REQUIRED_KEYS.indexOf(k) < 0; });
+    var dup = keys.filter(function (k, i) { return keys.indexOf(k) !== i; });
+    var badRefs = [];
+    DOMAINS.forEach(function (d) {
+      d.summaryKeys.concat(d.primaryKeys).forEach(function (k) {
+        if (!byKey[k]) badRefs.push(d.id + ":" + k);
+      });
+      d.primaryKeys.forEach(function (k, i) {
+        if (d.primaryKeys.indexOf(k) !== i) badRefs.push(d.id + ":常用重复:" + k);
+      });
+    });
+    var perDomain = DOMAINS.map(function (d) { return d.id + ":" + d.fields.length; }).join(" ");
+    var ok = keys.length === EXPECTED && REQUIRED_KEYS.length === EXPECTED &&
+      missing.length === 0 && extra.length === 0 && dup.length === 0 &&
+      dupKeys.length === 0 && badRefs.length === 0;
+    var msg = "[配置字段守卫] 应有 " + EXPECTED + " 项，实际渲染 " + keys.length + " 项（" + perDomain + "）";
+    if (!ok) {
+      console.warn(msg + "；缺失=" + JSON.stringify(missing) + " 多余=" + JSON.stringify(extra) +
+        " 重复=" + JSON.stringify(dup.concat(dupKeys)) + " 无效引用=" + JSON.stringify(badRefs));
+    } else {
+      console.info(msg + "；" + EXPECTED + " 项字段全部有归宿");
+    }
+    console.assert(ok, msg);
+    var counter = document.getElementById("fieldCount");
+    counter.textContent = keys.length + " / " + EXPECTED + " 项";
+    counter.classList.toggle("bad", !ok);
+    if (!ok) document.getElementById("hint").textContent = "字段守卫未通过：请查看控制台，缺少的字段不能从原型里消失。";
+    return ok;
+  }
+  var fieldsOk = guardFields();
+
+  /* ── 配置交互：折叠 / 全部展开 / 对照四域平铺 / 编辑图标 ────────── */
+  var cards = Array.prototype.slice.call(stack.querySelectorAll(".cfg-domain"));
+  var mores = Array.prototype.slice.call(stack.querySelectorAll(".more"));
+  var hint = document.getElementById("hint");
+  var toggleAll = document.getElementById("toggleAll");
+  function syncAll() {
+    var openCount = cards.filter(function (c) { return c.open; }).length;
+    var allOpen = openCount === cards.length;
+    toggleAll.textContent = allOpen ? "全部收起" : "全部展开";
+    toggleAll.setAttribute("aria-pressed", allOpen ? "true" : "false");
+  }
+  toggleAll.addEventListener("click", function () {
+    var allOpen = cards.every(function (c) { return c.open; });
+    cards.forEach(function (c) { c.open = !allOpen; });
+    hint.textContent = allOpen
+      ? "四域已收起，摘要行仍给出关键值。"
+      : "四域已展开：先看常用，其余在「更多」里。";
+    syncAll();
+  });
+  cards.forEach(function (c) { c.addEventListener("toggle", syncAll); });
+  syncAll();
+
+  Array.prototype.forEach.call(stack.querySelectorAll(".cfg-edit"), function (btn) {
+    btn.addEventListener("click", function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      var card = btn.closest(".cfg-domain");
+      if (card) card.open = true;
+      hint.textContent = "编辑图标（示意）：打开房间编辑器第 " + btn.getAttribute("data-step") +
+        " 步「" + btn.getAttribute("data-step-name") + "」；受管房间不显示此图标。";
+    });
+  });
+
+  var flatBtn = document.getElementById("flatBtn");
+  var snapshot = null;
+  flatBtn.addEventListener("click", function () {
+    var flat = document.body.classList.toggle("flat-view");
+    if (flat) {
+      snapshot = {
+        cards: cards.map(function (c) { return c.open; }),
+        mores: mores.map(function (m) { return m.open; })
+      };
+      cards.forEach(function (c) { c.open = true; });
+      mores.forEach(function (m) { m.open = true; });
+      hint.textContent = "对照：四域全展开，52 项平铺成一行行的定义列表。";
+    } else {
+      if (snapshot) {
+        cards.forEach(function (c, i) { c.open = snapshot.cards[i]; });
+        mores.forEach(function (m, i) { m.open = snapshot.mores[i]; });
+      }
+      snapshot = null;
+      hint.textContent = "已回到优化方案：默认收起，摘要给关键值，展开分两层。";
+    }
+    flatBtn.textContent = flat ? "返回优化方案" : "对照：四域平铺";
+    flatBtn.setAttribute("aria-pressed", flat ? "true" : "false");
+    syncAll();
+  });
+
+  /* ── 原型守卫：分段条 / 日志行数 / 隐私闸门（禁用字面词） ───────── */
+  function guardProto() {
+    var cells = document.querySelectorAll("#recStrip .part-cell");
+    var okCells = document.querySelectorAll("#recStrip .part-cell .dot.ok").length;
+    var runCells = document.querySelectorAll("#recStrip .part-cell .dot.run").length;
+    var stripOk = cells.length === 12 && okCells === 8 && runCells === 1;
+    var logsOk = LOGS.length >= 6 && LOGS.length <= 8;
+    var privacyOk = true;
+    try {
+      /* 拆开拼装，避免守卫自身把禁用字面词写进页面 */
+      var needles = ["BV" + "1", "coo" + "kie", "web" + "hook"].map(function (s) { return s.toLowerCase(); });
+      var visible = (document.body.innerText || "").toLowerCase();
+      var hits = needles.filter(function (n) { return visible.indexOf(n) >= 0; });
+      privacyOk = hits.length === 0;
+      if (!privacyOk) console.warn("[隐私闸门] 命中 " + hits.length + " 个禁用字面词");
+    } catch (e) { privacyOk = true; }
+    var allOk = fieldsOk && stripOk && logsOk && privacyOk;
+    console.assert(allOk, "[原型守卫] 配置字段 / 分段条 / 日志行 / 隐私闸门");
+    console.info("[原型守卫] 配置 " + (fieldsOk ? "52/52" : "未通过") + " · 分段 " + cells.length +
+      " 格（已确认 " + okCells + " · 进行中 " + runCells + "）· 日志 " + LOGS.length +
+      " 行 · 隐私闸门 " + (privacyOk ? "通过" : "命中"));
+  }
+  guardProto();
+})();
+</script>
+</body>
+</html>

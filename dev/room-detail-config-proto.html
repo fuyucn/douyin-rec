@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>房间详情 · 配置四域呈现优化（示意数据）</title>
+<style>
+/* =====================================================================
+   /rooms/:key 配置四域 · 呈现优化原型
+   令牌与组件语言沿用 dev/room-detail-redesign-proto.html 的 :root / .dot /
+   .status-line / .ico-btn / .linkbtn，不引入新色系。
+   字段全集 = 该原型 FIELDS + REQUIRED_KEYS 的 52 项（房间编辑器四步 +
+   RoomForm + RoomDTO 派生），数据结构同源，渲染后有字段守卫。
+   本文件只读其它文件，不改动实现。
+   ===================================================================== */
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0;padding:0}
+:root{
+  --font-sans:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",sans-serif;
+  --font-mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --canvas:#101214;
+  --raised:#15181b;
+  --surface:#1b1f22;
+  --surface-soft:#22262a;
+  --hairline:rgba(255,255,255,.08);
+  --hairline-strong:rgba(255,255,255,.16);
+  --ink:#e9edf0;
+  --body:#a9b1b8;
+  --muted:#788088;
+  --accent:#4a9ede;
+  --accent-fg:#0d1116;
+  --success:#2f9e6e;
+  --success-fg:#4cc38a;
+  --warning:#c9932e;
+  --warning-fg:#d9a94a;
+  --error:#d84a4f;
+  --error-fg:#ef7a7d;
+  --state-idle:#8a939b;
+  --state-off:#565e66;
+  --r:6px;
+  --ease:cubic-bezier(.16,1,.3,1);
+}
+:root[data-theme="light"]{
+  --canvas:#fafafa;
+  --raised:#ffffff;
+  --surface:#f2f3f4;
+  --surface-soft:#e9ebec;
+  --hairline:rgba(15,19,23,.10);
+  --hairline-strong:rgba(15,19,23,.20);
+  --ink:#12161a;
+  --body:#43494f;
+  --muted:#70767c;
+  --accent:#1a6fb5;
+  --accent-fg:#ffffff;
+  --success:#1e7a4f;
+  --success-fg:#17724a;
+  --warning:#9a6b10;
+  --warning-fg:#8a5f0c;
+  --error:#c2373c;
+  --error-fg:#b32f34;
+  --state-idle:#7d858c;
+  --state-off:#b3b9be;
+}
+html{min-height:100%;background:var(--canvas);scroll-behavior:smooth}
+body{min-height:100%;background:var(--canvas);color:var(--body);font-family:var(--font-sans);font-size:14px;line-height:1.55;-webkit-font-smoothing:antialiased}
+[hidden]{display:none !important}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button{font:inherit}
+a{color:inherit}
+.sprite{position:absolute;width:0;height:0;overflow:hidden}
+.ico{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex:none;display:inline-block}
+.mono{font-family:var(--font-mono)}
+.num{font-variant-numeric:tabular-nums}
+
+/* 状态点：全站唯一的状态语言，7px 方形、无光环 */
+.dot{display:inline-block;width:7px;height:7px;border-radius:2px;flex:none}
+.dot.ok{background:var(--success)}
+.dot.err{background:var(--error)}
+.dot.warn{background:var(--warning)}
+.dot.idle{background:var(--state-idle)}
+.dot.off{background:transparent;border:1.5px solid var(--state-off)}
+.dot.run{background:var(--accent)}
+
+/* ── 页面骨架：只保留配置四域所需的上下文 ────────────────────────── */
+.shell{max-width:1120px;margin:0 auto;padding:28px 28px 72px}
+.backlink{display:inline-flex;align-items:center;gap:6px;margin-bottom:18px;font-size:12.5px;color:var(--muted);text-decoration:none}
+.backlink:hover{color:var(--ink);text-decoration:underline;text-underline-offset:3px}
+.page-head{display:flex;flex-wrap:wrap;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:14px}
+.eyebrow{margin:0 0 8px;font-size:11.5px;color:var(--muted)}
+.identity{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 12px}
+h1{font-size:26px;line-height:1.2;font-weight:600;margin:0;color:var(--ink)}
+.plat{font-size:11.5px;color:var(--body);background:var(--surface);border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;white-space:nowrap}
+.roomkey{font-size:12.5px;color:var(--muted)}
+.roomkey .mono{color:var(--body)}
+.managed-tag{margin-left:4px;font-size:11.5px;color:var(--muted);border:1px solid var(--hairline);border-radius:4px;padding:1px 7px;white-space:nowrap;display:none}
+body.is-managed .managed-tag{display:inline-flex;align-items:center;gap:6px}
+body.is-managed [data-write]{display:none !important}
+.health-line{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 12px;margin-top:10px}
+.health{display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:500;color:var(--ink);white-space:nowrap}
+.reason{margin:0;font-size:12.5px;line-height:1.45;color:var(--body)}
+.head-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:32px;padding:0 12px;border-radius:var(--r);border:1px solid var(--hairline);background:transparent;color:var(--body);font:500 12.5px/1 var(--font-sans);cursor:pointer;white-space:nowrap;transition:color .14s var(--ease),background-color .14s var(--ease),border-color .14s var(--ease)}
+.btn:hover{color:var(--ink);border-color:var(--hairline-strong);background:var(--surface)}
+.btn:active{transform:translateY(1px)}
+
+/* 状态速览：一行安静数据，不做四格仪表卡 */
+.status-line{display:flex;flex-wrap:wrap;gap:6px 0;padding:10px 0;border-block:1px solid var(--hairline);font-size:12.5px;color:var(--muted)}
+.status-item{display:inline-flex;align-items:baseline;gap:8px;padding:0 18px;border-right:1px solid var(--hairline)}
+.status-item:first-child{padding-left:0}
+.status-item:last-child{border-right:0;padding-right:0}
+.status-item b{font-weight:500;color:var(--ink);font-variant-numeric:tabular-nums}
+
+/* ── 方案说明条：1–2 句讲清选了什么、为什么 ──────────────────────── */
+.approach{margin:20px 0 24px;padding:12px 0 0;border-top:1px solid var(--hairline)}
+.approach p{margin:0;font-size:12.5px;line-height:1.65;color:var(--ink)}
+.approach p.sub{margin-top:5px;font-size:11.5px;line-height:1.6;color:var(--muted)}
+
+/* ── 区块标题：正常字重，无 uppercase 微标签 ─────────────────────── */
+.sec-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 12px;margin-bottom:10px}
+.sec-head h2{margin:0;font-size:15px;line-height:1.3;font-weight:600;color:var(--ink)}
+.sec-head .count{font-family:var(--font-mono);font-size:12.5px;color:var(--muted)}
+.sec-head .count.bad{color:var(--error-fg)}
+.sec-head .note{font-size:11.5px;color:var(--muted)}
+.sec-head .spacer{margin-left:auto}
+.ctrl{display:inline-flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px}
+.linkbtn{border:0;background:transparent;color:var(--muted);font:400 11.5px/1 var(--font-sans);cursor:pointer;text-decoration:underline;text-underline-offset:3px;padding:2px 0;white-space:nowrap}
+.linkbtn:hover{color:var(--accent)}
+.linkbtn[aria-pressed="true"]{color:var(--ink)}
+
+/* ── 四域卡：默认收起，标题行直接给一句话摘要 ──────────────────── */
+.config-stack{display:flex;flex-direction:column;gap:10px}
+.cfg-domain{border:1px solid var(--hairline);border-radius:var(--r);background:var(--raised);overflow:hidden}
+.cfg-summary{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto auto;grid-template-areas:"title abstract count edit chev";align-items:center;gap:8px 12px;padding:12px 16px;cursor:pointer;list-style:none;color:var(--ink)}
+.cfg-summary::-webkit-details-marker{display:none}
+.cfg-summary:hover{background:var(--surface)}
+.cfg-title{grid-area:title;font-size:14px;font-weight:500;color:var(--ink);white-space:nowrap}
+.cfg-abstract{grid-area:abstract;min-width:0;font-size:12.5px;color:var(--body);overflow-wrap:anywhere}
+.cfg-abstract .sep{margin:0 7px;color:var(--muted)}
+.cfg-count{grid-area:count;justify-self:end;font-size:11.5px;color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
+.cfg-edit{grid-area:edit}
+.cfg-ro{grid-area:edit;display:none;font-size:11.5px;color:var(--muted);white-space:nowrap}
+body.is-managed .cfg-ro{display:inline-flex}
+.cfg-chev{grid-area:chev;justify-self:center;width:7px;height:7px;border-right:1.5px solid var(--muted);border-bottom:1.5px solid var(--muted);transform:rotate(45deg);transition:transform .14s var(--ease)}
+.cfg-domain[open] .cfg-chev{transform:rotate(225deg)}
+/* 图标操作形态：与房间页一致的 26px 图标按钮 + title 提示 */
+.ico-btn{width:26px;height:26px;display:inline-grid;place-items:center;padding:0;border:1px solid var(--hairline);border-radius:var(--r);background:transparent;color:var(--muted);cursor:pointer;transition:color .14s var(--ease),border-color .14s var(--ease),background-color .14s var(--ease)}
+.ico-btn:hover{color:var(--ink);border-color:var(--hairline-strong);background:var(--surface)}
+.ico-btn .ico{width:14px;height:14px}
+
+/* ── 展开后：常用字段卡 + 高级二级折叠，去 hairline 长表 ────────── */
+.cfg-body{border-top:1px solid var(--hairline);padding:14px 16px 16px}
+.group-cap{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;margin-bottom:10px}
+.group-cap .g{font-size:12.5px;font-weight:500;color:var(--ink)}
+.group-cap .g-note{font-size:11.5px;color:var(--muted)}
+.primary-group{padding:0;background:transparent}
+.field-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 22px;margin:0}
+.more-body .field-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+.field{min-width:0}
+.field-label{display:block;margin:0;font-size:12px;line-height:1.45;color:var(--muted)}
+.field-value{display:block;margin:3px 0 0;font-size:13px;line-height:1.45;color:var(--ink);word-break:break-word;overflow-wrap:anywhere}
+.field-value.unset{color:var(--muted)}
+.field-note{display:block;margin:3px 0 0;font-size:11.5px;line-height:1.45;color:var(--muted)}
+.more{margin-top:12px;border-top:1px solid var(--hairline)}
+.more-sum{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;padding:11px 2px 3px;cursor:pointer;list-style:none;font-size:12.5px;color:var(--body)}
+.more-sum::-webkit-details-marker{display:none}
+.more-sum:hover{color:var(--ink)}
+.more-sum .m-count{font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.more-sum .chev{margin-left:auto;width:7px;height:7px;border-right:1.5px solid var(--muted);border-bottom:1.5px solid var(--muted);transform:rotate(45deg);transition:transform .14s var(--ease)}
+.more[open] .more-sum .chev{transform:rotate(225deg)}
+.more-body{padding:12px 0 2px}
+.edit-hint{min-height:18px;margin:10px 0 0;font-size:11.5px;line-height:1.5;color:var(--muted)}
+
+/* ── 对照：旧版四域全展开 + 每行一条 hairline 定义列表 ───────────── */
+body.flat-view .cfg-abstract,body.flat-view .group-cap,body.flat-view .more-sum{display:none}
+body.flat-view .cfg-summary{grid-template-columns:auto auto auto auto;grid-template-areas:"title count edit chev"}
+body.flat-view .cfg-body{padding:0 16px 12px}
+body.flat-view .primary-group,body.flat-view .more-body{padding:0;background:transparent;border-radius:0}
+body.flat-view .more{margin-top:0;border-top:0}
+body.flat-view .field-grid,body.flat-view .more-body .field-grid{grid-template-columns:repeat(3,minmax(0,1fr));column-gap:22px;row-gap:0}
+body.flat-view .field{display:grid;grid-template-columns:minmax(104px,148px) minmax(0,1fr);gap:0 10px;padding:9px 0;border-bottom:1px solid var(--hairline);align-items:start}
+body.flat-view .field-label{padding-top:2px}
+body.flat-view .field-value{margin:0}
+body.flat-view .field-note{grid-column:2;margin-top:3px}
+
+/* ── 图例与脚注 ─────────────────────────────────────────────────── */
+.legend{margin-top:26px;border-top:1px solid var(--hairline);padding-top:14px;display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px;color:var(--muted)}
+.legend .group-title{color:var(--ink);font-weight:500;margin-right:4px}
+.legend .s{display:inline-flex;align-items:center;gap:6px}
+.legend .unset-demo{color:var(--muted)}
+.footnote{margin-top:12px;font-size:11.5px;line-height:1.65;color:var(--muted);max-width:980px}
+
+@media (max-width:1023px){
+  .more-body .field-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  body.flat-view .field-grid,body.flat-view .more-body .field-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media (max-width:760px){
+  .shell{padding:24px 18px 56px}
+  .cfg-summary{grid-template-columns:auto minmax(0,1fr) auto auto;grid-template-areas:"title count edit chev" "abstract abstract abstract abstract";row-gap:6px}
+  .status-item{flex-basis:50%;padding:0 12px;border-right:0}
+  .status-item:nth-child(odd){padding-left:0}
+  .sec-head .spacer{margin-left:0}
+}
+@media (max-width:639px){
+  h1{font-size:24px}
+  .field-grid,.more-body .field-grid{grid-template-columns:1fr}
+  body.flat-view .field-grid,body.flat-view .more-body .field-grid{grid-template-columns:1fr}
+  .status-item{flex-basis:100%;padding:3px 0;border-right:0}
+}
+@media (prefers-reduced-motion:reduce){
+  html{scroll-behavior:auto}
+  *,*::before,*::after{transition:none !important}
+}
+</style>
+</head>
+<body>
+
+<!-- 内联 SVG sprite：lucide 风格 1.6 stroke，图标只用于返回、主题与每域编辑 -->
+<svg class="sprite" aria-hidden="true">
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></symbol>
+  <symbol id="i-chevron-left" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+  <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></symbol>
+</svg>
+
+<main class="shell" id="top">
+
+  <a class="backlink" href="#top" id="backLink"><svg class="ico"><use href="#i-chevron-left"/></svg>房间列表</a>
+
+  <header class="page-head">
+    <div>
+      <p class="eyebrow">设计原型 · 示意数据</p>
+      <div class="identity">
+        <h1>主播A</h1>
+        <span class="plat">抖音</span>
+        <span class="roomkey">房间号 <span class="mono">demo-a</span> · <span class="mono">douyin</span></span>
+        <span class="managed-tag"><span class="dot off"></span>受管 · 只读</span>
+      </div>
+      <div class="health-line">
+        <span class="health"><span class="dot ok"></span>录制中</span>
+        <p class="reason">vps-1 在录 · 边录边传已确认 8/12 段 · 稿件 DEMO-0001 · 心跳 2s 前</p>
+      </div>
+    </div>
+    <div class="head-actions">
+      <button class="btn" id="themeBtn" type="button" aria-label="切换主题">
+        <svg class="ico"><use id="themeIcon" href="#i-sun"/></svg><span id="themeLabel">亮色</span>
+      </button>
+    </div>
+  </header>
+
+  <div class="status-line" aria-label="状态速览">
+    <span class="status-item">已录 <b class="mono num">01:42:18</b></span>
+    <span class="status-item">节点 <b class="mono">vps-1 + vps-2 · 1 在录</b></span>
+    <span class="status-item">交付 <b>投稿 B站 · 仅自己可见</b></span>
+    <span class="status-item">录制窗口 <b class="mono num">20:00–02:00</b></span>
+    <span class="status-item">当前分 P <b class="mono num">8/12</b></span>
+  </div>
+
+  <!-- ① 方案说明条 -->
+  <div class="approach" role="note">
+    <p>选了「默认收起 + 一句话摘要」和展开后的「常用 / 更多」两层：四域首屏缩成 4 行摘要，关键值不点开就能读。</p>
+    <p class="sub">取舍：不另做概览卡（与状态速览重复），也不只压缩列数（行没变少）。52 项字段全在展开层，摘要与详情共用一份数据。可切「对照旧版平铺」比较。</p>
+  </div>
+
+  <!-- ② 配置四域 -->
+  <section aria-labelledby="configTitle">
+    <div class="sec-head">
+      <h2 id="configTitle">配置</h2>
+      <span class="count" id="fieldCount">— / 52 项</span>
+      <span class="note">默认收起 · 摘要给关键值 · 展开见全部字段</span>
+      <span class="spacer"></span>
+      <div class="ctrl">
+        <button class="linkbtn" id="toggleAll" type="button" aria-pressed="false">全部展开</button>
+        <button class="linkbtn" id="compareBtn" type="button" aria-pressed="false">对照旧版平铺</button>
+        <button class="linkbtn" id="managedBtn" type="button" aria-pressed="false">预览受管只读</button>
+      </div>
+    </div>
+    <div class="config-stack" id="configStack"></div>
+    <p class="edit-hint" id="hint" aria-live="polite">四域默认收起，点标题展开；编辑图标为占位入口。</p>
+  </section>
+
+  <section class="legend" aria-label="字段与状态语言">
+    <span class="group-title">状态词</span>
+    <span class="s"><span class="dot run"></span>执行中</span>
+    <span class="s"><span class="dot ok"></span>已完成 / 已确认</span>
+    <span class="s"><span class="dot idle"></span>待封口 / 排队中</span>
+    <span class="s"><span class="dot warn"></span>需人工处理</span>
+    <span class="s"><span class="dot off"></span>已停用</span>
+    <span class="group-title">字段语言</span>
+    <span class="s"><span class="unset-demo">未设置</span>显式留空</span>
+    <span class="s"><span class="mono">等宽</span>只用于标识与数字</span>
+  </section>
+  <p class="footnote">设计原型 · 示意数据：主播名、房间号、节点、稿件号、地址与时长均为占位，不含真实主机或凭据。52 项字段取自房间编辑器四步与房间详情配置四域，未设置显式留空；示意值不构成经后端校验的组合。亮暗切换共用 <span class="mono">drec-proto-theme</span>，本页不改动实现文件。</p>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ── 主题：与其余原型共用存储键 ─────────────────────────────────── */
+  var root = document.documentElement;
+  var themeBtn = document.getElementById("themeBtn");
+  var themeIcon = document.getElementById("themeIcon");
+  var themeLabel = document.getElementById("themeLabel");
+  function applyTheme(mode) {
+    var light = mode === "light";
+    root.setAttribute("data-theme", light ? "light" : "dark");
+    themeIcon.setAttribute("href", light ? "#i-moon" : "#i-sun");
+    themeLabel.textContent = light ? "暗色" : "亮色";
+    try { localStorage.setItem("drec-proto-theme", light ? "light" : "dark"); } catch (e) {}
+  }
+  try { applyTheme(localStorage.getItem("drec-proto-theme") || "dark"); } catch (e) { applyTheme("dark"); }
+  themeBtn.addEventListener("click", function () {
+    applyTheme(root.getAttribute("data-theme") === "light" ? "dark" : "light");
+  });
+  window.addEventListener("storage", function (e) {
+    if (e.key === "drec-proto-theme" && e.newValue) applyTheme(e.newValue);
+  });
+
+  /* ── 字段全集：与 room-detail-redesign-proto.html 的 52 项同源 ──────
+     每项只有一处数据：short 只用于摘要行的口语化简写，note 是辅助说明；
+     标签、值、未设置状态、等宽口径都从这一份对象渲染，摘要不另写一份。 */
+  var DOMAINS = [
+    {
+      id: "record", title: "录制", step: "1", stepName: "录制",
+      summaryKeys: ["quality", "engine", "segmentSec", "danmu"],
+      primaryKeys: ["quality", "engine", "segmentSec", "danmu", "schedule", "workers"],
+      fields: [
+        { k:"platform", label:"平台", value:"抖音 · douyin", note:"由直播间地址解析；编辑时不可改" },
+        { k:"room", label:"房间地址", value:"https://live.example/demo-a", mono:true, note:"占位地址；编辑时只读，存量地址不回写" },
+        { k:"roomSlug", label:"房间号 slug", value:"demo-a", mono:true, note:"规则键 = douyin.demo-a" },
+        { k:"name", label:"名称", value:"主播A", note:"编辑器「名称」；列表与详情标题优先取解析名" },
+        { k:"anchorName", label:"主播名", value:"主播A", note:"运行时解析名，与任务名称独立" },
+        { k:"taskId", label:"录制任务 id", value:"12", mono:true },
+        { k:"enabled", label:"录制任务状态", value:"已启用", note:"启停由页面 ■ / ▶ 图标控制，编辑器保存不回写此值" },
+        { k:"schedule", label:"录制窗口", value:"20:00–02:00", mono:true, note:"可跨夜；留空 = 全天" },
+        { k:"quality", label:"画质", value:"原画", note:"来自平台可选画质；默认值由平台给出" },
+        { k:"engine", label:"录制引擎", value:"ffmpeg", mono:true },
+        { k:"segmentSec", label:"分段时长", value:"1800 s", short:"30 分钟分段", mono:true },
+        { k:"danmu", label:"录制弹幕", value:"开", short:"弹幕开", note:"写入会话弹幕文件；关闭后没有可烧录的文件" },
+        { k:"useLoginState", label:"带账号信息", value:"开", note:"抖音取流匿名，账号只用于礼物 / 入场弹幕" },
+        { k:"hasLoginState", label:"登录态", value:"已设置 · 12 天后过期", note:"原文不回显，只显示是否已设置" },
+        { k:"outDir", label:"输出目录", value:"未设置", unset:true, note:"留空 = 数据根默认输出目录" },
+        { k:"outputFormat", label:"输出格式", value:"MP4", mono:true, note:"只换容器，不并存两份" },
+        { k:"outputFormatLock", label:"输出格式锁", value:"已锁 · 直播直传", note:"后端判定；锁定时编辑器下拉不可选" },
+        { k:"rollingUpload", label:"旧边录边传开关", value:"关", note:"旧值只读，已迁到规则上传方式" },
+        { k:"rollingEffective", label:"边录边传生效值", value:"开", note:"按规则 + 节点数派生；恰好 1 个节点且关闭烧录时生效" },
+        { k:"workers", label:"参与节点", value:"vps-1", mono:true, note:"可选 vps-1 / vps-2；本场只勾选 vps-1（直传要求单节点）" }
+      ]
+    },
+    {
+      id: "process", title: "处理", step: "2", stepName: "处理",
+      summaryKeys: ["procEnabled", "mergeSegments", "burnDanmu", "effectiveFormat"],
+      primaryKeys: ["procEnabled", "mergeSegments", "versions", "effectiveFormat"],
+      fields: [
+        { k:"procEnabled", label:"编排此房间", value:"开", short:"编排开", note:"关掉 = 暂停此房间：各节点停录，录完也不处理（任务与配置保留）" },
+        { k:"mergeSegments", label:"产出形态", value:"按录制分段", note:"每个分段一个分 P；合并步骤跳过" },
+        { k:"burnDanmu", label:"烧飞屏弹幕", value:"关", short:"不烧录", note:"边录边传只上传 plain，开烧录会回落整场管线" },
+        { k:"burnLivechat", label:"烧聊天框", value:"关", note:"与弹幕版同一约束，按烧录标记派生" },
+        { k:"nodeSideUpload", label:"节点侧上传", value:"关", note:"由上传方式推导；节点直传时才开" },
+        { k:"tsDirect", label:"原始流直传", value:"关", note:"仅节点侧上传时生效" },
+        { k:"requires", label:"节点能力要求", value:"danmu:douyin", mono:true, note:"与参与节点取交集；空 = 无要求" },
+        { k:"versions", label:"要哪些版本", value:"原画（弹幕版 / 聊天版未生效）", note:"按规则启用状态与烧录标记派生" },
+        { k:"effectiveFormat", label:"生效输出格式", value:"MP4（投稿固定）", short:"MP4 投稿", note:"投稿形态下后处理产物恒为 mp4" }
+      ]
+    },
+    {
+      id: "upload", title: "投稿", step: "3", stepName: "上传",
+      summaryKeys: ["uploadOn", "method", "uploadPrivate", "streamUpload"],
+      primaryKeys: ["uploadOn", "method", "uploadPrivate", "streamUpload", "tid"],
+      fields: [
+        { k:"uploadOn", label:"录完之后", value:"投稿 B站" },
+        { k:"method", label:"上传时机", value:"边录边传", note:"收播后 / 边录边传 / 节点直传三选一" },
+        { k:"uploadMode", label:"上传方式（存储值）", value:"rolling", mono:true, note:"缺省 = stage（只合成）" },
+        { k:"streamUpload", label:"直播直传", value:"开 · 不写本地视频", short:"直播直传开", note:"边录边传子模式；每个分 P 先写临时文件，确认后清理" },
+        { k:"streamUploadSpool", label:"本地回退文件", value:"开（固定）", note:"上传失败可整文件重传" },
+        { k:"uploadPrivate", label:"可见性", value:"仅自己可见", note:"关水印与自制为硬标准，不在此配置" },
+        { k:"tid", label:"分区 tid", value:"21", mono:true },
+        { k:"tag", label:"标签", value:"直播录像, 主播A" },
+        { k:"desc", label:"简介", value:"未设置", unset:true, note:"留空 = 不额外填写简介" },
+        { k:"titleTemplate", label:"标题模板", value:"{name}_{date}_{HH}-{mm}-{ss}", mono:true },
+        { k:"submissionTitleTemplate", label:"稿件标题模板", value:"{name}_{date}_{title} 直播回放", mono:true },
+        { k:"partTitleTemplate", label:"分 P 标题模板", value:"P{part}", mono:true },
+        { k:"seasonSectionId", label:"合集 ID", value:"382911", mono:true, note:"投稿成功后自动加入；留空 = 不加入" },
+        { k:"seasonSectionIdStored", label:"合集 ID 存储状态", value:"已保存 · 可清空", note:"清空后保存为 null" },
+        { k:"partSizeMiB", label:"每 P 大小（MiB）", value:"未设置", unset:true, note:"留空 = 内置默认 1540 MiB（10 MiB 对齐）；范围 100–4096" },
+        { k:"partSizeMiBStored", label:"每 P 大小存储状态", value:"未保存 · 留空继承默认" }
+      ]
+    },
+    {
+      id: "finish", title: "通知与清理", step: "4", stepName: "清理与通知",
+      summaryKeys: ["pushUrl", "clStageSourceAfterMerge", "clSourceAfterDone", "clKeepArchive"],
+      primaryKeys: ["pushUrl", "clStageSourceAfterMerge", "clSourceAfterDone", "clKeepArchive"],
+      fields: [
+        { k:"pushUrl", label:"通知推送地址", value:"已设置（不回显）", short:"推送地址已设置", note:"凭据不回显；留空 = 用全局配置" },
+        { k:"hasPushUrl", label:"推送地址存储状态", value:"已设置", note:"接口只给是否已设置标记" },
+        { k:"pushUrlClear", label:"清除已保存推送地址", value:"未勾选", note:"勾选后保存为 null" },
+        { k:"notifyToggles", label:"通知开关（全局）", value:"开播 / 收播 / 合成 / hub / 出错 · 站内提醒开", note:"全局通知开关，不是房间字段；房间只覆盖推送地址" },
+        { k:"clStageSourceAfterMerge", label:"合并后删存档源片段", value:"开", short:"合并后删存档源" },
+        { k:"clSourceAfterDone", label:"完成后删源节点录制", value:"开", short:"完成后删节点源", note:"源录像目录的弹幕与字幕文件永不删到最后一份" },
+        { k:"clKeepArchive", label:"投稿后保留存档", value:"开", short:"保留存档", note:"关闭 = 上传成功后删除存档里的合成文件" }
+      ]
+    }
+  ];
+
+  /* 字段清单守卫：52 项 key 的唯一权威列表 */
+  var REQUIRED_KEYS = [
+    "platform","room","roomSlug","name","anchorName","taskId","enabled","schedule","quality",
+    "engine","segmentSec","danmu","useLoginState","hasLoginState","outDir","outputFormat",
+    "outputFormatLock","rollingUpload","rollingEffective","workers",
+    "procEnabled","mergeSegments","burnDanmu","burnLivechat","nodeSideUpload","tsDirect",
+    "requires","versions","effectiveFormat",
+    "uploadOn","method","uploadMode","streamUpload","streamUploadSpool","uploadPrivate","tid",
+    "tag","desc","titleTemplate","submissionTitleTemplate","partTitleTemplate",
+    "seasonSectionId","seasonSectionIdStored","partSizeMiB","partSizeMiBStored",
+    "pushUrl","hasPushUrl","pushUrlClear","notifyToggles","clStageSourceAfterMerge",
+    "clSourceAfterDone","clKeepArchive"
+  ];
+  var EXPECTED = 52;
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c];
+    });
+  }
+
+  var byKey = {}, dupKeys = [];
+  DOMAINS.forEach(function (d) {
+    d.fields.forEach(function (f) {
+      if (byKey[f.k]) dupKeys.push(f.k);
+      byKey[f.k] = f;
+    });
+  });
+
+  function fieldHtml(f) {
+    var cls = "field-value" + (f.unset ? " unset" : "") + (f.mono ? " mono" : "");
+    return '<div class="field" data-key="' + esc(f.k) + '">' +
+      '<span class="field-label">' + esc(f.label) + '</span>' +
+      '<span class="' + cls + '">' + esc(f.value) + '</span>' +
+      (f.note ? '<span class="field-note">' + esc(f.note) + '</span>' : "") +
+      '</div>';
+  }
+
+  /* 摘要行从同一份字段对象取值：short 只做口语简写，不另写第二套数据 */
+  function abstractHtml(d) {
+    return d.summaryKeys.map(function (k, i) {
+      var f = byKey[k];
+      if (!f) return "";
+      var mono = f.short ? !!f.shortMono : !!f.mono;
+      return (i ? '<span class="sep">·</span>' : "") +
+        '<span class="' + (mono ? "mono" : "") + '">' + esc(f.short || f.value) + '</span>';
+    }).join("");
+  }
+
+  var stack = document.getElementById("configStack");
+  stack.innerHTML = DOMAINS.map(function (d) {
+    var primary = d.primaryKeys.map(function (k) { return byKey[k]; }).filter(Boolean);
+    var more = d.fields.filter(function (f) { return d.primaryKeys.indexOf(f.k) < 0; });
+    var editTitle = "编辑" + d.title + "域（RoomEditor 第 " + d.step + " 步 · " + d.stepName + "）";
+    return '<details class="cfg-domain" id="domain-' + d.id + '" data-domain="' + d.id + '">' +
+        '<summary class="cfg-summary">' +
+          '<span class="cfg-title">' + esc(d.title) + '</span>' +
+          '<span class="cfg-abstract">' + abstractHtml(d) + '</span>' +
+          '<span class="cfg-count"><span data-count="' + d.id + '">' + d.fields.length + '</span> 项</span>' +
+          '<button class="ico-btn cfg-edit" data-write type="button" data-step="' + esc(d.step) + '" data-step-name="' + esc(d.stepName) + '" title="' + esc(editTitle) + '" aria-label="' + esc(editTitle) + '"><svg class="ico"><use href="#i-pencil"/></svg></button>' +
+          '<span class="cfg-ro">受管 · 只读</span>' +
+          '<span class="cfg-chev" aria-hidden="true"></span>' +
+        '</summary>' +
+        '<div class="cfg-body">' +
+          '<div class="group-cap"><span class="g">常用</span><span class="g-note">共 ' + primary.length + ' 项</span></div>' +
+          '<div class="primary-group"><div class="field-grid" data-fields="' + d.id + '-primary">' + primary.map(fieldHtml).join("") + '</div></div>' +
+          '<details class="more" data-more="' + d.id + '">' +
+            '<summary class="more-sum"><span>更多</span><span class="m-count">共 ' + more.length + ' 项</span><span class="chev" aria-hidden="true"></span></summary>' +
+            '<div class="more-body"><div class="field-grid" data-fields="' + d.id + '-more">' + more.map(fieldHtml).join("") + '</div></div>' +
+          '</details>' +
+        '</div>' +
+      '</details>';
+  }).join("");
+
+  /* 渲染后断言：52 项全部有归宿，缺项 / 多项 / 重复都在控制台报出 */
+  function guardFields() {
+    var nodes = Array.prototype.slice.call(stack.querySelectorAll(".field[data-key]"));
+    var keys = nodes.map(function (n) { return n.getAttribute("data-key"); });
+    var missing = REQUIRED_KEYS.filter(function (k) { return keys.indexOf(k) < 0; });
+    var extra = keys.filter(function (k) { return REQUIRED_KEYS.indexOf(k) < 0; });
+    var dup = keys.filter(function (k, i) { return keys.indexOf(k) !== i; });
+    /* 摘要键 / 常用键若指向不存在的字段，摘要会静默少一段；一并钉住 */
+    var badRefs = [];
+    DOMAINS.forEach(function (d) {
+      d.summaryKeys.concat(d.primaryKeys).forEach(function (k) {
+        if (!byKey[k]) badRefs.push(d.id + ":" + k);
+      });
+      d.primaryKeys.forEach(function (k, i) {
+        if (d.primaryKeys.indexOf(k) !== i) badRefs.push(d.id + ":常用重复:" + k);
+      });
+    });
+    var perDomain = DOMAINS.map(function (d) { return d.id + ":" + d.fields.length; }).join(" ");
+    var ok = keys.length === EXPECTED && REQUIRED_KEYS.length === EXPECTED &&
+      missing.length === 0 && extra.length === 0 && dup.length === 0 &&
+      dupKeys.length === 0 && badRefs.length === 0;
+    var msg = "[配置字段守卫] 应有 " + EXPECTED + " 项，实际渲染 " + keys.length + " 项（" + perDomain + "）";
+    if (!ok) {
+      console.warn(msg + "；缺失=" + JSON.stringify(missing) + " 多余=" + JSON.stringify(extra) +
+        " 重复=" + JSON.stringify(dup.concat(dupKeys)) + " 无效引用=" + JSON.stringify(badRefs));
+    } else {
+      console.info(msg + "；" + EXPECTED + " 项字段全部有归宿");
+    }
+    console.assert(ok, msg);
+    var counter = document.getElementById("fieldCount");
+    counter.textContent = keys.length + " / " + EXPECTED + " 项";
+    counter.classList.toggle("bad", !ok);
+    if (!ok) document.getElementById("hint").textContent = "字段守卫未通过：请查看控制台，缺少的字段不能从原型里消失。";
+  }
+  guardFields();
+
+  /* ── 交互：折叠 / 全部展开 / 对照旧版 / 受管只读 / 编辑图标 ───── */
+  var cards = Array.prototype.slice.call(stack.querySelectorAll(".cfg-domain"));
+  var mores = Array.prototype.slice.call(stack.querySelectorAll(".more"));
+  var hint = document.getElementById("hint");
+  var toggleAll = document.getElementById("toggleAll");
+  function syncAll() {
+    var openCount = cards.filter(function (c) { return c.open; }).length;
+    var allOpen = openCount === cards.length;
+    toggleAll.textContent = allOpen ? "全部收起" : "全部展开";
+    toggleAll.setAttribute("aria-pressed", allOpen ? "true" : "false");
+  }
+  toggleAll.addEventListener("click", function () {
+    var allOpen = cards.every(function (c) { return c.open; });
+    cards.forEach(function (c) { c.open = !allOpen; });
+    hint.textContent = allOpen
+      ? "四域已收起，摘要行仍给出关键值。"
+      : "四域已展开：先看常用，其余在「更多」里。";
+    syncAll();
+  });
+  cards.forEach(function (c) { c.addEventListener("toggle", syncAll); });
+  syncAll();
+
+  Array.prototype.forEach.call(stack.querySelectorAll(".cfg-edit"), function (btn) {
+    btn.addEventListener("click", function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      var card = btn.closest(".cfg-domain");
+      if (card) card.open = true;
+      hint.textContent = "编辑图标（示意）：打开房间编辑器第 " + btn.getAttribute("data-step") +
+        " 步「" + btn.getAttribute("data-step-name") + "」；受管房间不显示此图标。";
+    });
+  });
+
+  var compareBtn = document.getElementById("compareBtn");
+  var snapshot = null;
+  compareBtn.addEventListener("click", function () {
+    var flat = document.body.classList.toggle("flat-view");
+    if (flat) {
+      snapshot = {
+        cards: cards.map(function (c) { return c.open; }),
+        mores: mores.map(function (m) { return m.open; })
+      };
+      cards.forEach(function (c) { c.open = true; });
+      mores.forEach(function (m) { m.open = true; });
+      hint.textContent = "对照：旧版四域全展开，52 项平铺成一行行的定义列表。";
+    } else {
+      if (snapshot) {
+        cards.forEach(function (c, i) { c.open = snapshot.cards[i]; });
+        mores.forEach(function (m, i) { m.open = snapshot.mores[i]; });
+      }
+      snapshot = null;
+      hint.textContent = "已回到优化方案：默认收起，摘要给关键值，展开分两层。";
+    }
+    compareBtn.textContent = flat ? "返回优化方案" : "对照旧版平铺";
+    compareBtn.setAttribute("aria-pressed", flat ? "true" : "false");
+    syncAll();
+  });
+
+  var managedBtn = document.getElementById("managedBtn");
+  managedBtn.addEventListener("click", function () {
+    var managed = document.body.classList.toggle("is-managed");
+    managedBtn.textContent = managed ? "恢复可编辑态" : "预览受管只读";
+    managedBtn.setAttribute("aria-pressed", managed ? "true" : "false");
+    hint.textContent = managed
+      ? "受管只读：四域编辑图标全部隐藏，标题行标注「受管 · 只读」；配置浏览与折叠仍可用。"
+      : "已恢复可编辑态：四域编辑图标恢复为图标按钮 + title 提示。";
+  });
+
+  document.getElementById("backLink").addEventListener("click", function () {
+    hint.textContent = "返回房间列表（示意）；本原型只展示配置四域的呈现方式。";
+  });
+})();
+</script>
+</body>
+</html>
