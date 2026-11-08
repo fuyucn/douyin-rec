@@ -1,6 +1,6 @@
 {
   "name": "douyin-rec",
-  "version": "0.0.330",
+  "version": "0.0.331",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@10.33.2",

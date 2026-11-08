@@ -29,7 +29,8 @@ const NODE_STATE_COLOR: Record<NodeRoomView["state"], string> = {
   recording: "var(--success)",
   unavailable: "var(--warning)",
   waiting: "var(--muted-soft)",
-  disabled: "var(--hairline)",
+  // disabled 不能用 hairline(与分隔线同色,看起来像渲染坏了);用 muted 并配合中性 hover。
+  disabled: "var(--muted)",
 };
 
 function ago(ms: number | null | undefined, now: number): string {

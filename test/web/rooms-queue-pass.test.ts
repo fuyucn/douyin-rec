@@ -61,8 +61,10 @@ describe("rooms list subtractive pass (#552)", () => {
 });
 
 describe("queue visual pass (#552)", () => {
-  it("overview band is quiet data: no icons in counts, square health dot", () => {
-    expect(QUEUE).toContain("<b>{counts.running}</b>");
+  it("overview band is quiet data: no duplicated numbers (F1), no icons in counts, square health dot", () => {
+    // F1(hy4): <b>{n}</b> 与文案 {n} 是同一个数字的两套写法 —— 不允许再出现数字重复
+    expect(QUEUE).not.toContain("<b>{counts.running}</b>");
+    expect(QUEUE).toContain('t("queue.flow.count.running", { n: counts.running })');
     expect(QUEUE).not.toContain("<Loader2 className=\"w-3.5 h-3.5\" />{t(\"queue.flow.count.running\"");
     expect(CSS).toMatch(/\.queue-node-health \.dot \{ width: 7px; height: 7px; border-radius: 2px/s);
   });

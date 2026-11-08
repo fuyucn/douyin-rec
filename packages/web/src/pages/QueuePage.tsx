@@ -62,6 +62,8 @@ function NodeQueueCard(): ReactNode {
     : [];
   const hasUnknown = unknownKinds.length > 0;
   const snapshot = state.available ? data : null;
+  // 全零且无未知 kind → 折叠成一行摘要(hy4 F10);宿主停止时的 chip 保留在外,不折叠。
+  const allZero = snapshot != null && NODE_QUEUE_KINDS.every((k) => (snapshot.running[k] ?? 0) === 0 && (snapshot.pending[k] ?? 0) === 0) && !hasUnknown;
   return (
     <section className="queue-support">
       <div className="queue-support-title">{t("queue.nodeQueue.title")}</div>
@@ -72,7 +74,10 @@ function NodeQueueCard(): ReactNode {
         </div>
         {!state.available && <div className="mb-3 text-[12px] text-muted">{t("queue.nodeQueue.unavailable")}</div>}
         {!state.loaded && <div className="text-[12px] text-muted">{t("hub.common.loading")}</div>}
-        {state.loaded && snapshot && (
+        {state.loaded && snapshot && allZero && (
+          <div className="text-[12.5px] text-muted">{t("queue.nodeQueue.allIdle", { n: NODE_QUEUE_KINDS.length })}</div>
+        )}
+        {state.loaded && snapshot && !allZero && (
           <div className="space-y-1.5">
             {NODE_QUEUE_KINDS.map((kind) => {
               const running = snapshot.running[kind] ?? 0;
@@ -237,9 +242,9 @@ function OverviewBand({ counts, nodes, healthProbe, directoryLoaded, stale, stat
   return (
     <section className="queue-overview" aria-label={t("queue.flow.overview")}>
       <div className="queue-overview-counts">
-        <span className="queue-overview-count" data-tone="primary"><b>{counts.running}</b>{t("queue.flow.count.running", { n: counts.running })}</span>
-        <span className="queue-overview-count"><b>{counts.queued}</b>{t("queue.flow.count.queued", { n: counts.queued })}</span>
-        <span className="queue-overview-count" data-tone={counts.actions > 0 ? "danger" : undefined}><b>{counts.actions}</b>{t("queue.flow.count.actions", { n: counts.actions })}</span>
+        <span className="queue-overview-count" data-tone="primary" data-n={counts.running}>{t("queue.flow.count.running", { n: counts.running })}</span>
+        <span className="queue-overview-count" data-n={counts.queued}>{t("queue.flow.count.queued", { n: counts.queued })}</span>
+        <span className="queue-overview-count" data-n={counts.actions} data-tone={counts.actions > 0 ? "danger" : undefined}>{t("queue.flow.count.actions", { n: counts.actions })}</span>
       </div>
       <Link to="/nodes" className="queue-node-health" title={t("queue.fleet.open")}>
         <span className="dot" style={{ background: healthColor }} />
@@ -249,7 +254,7 @@ function OverviewBand({ counts, nodes, healthProbe, directoryLoaded, stale, stat
       </Link>
       {stats && (
         <span className="queue-health-rate" title={t("queue.health.label")}>
-          <b style={{ color: "var(--success-fg)", fontWeight: 600 }}>{stats.successRate == null ? "—" : Math.round(stats.successRate * 100) + "%"}</b>
+          <b style={{ color: "var(--success-fg)", fontWeight: 600 }}>{stats.successRate == null ? "-" : Math.round(stats.successRate * 100) + "%"}</b>
           {" · "}{t("queue.health.weekDoneShort", { n: stats.done })}
           {" · "}{t("queue.health.window", { n: stats.windowDays })}
         </span>

@@ -264,10 +264,13 @@ body {
   outline: 2px solid var(--ink);
   outline-offset: 2px;
 }
+/* 禁用态:全站一档(hy4 F5),主按钮禁用掉回中性而非调蓝(F6) */
 .btn-primary:disabled,
 .btn-secondary:disabled,
 .btn-danger:disabled {
-  opacity: 0.45;
+  background: var(--surface-soft);
+  color: var(--muted);
+  border-color: var(--hairline);
   cursor: not-allowed;
   transform: none;
 }
@@ -323,7 +326,7 @@ body {
   outline-offset: 2px;
 }
 .btn-icon:disabled {
-  opacity: 0.45;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
@@ -450,7 +453,7 @@ body {
 .input:disabled,
 .select:disabled,
 .textarea:disabled {
-  opacity: 0.55;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 .select {
@@ -716,7 +719,7 @@ table.tasks tbody tr:last-child td {
   border-color: var(--ink);
 }
 .method-option[aria-disabled="true"] {
-  opacity: 0.55;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 .method-dot {
@@ -760,7 +763,7 @@ table.tasks tbody tr:last-child td {
   background: var(--surface);
 }
 .mode-card:disabled {
-  opacity: 0.55;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 .mode-card-icon {
@@ -817,7 +820,7 @@ table.tasks tbody tr:last-child td {
   font-size: 12px;
 }
 .mode-cards-sm .mode-card-hint {
-  font-size: 10.5px;
+  font-size: 11px;
 }
 /* Narrow screens: one column so the icon + label + hint stay readable.
    600px collapses the 3-up timing cards, 440px the 2-up cards. */
@@ -842,7 +845,7 @@ table.tasks tbody tr:last-child td {
   padding: 10px 14px;
 }
 .switch-row[data-disabled="true"] {
-  opacity: 0.55;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 .status-strip {
@@ -1842,7 +1845,7 @@ table.tasks tbody tr:last-child td {
   background: var(--surface);
 }
 .rm-row.is-off {
-  opacity: 0.55;
+  opacity: 0.5;
 }
 .rm-name,
 .rm-status {
@@ -1931,7 +1934,7 @@ table.tasks tbody tr:last-child td {
   font-size: 12.5px;
 }
 .rm-seg .seg-btn:disabled {
-  opacity: 0.45;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 .rm-ctx {
@@ -1958,7 +1961,7 @@ table.tasks tbody tr:last-child td {
   cursor: default;
 }
 .rm-pick:disabled {
-  opacity: 0.45;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 .rm-steps {
@@ -2117,7 +2120,7 @@ table.tasks tbody tr:last-child td {
 .rt-run-foot {
   display: flex; gap: 14px; flex-wrap: wrap; margin-top: 10px;
   padding-top: 8px; border-top: 1px solid var(--hairline);
-  font-size: 10.5px; color: var(--muted);
+  font-size: 11px; color: var(--muted);
 }
 
 .rt-pill {
@@ -2195,7 +2198,7 @@ table.tasks tbody tr:last-child td {
   display: grid; grid-template-columns: 70px 120px minmax(0, 1fr);
   gap: 10px; align-items: baseline;
   padding: 5px 0; border-top: 1px solid var(--hairline);
-  font-size: 10.5px; color: var(--body);
+  font-size: 11px; color: var(--body);
 }
 .rt-event-time { font-family: var(--font-mono); color: var(--muted); }
 .rt-event-kind { font-family: var(--font-mono); color: var(--accent); font-weight: 600; }
@@ -2371,7 +2374,8 @@ table.tasks tbody tr:last-child td {
 .cfg-body { border-top: 1px solid var(--hairline); padding: 14px 16px 16px; }
 .field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 22px; margin: 0; }
 .field { min-width: 0; }
-.field-label { display: block; margin: 0; font-size: 12px; line-height: 1.45; color: var(--muted); }
+/* field-label 声部在顶部唯一插入点(margin 0 0 6px);这里只补 field 语境的行高 */
+.field .field-label { line-height: 1.45; }
 .field-value { display: block; margin: 3px 0 0; font-size: 13px; line-height: 1.45; color: var(--ink); word-break: break-word; overflow-wrap: anywhere; }
 .field-value.unset { color: var(--muted); }
 .field-note { display: block; margin: 3px 0 0; font-size: 11.5px; line-height: 1.45; color: var(--muted); }
@@ -2431,12 +2435,10 @@ table.tasks tbody tr:last-child td {
   background: transparent;
 }
 .queue-overview-counts { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 18px; }
-.queue-overview-count { display: inline-flex; align-items: baseline; gap: 7px; font-size: 12.5px; color: var(--muted); white-space: nowrap; }
-.queue-overview-count b, .queue-overview-count .queue-overview-num { font-size: 14px; font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
+/* 数字强调:文案里 {n} 单独强调(F1 修后不再复制数字);danger 时整条用错误色 */
+.queue-overview-count { display: inline-flex; align-items: baseline; gap: 7px; font-size: 12.5px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .queue-overview-count[data-tone="primary"] { color: var(--body); }
-.queue-overview-count[data-tone="primary"] b { color: var(--ink); }
-.queue-overview-count[data-tone="danger"] { color: var(--body); }
-.queue-overview-count[data-tone="danger"] b { color: var(--error-fg); }
+.queue-overview-count[data-tone="danger"] { color: var(--error-fg); font-weight: 600; }
 .queue-node-health { display: inline-flex; align-items: center; gap: 7px; max-width: 100%; font-size: 12px; color: var(--muted); }
 .queue-node-health .dot { width: 7px; height: 7px; border-radius: 2px; flex: 0 0 auto; }
 .queue-node-health:hover { color: var(--ink); }
@@ -2529,3 +2531,15 @@ table.tasks tbody tr:last-child td {
   .queue-action-reason { white-space: normal; }
 }
 .queue-group-footer { padding-top: 10px; border-top: 1px solid var(--hairline); text-align: right; }
+
+/* ── 全部成功的历史折叠摘要(hy4 F10)────────────────────────────────────── */
+.runs-alldone {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 11px 12px; border: 0; border-top: 1px solid var(--hairline);
+  background: transparent; color: var(--body); font: 500 12.5px/1.4 var(--font-sans);
+  text-align: left; cursor: pointer;
+}
+.runs-alldone:hover { background: var(--surface); color: var(--ink); }
+.runs-alldone .dot { width: 7px; height: 7px; border-radius: 2px; flex: 0 0 auto; }
+.runs-alldone-date { font-family: var(--font-mono); font-size: 11px; color: var(--muted-soft); }
+.runs-alldone-chev { margin-left: auto; color: var(--muted); }

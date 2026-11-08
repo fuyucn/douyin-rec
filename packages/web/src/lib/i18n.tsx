@@ -218,6 +218,7 @@ const DICT = {
       stopConfirm: "立即停止「{name}」的录制?当前分段会被截断。", deleteConfirm: "删除房间「{name}」?录制任务与处理规则会一起删除。",
       addRoom: "新建房间",
       runsHeading: "处理运行态", runsEmpty: "还没有处理记录",
+      runsAllDone: "最近 {count} 场全部成功", runsLast: "最近一场 {date}",
       runsEmptyHint: "录完一场并收播后,这里会显示该房间的处理流程(合并 → 烧录 → 上传)与结果。",
     },
     roomForm: {
@@ -651,7 +652,7 @@ const DICT = {
         kind: "处理类型", running: "执行中", pending: "待执行", lease: "执行者",
         kinds: { "upload-part": "分 P 上传", "cleanup-part": "分 P 清理", "reconcile-part": "分 P 对账", "upload-prep": "上传预处理", biliup: "B站上传", "\u0072emux": "格式转换" },
         leaseAlive: "存活", leaseDead: "无存活租约", hostRunning: "执行宿主运行中", hostStopped: "执行宿主未运行",
-        unavailable: "无法读取本机队列", empty: "暂无处理任务",
+        unavailable: "无法读取本机队列", empty: "暂无处理任务", allIdle: "{n} 个执行器全部空闲",
         unknownKind: "其他处理类型",
       },
       health: {
@@ -885,6 +886,7 @@ const DICT = {
       stopConfirm: "Stop recording for \"{name}\"? The current segment will be truncated.", deleteConfirm: "Delete room \"{name}\"? Its recording task and processing rule are both removed.",
       addRoom: "New room",
       runsHeading: "Processing runs", runsEmpty: "No processing runs yet",
+      runsAllDone: "Last {count} runs all succeeded", runsLast: "Last run {date}",
       runsEmptyHint: "After a stream ends, this room's pipeline (merge → burn → upload) and results show up here.",
     },
     roomForm: {
@@ -1316,7 +1318,7 @@ const DICT = {
         kind: "Processor", running: "Running", pending: "Pending", lease: "Executor",
         kinds: { "upload-part": "Part upload", "cleanup-part": "Part cleanup", "reconcile-part": "Part reconciliation", "upload-prep": "Upload prep", biliup: "Bilibili upload", remux: "Format conversion" },
         leaseAlive: "Alive", leaseDead: "No live lease", hostRunning: "Runner active", hostStopped: "Runner not active",
-        unavailable: "Cannot read the local queue", empty: "No processing jobs",
+        unavailable: "Cannot read the local queue", empty: "No processing jobs", allIdle: "All {n} runners idle",
         unknownKind: "Other processor",
       },
       health: {

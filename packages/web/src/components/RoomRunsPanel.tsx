@@ -24,6 +24,8 @@ import { RunNowDialog } from "./RunNowDialog";
 import type { FlowCfg } from "./flow-build";
 import { useHubStream, usePolling, useToast, errMessage } from "../lib/hooks";
 import { useT } from "../lib/i18n";
+
+type TFunc = (key: string, vars?: Record<string, string | number>) => string;
 import { todayYmdInTz } from "../lib/tz";
 import { serverTimezoneAtom } from "../atoms";
 import { shouldToastRunError } from "../lib/run-now";
@@ -67,6 +69,8 @@ export function RoomRunsPanel({
   const [runOpen, setRunOpen] = useState(false);
   const [runBusy, setRunBusy] = useState(false);
   const [forceRun, setForceRun] = useState<{ streamKey: string; message: string } | null>(null);
+  // 全部成功的历史不需要逐行展示(hy4 F10):默认只给摘要行,点开才列出全部。任何一行被展开/过滤变化都不折叠。
+  const [showAllRuns, setShowAllRuns] = useState(false);
 
   // 稳定引用:workerName 只在 workers 变化时换,否则每次渲染新引用会击穿 RunCard 内
   // PipelineFlow 的 memo(既有 RoomDetail 同款注释,不是新问题)。
@@ -218,7 +222,10 @@ export function RoomRunsPanel({
             <p className="text-xs text-muted-soft max-w-sm text-center">{t("rooms.runsEmptyHint")}</p>
           </div>
         )}
-        {loaded &&
+        {loaded && runs.length >= 6 && runs.every((j) => j.state === "done") && !expandedKey && !showAllRuns && (
+          <AllDoneSummary count={runs.length} lastAt={runs[0]?.updatedAt} onLoad={() => setShowAllRuns(true)} t={t} />
+        )}
+        {loaded && !(runs.length >= 6 && runs.every((j) => j.state === "done") && !expandedKey && !showAllRuns) &&
           runs.map((j) => (
             <RunCard
               key={j.streamKey}
@@ -280,4 +287,27 @@ export function RoomRunsPanel({
     </section>
     </>
   );
+}
+
+/** 全部成功的历史折叠摘要(hy4 F10):全 done 且 ≥6 条时,一行代替 N 行同质卡片;保留最近一次日期作时间锚。 */
+function AllDoneSummary({ count, lastAt, onLoad, t }: {
+  count: number;
+  lastAt: number | null;
+  onLoad: () => void;
+  t: TFunc;
+}): ReactNode {
+  return (
+    <button type="button" className="runs-alldone" onClick={onLoad}>
+      <span className="dot" style={{ background: "var(--success)" }} />
+      <span>{t("rooms.runsAllDone", { count })}</span>
+      {lastAt != null && <span className="runs-alldone-date">{t("rooms.runsLast", { date: stampDate(lastAt) })}</span>}
+      <ChevronDown className="w-3.5 h-3.5 runs-alldone-chev" />
+    </button>
+  );
+}
+
+function stampDate(ms: number): string {
+  const d = new Date(ms);
+  const p2 = (n: number): string => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
 }

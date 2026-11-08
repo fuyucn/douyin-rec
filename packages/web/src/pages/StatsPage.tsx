@@ -23,7 +23,7 @@ function uploadModeLabel(mode: string, t: ReturnType<typeof useT>): string {
     case "upload": return t("stats.mode.upload");
     case "stage": return t("stats.mode.stage");
     case "local": return t("stats.mode.local");
-    default: return mode || "—";
+    default: return mode || "-";
   }
 }
 
@@ -129,12 +129,12 @@ export function StatsPage(): ReactNode {
         <Metric icon={<Activity className="w-4 h-4" />} label={t("stats.observedRooms")} value={o.observedRooms} sub={t("stats.knownRooms", { n: o.knownRooms })} />
         <Metric icon={<Clock className="w-4 h-4" />} label={t("stats.broadcastHours")} value={`${o.broadcastHours}h`} sub={t("stats.sessionsCount", { n: o.sessions })} />
         <Metric icon={<Users className="w-4 h-4" />} label={t("stats.enabledRooms")} value={o.enabledRooms} sub={t("stats.roomsWithSessions", { n: data.rooms.filter((r) => r.sessions > 0).length })} />
-        <Metric icon={<BarChart3 className="w-4 h-4" />} label={t("stats.collectedAt")} value={collected?.short ?? "—"} title={collected?.full} mono sub={data.timeZone} />
+        <Metric icon={<BarChart3 className="w-4 h-4" />} label={t("stats.collectedAt")} value={collected?.short ?? "-"} title={collected?.full} mono sub={data.timeZone} />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
         <Breakdown title={t("stats.uploadMode")} items={o.uploadModes.map((x: { mode: string; count: number }) => ({ label: uploadModeLabel(x.mode, t), count: x.count }))} />
-        <Breakdown title={t("stats.outputFormat")} items={o.outputFormats.map((x: { format: string; count: number }) => ({ label: x.format || "—", count: x.count }))} />
+        <Breakdown title={t("stats.outputFormat")} items={o.outputFormats.map((x: { format: string; count: number }) => ({ label: x.format || "-", count: x.count }))} />
         <Breakdown title={t("stats.platform")} items={o.platforms.map((x: { platform: string; count: number }) => ({ label: x.platform, count: x.count }))} />
       </div>
       <div className="font-mono text-[11px] text-muted-soft mb-6">
@@ -211,14 +211,14 @@ export function StatsPage(): ReactNode {
                         <span className="font-mono text-xs text-muted truncate">{r.roomSlug}</span>
                       </div>
                     </td>
-                    <td><span className="badge badge-muted text-[10.5px]">{uploadModeLabel(r.uploadMode, t)}</span></td>
-                    <td className="font-mono text-[12px] text-muted">{r.outputFormat || "—"}</td>
+                    <td><span className="badge badge-muted text-[11px]">{uploadModeLabel(r.uploadMode, t)}</span></td>
+                    <td className="font-mono text-[12px] text-muted">{r.outputFormat || "-"}</td>
                     <Num>{r.sessions}</Num>
                     <Num>{r.totalHours}</Num>
                     <Num strong>{r.perDayHours}</Num>
                     <Num>{r.avgHours}<span className="text-muted-soft"> / </span>{r.medianHours}</Num>
-                    <Num>{r.typicalStartHour == null ? <span className="text-muted-soft">—</span> : hh(r.typicalStartHour)}</Num>
-                    <td className="font-mono text-[11px] text-muted truncate max-w-[200px]" title={nodes}>{nodes || "—"}</td>
+                    <Num>{r.typicalStartHour == null ? <span className="text-muted-soft">-</span> : hh(r.typicalStartHour)}</Num>
+                    <td className="font-mono text-[11px] text-muted truncate max-w-[200px]" title={nodes}>{nodes || "-"}</td>
                   </tr>
                 );
               })}
