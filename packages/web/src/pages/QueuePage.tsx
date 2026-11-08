@@ -488,16 +488,6 @@ export function QueuePage(): ReactNode {
   const toast = useToast();
   const masterEnabled = hubEnabled === true;
   const hubAlive = useRef(true);
-  // 「知道了」= 一次点击,零输入(#561):固定备注落台账(可追溯),行当场消失(乐观移除)。
-  const openAck = useCallback((key: string): void => {
-    setAckedKeys((prev) => new Set(prev).add(key));
-    api.ackHubJob(key, { note: "用户确认已处理" })
-      .then(() => { toast(t("queue.ack.done"), "success"); void poll(); })
-      .catch((e: unknown) => {
-        setAckedKeys((prev) => { const next = new Set(prev); next.delete(key); return next; });
-        toast(errMessage(e), "error");
-      });
-  }, [poll, t]);
   const [debouncedQ, setDebouncedQ] = useState("");
   useEffect(() => {
     const id = setTimeout(() => setDebouncedQ(q), 250);
@@ -521,6 +511,16 @@ export function QueuePage(): ReactNode {
     },
     [queryKey],
   );
+  // 「知道了」= 一次点击,零输入(#561):固定备注落台账(可追溯),行当场消失(乐观移除)。
+  const openAck = useCallback((key: string): void => {
+    setAckedKeys((prev) => new Set(prev).add(key));
+    api.ackHubJob(key, { note: "用户确认已处理" })
+      .then(() => { toast(t("queue.ack.done"), "success"); void poll(); })
+      .catch((e: unknown) => {
+        setAckedKeys((prev) => { const next = new Set(prev); next.delete(key); return next; });
+        toast(errMessage(e), "error");
+      });
+  }, [poll, t]);
   const stream = useHubStream(poll, { enabled: masterEnabled });
   useEffect(() => {
     hubAlive.current = true;
