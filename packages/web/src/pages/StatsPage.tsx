@@ -74,7 +74,7 @@ export function StatsPage(): ReactNode {
   const head = (
     <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-3 mb-6">
       <div className="min-w-0">
-        <h1 className="headline text-[28px] sm:text-[32px] leading-tight">{t("stats.title")}</h1>
+        <h1 className="headline page-h1">{t("stats.title")}</h1>
         {data
           ? <p className="text-muted text-sm mt-1.5">{t("stats.subtitle", { days: data.windowDays, tz: data.timeZone })}</p>
           : <span className="skeleton block h-4 w-48 mt-2.5" aria-hidden="true" />}
@@ -207,12 +207,12 @@ export function StatsPage(): ReactNode {
                     <td className="max-w-[240px]">
                       <div className="font-medium text-ink truncate" title={r.anchorName ?? r.roomSlug}>{r.anchorName ?? r.roomSlug}</div>
                       <div className="mt-1 flex items-center gap-1.5 min-w-0">
-                        <span className="badge badge-muted shrink-0 !h-[18px] !px-1.5 !text-[10px] uppercase">{r.platform}</span>
+                        <span className="badge badge-muted shrink-0">{r.platform}</span>
                         <span className="font-mono text-xs text-muted truncate">{r.roomSlug}</span>
                       </div>
                     </td>
                     <td><span className="badge badge-muted text-[10.5px]">{uploadModeLabel(r.uploadMode, t)}</span></td>
-                    <td className="font-mono text-[12px] text-muted uppercase">{r.outputFormat || "—"}</td>
+                    <td className="font-mono text-[12px] text-muted">{r.outputFormat || "—"}</td>
                     <Num>{r.sessions}</Num>
                     <Num>{r.totalHours}</Num>
                     <Num strong>{r.perDayHours}</Num>
@@ -290,7 +290,7 @@ function Heatmap({ cells, max, labels }: { cells: { dow: number; hour: number; h
       <div className="grid min-w-[480px]" style={{ gridTemplateColumns: HEAT_COLS, gap: 3 }}>
         <div />
         {hours.map((h) => (
-          <div key={`h${h}`} className="font-mono text-[10px] text-muted-soft tabular-nums leading-4 pb-1">{h % 3 === 0 ? String(h).padStart(2, "0") : ""}</div>
+          <div key={`h${h}`} className="font-mono text-[11px] text-muted-soft tabular-nums leading-4 pb-1">{h % 3 === 0 ? String(h).padStart(2, "0") : ""}</div>
         ))}
         {labels.map((lab, dow) => (
           <Fragment key={dow}>

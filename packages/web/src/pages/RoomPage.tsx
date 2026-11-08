@@ -167,7 +167,7 @@ export function RoomPage(): ReactNode {
       <div className="flex flex-wrap items-start justify-between gap-4 mb-5">
         <div className="min-w-0">
           <div className="flex items-center gap-3 flex-wrap">
-            <h1 className="headline text-[26px] sm:text-[30px] leading-tight break-all">{roomName(room)}</h1>
+            <h1 className="headline page-h1 break-all">{roomName(room)}</h1>
             <RoomBadge s={s} />
             {managed && <span className="badge badge-muted" title={t("tasks.managedHint")}>{t("tasks.managed")}</span>}
           </div>

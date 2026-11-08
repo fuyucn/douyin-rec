@@ -115,7 +115,7 @@ export function TopNav(): ReactNode {
               </div>
               <span className="flex flex-col min-w-0 leading-none">
                 <span className="headline text-[15px] truncate">{t("nav.title")}</span>
-                <span className="hidden sm:block font-mono text-[10px] uppercase text-muted mt-1">
+                <span className="hidden sm:block text-[11px] text-muted mt-1">
                   Douyin Rec
                 </span>
               </span>

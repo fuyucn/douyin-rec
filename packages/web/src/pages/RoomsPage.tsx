@@ -79,7 +79,7 @@ export function RoomsPage(): ReactNode {
     <>
       <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-3 mb-6">
         <div className="min-w-0">
-          <h1 className="headline text-[28px] sm:text-[32px] leading-tight">{t("room.title")}</h1>
+          <h1 className="headline page-h1">{t("room.title")}</h1>
           <p className="text-muted text-sm mt-1.5">{t("room.subtitle")}</p>
         </div>
         <div className="flex w-full sm:w-auto flex-wrap items-center gap-2 sm:gap-3 min-w-0">

@@ -142,7 +142,7 @@ export function HubPage(): ReactNode {
     <>
       <div className="flex flex-wrap items-end justify-between gap-3 mb-6">
         <div>
-          <h1 className="headline text-[26px] sm:text-[30px] leading-tight">{t("hub.page.title")}</h1>
+          <h1 className="headline page-h1">{t("hub.page.title")}</h1>
           <p className="text-muted text-sm mt-1.5">{t("hub.page.subtitle")}</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">

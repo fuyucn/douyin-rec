@@ -12,11 +12,11 @@ export function Footer(): ReactNode {
           <span className="w-5 h-5 rounded-[4px] grid place-items-center shrink-0 border border-hairline" style={{ background: "var(--surface)" }}>
             <RecordGlyph stroke="var(--muted)" />
           </span>
-          <span className="font-mono text-[11px] uppercase tracking-normal text-muted truncate">
+          <span className="text-[11.5px] tracking-normal text-muted truncate">
             {t("nav.title")}
           </span>
         </div>
-        <p className="font-mono text-[11px] uppercase tracking-normal text-muted-soft">
+        <p className="text-[11.5px] tracking-normal text-muted-soft">
           {t("footer.tagline")}
         </p>
       </div>

@@ -22,7 +22,7 @@ export function LiveUploadLanes({ lanes, now }: { lanes: LiveUploadLaneRow[]; no
             <div className="text-right shrink-0">
               {l.partIndex !== undefined && <div className="font-mono text-sm text-ink">P{l.partIndex + 1}</div>}
               {l.bvid && <div className="font-mono text-[11px] text-muted">{l.bvid}</div>}
-              <div className="text-[10px] text-muted-soft">{Math.max(0, Math.round((now - l.updatedAt) / 1000))}s</div>
+              <div className="text-[11px] text-muted-soft">{Math.max(0, Math.round((now - l.updatedAt) / 1000))}s</div>
             </div>
           </div>
         </article>

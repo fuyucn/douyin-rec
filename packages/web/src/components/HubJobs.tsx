@@ -158,7 +158,7 @@ function StepNode({ data }: { data: { label: string; status: NodeStatus; sec: nu
           >
             {data.label}
           </span>
-          <span className="text-[10px] font-mono" style={{ color: data.status === "active" ? "var(--ink)" : "var(--muted-soft)" }}>
+          <span className="text-[11px] font-mono" style={{ color: data.status === "active" ? "var(--ink)" : "var(--muted-soft)" }}>
             {data.metric ?? (data.status === "skipped" ? t("hub.jobs.skipped") : data.status === "todo" ? "" : humanSec(data.sec))}
           </span>
         </div>
@@ -215,7 +215,7 @@ function CandidateNode({ data }: { data: { name: string; coveragePct: number; du
             {win && <Check className="w-3 h-3 shrink-0" style={{ color: "var(--success-fg)" }} />}
             <span className="font-medium truncate">{data.name}</span>
           </span>
-          <span className="text-[10px] font-mono leading-tight" style={{ color: win ? "var(--ink)" : "var(--muted-soft)" }}>
+          <span className="text-[11px] font-mono leading-tight" style={{ color: win ? "var(--ink)" : "var(--muted-soft)" }}>
             {data.complete ? t("hub.jobs.candComplete") : t("hub.jobs.candCoverage", { pct: data.coveragePct })}
             {win ? ` · ${t("hub.jobs.candWinner")}` : ""}
           </span>

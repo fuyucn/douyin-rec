@@ -272,7 +272,7 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                 {/* 流程摘要描述的是主控的流水线:worker 没有它,不渲染以免误导。 */}
                 {caps.editPipeline && (
                   <p className="text-xs text-muted">
-                    <span className="font-mono uppercase mr-2">{t("room.editor.flow")}</span>
+                    <span className="font-sans text-muted-soft mr-2">{t("room.editor.flow")}</span>
                     {flow.map((s) => t(s.key, s.vars)).join(" → ")}
                   </p>
                 )}

@@ -616,7 +616,7 @@ export function QueuePage(): ReactNode {
       <>
         <div className="flex flex-wrap items-end justify-between gap-3 mb-6">
           <div>
-            <h1 className="headline text-[26px] sm:text-[30px] leading-tight">{t("queue.nodeQueue.workerTitle")}</h1>
+            <h1 className="headline page-h1">{t("queue.nodeQueue.workerTitle")}</h1>
             <p className="text-muted text-sm mt-1.5">{t("queue.nodeQueue.workerNotice")}</p>
           </div>
         </div>
@@ -628,7 +628,7 @@ export function QueuePage(): ReactNode {
     <>
       <div className="flex flex-wrap items-end justify-between gap-3 mb-4">
         <div>
-          <h1 className="headline text-[26px] sm:text-[30px] leading-tight">{t("queue.title")}</h1>
+          <h1 className="headline page-h1">{t("queue.title")}</h1>
           <p className="text-muted text-sm mt-1.5">{t("queue.flow.subtitle")}</p>
         </div>
       </div>

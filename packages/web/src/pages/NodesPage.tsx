@@ -211,7 +211,7 @@ export function NodesPage(): ReactNode {
     <>
       <div className="flex flex-wrap items-end justify-between gap-3 mb-6">
         <div className="min-w-0">
-          <h1 className="headline text-[28px] sm:text-[32px] leading-tight">{t("nodes.title")}</h1>
+          <h1 className="headline page-h1">{t("nodes.title")}</h1>
           <p className="text-muted text-sm mt-1.5">{t("nodes.subtitle")}</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -429,7 +429,7 @@ function NodeCard({
           {n.capabilities && n.capabilities.length > 0 && (
             <div className="mt-1 flex flex-wrap gap-1">
               {n.capabilities.map((c) => (
-                <span key={c} className="font-mono text-[10px] px-1.5 py-0.5 border border-hairline text-muted-soft" style={{ borderRadius: "var(--r-pill, 999px)" }}>{c}</span>
+                <span key={c} className="font-mono text-[11px] px-1.5 py-0.5 border border-hairline text-muted-soft" style={{ borderRadius: "var(--r-pill, 999px)" }}>{c}</span>
               ))}
             </div>
           )}
@@ -460,7 +460,7 @@ function NodeCard({
               {nodeRoomHref(r)
                 ? <Link to={nodeRoomHref(r)} className="text-[13px] text-ink hover:underline truncate">{r.label}</Link>
                 : <span className="text-[13px] text-ink truncate">{r.label}</span>}
-              <span className="font-mono text-[10px] text-muted-soft">{r.platform} · {r.roomSlug}</span>
+              <span className="font-mono text-[11px] text-muted-soft">{r.platform} · {r.roomSlug}</span>
               <span className="text-[11px] text-muted ml-auto">{t(`queue.nodes.state.${r.state}`)}</span>
               {r.sessions.map((s) => (
                 <div key={s.sessionBase} className="node-session w-full">
