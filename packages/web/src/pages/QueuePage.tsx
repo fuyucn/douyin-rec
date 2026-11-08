@@ -632,7 +632,7 @@ export function QueuePage(): ReactNode {
           <span className="queue-health-item"><span className="dot ok"></span>{t("queue.health.rate")} <b className="num">{data.stats.successRate == null ? "—" : Math.round(data.stats.successRate * 100) + "%"}</b></span>
           <span className="queue-health-item e"><span className="dot err"></span>{t("queue.health.needsYou")} <b className="num">{flow.actions.length}</b></span>
           {(data.manualTotal ?? 0) > 0 && <span className="queue-health-item w"><span className="dot warn"></span>{t("queue.health.manualTotal")} <b className="num">{data.manualTotal}</b></span>}
-          <span className="queue-health-rate">{t("queue.health.window", { n: data.stats.windowDays })}{(data.doneTotal ?? 0) > 0 ? t("queue.health.doneTotal", { n: data.doneTotal }) : ""}</span>
+          <span className="queue-health-rate">{t("queue.health.window", { n: data.stats.windowDays })}{(data.doneTotal ?? 0) > 0 ? t("queue.health.doneTotal", { n: data.doneTotal ?? 0 }) : ""}</span>
         </div>
       )}
       <OverviewBand counts={flow.counts} nodes={fleetNodes} healthProbe={fleetHealthProbe} directoryLoaded={fleetWorkersLoaded} stale={stale} t={t} />
