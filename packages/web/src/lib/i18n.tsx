@@ -634,7 +634,7 @@ const DICT = {
       nodes: { title: "节点", offline: "节点不可达", drift: "节点 v{v},主控是 v{m}", recording: "在录 {n} 个房间", unavailable: "{n} 个房间状态未知", disk: "磁盘剩余 {gb} GB", rolling: "边录边传 {n} 场", locked: "未确认占盘 {size}", synced: "任务配置 {ago}前同步", syncLag: "任务配置期望 v{expected},节点停在 v{applied}", state: { recording: "录制中", waiting: "等待开播", unavailable: "状态未知", disabled: "已停用" }, disabledCount: "另有 {n} 个已停用房间" },
       delivering: { recording: "录制中", ended: "已收播", pending: "传输中", unknown: "待人工核对", noBv: "尚未建稿", progress: "已确认 {c} / {n} 段", updated: "{s} 秒前核对", locked: "未确认占盘 {size}" },
       summary: { running: "处理中 {n}", upload: "待上传 {n}", attention: "需处理 {n}", stopped: "已停止 {n}", done: "已完成 {n}", manualMore: "待人工共 {total} 条,仅列出最新 {shown} 条", acked: "已核对 {n}" },
-      ack: { action: "标记已核对", title: "标记为已核对", message: "该记录保留在台账与日志里,只是不再出现在待处理列表。请写明为什么不再需要处理(必填)。", placeholder: "例如:B 站稿件分 P 已核对齐全", confirm: "标记", done: "已标记为已核对", required: "请填写核对备注" },
+      ack: { action: "知道了", done: "知道了,已从列表移除(台账留痕)" },
       col: { room: "直播间 / 场次", status: "状态", flow: "进度", enqueued: "时间", videoDuration: "时长 {time}", actions: "操作" },
       filter: {
         running: "执行中", queued: "排队中", pulling: "拉取中", settle: "等待收播", manual: "需处理",
@@ -1299,7 +1299,7 @@ const DICT = {
       nodes: { title: "Nodes", offline: "Node unreachable", drift: "Node v{v}, master v{m}", recording: "Recording {n} rooms", unavailable: "{n} rooms status unknown", disk: "Disk free {gb} GB", rolling: "Rolling upload {n}", locked: "{size} unconfirmed on disk", synced: "Task config synced {ago} ago", syncLag: "Task config expected v{expected}, node stuck at v{applied}", state: { recording: "Recording", waiting: "Waiting", unavailable: "Unknown", disabled: "Disabled" }, disabledCount: "{n} more disabled rooms" },
       delivering: { recording: "Recording", ended: "Ended", pending: "Uploading", unknown: "Needs manual check", noBv: "No submission yet", progress: "{c} / {n} segments confirmed", updated: "checked {s}s ago", locked: "{size} unconfirmed on disk" },
       summary: { running: "{n} running", upload: "{n} to upload", attention: "{n} need action", stopped: "{n} stopped", done: "{n} done", manualMore: "{total} need action in total; showing the newest {shown}", acked: "{n} reviewed" },
-      ack: { action: "Mark reviewed", title: "Mark as reviewed", message: "The run stays in the ledger and its log; it only leaves the action list. Say why nothing more is needed (required).", placeholder: "e.g. Bilibili submission checked, all parts present", confirm: "Mark", done: "Marked as reviewed", required: "A review note is required" },
+      ack: { action: "Got it", done: "Got it — removed from the list (kept in ledger)" },
       col: { room: "Room / session", status: "Status", flow: "Progress", enqueued: "Time", videoDuration: "{time}", actions: "Actions" },
       filter: {
         running: "Running", queued: "Queued", pulling: "Pulling", settle: "Waiting to end", manual: "Needs action",

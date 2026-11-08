@@ -482,14 +482,22 @@ export function QueuePage(): ReactNode {
   const [showAllDone, setShowAllDone] = useState(false);
   const [doneOpen, setDoneOpen] = useState(false);
   const [logKey, setLogKey] = useState<string | null>(null);
-  const [ackKey, setAckKey] = useState<string | null>(null);
-  const [ackNote, setAckNote] = useState("");
+  const [ackedKeys, setAckedKeys] = useState<ReadonlySet<string>>(new Set());
   const [forceRun, setForceRun] = useState<{ streamKey: string; message: string } | null>(null);
   const [retryKey, setRetryKey] = useState<string | null>(null);
   const toast = useToast();
   const masterEnabled = hubEnabled === true;
   const hubAlive = useRef(true);
-  const openAck = useCallback((key: string): void => { setAckKey(key); setAckNote(""); }, []);
+  // 「知道了」= 一次点击,零输入(#561):固定备注落台账(可追溯),行当场消失(乐观移除)。
+  const openAck = useCallback((key: string): void => {
+    setAckedKeys((prev) => new Set(prev).add(key));
+    api.ackHubJob(key, { note: "用户确认已处理" })
+      .then(() => { toast(t("queue.ack.done"), "success"); void poll(); })
+      .catch((e: unknown) => {
+        setAckedKeys((prev) => { const next = new Set(prev); next.delete(key); return next; });
+        toast(errMessage(e), "error");
+      });
+  }, [poll, t]);
   const [debouncedQ, setDebouncedQ] = useState("");
   useEffect(() => {
     const id = setTimeout(() => setDebouncedQ(q), 250);
@@ -657,7 +665,7 @@ export function QueuePage(): ReactNode {
             <div className="queue-idle-bar">{t("queue.flow.idle", { n: flow.counts.done })}</div>
           )}
           <QueueGroup id="attention" count={flow.actions.length} empty={flow.actions.length === 0} emptyKey={groupEmptyKey("attention")} t={t}>
-            {flow.actions.map((action) => (
+            {flow.actions.filter((a) => !ackedKeys.has(a.streamKey)).map((action) => (
               <ActionRow key={action.key} action={action} now={now} tz={tz} t={t} onOpenLog={setLogKey} onAck={openAck} onRetry={requestRetry} />
             ))}
           </QueueGroup>
@@ -705,26 +713,6 @@ export function QueuePage(): ReactNode {
         </section>
       )}
       <JobLogDialog logKey={logKey} onClose={() => setLogKey(null)} />
-      <ConfirmDialog
-        open={ackKey !== null}
-        title={t("queue.ack.title")}
-        message={t("queue.ack.message")}
-        confirmLabel={t("queue.ack.confirm")}
-        onCancel={() => setAckKey(null)}
-        onConfirm={() => {
-          const key = ackKey;
-          if (!key) return;
-          if (!ackNote.trim()) { toast(t("queue.ack.required"), "error"); return; }
-          api.ackHubJob(key, { note: ackNote.trim() })
-            .then(() => { toast(t("queue.ack.done"), "success"); setAckKey(null); void poll(); })
-            .catch((e: unknown) => toast(errMessage(e), "error"));
-        }}
-      >
-        <div className="space-y-2 mb-3">
-          <div className="font-mono text-[11px] text-muted break-all">{ackKey}</div>
-          <textarea className="input w-full min-h-[72px]" maxLength={500} value={ackNote} placeholder={t("queue.ack.placeholder")} onChange={(e) => setAckNote(e.target.value)} />
-        </div>
-      </ConfirmDialog>
       <ConfirmDialog
         open={retryKey !== null}
         title={t("queue.flow.retryTitle")}
