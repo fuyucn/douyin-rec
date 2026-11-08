@@ -64,7 +64,6 @@ flowchart TB
   subgraph L0["L0 · 基础叶子"]
     core["<b>core</b><br/>Platform / DownloadEngine 契约<br/>+ 注册表 + types/config/notify/api-types"]
     extra["<b>ffmpeg-recorder-extra</b><br/>logStreamMeta + detectDevice"]
-    tui["<b>tui</b><br/>Ink 终端控制台 (独立 bundle)"]
   end
 
   cli --> app

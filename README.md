@@ -14,7 +14,7 @@
 
 ## 架构
 
-pnpm workspace（13 包），收敛成 **2 个可插拔接缝** + **1 个多节点编排层**:**平台轴**(各 `<平台>-live`,平台专属取流+弹幕)+ **引擎轴**(`record-engine`,平台无关下载)+ **多节点 hub**(`orchestrator`,master 管理任务分配、收集选中节点录像并后处理),其余全通用。依赖只能向下（`test/arch/layering.test.ts` 守护）。esbuild 把 `cli` 打成 `dist/douyin-rec.mjs`(+ `dist/tui.mjs`)。
+pnpm workspace（12 包），收敛成 **2 个可插拔接缝** + **1 个多节点编排层**:**平台轴**(各 `<平台>-live`,平台专属取流+弹幕)+ **引擎轴**(`record-engine`,平台无关下载)+ **多节点 hub**(`orchestrator`,master 管理任务分配、收集选中节点录像并后处理),其余全通用。依赖只能向下（`test/arch/layering.test.ts` 守护）。esbuild 把 `cli` 打成 `dist/douyin-rec.mjs`。
 
 > 📐 **架构图(依赖分层 + 运行时数据流,mermaid)：[docs/architecture.md](./docs/architecture.md)**(GitHub 直接渲染);可交互版 [docs/architecture.html](./docs/architecture.html)。
 
@@ -24,7 +24,6 @@ packages/
 ├── observability/         # 日志/通知实现:Notifier/EventCenter/TaskLogStore/FileLogger(接口在 core)
 ├── post-process/          # 后处理纯函数:concat / burn / ass(rolling·livechat·multi·emoji·render) / merge / ffmpeg / fonts
 ├── ffmpeg-recorder-extra/ # 附加:流信息 logStreamMeta + 设备检测 detectDevice
-├── tui/                   # Ink 终端控制台(独立打包 dist/tui.mjs)
 ├── record-engine/         # 【引擎轴·平台无关】通用 PollingRecorder + 下载引擎 ffmpeg(.ts)/mesio(.flv);取流经 platform.getStream(url+headers)
 ├── douyin-live/           # 【平台轴】douyinPlatform:src/{stream(vendored a_bogus 取流)+ danmaku(自有 TS WS 客户端,仅签名/schema vendored)} + probe + index 装配
 ├── bilibili-live/         # 【平台轴】bilibiliPlatform:getStream(getRoomPlayInfo,headers 带 referer)/getLiving;connectDanmu 实装(WBI 签名 + 二进制 WS 协议)
@@ -124,30 +123,14 @@ db / recordings / stage / config（含 hub 规则、biliup cookies）全部收�
 - docker-compose.yml / systemd 里仍保留的 `TZ=` 只是**容器/服务启动前几毫秒的初始值**（外加给
   `date` 等诊断命令一个参考），我们自己的代码启动后会立刻覆盖它——不用去改那些文件。
 
-## 终端 TUI 控制台（`task tui`）
-
-在终端里交互式管理任务（Web 的命令行替代）。**TUI 是瘦客户端**——它本身**不录制**，只通过 REST API 连到 `task serve`（默认 `http://localhost:7860`）去看状态、启停、看日志。真正录制的是 serve 的进程；**关掉 TUI 录制照常继续**，**没开 serve 则 TUI 连不上、什么也录不了**。
-
-```bash
-# 前提：先有一个 task serve 在跑（docker 的 7860，或本地 serve）
-pnpm tui                                              # 连 7860
-node dist/douyin-rec.mjs task tui --api http://localhost:7861   # 连别的 serve
-```
-
-- 必须在**真实终端(TTY)**里运行（Ink 需要 raw mode）；非 TTY 会打印提示而不渲染。
-- 快捷键：`↑/↓`(或 `k/j`) 选择 · `s` 启动 · `x` 停止 · `l`/`⏎` 看日志 · `r` 刷新（本就 2s 自动刷）· `q` 退出。
-- 状态徽章：`● 录制中`(绿) / `◌ 等待开播`(品红) / `⏳ 排空中` / `○ 待命` / `○ 已停用`。
-- 日志视图**按行上色**：error 浅红行底、warn 黄、success 绿、弹幕灰、状态/主播 青（Web 详情页日志台同款配色）。
-- 技术：Ink + React，单独打包成 `dist/tui.mjs`（**不进主 bundle**，详见 [docs/app.md](./docs/app.md)）；`ink/react` 在 host 从 `node_modules` 解析，docker 的 serve 不含也不需要它。
-
 ### 「自动录制」是谁做的？
 
 | | 跑录制? | 自动? |
 |---|---|---|
 | `task serve`（docker/本地） | ✅ 执行方（spawn `record` 子进程） | **默认开调度**：启用的任务**无窗口=24h 录 / 有窗口=窗口内录**；`--no-schedule` 退化为纯手动 |
-| `task tui` / Web | ❌ 只遥控/查看 | 只是发指令给 serve |
+| Web 控制台 | ❌ 只遥控/查看 | 只是发指令给 serve |
 
-要让任务自动录：任务**已启用（enabled）**即可（serve 默认带调度）；设了定时窗口就窗口内录、没设就 24h。跟 TUI 开不开**无关**。
+要让任务自动录：任务**已启用（enabled）**即可（serve 默认带调度）；设了定时窗口就窗口内录、没设就 24h。跟 Web 开不开**无关**。
 
 ## 同时跑两个实例（本地开发 + docker 生产）
 
@@ -160,25 +143,11 @@ docker compose up -d
 # 开发：本地，:7861，独立数据根 data-local（db 在 data-local/db）
 pnpm serve:local        # = DOUYIN_REC_ROOT=./data-local task serve --port 7861（默认含调度）
 
-# TUI 分别连：
-pnpm tui                # docker  :7860
-pnpm tui:local          # 本地    :7861
+# Web UI 分别看：
+#   docker :7860 / 本地 :7861
 ```
 
 docker 宿主机端口由 `.env` 的 `PORT` 控制（容器内固定 7860），改完 `docker compose up -d` 生效。`.env` / `*.db` 均已 gitignore。
-
-### 远程（VPS）怎么用 TUI
-
-VPS 上 `task serve`（docker）负责录制；**TUI 不能在容器里跑**（镜像无 `node_modules`，`ink/react` 是 external）。从本地遥控：
-
-```bash
-# 1) SSH 隧道把 VPS 的 7860 映到本地（API 无鉴权，别直接暴露公网）
-ssh -L 7860:localhost:7860 <vps>
-# 2) 本地（pnpm install 过的仓库）连过去
-pnpm tui            # 实际打到 VPS 的 serve
-```
-
-或 ssh 进 VPS、在装好依赖的仓库里 `node dist/douyin-rec.mjs task tui`。不想用 TUI 就浏览器经隧道开 Web UI。**录制由 VPS 的 serve 完成，与 TUI 是否连着无关。**
 
 ## Docker 部署（单容器：Web UI + 定时调度）
 

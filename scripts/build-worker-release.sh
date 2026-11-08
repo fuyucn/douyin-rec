@@ -9,7 +9,6 @@
 #   VERSION
 #   manifest.json
 #   packages/base/dist/douyin-rec.mjs
-#   packages/base/dist/tui.mjs
 #   packages/base/bin/mesio
 #   packages/web/dist/
 #   packages/hub/config/hub.config.example.json
@@ -20,7 +19,6 @@ VERSION=""
 OUT_DIR="${DREC_RELEASE_DIR:-$ROOT/dist/releases}"
 ARCHES="all"
 BUNDLE="${DREC_BUNDLE:-$ROOT/dist/douyin-rec.mjs}"
-TUI_BUNDLE="${DREC_TUI_BUNDLE:-$ROOT/dist/tui.mjs}"
 WEB_DIST="${DREC_WEB_DIST:-$ROOT/packages/web/dist}"
 HUB_CONFIG="${DREC_HUB_CONFIG:-$ROOT/configs/hub.config.example.json}"
 MESIO_VERSION="${MESIO_VERSION:-mesio-v0.4.1}"
@@ -32,7 +30,6 @@ usage() {
 
 环境变量:
   DREC_BUNDLE      指定 dist/douyin-rec.mjs（默认仓库 dist/）
-  DREC_TUI_BUNDLE  指定 dist/tui.mjs（默认仓库 dist/）
   DREC_WEB_DIST    指定前端 dist（默认 packages/web/dist）
   DREC_HUB_CONFIG  指定 hub 配置模板（默认 configs/hub.config.example.json）
   DREC_RELEASE_DIR 输出目录（默认 dist/releases）
@@ -53,7 +50,6 @@ done
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "--version 必须是 x.y.z" >&2; exit 1; }
 case "$ARCHES" in all|amd64|arm64) ;; *) echo "--arch 只支持 all|amd64|arm64" >&2; exit 1 ;; esac
 [ -f "$BUNDLE" ] || { echo "找不到 bundle: $BUNDLE；先运行 pnpm bundle" >&2; exit 1; }
-[ -f "$TUI_BUNDLE" ] || { echo "找不到 TUI bundle: $TUI_BUNDLE；先运行 pnpm bundle" >&2; exit 1; }
 [ -f "$WEB_DIST/index.html" ] || { echo "找不到前端: $WEB_DIST；先构建 packages/web" >&2; exit 1; }
 [ -f "$HUB_CONFIG" ] || { echo "找不到 hub 配置模板: $HUB_CONFIG" >&2; exit 1; }
 command -v tar >/dev/null 2>&1 || { echo "缺少 tar" >&2; exit 1; }
@@ -98,7 +94,6 @@ build_one() {
     "$stage/packages/web/dist" \
     "$stage/packages/hub/config"
   cp "$BUNDLE" "$stage/packages/base/dist/douyin-rec.mjs"
-  cp "$TUI_BUNDLE" "$stage/packages/base/dist/tui.mjs"
   cp -R "$WEB_DIST"/. "$stage/packages/web/dist/"
   cp "$HUB_CONFIG" "$stage/packages/hub/config/hub.config.example.json"
   printf '%s\n' "$VERSION" >"$stage/VERSION"

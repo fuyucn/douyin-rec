@@ -305,32 +305,6 @@ esbuild 只打包 JS，bundle 不含 HTML，故 `loadIndexHtml()` 按优先级�
 
 ---
 
-## 终端 TUI（`task tui`）
-
-Ink(React)做的全屏终端界面，**Web 的命令行替代**：列表 / 状态徽章 / 启停 / 日志（按行上色）/ 刷新。源码在 `packages/tui/src/`（独立打包 `dist/tui.mjs`,`react`/`ink` 在 host node_modules 解析,不进主 bundle）。
-
-**它是瘦客户端，不是执行方**：TUI **不持有 TaskManager、不 spawn 录制**，只通过 REST 调 `task serve`（`--api`，默认 `http://localhost:7860`）。录制全由 serve 完成 → 关掉 TUI 录制照常、没 serve 则 TUI 连不上。自动录制 = serve 的调度 daemon（默认开），与 TUI 无关。
-
-### 为什么单独打包 `dist/tui.mjs`（不进主 bundle）
-
-主 bundle（`dist/douyin-rec.mjs`）跑 `record`/`serve`，**docker 里无 `node_modules`**。若把 `ink/react` 标成主 bundle 的 esbuild external，ESM 静态 `import` 会被**提升到主 bundle 顶层** → 即使 TUI 是按需 `import()`，主 bundle 一加载就 `import "react"` → docker 的 `task serve` 启动即崩（`ERR_MODULE_NOT_FOUND: react`，容器 restart-loop）。
-
-解法（见 `esbuild.config.mjs`）：
-
-- TUI 单独 esbuild entry → `dist/tui.mjs`（`jsx: automatic`；`ink/react/react/jsx-runtime/yoga-layout` 在**它**里 external）。
-- `cli-task.ts` 的 `task tui` 用**变量 specifier** 加载，让 esbuild 不静态跟踪、不把 TUI/react 打进主 bundle：
-  ```ts
-  const tuiMod = "./tui.mjs";
-  const { launchTui } = await import(tuiMod); // 运行时相对 dist/douyin-rec.mjs 解析
-  ```
-- 验证：`grep -c 'from"react"' dist/douyin-rec.mjs` 必须为 `0`。
-
-结果：主 bundle 干净、docker serve 不含也不需要 react/ink；TUI 只在**有 `node_modules` 的 host** 跑（`ink/react` 运行时解析）。Ink 需 TTY → `launchTui` 里 `process.stdin.isTTY` 守卫，非 TTY 打印提示不抛 Ink 堆栈。
-
-### 远程（VPS）使用
-
-VPS 跑 `task serve`（docker）干活；**容器内不能跑 TUI**（无 node_modules）。从本地经 **SSH 隧道**遥控（API 无鉴权，勿暴露公网）：`ssh -L 7860:localhost:7860 <vps>` 后本地 `pnpm tui`。**最省事其实是浏览器经隧道开 Web UI**（不需要 TUI 的依赖）；TUI 仅「想在终端里管」时用。
-
 ---
 
 ## 扫码登录 (QR Login)

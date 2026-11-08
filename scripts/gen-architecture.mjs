@@ -137,7 +137,7 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
 // ── 语义角色 → 颜色(Archify 风格:深色底 + 语义色) ──────────────────────────────
 const SEMANTIC = {
   "@drec/core": "core", "@drec/observability": "core", "@drec/post-process": "core", "@drec/proc-queue": "core", "@drec/processors": "core",
-  "@drec/tui": "core", "@drec/ffmpeg-recorder-extra": "core",
+  "@drec/ffmpeg-recorder-extra": "core",
   "@drec/record-engine": "engine",
   "@drec/douyin-live": "platform", "@drec/bilibili-live": "platform", "@drec/kuaishou-live": "platform",
   "@drec/manager": "session",
@@ -310,7 +310,6 @@ const PKG_BLURB = {
   "@drec/proc-queue": "ProcQueueStore 持久任务表(sqlite)<br/>ProcRunner 租约 / 心跳 / fencing / 关停",
   "@drec/zero-upload": "0 落盘流式直传(自研 UPOS)<br/>live-pump: 一段一 ffmpeg 边录边传",
   "@drec/processors": "remux 处理器(校验 / 原地转换 / recover);加处理器 = 一个模块 + 注册一行",
-  "@drec/tui": "Ink 终端控制台 (独立 bundle)",
   "@drec/ffmpeg-recorder-extra": "logStreamMeta + detectDevice",
   "@drec/record-engine": "通用 PollingRecorder<br/>下载引擎: ffmpeg(.ts) / mesio(.flv)",
   "@drec/douyin-live": "douyinPlatform<br/>stream(a_bogus 取流) + danmaku(自有 TS WS)",
@@ -324,7 +323,7 @@ const PKG_BLURB = {
 const NODE_ID = {
   "@drec/core": "core", "@drec/observability": "observ", "@drec/post-process": "post", "@drec/proc-queue": "procq", "@drec/zero-upload": "zeroup",
   "@drec/processors": "procs",
-  "@drec/tui": "tui", "@drec/ffmpeg-recorder-extra": "extra", "@drec/record-engine": "engine",
+  "@drec/ffmpeg-recorder-extra": "extra", "@drec/record-engine": "engine",
   "@drec/douyin-live": "douyin", "@drec/bilibili-live": "bilibili", "@drec/kuaishou-live": "kuaishou",
   "@drec/manager": "manager", "@drec/app": "app", "@drec/orchestrator": "orch", "@drec/cli": "cli",
 };

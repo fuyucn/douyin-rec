@@ -44,7 +44,7 @@ jobs:
       - name: "Unit tests (vitest, 含分层守护)"
         run: pnpm test
 
-      - name: "Bundle (esbuild: douyin-rec.mjs + tui.mjs)"
+      - name: "Bundle (esbuild: douyin-rec.mjs)"
         run: pnpm bundle
 
       - name: "Web UI install + typecheck + build"

@@ -34,7 +34,6 @@ const RANKS: Record<string, number> = {
   "@drec/zero-upload": 0.35,
   // 0.4:后处理处理器实现(依赖 core + post-process;被 app/cli 依赖;proc-queue 不依赖它,只经 core 注册表找处理器)
   "@drec/processors": 0.4,
-  "@drec/tui": 0,
   "@drec/ffmpeg-recorder-extra": 0,
   // 1 共享层:通用录制器 + ffmpeg/mesio 引擎策略(record-engine)
   "@drec/record-engine": 1,

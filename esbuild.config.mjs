@@ -1,7 +1,4 @@
-// Bundles src/cli.ts into a single self-contained file: dist/douyin-rec.mjs
-// + a SEPARATE dist/tui.mjs for the Ink TUI (kept out of the main bundle so its
-// React/Ink deps never become eager top-level imports — that would crash
-// `task serve` in docker where node_modules isn't present).
+// Bundles src/cli.ts into a single self-contained file: dist/douyin-rec.mjs.
 //
 // banner notes:
 //   1. shebang must be line 1 (the source no longer carries one — esbuild would
@@ -51,13 +48,11 @@ const shared = {
 
 // Test builds (test/cli/record-spool-flag.test.ts) point DREC_BUNDLE_MAIN_OUT at a private temp
 // directory so a spawned-CLI test never races other test files over the shared dist/. When it is
-// set we stop after the main bundle: the TUI and the launcher are not used by that test.
+// set we stop after the main bundle: the launcher is not used by that test.
 const MAIN_OUT = process.env.DREC_BUNDLE_MAIN_OUT || "dist/douyin-rec.mjs";
 
-// ── Main bundle: CLI + serve (single file; docker runs this; NO TUI/React/Ink) ──
-// The `task tui` action loads ./tui.mjs via a VARIABLE dynamic import, so esbuild
-// can't statically follow it → the TUI (and its react/ink/yoga deps) stay OUT of
-// this bundle. Keeps `task serve` loadable in docker without node_modules.
+// ── Main bundle: CLI + serve (single file; docker runs this) ──
+// 主 bundle 必须能脱离 node_modules 启动(docker 里没有),所以依赖一律打进产物。
 await build({
   ...shared,
   entryPoints: ["packages/cli/src/cli.ts"],
@@ -73,19 +68,8 @@ await build({
 });
 
 if (!process.env.DREC_BUNDLE_MAIN_OUT) {
-// ── TUI bundle: separate file, contains JSX; ink/react/yoga stay external and
-// resolve from node_modules at runtime (TUI only runs on a host, never in docker). ──
-await build({
-  ...shared,
-  entryPoints: ["packages/tui/src/index.ts"],
-  outfile: "dist/tui.mjs",
-  jsx: "automatic",
-  external: ["ink", "react", "react/jsx-runtime", "react/jsx-dev-runtime", "yoga-layout"],
-  banner: { js: REQUIRE_SHIM },
-});
-
 // ── 便捷启动器 dist/douyin-rec：exec 同目录的 .mjs，省去 .mjs 后缀与 `node` 前缀。
-//    用法：`./dist/douyin-rec task tui`。docker CMD / package.json bin 仍指 .mjs，互不影响。
+//    用法：`./dist/douyin-rec serve`。docker CMD / package.json bin 仍指 .mjs，互不影响。
 const launcher =
   "#!/usr/bin/env sh\n" +
   "# 由 `pnpm bundle` 生成。`dist/douyin-rec <args>` == `node dist/douyin-rec.mjs <args>`。\n" +
