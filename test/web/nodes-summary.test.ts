@@ -193,7 +193,7 @@ describe("节点卡片的房间行", () => {
   });
 
   it("任务清单里没有的遗留会话也列出(未确认分段不能消失)", () => {
-    const r = summarizeNodes([rt("https://live.douyin.com/1", "甲", true, ["a", "recording"])], {}, [del("a", { roomSlug: "999", anchorName: "遗留" })], "");
+    const r = summarizeNodes([rt("https://live.douyin.com/1", ["a", "recording"])], {}, [del("a", { roomSlug: "999", anchorName: "遗留" })], "");
     expect(r[0]!.rooms.map((x) => x.label)).toContain("遗留");
   });
 
@@ -218,5 +218,32 @@ describe("room label priority (#53): task name before the cached anchor name", (
       mk("https://live.douyin.com/3", null, null),
     ], {}, [], "");
     expect(r[0]!.rooms.map((x) => x.label).sort()).toEqual(["3", "主播名2", "任务名"].sort());
+  });
+});
+
+describe("node rooms list — 只留还需要人看的遗留会话", () => {
+  const rt = (room: string, ...ws: Array<[string, "recording" | "not_recording" | "unavailable"]>) => ({
+    platform: "douyin", room, anchorName: null, name: null, enabled: true,
+    recordingWorkers: ws.map(([workerId, state]) => ({ workerId, workerName: `N-${workerId}`, state })),
+  }) as unknown as Parameters<typeof summarizeNodes>[0][number];
+
+  it("已收尾的遗留会话不再挂在节点下(房间已摘走就不该还在)", () => {
+    const r = summarizeNodes(
+      [rt("https://live.douyin.com/1", ["a", "recording"])],
+      {},
+      [del("a", { roomSlug: "999", anchorName: "旧房", recording: false, ambiguous: 0 })],
+      "",
+    );
+    expect(r[0]!.rooms.map((x) => x.roomSlug)).not.toContain("999");
+  });
+
+  it("仍有未确认分段的遗留会话保留——数据在风险里,不能消失", () => {
+    const r = summarizeNodes(
+      [rt("https://live.douyin.com/1", ["a", "recording"])],
+      {},
+      [del("a", { roomSlug: "999", anchorName: "旧房", recording: false, ambiguous: 2 })],
+      "",
+    );
+    expect(r[0]!.rooms.map((x) => x.roomSlug)).toContain("999");
   });
 });

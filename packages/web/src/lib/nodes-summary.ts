@@ -241,8 +241,13 @@ export function summarizeNodes(
     n.ambiguous += d.ambiguous;
     const identity = `${d.workerId}:${d.platform ?? ""}:${d.roomSlug}`;
     let row = roomIdx.get(identity);
+    // 任务清单里已没有该房间时,只有**还需要人看**的遗留会话才占一行:
+    // 在录(recording)或还有未确认分段(ambiguous>0)。已收尾的历史不要再挂在节点下 ——
+    // 否则「房间已经从这台节点摘掉了」这件事会被一条旧会话记录永远否决。
+    const leftoverNeedsEyes = d.recording === true || (typeof d.ambiguous === "number" && d.ambiguous > 0);
     if (!row) {
-      // 任务清单里已没有的房间(遗留会话):照样列出,别让未确认分段「消失」。
+      // 已收尾、无未确认分段的旧会话:不建行,也不影响节点卡片的房间列表。
+      if (!leftoverNeedsEyes) continue;
       row = {
         key: identity,
         platform: d.platform ?? "",
