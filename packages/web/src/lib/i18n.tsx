@@ -655,8 +655,8 @@ const DICT = {
         unknownKind: "其他处理类型",
       },
       health: {
-        label: "自动化健康度", weekDone: "场本周自动完成", rate: "成功率",
-        needsYou: "需处理", window: "统计窗口:最近 {n} 天", doneTotal: " · 台账共 {n} 场", ackedNote: " · 另有 {n} 条已核对",
+        label: "自动化健康度", weekDone: "{n} 场本周自动完成", weekDoneShort: "本周 {n} 场",
+        window: "统计窗口:最近 {n} 天",
       },
       archive: {
         title: "已存档 · 待上传", note: "合并后不投稿的正常收口,等你手动上传,不是故障",
@@ -666,7 +666,7 @@ const DICT = {
         subtitle: "一条任务流：先处理需要人的，再看在跑、排队、等收播和最近完成。",
         stream: "任务队列", overview: "队列概览", steps: "步骤流水线",
         sort: { newest: "最新在前", oldest: "最早在前" },
-        count: { running: "{n} 在跑", queued: "{n} 排队", actions: "{n} 待处理", done: "已完成 {n}" },
+        count: { running: "{n} 在跑", queued: "{n} 排队", actions: "{n} 待处理" },
         group: { attention: "需要你处理", running: "正在跑", queued: "排队中", settling: "等收播", done: "最近完成" },
         hint: { attention: "按严重度", running: "当前步骤与预计剩余", queued: "按资源位次", settling: "收播后进入处理", done: "默认显示最近 5 条" },
         empty: { attention: "没有需要你处理的事", running: "当前没有正在跑的任务", queued: "没有排队中的任务", settling: "没有等收播的任务", done: "窗口内还没有已完成的任务" },
@@ -1320,8 +1320,8 @@ const DICT = {
         unknownKind: "Other processor",
       },
       health: {
-        label: "Automation health", weekDone: "auto-completed this week", rate: "Success rate",
-        needsYou: "Need action", window: "Window: last {n} days", doneTotal: " · {n} total in ledger", ackedNote: " · {n} reviewed",
+        label: "Automation health", weekDone: "{n} auto-completed this week", weekDoneShort: "{n} this week",
+        window: "Window: last {n} days",
       },
       archive: {
         title: "Archived · awaiting upload", note: "Normal merge-only close-out, waiting for your manual upload — not a fault",
@@ -1331,7 +1331,7 @@ const DICT = {
         subtitle: "One task stream: action first, then running, queued, settling, and recent results.",
         stream: "Task queue", overview: "Queue overview", steps: "Step pipeline",
         sort: { newest: "Newest first", oldest: "Oldest first" },
-        count: { running: "{n} running", queued: "{n} queued", actions: "{n} need action", done: "{n} done" },
+        count: { running: "{n} running", queued: "{n} queued", actions: "{n} need action" },
         group: { attention: "Needs you", running: "Running", queued: "Queued", settling: "Waiting to end", done: "Recently done" },
         hint: { attention: "By severity", running: "Current step and ETA", queued: "By resource position", settling: "Starts after the stream ends", done: "Latest 5 by default" },
         empty: { attention: "Nothing needs you", running: "Nothing is running", queued: "Nothing is queued", settling: "Nothing is waiting to end", done: "Nothing finished in this window yet" },

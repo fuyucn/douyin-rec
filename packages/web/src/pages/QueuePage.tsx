@@ -213,12 +213,13 @@ function CompactFilterBar({
   );
 }
 
-function OverviewBand({ counts, nodes, healthProbe, directoryLoaded, stale, t }: {
-  counts: { running: number; queued: number; actions: number; done: number };
+function OverviewBand({ counts, nodes, healthProbe, directoryLoaded, stale, stats, t }: {
+  counts: { running: number; queued: number; actions: number };
   nodes: readonly NodeSummary[];
   healthProbe: "loading" | "failed" | "ready";
   directoryLoaded: boolean;
   stale: boolean;
+  stats?: { windowDays: number; done: number; successRate: number | null };
   t: TFunc;
 }): ReactNode {
   const total = nodes.length;
@@ -239,7 +240,6 @@ function OverviewBand({ counts, nodes, healthProbe, directoryLoaded, stale, t }:
         <span className="queue-overview-count" data-tone="primary"><b>{counts.running}</b>{t("queue.flow.count.running", { n: counts.running })}</span>
         <span className="queue-overview-count"><b>{counts.queued}</b>{t("queue.flow.count.queued", { n: counts.queued })}</span>
         <span className="queue-overview-count" data-tone={counts.actions > 0 ? "danger" : undefined}><b>{counts.actions}</b>{t("queue.flow.count.actions", { n: counts.actions })}</span>
-        <span className="queue-overview-count"><b>{counts.done}</b>{t("queue.flow.count.done", { n: counts.done })}</span>
       </div>
       <Link to="/nodes" className="queue-node-health" title={t("queue.fleet.open")}>
         <span className="dot" style={{ background: healthColor }} />
@@ -247,6 +247,13 @@ function OverviewBand({ counts, nodes, healthProbe, directoryLoaded, stale, t }:
         {offline > 0 && <span style={{ color: "var(--error-fg)" }}>{t("queue.fleet.offline", { n: offline })}</span>}
         {unknown > 0 && <span style={{ color: "var(--warning-fg)" }}>{t("queue.fleet.noStatus", { n: unknown })}</span>}
       </Link>
+      {stats && (
+        <span className="queue-health-rate" title={t("queue.health.label")}>
+          <b style={{ color: "var(--success-fg)", fontWeight: 600 }}>{stats.successRate == null ? "—" : Math.round(stats.successRate * 100) + "%"}</b>
+          {" · "}{t("queue.health.weekDoneShort", { n: stats.done })}
+          {" · "}{t("queue.health.window", { n: stats.windowDays })}
+        </span>
+      )}
     </section>
   );
 }
@@ -585,23 +592,21 @@ export function QueuePage(): ReactNode {
     () => buildQueueFlow(rows, data?.blocked ?? [], liveLanes.length, now, dataAt, sort),
     [rows, data?.blocked, liveLanes.length, now, dataAt, sort],
   );
-  const fleetNodes = useMemo(
-    () => summarizeNodes(fleetTasks, fleetStatus, data?.delivering ?? [], masterVersion, fleetWorkers),
-    [fleetTasks, fleetStatus, data?.delivering, masterVersion, fleetWorkers],
-  );
   const fleetHealthProbe = deriveNodeHealthProbe({
     statusSettled: fleetHealthLoad.statusSettled,
     statusHasSnapshot: fleetHealthLoad.statusHasSnapshot,
     workersLoaded: fleetWorkersLoaded,
   });
+  const fleetNodes = useMemo(
+    () => summarizeNodes(fleetTasks, fleetStatus, data?.delivering ?? [], masterVersion, fleetWorkers),
+    [fleetTasks, fleetStatus, data?.delivering, masterVersion, fleetWorkers],
+  );
   const filtered = phase.length + states.length + platform.length + (debouncedQ ? 1 : 0) > 0;
   const groupEmptyKey = (id: QueueGroupId): string => (filtered ? "queue.filter.noMatch" : queueEmptyKey(id));
   // Rolling sessions live outside the ledger rows; keep them visible as their own stat instead of
   // inflating the running header (which must equal the rows + lanes actually rendered below).
   const deliveringTotal = data?.delivering?.length ?? 0;
   const visibleDone = showAllDone || filtered ? flow.done : flow.done.slice(0, 5);
-  const manualTotal = data?.manualTotal ?? 0;
-  const manualShown = (data?.active ?? []).filter((r) => r.state === "needs_manual").length;
   const renderFlowRow = (row: QueueFlowRow, group: QueueRowGroup): ReactNode => (
     <FlowRow key={row.key} row={row} group={group} tz={tz} now={now} t={t} onOpenLog={setLogKey} onAck={openAck} />
   );
@@ -633,21 +638,11 @@ export function QueuePage(): ReactNode {
         </div>
       </div>
       <HubStreamBanner handle={stream} />
-      {/* 健康带(#561):第一眼证明系统在正常工作——7 天台账统计,不是故障清单 */}
-      {data?.stats && (
-        <div className="queue-health" aria-label={t("queue.health.label")}>
-          <span className="queue-health-big"><b className="num">{data.stats.done}</b>{t("queue.health.weekDone")}</span>
-          <span className="queue-health-item"><span className="dot ok"></span>{t("queue.health.rate")} <b className="num">{data.stats.successRate == null ? "—" : Math.round(data.stats.successRate * 100) + "%"}</b></span>
-          <span className="queue-health-item e"><span className="dot err"></span>{t("queue.health.needsYou")} <b className="num">{flow.actions.length}</b></span>
-          <span className="queue-health-rate">{t("queue.health.window", { n: data.stats.windowDays })}{(data.doneTotal ?? 0) > 0 ? t("queue.health.doneTotal", { n: data.doneTotal ?? 0 }) : ""}</span>
-        </div>
-      )}
-      <OverviewBand counts={flow.counts} nodes={fleetNodes} healthProbe={fleetHealthProbe} directoryLoaded={fleetWorkersLoaded} stale={stale} t={t} />
+      {/* 页头一行(#561 跟进):当前计数与分组一一对应;7 天台账健康收在行尾注脚。
+          此前健康带 + 概览行 + 已核对注脚三层堆叠,done 计数出现三个口径。 */}
+      <OverviewBand counts={flow.counts} nodes={fleetNodes} healthProbe={fleetHealthProbe} directoryLoaded={fleetWorkersLoaded} stale={stale} stats={data?.stats} t={t} />
       {/* 资源池:全零不渲染(#561) */}
       {data && (data.pool.cpu.active > 0 || data.pool.cpu.queued > 0 || data.pool.upload.active > 0 || data.pool.upload.queued > 0 || data.pool.upload.cooldownUntil > Date.now()) && <LivePool pool={data.pool} />}
-      {!filtered && manualTotal > manualShown && (
-        <div className="queue-manual-more" style={{ color: "var(--warning-fg)" }}>{t("queue.summary.manualMore", { total: manualTotal, shown: manualShown })}</div>
-      )}
       {(data?.manualAcked ?? 0) > 0 && <div className="queue-manual-more">{t("queue.summary.acked", { n: data?.manualAcked ?? 0 })}</div>}
       <CompactFilterBar
         phase={phase} states={states} platform={platform} q={q} sort={sort}
