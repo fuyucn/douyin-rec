@@ -32,7 +32,7 @@ import { APP_VERSION } from "./version.js";
 import { TaskLogStore } from "@drec/observability";
 import { NodeRecordSpawner } from "./process/spawner.js";
 import { sweepCredentialFiles } from "./process/credential-file.js";
-import { createWebServer } from "./web/server.js";
+import { createWebServer, enableAccessStats } from "./web/server.js";
 import { HubWatch } from "./hub-watch.js";
 import { QrLoginManager } from "./login/login-manager.js";
 import { PlaywrightQrLogin } from "./login/qr-login.js";
@@ -295,6 +295,8 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     }
     const procRunnerRef = procRunner;
     const procStoreRef = procStore;
+    // 访问计数(精简审计用):只记路由名,30s 防抖落盘到 <root>/config/access-stats.json。
+    const accessStats = enableAccessStats(join(rootConfigDir(), "access-stats.json"), (m) => serveLog.warn(m));
     const server = createWebServer({
       procActive: procRunnerRef ? () => procRunnerRef.active() : undefined,
       procPurge: procStoreRef ? (o) => ({ deleted: procStoreRef.gc({ purgeFailed: o.purgeFailed }) }) : undefined,
@@ -570,6 +572,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
 
     let stopping = false;
     const shutdown = (sig: string): void => {
+      accessStats.flush(); // 最后 ≤30s 的命中不丢:观察期数据跨重启连续
       if (stopping) return;
       stopping = true;
       // 首步:停 runner(停认领 → 可中断 job 回 pending → 删租约),与 daemon 停止并行、都等完再关 http。

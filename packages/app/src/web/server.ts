@@ -22,6 +22,7 @@ import {
   type LoginManagerLike,
 } from "./api.js";
 import { loadIndexHtml, loadStaticAsset } from "./static-html.js";
+import { AccessStats } from "./access-stats.js";
 import { fetchAnchorName, resolveShortUrl } from "../anchor.js";
 import type { TaskStore } from "../store.js";
 import { MergeJobStore } from "../merge-jobs.js";
@@ -232,8 +233,7 @@ const ROUTES: readonly RouteEntry[] = [
  * PURE router. Maps (method, pathname) → RouteMatch or null (404). Exported for
  * unit testing of param extraction without spinning up a server.
  */
-export function matchRoute(method: string, pathname: string): RouteMatch | null {
-  // normalise trailing slash (but keep root "/")
+export function matchRoute(method: string, pathname: string): RouteMatch | null {  // normalise trailing slash (but keep root "/")
   const p = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
 
   for (const route of ROUTES) {
@@ -255,6 +255,18 @@ export function matchRoute(method: string, pathname: string): RouteMatch | null 
     return match;
   }
   return null;
+}
+
+/** 路由命中计数器(精简审计取证)。未启用时 `record` 是 no-op,测试与 worker 不受影响。 */
+let accessStats: AccessStats | null = null;
+
+/**
+ * 启用访问计数(只记路由名,不记 URL 参数)。由 `serve` 在 master 上开启。
+ * 文件位置 = `<root>/config/access-stats.json`,现场读它就能回答「/hub、/stats 到底有人用吗」。
+ */
+export function enableAccessStats(file: string, log?: (m: string) => void): AccessStats {
+  accessStats = new AccessStats(file, undefined, log);
+  return accessStats;
 }
 
 export interface WebServerDeps {
@@ -925,6 +937,7 @@ export function createWebServer(deps: WebServerDeps): Server {
         return;
       }
       const match = matchRoute(method, pathname);
+      if (match) accessStats?.record(match.name);
 
       if (!match) {
         // API routes never fall through to static / SPA — keep their 404 JSON.
