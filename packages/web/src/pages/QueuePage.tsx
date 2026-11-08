@@ -386,7 +386,7 @@ function ActionRow({ action, now, tz, t, onOpenLog, onAck, onRetry }: {
             <div className="queue-row-title">
               <AlertTriangle className="w-3.5 h-3.5 shrink-0" style={{ color: action.severity === "error" ? "var(--error-fg)" : "var(--muted-soft)" }} />
               <span className="font-medium text-ink truncate">{action.title}</span>
-              <span className="font-mono text-[11px] text-muted-soft shrink-0">{sessionTime(action.streamKey, t)}</span>
+              <span className="font-mono text-[11px] text-muted-soft shrink-0">{sessionTime(action.item?.streamKey ?? action.key.replace(/^row-/, ""), t)}</span>
             </div>
             <div className="font-mono text-[11px] text-muted-soft truncate">{platformLabel(action.platform)} · {roomId(action.roomSlug)}</div>
           </div>
@@ -394,7 +394,7 @@ function ActionRow({ action, now, tz, t, onOpenLog, onAck, onRetry }: {
             {retries > 0 && <span className="chip">{action.blocked ? t("queue.flow.rounds", { n: retries }) : t("hub.jobs.retries", { count: retries })}</span>}
           </div>
           <RowActions
-            streamKey={action.streamKey}
+            streamKey={action.item?.streamKey ?? action.key.replace(/^row-/, "")}
             platform={action.platform}
             roomSlug={action.roomSlug}
             needsAck={action.needsAck}
