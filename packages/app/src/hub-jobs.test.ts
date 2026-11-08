@@ -557,6 +557,36 @@ describe("buildQueueView", () => {
     expect(active.map((a) => a.streamKey)).not.toContain("douyin:UPLOAD:2026-10-06");
   });
 
+  it("digestManualError:ssh known-hosts 警告与 ffmpeg 参数串消化为短原因(#561)", () => {
+    const { dbPath, db } = makeSyncDb();
+    const stage = mkdtempSync(join(tmpdir(), "queue-digest-"));
+    const now = T0 + 10_000_000;
+    const put = (k: string, error: string, at: number): void => {
+      db.prepare("INSERT INTO sync_jobs(streamKey,state,winnerWorker,bv,error,fails,updatedAt) VALUES(?,?,?,?,?,0,?)")
+        .run(k, "needs_manual", "local", null, error, at);
+      db.prepare("INSERT INTO sync_job_events(streamKey,state,at) VALUES(?,?,?)").run(k, "pending", at - 1000);
+      db.prepare("INSERT INTO sync_job_events(streamKey,state,at) VALUES(?,?,?)").run(k, "needs_manual", at);
+    };
+    put("douyin:SSH:2026-10-06",
+      "节点侧上传失败: ssh rc=1: Warning: Permanently added 198.51.100.7 (ED25519) to the list of known hosts.", now - 3_000);
+    put("douyin:FFMPEG:2026-10-06",
+      "ffmpeg 失败 (rc=1): --enable-libdrm --enable-libiec61883 --enable-chromaprint", now - 2_000);
+    put("douyin:SSH_ONLY:2026-10-06",
+      "ssh rc=1: Warning: Permanently added 198.51.100.7 (ED25519) to the list of known hosts.", now - 1_000);
+    put("douyin:PLAIN:2026-10-06", "进程重启中断", now - 500);
+    db.close();
+    const { rows } = buildQueueView(dbPath, { now, stageDir: stage, pool: POOL_EMPTY });
+    const errOf = (prefix: string): string => rows.find((r) => r.streamKey.startsWith(prefix))!.error ?? "";
+    // ssh 警告段剥掉,悬空前缀收掉,归纳为连接失败
+    expect(errOf("douyin:SSH:2026-10-06")).toBe("节点侧上传失败:SSH 连接失败(节点首次连线提示,非故障原因)");
+    // 整条只有警告 → 归纳成连接失败
+    expect(errOf("douyin:SSH_ONLY:2026-10-06")).toContain("SSH 连接失败");
+    // ffmpeg 参数串剥掉,只留退出码
+    expect(errOf("douyin:FFMPEG:2026-10-06")).toBe("ffmpeg 失败 (rc=1)");
+    // 非机器痕迹原样透出
+    expect(errOf("douyin:PLAIN:2026-10-06")).toBe("进程重启中断");
+  });
+
   it("manualLimit 只约束真事故:一堆 stage 正常收口不占人工收件箱名额", () => {
     const { dbPath, db } = makeSyncDb();
     const stage = mkdtempSync(join(tmpdir(), "queue-stage7-"));

@@ -678,9 +678,10 @@ export function digestManualError(raw: string | null | undefined): string | null
   const ffmpegArgs = /^(ffmpeg 失败 \(rc=\d+\)):\s*--\S.*$/;
   if (ffmpegArgs.test(text)) return text.replace(ffmpegArgs, "$1");
   if (sshWarn.test(text)) {
-    const rest = text.replace(sshWarn, "").trim();
-    // 警告后还有内容 → 只留内容;整条就是警告 → 归纳成连接失败
-    return rest || "节点侧上传失败:SSH 连接失败(节点首次连线提示,非故障原因)";
+    // 警告段剥掉后剥掉尾部悬空的前缀(「节点侧上传失败:」),归纳成一句连接失败;
+    // 警告后还有真实内容 → 只留内容。
+    const stripped = text.replace(sshWarn, "").trim().replace(/^[^:]{1,20}:\s*$/, "").trim();
+    return stripped || "节点侧上传失败:SSH 连接失败(节点首次连线提示,非故障原因)";
   }
   return null;
 }
@@ -827,10 +828,11 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
       fails: job.fails,
       updatedAt: job.updatedAt,
       // 空 error 的 needs_manual 行补一句兜底说明(见 UNKNOWN_MANUAL_REASON);
+      // 机器痕迹(ssh known-hosts 警告/ffmpeg 参数串)经 digestManualError 消化(#561),
       // 其余行原样透出。
       error: (job.state === "needs_manual" && !(job.error ?? "").trim())
         ? UNKNOWN_MANUAL_REASON
-        : job.error ?? null,
+        : digestManualError(job.error) ?? job.error ?? null,
       bv: job.bv ?? null,
       videoDurationSec: job.videoDurationSec,
       // 收尾时刻 = 末个事件(终态那次的时刻);非终态 null。
