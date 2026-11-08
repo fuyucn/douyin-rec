@@ -38,7 +38,7 @@ const TOGGLE_KEYS = [
   "roomForm.useCookieStream",
   "roomForm.useCookieStreamOnly",
   "dialog.giftNeedCookie",
-  "tasks.giftCookie",
+  // 旧任务列表/任务详情已收敛为 /rooms 重定向,`tasks.giftCookie` 随之退场(2026-11-08 死 key 清理)。
 ];
 
 describe("account toggle wording (#85)", () => {
