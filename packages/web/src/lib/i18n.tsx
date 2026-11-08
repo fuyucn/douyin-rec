@@ -656,7 +656,7 @@ const DICT = {
       },
       health: {
         label: "自动化健康度", weekDone: "场本周自动完成", rate: "成功率",
-        needsYou: "需处理", manualTotal: "历史需人工", window: "统计窗口:最近 {n} 天", doneTotal: " · 台账共 {n} 场",
+        needsYou: "需处理", window: "统计窗口:最近 {n} 天", doneTotal: " · 台账共 {n} 场", ackedNote: " · 另有 {n} 条已核对",
       },
       archive: {
         title: "已存档 · 待上传", note: "合并后不投稿的正常收口,等你手动上传,不是故障",
@@ -1321,7 +1321,7 @@ const DICT = {
       },
       health: {
         label: "Automation health", weekDone: "auto-completed this week", rate: "Success rate",
-        needsYou: "Need action", manualTotal: "Historic manual", window: "Window: last {n} days", doneTotal: " · {n} total in ledger",
+        needsYou: "Need action", window: "Window: last {n} days", doneTotal: " · {n} total in ledger", ackedNote: " · {n} reviewed",
       },
       archive: {
         title: "Archived · awaiting upload", note: "Normal merge-only close-out, waiting for your manual upload — not a fault",
