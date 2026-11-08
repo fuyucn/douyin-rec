@@ -675,8 +675,8 @@ export function digestManualError(raw: string | null | undefined): string | null
   // ssh rc=1 警告:「节点侧上传失败: ssh rc=1: Warning: Permanently added ... to the list of known hosts.<真实原因>」
   const sshWarn = /ssh rc=\d+: Warning: Permanently added \S+ \([^)]*\) to the list of known hosts\.\s*/i;
   // ffmpeg 命令行:「ffmpeg 失败 (rc=1): --enable-libdrm ... 」(参数串无诊断价值)
-  const ffmpegArgs = /^(ffmpeg 失败 \(rc=\d+\)):\s*--\S.*$/;
-  if (ffmpegArgs.test(text)) return text.replace(ffmpegArgs, "$1");
+  const ffmpegArgs = /^(ffmpeg 失败 \(rc=\d+\)):\s*--/;
+  if (ffmpegArgs.test(text)) return text.match(ffmpegArgs)![1];
   if (sshWarn.test(text)) {
     // 警告段剥掉后剥掉尾部悬空的前缀(「节点侧上传失败:」),归纳成一句连接失败;
     // 警告后还有真实内容 → 只留内容。
