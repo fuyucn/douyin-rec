@@ -93,6 +93,28 @@ export function roomStatus(room: Pick<RoomDTO, "processing" | "recording">, task
   return out("waiting");
 }
 
+/**
+ * Start/stop control appearance. `enabled` is only what the button WILL DO; the mark's colour has to
+ * state what IS happening — a room stays enabled while it waits for the stream, sits idle between runs,
+ * or its schedule is paused, and painting all of those as a saturated stop block reads as "recording".
+ * Both screens (list and detail) render from this one decision so they cannot drift.
+ */
+export interface StartStopVisual {
+  /** The click's effect: start or stop a room's recording task. */
+  action: "start" | "stop";
+  /** `live` = genuinely recording (saturated); `idle` = the control is quiet but still truthful. */
+  state: "live" | "idle";
+  filled: boolean;
+  /** Explicit icon colour; `null` leaves the muted button default (an outline mark). */
+  tone: string | null;
+}
+
+export function startStopVisual(enabled: boolean, kind: RoomStatusKind): StartStopVisual {
+  if (!enabled) return { action: "start", state: "idle", filled: false, tone: "var(--success-fg)" };
+  if (kind === "recording") return { action: "stop", state: "live", filled: true, tone: "var(--warning-fg)" };
+  return { action: "stop", state: "idle", filled: false, tone: null };
+}
+
 /** Stable sort by status order; ties keep the server order. */
 export function sortByStatus<T>(items: readonly T[], statusOf: (x: T) => RoomStatus): T[] {
   const rank = (x: T): number => ROOM_STATUS_ORDER.indexOf(statusOf(x).kind);

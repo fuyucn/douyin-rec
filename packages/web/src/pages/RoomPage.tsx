@@ -31,6 +31,7 @@ import { localTimeTooltip } from "../lib/tz";
 import { taskOutputFormatLock } from "../lib/room-form-rules";
 import { configDomains, domainGroups, domainSummary, type DomainDef } from "../lib/room-detail-v2";
 import { roomActionsFor, roomVisibilityFor, versionKeys } from "../lib/room-detail";
+import { startStopVisual } from "../lib/room-status";
 import { zeroDiskView } from "../lib/zero-disk-status";
 import { LiveUploadTimeline } from "../components/LiveUploadTimeline";
 import { deliverText, nodesText, roomName, RoomBadge, statusDetail, useRoomActions, useRoomsData } from "./rooms/shared";
@@ -101,6 +102,8 @@ export function RoomPage(): ReactNode {
   const rec = room.recording;
   const proc = room.processing;
   const enabled = task?.enabled ?? rec?.enabled ?? false;
+  // 与列表页同一判定(`startStopVisual`):颜色只说明「正在录」,enabled 只说按钮将做什么。
+  const mark = startStopVisual(enabled, s.kind);
   const managed = actions.managedOf(room);
   // 受管(`managedBy === "hub"`)= 只读:与角色无关,master 上的受管房间同样没有写操作(plan §3.3)。
   const view = roomActionsFor({ managed, caps: data.caps });
@@ -177,13 +180,13 @@ export function RoomPage(): ReactNode {
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           {view.startStop && rec && !enabled && (
-            <IconButton title={t("tasks.titleStart")} onClick={() => actions.setEnabled(room, true)} disabled={!!task?.stopping}>
-              <Play className="w-4 h-4" style={{ color: "var(--success-fg)" }} fill="currentColor" />
+            <IconButton title={t("tasks.titleStart")} data-state={mark.state} onClick={() => actions.setEnabled(room, true)} disabled={!!task?.stopping}>
+              <Play className="w-4 h-4" style={{ color: mark.tone ?? "var(--success-fg)" }} fill="none" />
             </IconButton>
           )}
           {view.startStop && rec && enabled && (
-            <IconButton title={t("tasks.titleStop")} onClick={() => actions.setEnabled(room, false)}>
-              <Square className="w-4 h-4" style={{ color: "var(--warning-fg)" }} fill="currentColor" />
+            <IconButton title={t("tasks.titleStop")} data-state={mark.state} onClick={() => actions.setEnabled(room, false)}>
+              <Square className="w-4 h-4" style={mark.tone ? { color: mark.tone } : undefined} fill={mark.filled ? "currentColor" : "none"} />
             </IconButton>
           )}
           {view.drain && rec && enabled && live && (

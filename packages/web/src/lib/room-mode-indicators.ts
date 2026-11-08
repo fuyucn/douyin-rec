@@ -20,6 +20,11 @@ export interface RoomIndicator {
   kind: RoomIndicatorKind;
   /** i18n key; this module stays pure and never emits translated text. */
   labelKey: string;
+  /**
+   * Short visible word for the delivery mark. Icon-only marks in the Upload column were unreadable
+   * (three glyphs, no legend), so the mode carries one word and the other two marks stay glyphs.
+   */
+  shortLabelKey?: string;
   /** Extra existing i18n keys composed into the explanation (privacy, spool, paused). */
   detailKeys?: string[];
 }
@@ -62,6 +67,7 @@ export function roomModeIndicators(room: RoomIndicatorSource): RoomIndicator[] {
       id: "delivery",
       kind: "zero-disk",
       labelKey: "room.methodLiveStream",
+      shortLabelKey: "room.mark.live",
       detailKeys: ["room.editor.zeroDiskSpool", ...pausedKeys()],
     });
     addUpload();
@@ -70,6 +76,7 @@ export function roomModeIndicators(room: RoomIndicatorSource): RoomIndicator[] {
       id: "delivery",
       kind: "segment",
       labelKey: "room.methodRolling",
+      shortLabelKey: "room.mark.rolling",
       detailKeys: [...privacyDetailKeys, ...pausedKeys()],
     });
     addUpload();
@@ -80,6 +87,7 @@ export function roomModeIndicators(room: RoomIndicatorSource): RoomIndicator[] {
       id: "delivery",
       kind: nodeRoute ? "node" : steps?.mergeSegments === false ? "split" : "merge",
       labelKey: nodeRoute ? "room.editor.timingNode" : "room.methodUpload",
+      shortLabelKey: nodeRoute ? "room.mark.node" : steps?.mergeSegments === false ? "room.mark.split" : "room.mark.upload",
       detailKeys: [...privacyDetailKeys, ...pausedKeys(),
         ...(nodeRoute ? ["room.editor.timingNodeHint", steps?.mergeSegments === false ? "room.editor.timingNodeSplitHint" : "room.editor.timingNodeMergeHint"] : steps?.mergeSegments === false ? ["roomForm.mergeSplitHint"] : ["roomForm.mergeOneHint"])],
     });
@@ -89,6 +97,7 @@ export function roomModeIndicators(room: RoomIndicatorSource): RoomIndicator[] {
       id: "delivery",
       kind: "archive",
       labelKey: "room.archiveMode",
+      shortLabelKey: "room.mark.archive",
       detailKeys: processingPaused ? ["room.pausedRule"] : undefined,
     });
   }

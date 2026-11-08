@@ -19,6 +19,9 @@
 - [~] **T-157 房间详情页重排（issue [#553](https://github.com/fuyucn/douyin-rec/issues/553) → PR [#556](https://github.com/fuyucn/douyin-rec/pull/556)，已合并 ecff51f2，版本 0.0.319，2026-11-07）** — **待部署验证**。review 打回一轮（P1 cfg CSS 漏移植等）返工后 APPROVE。核对项：详情页首屏、配置四域、图标操作、受管只读。
 - [~] **T-163 Queue 页信息架构重做（已由 PR [#551](https://github.com/fuyucn/douyin-rec/pull/551) 合并，2026-11-07 实际收口）**
   — 与 T-156 的 queue 部分重叠：#552 实现时基于 #551 产物只做视觉走查残余差异（dev/queue-visual-review.html 的 9 条修订）。
+- [~] **T-167 hy4 推迟项收口(①⑤⑧⑨ + F4/F9)（分支 `codex/design-hy4-followup`，2026-11-08）**
+  — **做什么**: 把上一轮 T-166 推迟出去的五项一次做完。**①停止方块语义**: `enabled` 只说明按钮将做什么,颜色改由「正在录」决定——判定收敛成 `startStopVisual()`(room-status.ts),列表页与详情页共用(此前两页各写一份「enabled 就画橙色实心」,正是这轮要消灭的分歧);非录制行=中性描边方块/描边 Play,只有 `roomStatus.kind === "recording"` 才 saturated+fill,并带 `data-state` 供断言。**⑤Stats 卡片**: `Breakdown` 单类别不再画 100% 满条(占比恒为 1),改一行 label · count;`breakdownShape()` 纯函数 + 3 条用例。**⑧表格**: 实测 1024 视口 Stats 9 列表溢出 64px(1038 vs 974)→ 固定列宽合计 940(扩到 974 仍不滚),EN 徽标换行不再被 shell 裁;Rooms 六列表实测 1024 无溢出(仅 nodes 列按设计截断+title),**不改断点**(避免把 1024–1119 降级成紧凑行)。**⑨Upload 列补词**: 三纯图标读不出意思 → 交付方式那枚改为位置上的短词(直传/边传/合并/分P/节点/存档 ×中英),另两枚仍是图标;列预算 156px→内容 124px,实测组宽 98(zh)/110(en)。**F4**: `--r-pill` 全仓未定义、靠 999px 回落 → 4 处调用改用 `--r-btn`,并加「无 fallback 的 `var(--x)` 必须已定义」守卫用例。**F9 死 CSS**: 新增 `scripts/check-css-classes.mjs`(静态引用 + 动态前缀白名单 + 第三方命名空间)接入 CI,按族删除旧 run-tree/metric/attention/live-flow 等 426 行,`index.css` 2545→2119。
+  **验收**: `vitest 4872 全绿`、`check-i18n 1478 key 通过`、`packages/web typecheck + vite build 通过`、`mode-indicators.browser.mjs` PASS(契约有意变更:交付标记从图标改为短词,320px 行无溢出)、1024/1280 六页无横向溢出。
 - [~] **T-166 hy4 评审修复(F1-F12 采纳项)（0.0.331-b89fa233，已部署三节点，2026-11-08）**
   — hy4(group/plan) 读码评审:两类确定性缺陷 + 四类一致性,全部采纳并上线。
   **F1** 队列页头数字打两遍(<b>{n}</b> 与文案 {n} 同值,实测「00 running」)——删 b 包装,CSS 删 .queue-overview-count b,回归测试反转断言。
@@ -26,7 +29,7 @@
   **F5/F6** 禁用态透明度三档统一 0.5;主按钮禁用掉回中性(修好全部弹窗禁用键);节点卡 disabled 点从 hairline 改 muted。
   **F8** 5 处 10.5px 清完。**F10** 详情页历史全 done(≥6)折叠摘要行+最近日期锚;节点队列全零折叠「N 个执行器全部空闲」。**F12** 数据空值统一 ASCII「-」。
   **部署发现**:VPS web/dist 是 0.0.327 时代的旧产物(biliup bundle 只带 APP_VERSION 不带新 UI)——已 scp 新 web/dist 原子替换,VPS1/VPS2 UI 现为 0.0.331。
-  **推迟单独开票**:①停止方块语义(enabled≠recording)、⑤Stats breakdown 纵向留白、⑧1024-1100 表格挤、⑨Upload 列补词、F4 --r-pill 未定义、F9 死 CSS 80 行。
+  **推迟单独开票**:①停止方块语义(enabled≠recording)、⑤Stats breakdown 纵向留白、⑧1024-1100 表格挤、⑨Upload 列补词、F4 --r-pill 未定义、F9 死 CSS 80 行。→ **已由 T-167 收口(2026-11-08)**
   **验收**:typecheck/test 4870 全绿、check-i18n 绿、线上实测 F1「0 running」/F2 marginBottom 6px/F10 两处折叠(凌晴页「Last 20 runs all succeeded」)。
 
 - [~] **T-165 全局 design 统一 pass(用户反馈「每个页面每个组件风格不统一」+ edit 等表单也统一)**

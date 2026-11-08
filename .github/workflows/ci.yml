@@ -50,6 +50,9 @@ jobs:
       - name: "Web UI install + typecheck + build"
         run: cd packages/web && pnpm install --frozen-lockfile && pnpm typecheck && pnpm build
 
+      - name: "Web CSS: no unreferenced classes"
+        run: node scripts/check-css-classes.mjs
+
       - name: "Install Chromium for browser regression"
         run: pnpm exec playwright install --with-deps chromium
 

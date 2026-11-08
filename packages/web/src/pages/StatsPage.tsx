@@ -9,6 +9,7 @@ import { Activity, BarChart3, Clock, FolderOpen, Server, Users } from "lucide-re
 import { api, type StatsDTO } from "../api/client";
 import { Button } from "../components/Button";
 import { useT } from "../lib/i18n";
+import { breakdownShape } from "../lib/stats-breakdown";
 
 const DOW_KEYS = ["stats.dow.mon", "stats.dow.tue", "stats.dow.wed", "stats.dow.thu", "stats.dow.fri", "stats.dow.sat", "stats.dow.sun"] as const;
 /** 热力图表头与数据行共用同一列模板,保证小时列对齐;星期列固定宽,格子有最小可读尺寸。 */
@@ -185,18 +186,20 @@ export function StatsPage(): ReactNode {
       <section className="table-shell">
         <SectionHead title={t("stats.roomsTitle")} />
         <div className="overflow-x-auto">
-          <table className="tasks min-w-[960px]">
+          {/* 固定列宽:9 列在 1024 视口会挤出 64px 横向滚动(实测 1038 vs 974)。固定布局把列宽压到
+              合计 940px,窄屏不再出现「只能看到前 8.2 列」的横向漂移,被截断的单元格都带 title。 */}
+          <table className="tasks min-w-[940px]" style={{ tableLayout: "fixed" }}>
             <thead>
               <tr>
-                <th>{t("stats.col.anchor")}</th>
-                <th>{t("stats.col.mode")}</th>
-                <th>{t("stats.col.format")}</th>
-                <th className="text-right">{t("stats.col.sessions")}</th>
-                <th className="text-right">{t("stats.col.totalHours")}</th>
-                <th className="text-right">{t("stats.col.perDayHours")}</th>
-                <th className="text-right">{t("stats.col.avgMedian")}</th>
-                <th className="text-right">{t("stats.col.typicalStart")}</th>
-                <th>{t("stats.col.nodes")}</th>
+                <th className="w-[192px]">{t("stats.col.anchor")}</th>
+                <th className="w-[112px]">{t("stats.col.mode")}</th>
+                <th className="w-[92px]">{t("stats.col.format")}</th>
+                <th className="w-[72px] text-right">{t("stats.col.sessions")}</th>
+                <th className="w-[84px] text-right">{t("stats.col.totalHours")}</th>
+                <th className="w-[88px] text-right">{t("stats.col.perDayHours")}</th>
+                <th className="w-[112px] text-right">{t("stats.col.avgMedian")}</th>
+                <th className="w-[88px] text-right">{t("stats.col.typicalStart")}</th>
+                <th className="w-[120px]">{t("stats.col.nodes")}</th>
               </tr>
             </thead>
             <tbody>
@@ -204,14 +207,15 @@ export function StatsPage(): ReactNode {
                 const nodes = r.nodes.map((n: { name: string | null; workerId: string; sessions: number }) => `${n.name ?? n.workerId}×${n.sessions}`).join(", ");
                 return (
                   <tr key={r.key}>
-                    <td className="max-w-[240px]">
+                    <td className="max-w-[192px]">
                       <div className="font-medium text-ink truncate" title={r.anchorName ?? r.roomSlug}>{r.anchorName ?? r.roomSlug}</div>
                       <div className="mt-1 flex items-center gap-1.5 min-w-0">
                         <span className="badge badge-muted shrink-0">{r.platform}</span>
                         <span className="font-mono text-xs text-muted truncate">{r.roomSlug}</span>
                       </div>
                     </td>
-                    <td><span className="badge badge-muted text-[11px]">{uploadModeLabel(r.uploadMode, t)}</span></td>
+                    {/* EN 标签比中文长("Rolling upload" 111px vs "边录边传"):固定列宽下换行,别让 shell 裁掉。 */}
+                    <td><span className="badge badge-muted text-[11px] max-w-full whitespace-normal leading-[1.35]">{uploadModeLabel(r.uploadMode, t)}</span></td>
                     <td className="font-mono text-[12px] text-muted">{r.outputFormat || "-"}</td>
                     <Num>{r.sessions}</Num>
                     <Num>{r.totalHours}</Num>
@@ -258,23 +262,31 @@ function Metric({ icon, label, value, sub, title, mono }: { icon: ReactNode; lab
 }
 
 function Breakdown({ title, items }: { title: string; items: { label: string; count: number }[] }): ReactNode {
+  const shape = breakdownShape(items);
   const total = items.reduce((a, b) => a + b.count, 0) || 1;
   return (
     <div className="card px-5 py-4 min-w-0">
       <div className="section-label mb-3">{title}</div>
-      {items.length === 0 ? <div className="text-[12px] text-muted-soft">—</div> : (
-        <div className="grid grid-cols-[88px_minmax(0,1fr)_36px] items-center gap-x-3 gap-y-2.5">
-          {items.map((it) => (
-            <Fragment key={it.label}>
-              <span className="text-[12.5px] text-body truncate" title={it.label}>{it.label}</span>
-              <div className="h-2 rounded-sm bg-[var(--surface-soft)] overflow-hidden">
-                <div className="h-full rounded-sm bg-[var(--accent)]" style={{ width: `${(it.count / total) * 100}%` }} />
-              </div>
-              <span className="font-mono text-[12px] text-ink tabular-nums text-right">{it.count}</span>
-            </Fragment>
-          ))}
-        </div>
-      )}
+      {shape.kind === "empty" ? <div className="text-[12px] text-muted-soft">—</div>
+        : shape.kind === "single" ? (
+          // 单个类别:占比恒为 100%,满条不携带任何信息 → 一行 label · count。
+          <div className="flex items-baseline justify-between gap-3 min-w-0">
+            <span className="text-[12.5px] text-body truncate" title={shape.item.label}>{shape.item.label}</span>
+            <span className="font-mono text-[12px] text-ink tabular-nums shrink-0">{shape.item.count}</span>
+          </div>
+        ) : (
+          <div className="grid grid-cols-[88px_minmax(0,1fr)_36px] items-center gap-x-3 gap-y-2.5">
+            {shape.items.map((it) => (
+              <Fragment key={it.label}>
+                <span className="text-[12.5px] text-body truncate" title={it.label}>{it.label}</span>
+                <div className="h-2 rounded-sm bg-[var(--surface-soft)] overflow-hidden">
+                  <div className="h-full rounded-sm bg-[var(--accent)]" style={{ width: `${(it.count / total) * 100}%` }} />
+                </div>
+                <span className="font-mono text-[12px] text-ink tabular-nums text-right">{it.count}</span>
+              </Fragment>
+            ))}
+          </div>
+        )}
     </div>
   );
 }

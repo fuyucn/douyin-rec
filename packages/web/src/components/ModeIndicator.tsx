@@ -22,10 +22,12 @@ function Indicator({ data, open, onOpenChange }: {
 }): ReactNode {
   const t = useT();
   const label = t(data.labelKey);
+  const word = data.shortLabelKey ? t(data.shortLabelKey) : null;
   const details = (data.detailKeys ?? []).map((key) => t(key));
   const accessibleLabel = [label, ...details].join(" · ");
   const pointerFocus = useRef(false);
-  const tone = data.id === "delivery" && data.kind !== "archive" ? "var(--status-fg)" : undefined;
+  // 词本身读得出意思,不再给它上 accent 色(蓝只留给主操作);图标保留原来的状态色。
+  const tone = !word && data.id === "delivery" && data.kind !== "archive" ? "var(--status-fg)" : undefined;
 
   return (
     <Popover.Root open={open} onOpenChange={onOpenChange}>
@@ -34,7 +36,7 @@ function Indicator({ data, open, onOpenChange }: {
         openOnHover
         delay={80}
         aria-label={accessibleLabel}
-        className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted transition-colors hover:bg-surface hover:text-ink"
+        className={`inline-flex h-8 shrink-0 items-center justify-center gap-1 rounded-md whitespace-nowrap text-muted transition-colors hover:bg-surface hover:text-ink ${word ? "px-1" : "w-8"}`}
         style={tone ? { color: tone } : undefined}
         onPointerDown={() => { pointerFocus.current = true; }}
         onPointerCancel={() => { pointerFocus.current = false; }}
@@ -47,7 +49,7 @@ function Indicator({ data, open, onOpenChange }: {
           onOpenChange(true);
         }}
       >
-        <ModeLogo kind={data.kind} className="mode-chip-icon" />
+        {word ? <span className="text-[11px] font-medium leading-none">{word}</span> : <ModeLogo kind={data.kind} className="mode-chip-icon" />}
       </Popover.Trigger>
       <Popover.Portal>
         <Popover.Positioner sideOffset={6} className="tooltip-positioner">
@@ -74,7 +76,7 @@ export function ModeIndicators({ room }: { room: Pick<RoomDTO, "recording" | "pr
   if (indicators.length === 0) return null;
 
   return (
-    <span className="inline-flex items-center gap-0.5">
+    <span className="mode-indicators inline-flex items-center gap-0.5">
       {indicators.map((data) => (
         <Indicator
           key={data.id}

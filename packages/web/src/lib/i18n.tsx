@@ -239,6 +239,8 @@ const DICT = {
       run: { pending: "排队中", settling: "等收播", syncing: "拉取录像", merging: "合并 / 烧录", uploading: "上传中", retrying: "重跑中", done: "已完成", failed: "失败", needs_manual: "需人工处理" },
       allDay: "全天", allNodes: "全部节点", noTask: "未绑定录制任务", lastRun: "上一场 {state}", lastBv: "上一场已投稿",
       archiveMode: "存档", uploadMode: "投稿 B站", privateShort: "仅自己可见", publicShort: "公开", pausedRule: "房间已暂停",
+      // 列表图标列的短词(交付方式):图标本身语义不透明,这一列必须能读出一个词。
+      mark: { live: "直传", rolling: "边传", upload: "合并", split: "分P", node: "节点", archive: "存档" },
       alertCount_one: "{count} 个房间需要处理", alertCount_other: "{count} 个房间需要处理", view: "查看",
       colLastDeliver: "上次交付", colUploadMethod: "上传方式", colRecordingMethod: "录制方式",
       methodLiveStream: "直播直传", methodRolling: "边录边传", methodUpload: "收播后上传", methodStage: "存档", methodPlain: "普通", methodPrivate: "仅自己可见", methodPublic: "公开",
@@ -907,6 +909,7 @@ const DICT = {
       run: { pending: "Queued", settling: "Settling", syncing: "Pulling", merging: "Merge / burn", uploading: "Uploading", retrying: "Retrying", done: "Done", failed: "Failed", needs_manual: "Needs manual" },
       allDay: "All day", allNodes: "All nodes", noTask: "No recording task", lastRun: "Last run {state}", lastBv: "Last run uploaded",
       archiveMode: "Archive", uploadMode: "Upload to Bilibili", privateShort: "Private", publicShort: "Public", pausedRule: "Room paused",
+      mark: { live: "Live", rolling: "Roll", upload: "Merge", split: "Split", node: "Node", archive: "Archive" },
       alertCount_one: "{count} room needs action", alertCount_other: "{count} rooms need action", view: "View",
       colLastDeliver: "Last delivery", colUploadMethod: "Upload", colRecordingMethod: "Recording method",
       methodLiveStream: "Live stream", methodRolling: "Rolling", methodUpload: "After close", methodStage: "Archive", methodPlain: "Plain", methodPrivate: "Private", methodPublic: "Public",

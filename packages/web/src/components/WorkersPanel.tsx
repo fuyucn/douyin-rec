@@ -205,7 +205,7 @@ export function WorkersPanel({
                 {w.capabilities && w.capabilities.length > 0 && (
                   <div className="flex flex-wrap gap-1 mt-1">
                     {w.capabilities.map((c) => (
-                      <span key={c} className="font-mono text-[11px] px-1.5 py-0.5 border border-hairline text-muted-soft" style={{ borderRadius: "var(--r-pill, 999px)" }}>{c}</span>
+                      <span key={c} className="font-mono text-[11px] px-1.5 py-0.5 border border-hairline text-muted-soft" style={{ borderRadius: "var(--r-btn)" }}>{c}</span>
                     ))}
                   </div>
                 )}

@@ -142,11 +142,13 @@ async function assertMobileRoomRow(page) {
   });
   await row.getByText("Studio node", { exact: true }).waitFor({ state: "visible" });
   await row.getByText(/20:00.*02:00/).waitFor({ state: "visible" });
-  const controls = row.getByRole("button").filter({ has: page.locator("svg use") });
+  // 契约有意变更(hy4 F⑨):交付方式那枚是「位置上的一个短词」,不再是图标;另外两枚仍是图标。
+  const controls = row.locator(".mode-indicators button");
   assert.equal(await controls.count(), 3);
+  assert.equal(await controls.filter({ has: page.locator("svg use") }).count(), 2);
   const geometry = await row.evaluate((element) => {
     const rowRect = element.getBoundingClientRect();
-    const items = [...element.querySelectorAll("button:has(svg use)")];
+    const items = [...element.querySelectorAll(".mode-indicators button")];
     const scheduleElement = [...element.querySelectorAll("span")].find((span) => /20:00.*02:00/.test(span.textContent ?? ""));
     const nodeElement = [...element.querySelectorAll("span")].find((span) => span.textContent === "Studio node");
     return {
@@ -187,9 +189,13 @@ try {
   await assertAllMarkGeometry(desktop);
   const buttons = desktop.locator("#indicators button");
   assert.equal(await buttons.count(), 3);
-  assert.equal(await desktop.locator("#indicators").textContent(), "");
   const names = await buttons.evaluateAll(elements => elements.map(element => element.getAttribute("aria-label")));
   assert(names.every(name => name && !name.includes("room.")));
+  // 契约有意变更(hy4 F⑨):交付方式那枚从纯图标改为「图标位置上的一个短词」,
+  // 三个纯图标在 Upload 列里读不出意思。图标仍然占据同一位置,故按钮数仍是 3。
+  const indicatorText = (await desktop.locator("#indicators").textContent())?.trim() ?? "";
+  assert(indicatorText.length > 0, "delivery mark must show a readable word");
+  assert(indicatorText.length <= 8, `delivery word must stay short, got "${indicatorText}"`);
   await buttons.first().hover();
   await desktop.getByRole("dialog").waitFor({ state: "visible" });
   await desktop.locator("#outside").hover();

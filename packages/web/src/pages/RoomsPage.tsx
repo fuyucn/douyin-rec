@@ -23,7 +23,7 @@ import { isUnassignedHidden } from "../lib/assigned";
 import { useTicker } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { platformLabel, roomDisplayId, scheduleText } from "../lib/labels";
-import { sortByStatus, type RoomStatusKind } from "../lib/room-status";
+import { sortByStatus, startStopVisual, type RoomStatusKind } from "../lib/room-status";
 import { DeliveryCell, deliverText, nodesText, roomName, RoomBadge, statusDetail, useRoomActions, useRoomsData } from "./rooms/shared";
 
 type Filter = "all" | Extract<RoomStatusKind, "recording" | "processing" | "attention">;
@@ -293,6 +293,8 @@ function RoomActions({ room, data, actions }: {
   const managed = actions.managedOf(room);
   const enabled = task?.enabled ?? room.recording?.enabled ?? false;
   const taskId = room.recording?.taskId ?? null;
+  // 颜色说「在发生什么」,不是「按钮将做什么」:暂停/等待/离线的房间不带饱和停止块。
+  const mark = startStopVisual(enabled, data.statusOf(room).kind);
   if (managed) {
     return (
       <div className="inline-flex items-center gap-1.5 justify-end">
@@ -305,13 +307,13 @@ function RoomActions({ room, data, actions }: {
   return (
     <div className="inline-flex items-center gap-1.5 justify-end">
       {task ? (
-        enabled ? (
-          <IconButton title={t("tasks.titleStop")} onClick={() => actions.setEnabled(room, false)}>
-            <Square className="w-4 h-4" style={{ color: "var(--warning-fg)" }} fill="currentColor" />
+        mark.action === "stop" ? (
+          <IconButton title={t("tasks.titleStop")} data-state={mark.state} onClick={() => actions.setEnabled(room, false)}>
+            <Square className="w-4 h-4" style={mark.tone ? { color: mark.tone } : undefined} fill={mark.filled ? "currentColor" : "none"} />
           </IconButton>
         ) : (
-          <IconButton title={t("tasks.titleStart")} onClick={() => actions.setEnabled(room, true)}>
-            <Play className="w-4 h-4" style={{ color: "var(--success-fg)" }} fill="currentColor" />
+          <IconButton title={t("tasks.titleStart")} data-state={mark.state} onClick={() => actions.setEnabled(room, true)}>
+            <Play className="w-4 h-4" style={{ color: mark.tone ?? "var(--success-fg)" }} fill="none" />
           </IconButton>
         )
       ) : null}

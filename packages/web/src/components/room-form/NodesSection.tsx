@@ -53,7 +53,7 @@ export function NodesSection(p: Props): ReactNode {
           <div className="flex flex-wrap gap-2">
             {caps.map((c) => (
               <label key={c} className="inline-flex items-center gap-1.5 text-xs border border-hairline px-2 py-1 cursor-pointer"
-                     style={{ borderRadius: "var(--r-pill, 999px)" }}>
+                     style={{ borderRadius: "var(--r-btn)" }}>
                 <input type="checkbox" checked={p.requires.includes(c)} onChange={() => p.onToggleRequire(c)} />
                 <span className="font-mono text-muted-soft">{c}</span>
               </label>
