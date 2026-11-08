@@ -633,7 +633,7 @@ const DICT = {
       blocked: { by: "被节点 {nodes} 挡住", since: "已 {min} 分钟", rounds: "连续 {n} / {max} 轮,达到后转待人工", roundsNoLimit: "连续 {n} 轮(未设转人工阈值)" },
       nodes: { title: "节点", offline: "节点不可达", drift: "节点 v{v},主控是 v{m}", recording: "在录 {n} 个房间", unavailable: "{n} 个房间状态未知", disk: "磁盘剩余 {gb} GB", rolling: "边录边传 {n} 场", locked: "未确认占盘 {size}", synced: "任务配置 {ago}前同步", syncLag: "任务配置期望 v{expected},节点停在 v{applied}", state: { recording: "录制中", waiting: "等待开播", unavailable: "状态未知", disabled: "已停用" }, disabledCount: "另有 {n} 个已停用房间" },
       delivering: { recording: "录制中", ended: "已收播", pending: "传输中", unknown: "待人工核对", noBv: "尚未建稿", progress: "已确认 {c} / {n} 段", updated: "{s} 秒前核对", locked: "未确认占盘 {size}" },
-      summary: { running: "处理中 {n}", upload: "待上传 {n}", attention: "需处理 {n}", stopped: "已停止 {n}", done: "已完成 {n}", manualMore: "待人工共 {total} 条,仅列出最新 {shown} 条", acked: "已核对 {n}" },
+      summary: { acked: "已核对 {n} 条" },
       ack: { action: "知道了", done: "知道了,已从列表移除(台账留痕)" },
       col: { room: "直播间 / 场次", status: "状态", flow: "进度", enqueued: "时间", videoDuration: "时长 {time}", actions: "操作" },
       filter: {
@@ -1298,7 +1298,7 @@ const DICT = {
       blocked: { by: "Blocked by node {nodes}", since: "for {min} min", rounds: "{n} / {max} rounds; becomes manual at the limit", roundsNoLimit: "{n} rounds (no manual threshold)" },
       nodes: { title: "Nodes", offline: "Node unreachable", drift: "Node v{v}, master v{m}", recording: "Recording {n} rooms", unavailable: "{n} rooms status unknown", disk: "Disk free {gb} GB", rolling: "Rolling upload {n}", locked: "{size} unconfirmed on disk", synced: "Task config synced {ago} ago", syncLag: "Task config expected v{expected}, node stuck at v{applied}", state: { recording: "Recording", waiting: "Waiting", unavailable: "Unknown", disabled: "Disabled" }, disabledCount: "{n} more disabled rooms" },
       delivering: { recording: "Recording", ended: "Ended", pending: "Uploading", unknown: "Needs manual check", noBv: "No submission yet", progress: "{c} / {n} segments confirmed", updated: "checked {s}s ago", locked: "{size} unconfirmed on disk" },
-      summary: { running: "{n} running", upload: "{n} to upload", attention: "{n} need action", stopped: "{n} stopped", done: "{n} done", manualMore: "{total} need action in total; showing the newest {shown}", acked: "{n} reviewed" },
+      summary: { acked: "{n} reviewed" },
       ack: { action: "Got it", done: "Got it — removed from the list (kept in ledger)" },
       col: { room: "Room / session", status: "Status", flow: "Progress", enqueued: "Time", videoDuration: "{time}", actions: "Actions" },
       filter: {
