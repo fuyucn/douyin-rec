@@ -19,6 +19,13 @@
 - [~] **T-157 房间详情页重排（issue [#553](https://github.com/fuyucn/douyin-rec/issues/553) → PR [#556](https://github.com/fuyucn/douyin-rec/pull/556)，已合并 ecff51f2，版本 0.0.319，2026-11-07）** — **待部署验证**。review 打回一轮（P1 cfg CSS 漏移植等）返工后 APPROVE。核对项：详情页首屏、配置四域、图标操作、受管只读。
 - [~] **T-163 Queue 页信息架构重做（已由 PR [#551](https://github.com/fuyucn/douyin-rec/pull/551) 合并，2026-11-07 实际收口）**
   — 与 T-156 的 queue 部分重叠：#552 实现时基于 #551 产物只做视觉走查残余差异（dev/queue-visual-review.html 的 9 条修订）。
+- [~] **T-165 全局 design 统一 pass(用户反馈「每个页面每个组件风格不统一」+ edit 等表单也统一)**
+  — 顾问卡点 1 过审(reviewer group/plan):四轮页面迭代留下代差;两 PR 落地。
+  **PR1(0.0.328-6965ca89)**:标签声部唯一插入点(field-label 双定义合并——2371 行无作用域覆盖 386 行的 font-size/margin 是「标签贴输入框」根因;telemetry/metric/section/form/field 五份重复声明合一);散文标签去 uppercase(CSS 14 处 + tsx 4 处,机器 token 大写交给数据);字号下限 10px→11px(CSS 6 + tsx 7,rt-pill/tr-pill height→min-height 防溢出);H1 统一 .page-h1 28→32px(7 处)。
+  **PR2(0.0.329-ae426e70 + 0.0.330-b64ac4e6)**:队列页头三层收敛为一行(删重复 needsYou 计数、counts.done;7 天健康收行尾注脚;「已核对 N」保留;死键清理 queue.health.*/queue.flow.count.done/queue.summary.*)。
+  **验收**:typecheck/test 4870 全绿、check-i18n 绿、5 页 + 表单弹窗截图核对(句首大写/32px H1/单行页头);master 已部署 0.0.330-881618。
+  **残余**:Stats 页 OUTPUT FORMAT 条留白与 Node load 表格留待后续;VPS1/VPS2 仍 0.0.321(UI 改动不急)。
+
 - [~] **T-126 worker 按 Release 部署:main 为 stable,开发分支按需 prerelease（issue [#392](https://github.com/fuyucn/douyin-rec/issues/392)）**（2026-10-29）
   — worker 升级靠手动换文件,流程不在仓库里;已有安装脚本和发布流程但从未发过 Release。
   **做什么**: 发布流程按 tag 所指提交是否在 main 区分正式版/prerelease,且不覆盖已有 Release;安装脚本升级前检查无录制/上传、升级后核对版本;文档与 AGENTS 写明流程。
