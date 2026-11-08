@@ -621,6 +621,23 @@ export interface HubQueueDTO {
   manualTotal?: number;
   /** needs_manual runs already marked as reviewed (kept in history, left out of `active`). Older master: absent. */
   manualAcked?: number;
+  /**
+   * 7 天自动化健康度(#561):窗口内 done/failed/needs_manual 计数与成功率。
+   * 队列页健康带的单一数据源——「第一眼证明系统在正常工作」。旧 master 缺省。
+   */
+  stats?: HubQueueStats;
+  /** 台账 done 总数(全时间);「自动完成」组的「查看全部」入口与计数。旧 master 缺省。 */
+  doneTotal?: number;
+}
+
+/** 7 天滚动窗口的自动化统计(#561)。 */
+export interface HubQueueStats {
+  windowDays: number;
+  done: number;
+  failed: number;
+  needsManual: number;
+  /** done ÷ (done+failed+needs_manual),0–1;分母 0 = null(无数据,不显示)。 */
+  successRate: number | null;
 }
 
 /** POST /api/hub/rules + PATCH /api/hub/rules/:roomSlug 的请求体。 */

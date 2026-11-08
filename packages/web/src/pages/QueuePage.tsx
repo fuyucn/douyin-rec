@@ -625,8 +625,19 @@ export function QueuePage(): ReactNode {
         </div>
       </div>
       <HubStreamBanner handle={stream} />
+      {/* 健康带(#561):第一眼证明系统在正常工作——7 天台账统计,不是故障清单 */}
+      {data?.stats && (
+        <div className="queue-health" aria-label={t("queue.health.label")}>
+          <span className="queue-health-big"><b className="num">{data.stats.done}</b>{t("queue.health.weekDone")}</span>
+          <span className="queue-health-item"><span className="dot ok"></span>{t("queue.health.rate")} <b className="num">{data.stats.successRate == null ? "—" : Math.round(data.stats.successRate * 100) + "%"}</b></span>
+          <span className="queue-health-item e"><span className="dot err"></span>{t("queue.health.needsYou")} <b className="num">{flow.actions.length}</b></span>
+          {(data.manualTotal ?? 0) > 0 && <span className="queue-health-item w"><span className="dot warn"></span>{t("queue.health.manualTotal")} <b className="num">{data.manualTotal}</b></span>}
+          <span className="queue-health-rate">{t("queue.health.window", { n: data.stats.windowDays })}{(data.doneTotal ?? 0) > 0 ? t("queue.health.doneTotal", { n: data.doneTotal }) : ""}</span>
+        </div>
+      )}
       <OverviewBand counts={flow.counts} nodes={fleetNodes} healthProbe={fleetHealthProbe} directoryLoaded={fleetWorkersLoaded} stale={stale} t={t} />
-      {data && <LivePool pool={data.pool} />}
+      {/* 资源池:全零不渲染(#561) */}
+      {data && (data.pool.cpu.active > 0 || data.pool.cpu.queued > 0 || data.pool.upload.active > 0 || data.pool.upload.queued > 0 || data.pool.upload.cooldownUntil > Date.now()) && <LivePool pool={data.pool} />}
       {!filtered && manualTotal > manualShown && (
         <div className="queue-manual-more" style={{ color: "var(--warning-fg)" }}>{t("queue.summary.manualMore", { total: manualTotal, shown: manualShown })}</div>
       )}
@@ -651,6 +662,26 @@ export function QueuePage(): ReactNode {
               <ActionRow key={action.key} action={action} now={now} tz={tz} t={t} onOpenLog={setLogKey} onAck={openAck} onRetry={requestRetry} />
             ))}
           </QueueGroup>
+          {/* 已存档·待上传(#561):stage 正常收口,不是故障,中性独立组,默认收起 */}
+          {flow.waitingUpload.length > 0 && (
+            <details className="queue-archive">
+              <summary className="queue-archive-head">
+                <span className="dot idle" />
+                <span className="queue-group-title">{t("queue.archive.title")}</span>
+                <span className="queue-group-count num">{flow.waitingUpload.length}</span>
+                <span className="queue-group-hint">{t("queue.archive.note")}</span>
+              </summary>
+              <div className="queue-archive-body">
+                {flow.waitingUpload.map((item) => (
+                  <div key={item.streamKey} className="queue-archive-row">
+                    <span className="queue-archive-name">{item.anchorName ?? item.roomSlug}</span>
+                    <span className="queue-archive-meta">{t("queue.archive.rowNote")}</span>
+                    <span className="queue-archive-time num">{item.finishedAt ? new Date(item.finishedAt).toISOString().slice(5, 10) : ""}</span>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
           <QueueGroup
             id="running"
             count={flow.counts.running}
@@ -668,7 +699,7 @@ export function QueuePage(): ReactNode {
           <QueueGroup id="settling" count={flow.settling.length} empty={flow.settling.length === 0} emptyKey={groupEmptyKey("settling")} t={t}>
             {flow.settling.map((row) => renderFlowRow(row, "settling"))}
           </QueueGroup>
-          <QueueGroup id="done" count={flow.done.length} empty={visibleDone.length === 0} emptyKey={groupEmptyKey("done")} t={t} defaultOpen={false} open={doneOpen} onToggle={() => setDoneOpen((v) => !v)} footer={doneFooter}>
+          <QueueGroup id="done" count={data?.doneTotal ?? flow.done.length} empty={visibleDone.length === 0} emptyKey={groupEmptyKey("done")} t={t} defaultOpen={false} open={doneOpen} onToggle={() => setDoneOpen((v) => !v)} footer={doneFooter}>
             {visibleDone.map((row) => renderFlowRow(row, "done"))}
           </QueueGroup>
           <NodeQueueCard />

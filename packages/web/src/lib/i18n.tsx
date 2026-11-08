@@ -654,6 +654,14 @@ const DICT = {
         unavailable: "无法读取本机队列", empty: "暂无处理任务",
         unknownKind: "其他处理类型",
       },
+      health: {
+        label: "自动化健康度", weekDone: "场本周自动完成", rate: "成功率",
+        needsYou: "需处理", manualTotal: "历史需人工", window: "统计窗口:最近 {n} 天", doneTotal: " · 台账共 {n} 场",
+      },
+      archive: {
+        title: "已存档 · 待上传", note: "合并后不投稿的正常收口,等你手动上传,不是故障",
+        rowNote: "已合成 · 等待手动上传",
+      },
       flow: {
         subtitle: "一条任务流：先处理需要人的，再看在跑、排队、等收播和最近完成。",
         stream: "任务队列", overview: "队列概览", steps: "步骤流水线",
@@ -1310,6 +1318,14 @@ const DICT = {
         leaseAlive: "Alive", leaseDead: "No live lease", hostRunning: "Runner active", hostStopped: "Runner not active",
         unavailable: "Cannot read the local queue", empty: "No processing jobs",
         unknownKind: "Other processor",
+      },
+      health: {
+        label: "Automation health", weekDone: "auto-completed this week", rate: "Success rate",
+        needsYou: "Need action", manualTotal: "Historic manual", window: "Window: last {n} days", doneTotal: " · {n} total in ledger",
+      },
+      archive: {
+        title: "Archived · awaiting upload", note: "Normal merge-only close-out, waiting for your manual upload — not a fault",
+        rowNote: "Merged · awaiting manual upload",
       },
       flow: {
         subtitle: "One task stream: action first, then running, queued, settling, and recent results.",

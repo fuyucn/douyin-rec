@@ -37,7 +37,8 @@ function renderedRowCount(flow: QueueFlowGroups): number {
     + flow.running.length
     + flow.queued.length
     + flow.settling.length
-    + flow.done.length;
+    + flow.done.length
+    + flow.waitingUpload.length;
 }
 
 describe("queue flow steps", () => {
@@ -87,8 +88,10 @@ describe("queue flow groups", () => {
       row({ streamKey: "g", phase: "waiting_upload" }),
       row({ streamKey: "i", phase: "stopped", error: "用户停止" }),
     ], [], 0, 1000, 1000);
-    expect(flow.counts).toEqual({ running: 1, queued: 2, actions: 4, done: 1, settling: 1 });
-    expect(flow.actions.map((a) => a.key)).toEqual(["row-a", "row-f", "row-g", "row-i"]);
+    expect(flow.counts).toEqual({ running: 1, queued: 2, actions: 3, done: 1, settling: 1 });
+    // #561: waiting_upload(stage 正常收口)不是故障,从 actions 拆到 waitingUpload
+    expect(flow.waitingUpload.map((r) => r.streamKey)).toEqual(["g"]);
+    expect(flow.actions.map((a) => a.key)).toEqual(["row-a", "row-f", "row-i"]);
     expect(flow.queued.map((r) => r.key)).toEqual(["d", "c"]);
     expect(flow.running[0]?.elapsedSec).toBe(83);
     expect(flow.running[0]?.etaSec).toBe(120);
@@ -105,9 +108,10 @@ describe("queue flow groups", () => {
     }));
     const flow = buildQueueFlow(rows, [], 0, 1000, 1000);
     expect(renderedRowCount(flow)).toBe(QUEUE_PHASES.length);
-    expect(flow.counts.running + flow.counts.queued + flow.counts.actions + flow.counts.done + flow.counts.settling)
+    expect(flow.counts.running + flow.counts.queued + flow.counts.actions + flow.counts.done + flow.counts.settling + flow.waitingUpload.length)
       .toBe(QUEUE_PHASES.length);
-    expect(flow.counts).toEqual({ running: 1, queued: 1, actions: 4, done: 1, settling: 1 });
+    expect(flow.counts).toEqual({ running: 1, queued: 1, actions: 3, done: 1, settling: 1 });
+    expect(flow.waitingUpload).toHaveLength(1);
   });
 
   it("counts blocked broadcasts as actions with a reason and preserves their workers", () => {
@@ -158,10 +162,13 @@ describe("queue flow groups", () => {
 describe("attention reasons", () => {
   const reasonOf = (item: QueueItemDTO): string =>
     buildQueueFlow([item], [], 0, 0, 0).actions[0]!.reason;
+  const uploadRowOf = (item: QueueItemDTO): QueueItemDTO =>
+    buildQueueFlow([item], [], 0, 0, 0).waitingUpload[0]!;
 
   it("localizes the stage-ready and stopped sentinels instead of leaking the raw ledger text", () => {
-    expect(reasonOf(row({ streamKey: "s", phase: "waiting_upload", error: STAGE_READY }))).toBe("queue.flow.reason.stageReady");
-    expect(reasonOf(row({ streamKey: "s2", phase: "waiting_upload", error: "用户停止" }))).toBe("queue.flow.reason.stageReady");
+    // #561: waiting_upload 不再进 actions(不是故障),进 waitingUpload 组;error 原样透出由 UI 渲染
+    expect(uploadRowOf(row({ streamKey: "s", phase: "waiting_upload", error: STAGE_READY })).error).toBe(STAGE_READY);
+    expect(uploadRowOf(row({ streamKey: "s2", phase: "waiting_upload", error: "用户停止" })).error).toBe("用户停止");
     expect(reasonOf(row({ streamKey: "t", phase: "stopped", error: "用户停止" }))).toBe("queue.flow.reason.stopped");
     expect(reasonOf(row({ streamKey: "t2", phase: "stopped", error: null }))).toBe("queue.flow.reason.stopped");
   });
