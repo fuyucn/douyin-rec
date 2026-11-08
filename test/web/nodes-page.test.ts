@@ -43,13 +43,23 @@ describe("nodes page model", () => {
     expect(out[1]?.ok).toBe(false);
   });
 
-  it("keeps an orphan rolling session visible under its node", () => {
+  // 2026-11-08 口径变更:遗留会话只在**仍在进行**(在录/在传)时占行。旧的「只要还有未确认
+  // 分段就永远挂在节点下」会让已摘走的房间永远留在卡片上(线上 VPS1 6 个任务列了 9 行)。
+  it("hide an orphan session that is neither recording nor uploading (历史不再冒充分配)", () => {
     const out = buildNodes([], [room({})], workers, { w1: { id: "w1", ok: true } }, [
       { workerId: "w1", workerName: "worker-one", platform: "douyin", roomSlug: "1", anchorName: "Alice", sessionBase: "s", bv: "BV1", confirmed: 1, total: 2, ambiguous: 1, uploading: null, recording: false, checkedAt: 1 },
     ], "0.0.234");
     const w1 = out.find((n) => n.id === "w1")!;
-    expect(w1.rooms[0]?.sessions[0]?.bv).toBe("BV1");
+    expect(w1.rooms).toHaveLength(0);
+    // 未确认分段的统计不因「不显示」而丢:队列页仍按同一份快照提示。
     expect(w1.uncertainSessions).toBe(1);
+  });
+
+  it("keeps an orphan session that is still uploading", () => {
+    const out = buildNodes([], [room({})], workers, { w1: { id: "w1", ok: true } }, [
+      { workerId: "w1", workerName: "worker-one", platform: "douyin", roomSlug: "1", anchorName: "Alice", sessionBase: "s", bv: "BV1", confirmed: 1, total: 2, ambiguous: 0, uploading: "BV1", recording: false, checkedAt: 1 },
+    ], "0.0.234");
+    expect(out.find((n) => n.id === "w1")!.rooms[0]?.sessions[0]?.bv).toBe("BV1");
   });
 
   it("keeps equal room slugs on different platforms separate", () => {

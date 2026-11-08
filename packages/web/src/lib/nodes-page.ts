@@ -85,7 +85,9 @@ export function buildNodes(
       rooms: roomsOut,
       activeRooms: roomsOut.filter((r) => r.state !== "disabled").length,
       recordingRooms: roomsOut.filter((r) => r.state === "recording").length,
-      uncertainSessions: roomsOut.reduce((sum, r) => sum + r.sessions.filter((s) => s.ambiguous > 0).length, 0),
+      // 从**原始快照**数,不是从显示出来的行数:遗留行可能因为「已无任务」而被藏掉,
+      // 但「这条会话还有分 P 待确认」这件事不能跟着消失(它会驱动节点卡顶部的待复核提示)。
+      uncertainSessions: delivering.filter((d) => d.workerId === n.id && d.ambiguous > 0).length,
     };
   }).sort((a, b) => {
     // Display order = configured worker order (drag-reorder persists exactly this; the controller

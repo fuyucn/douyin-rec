@@ -237,13 +237,30 @@ describe("node rooms list — 只留还需要人看的遗留会话", () => {
     expect(r[0]!.rooms.map((x) => x.roomSlug)).not.toContain("999");
   });
 
-  it("仍有未确认分段的遗留会话保留——数据在风险里,不能消失", () => {
+  it("只剩「未确认分段」的遗留会话也不再挂行(历史不再否决当前分配)", () => {
     const r = summarizeNodes(
       [rt("https://live.douyin.com/1", ["a", "recording"])],
       {},
       [del("a", { roomSlug: "999", anchorName: "旧房", recording: false, ambiguous: 2 })],
       "",
     );
-    expect(r[0]!.rooms.map((x) => x.roomSlug)).toContain("999");
+    expect(r[0]!.rooms.map((x) => x.roomSlug)).not.toContain("999");
+  });
+
+  it("仍在录 / 仍在传的遗留会话保留(否则丢的是正在发生的事)", () => {
+    const rec = summarizeNodes(
+      [rt("https://live.douyin.com/1", ["a", "recording"])],
+      {},
+      [del("a", { roomSlug: "999", anchorName: "旧房", recording: true })],
+      "",
+    );
+    expect(rec[0]!.rooms.map((x) => x.roomSlug)).toContain("999");
+    const up = summarizeNodes(
+      [rt("https://live.douyin.com/1", ["a", "recording"])],
+      {},
+      [del("a", { roomSlug: "998", anchorName: "在传的旧房", recording: false, uploading: "BV1" })],
+      "",
+    );
+    expect(up[0]!.rooms.map((x) => x.roomSlug)).toContain("998");
   });
 });

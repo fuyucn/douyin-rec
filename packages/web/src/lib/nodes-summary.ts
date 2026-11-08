@@ -241,10 +241,11 @@ export function summarizeNodes(
     n.ambiguous += d.ambiguous;
     const identity = `${d.workerId}:${d.platform ?? ""}:${d.roomSlug}`;
     let row = roomIdx.get(identity);
-    // 任务清单里已没有该房间时,只有**还需要人看**的遗留会话才占一行:
-    // 在录(recording)或还有未确认分段(ambiguous>0)。已收尾的历史不要再挂在节点下 ——
-    // 否则「房间已经从这台节点摘掉了」这件事会被一条旧会话记录永远否决。
-    const leftoverNeedsEyes = d.recording === true || (typeof d.ambiguous === "number" && d.ambiguous > 0);
+    // 任务清单里已没有该房间时,只有**仍在进行**的遗留会话才占一行:正在录(recording)
+    // 或正在传(uploading)。只要还有历史「未确认分段」就挂一行,等于让一条旧记录永远否决
+    // 「房间已经从这台节点摘走了」——实测 VPS1 只有 6 个任务却列出 9 个房间,多出来的
+    // 全是别台节点的旧交付记录。未确认分段仍在队列页/房间详情里可见,不靠节点卡兜底。
+    const leftoverNeedsEyes = d.recording === true || Boolean(d.uploading);
     if (!row) {
       // 已收尾、无未确认分段的旧会话:不建行,也不影响节点卡片的房间列表。
       if (!leftoverNeedsEyes) continue;
