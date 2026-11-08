@@ -311,7 +311,11 @@ describe("buildQueueView", () => {
 
   it("无 sync db → active/rows/recent 空,pool 原样透出", () => {
     const v = buildQueueView("/nonexistent/x-sync.db", { pool: POOL_EMPTY });
-    expect(v).toEqual({ active: [], rows: [], recent: [], pool: POOL_EMPTY, manualTotal: 0, manualAcked: 0 });
+    // 无 db → stats undefined(#561:健康带隐藏而不是显示全 0)
+    expect(v).toEqual({
+      active: [], rows: [], recent: [], pool: POOL_EMPTY, manualTotal: 0, manualAcked: 0,
+      doneTotal: 0, stats: undefined,
+    });
   });
 
   it("进行中 job:doneSteps=已完成(做了什么),nextSteps=DAG 后继(下面做什么),phase=running", () => {

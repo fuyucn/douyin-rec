@@ -13,7 +13,7 @@ import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import {
   HUB_TABLE_NAMES, HUB_TERMINAL_STATES, HUB_FLOW_ORDER, isSidecarSkipEvent, readyNodes, STAGE_READY, USER_STOP,
   jobLogPathCandidates,
-  type HubPoolSnapshotDTO, type HubQueueDTO, type NodeUploadStatusDTO, type QueueItemDTO, type QueuePhase,
+  type HubPoolSnapshotDTO, type HubQueueDTO, type HubQueueStats, type NodeUploadStatusDTO, type QueueItemDTO, type QueuePhase,
 } from "@drec/core";
 import { rootHubConfig, rootLogsDir, rootStageDir } from "./paths.js";
 
@@ -662,6 +662,58 @@ export interface BuildQueueOpts {
  */
 const UNKNOWN_MANUAL_REASON = "缺少失败原因(数据异常或修复前遗留的旧记录,请核对后标记已核对)";
 
+/**
+ * needs_manual 的 error 原文消化(#561):节点日志里的机器痕迹对用户是噪声。
+ * - ssh known-hosts 首连警告(Warning: Permanently added ...)整段剥掉,只留真实原因;
+ * - ffmpeg/命令行参数(--enable-* 等)剥掉,只留「退出码 N」;
+ * - 其余按原样透出(各管线写入方已是人话)。
+ * 返回 null = 原样透出即可。
+ */
+export function digestManualError(raw: string | null | undefined): string | null {
+  const text = (raw ?? "").trim();
+  if (!text) return null;
+  // ssh rc=1 警告:「节点侧上传失败: ssh rc=1: Warning: Permanently added ... to the list of known hosts.<真实原因>」
+  const sshWarn = /ssh rc=\d+: Warning: Permanently added \S+ \([^)]*\) to the list of known hosts\.\s*/i;
+  // ffmpeg 命令行:「ffmpeg 失败 (rc=1): --enable-libdrm ... 」(参数串无诊断价值)
+  const ffmpegArgs = /^(ffmpeg 失败 \(rc=\d+\)):\s*--\S.*$/;
+  if (ffmpegArgs.test(text)) return text.replace(ffmpegArgs, "$1");
+  if (sshWarn.test(text)) {
+    const rest = text.replace(sshWarn, "").trim();
+    // 警告后还有内容 → 只留内容;整条就是警告 → 归纳成连接失败
+    return rest || "节点侧上传失败:SSH 连接失败(节点首次连线提示,非故障原因)";
+  }
+  return null;
+}
+
+/** 7 天健康度统计(#561):一条 GROUP BY 拿全窗口计数;分母 0 → rate null。 */
+function queueStats(syncDbPath: string, windowDays: number, now: number): HubQueueStats | undefined {
+  try {
+    const db = openLedger(syncDbPath);
+    try {
+      if (!hasAckColumns(db) && !tableExists(db)) return undefined;
+      const dayMs = 24 * 60 * 60;
+      const since = now - windowDays * dayMs * 1000;
+      const rows = db.prepare(
+        `SELECT state, COUNT(*) AS n FROM sync_jobs WHERE updatedAt > ? GROUP BY state`,
+      ).all(since) as Array<{ state: string; n: number }>;
+      const get = (st: string): number => rows.find((r) => r.state === st)?.n ?? 0;
+      const done = get("done"), failed = get("failed"), manual = get("needs_manual");
+      const denom = done + failed + manual;
+      return {
+        windowDays, done, failed, needsManual: manual,
+        successRate: denom > 0 ? Math.round((done / denom) * 100) / 100 : null,
+      };
+    } finally { db.close(); }
+  } catch { return undefined; } // 旧库/无表 → 健康带隐藏,不阻塞页面
+}
+
+function tableExists(db: DatabaseSync): boolean {
+  try {
+    const t = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sync_jobs'").all();
+    return t.length > 0;
+  } catch { return false; }
+}
+
 const EMPTY_POOL: HubPoolSnapshotDTO = {
   cpu: { active: 0, queued: 0, max: 0 },
   net: { active: 0, queued: 0, max: 0 },
@@ -840,6 +892,15 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
     return true;
   };
 
+  // done 总数(全时间,#561):「自动完成」组的「查看全部」计数。旧库无表 → 0。
+  let doneTotal = 0;
+  try {
+    const db = openLedger(syncDbPath);
+    try {
+      doneTotal = Number(db.prepare("SELECT COUNT(*) AS n FROM sync_jobs WHERE state = 'done'").all()[0]?.n ?? 0);
+    } finally { db.close(); }
+  } catch { doneTotal = 0; }
+
   return {
     active: active.filter(keep),
     rows: rows.filter(keep),
@@ -848,6 +909,8 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
     // Totals ignore the filters on purpose: they size the whole inbox, not the current view.
     manualTotal: manualRows.total,
     manualAcked,
+    stats: queueStats(syncDbPath, 7, opts.now ?? Date.now()),
+    doneTotal,
   };
 }
 

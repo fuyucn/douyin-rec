@@ -63,6 +63,8 @@ export interface QueueFlowGroups {
     done: number;
     settling: number;
   };
+  /** stage 正常收口的场(error=STAGE_READY):不是故障,单独一组(#561)。 */
+  waitingUpload: QueueItemDTO[];
 }
 
 /**
@@ -136,10 +138,25 @@ function attentionReason(item: QueueItemDTO): string {
   // only a genuine failure message falls through to the raw ledger error.
   if (item.phase === "waiting_upload" || item.error === STAGE_READY) return "queue.flow.reason.stageReady";
   if (item.phase === "stopped") return "queue.flow.reason.stopped";
-  if (item.error) return item.error;
+  if (item.error) return digestLedgerError(item.error);
   if (item.phase === "failed") return "queue.flow.reason.failed";
   if (item.phase === "waiting_manual") return "queue.flow.reason.manual";
   return "queue.flow.reason.stopped";
+}
+
+/**
+ * 台账 error 原文消化(#561;与后端 digestManualError 同口径,兜底旧 master 未消化的原文):
+ * ssh known-hosts 首连警告剥掉;ffmpeg 参数串剥掉只留退出码;其余原样。
+ * 返回带 queue.flow.digest.* key 的引用时由 i18n 渲染。
+ */
+export function digestLedgerError(raw: string): string {
+  const text = raw.trim();
+  if (/ssh rc=\d+: Warning: Permanently added \S+ \([^)]*\) to the list of known hosts\./i.test(text)) {
+    const rest = text.replace(/ssh rc=\d+: Warning: Permanently added \S+ \([^)]*\) to the list of known hosts\.\s*/i, "").trim();
+    return rest || "queue.flow.digest.sshWarn";
+  }
+  if (/^ffmpeg 失败 \(rc=\d+\):\s*--\S/.test(text)) return text.replace(/^(ffmpeg 失败 \(rc=\d+\)).*$/, "$1");
+  return text;
 }
 
 function rowAction(item: QueueItemDTO): QueueAction {
@@ -212,13 +229,17 @@ export function buildQueueFlow(
   sort: "newest" | "oldest" = "newest",
 ): QueueFlowGroups {
   const actions: QueueAction[] = [];
+  const waitingUpload: QueueItemDTO[] = [];
   const running: QueueFlowRow[] = [];
   const queued: QueueFlowRow[] = [];
   const settling: QueueFlowRow[] = [];
   const done: QueueFlowRow[] = [];
   for (const item of rows) {
     switch (PHASE_SECTION[item.phase]) {
-      case "attention": actions.push(rowAction(item)); break;
+      case "attention":
+        // stage 正常收口(waiting_upload)不是故障 → 不进 needs-you 工单(#561)
+        if (item.phase === "waiting_upload") { waitingUpload.push(item); break; }
+        actions.push(rowAction(item)); break;
       case "running": running.push(flowRow(item, now, dataAt)); break;
       case "queued": queued.push(flowRow(item, now, dataAt)); break;
       case "settling": settling.push(flowRow(item, now, dataAt)); break;
@@ -229,6 +250,7 @@ export function buildQueueFlow(
   return {
     delivering: deliveringCount,
     actions: sortActions(actions),
+    waitingUpload: waitingUpload.sort((a, b) => (a.enqueuedAt ?? a.updatedAt) - (b.enqueuedAt ?? b.updatedAt)),
     running: sortRows(running),
     queued: sortRows(queued),
     settling: sortRows(settling),
