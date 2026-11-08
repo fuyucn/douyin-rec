@@ -1,5 +1,5 @@
 /**
- * room-detail-v2.ts — 房间详情页 v2 的展示模型(#557,基准 = dev/room-detail-v2-proto.html)。
+ * room-detail-v2.ts — 房间详情页 v2 的展示模型(#557,基准 = docs/design-archive/room-detail-v2-proto.html)。
  *
  * 页面优先级原则:正在录的房间,进度 + 日志是高频,配置是低频。
  * 本模块只做纯函数:四域字段的常用/更多分组、summary 摘要文案。数据全部来自 RoomDTO,
