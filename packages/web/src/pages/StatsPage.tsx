@@ -188,7 +188,7 @@ export function StatsPage(): ReactNode {
         <div className="overflow-x-auto">
           {/* 固定列宽:9 列在 1024 视口会挤出 64px 横向滚动(实测 1038 vs 974)。固定布局把列宽压到
               合计 940px,窄屏不再出现「只能看到前 8.2 列」的横向漂移,被截断的单元格都带 title。 */}
-          <table className="tasks min-w-[940px]" style={{ tableLayout: "fixed" }}>
+          <table className="tasks stats-rooms-table min-w-[940px]" style={{ tableLayout: "fixed" }}>
             <thead>
               <tr>
                 <th className="w-[192px]">{t("stats.col.anchor")}</th>
@@ -197,9 +197,9 @@ export function StatsPage(): ReactNode {
                 <th className="w-[72px] text-right">{t("stats.col.sessions")}</th>
                 <th className="w-[84px] text-right">{t("stats.col.totalHours")}</th>
                 <th className="w-[88px] text-right">{t("stats.col.perDayHours")}</th>
-                <th className="w-[112px] text-right">{t("stats.col.avgMedian")}</th>
+                <th className="w-[120px] text-right">{t("stats.col.avgMedian")}</th>
                 <th className="w-[88px] text-right">{t("stats.col.typicalStart")}</th>
-                <th className="w-[120px]">{t("stats.col.nodes")}</th>
+                <th className="w-[112px]">{t("stats.col.nodes")}</th>
               </tr>
             </thead>
             <tbody>

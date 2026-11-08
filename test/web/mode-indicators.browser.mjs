@@ -25,8 +25,20 @@ async function isolateApi(page, responses = {}) {
 async function mountIndicators(page) {
   const unexpectedRequests = await isolateApi(page);
   const fixtureUrl = new URL("/__mode_indicator_fixture__", baseUrl).href;
+
   await page.route(fixtureUrl, (route) => route.fulfill({ contentType: "text/html", body: "<!doctype html><html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body></body></html>" }));
   await page.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
+  // 预热 optimizeDeps:CI 里只 curl 过 `/` 就开始导入 `/node_modules/.vite/deps/react.js`,
+  // 预打包一旦还没落盘,vite 会先回 504 Outdated Optimize Dep,动态导入随机超时(本脚本 flake 的成因)。
+  await page.evaluate(async () => {
+    for (const dep of ["/node_modules/.vite/deps/react.js", "/node_modules/.vite/deps/react-dom_client.js"]) {
+      for (let attempt = 0; attempt < 40; attempt++) {
+        const res = await fetch(dep, { cache: "no-store" }).catch(() => null);
+        if (res && res.ok) break;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+  });
   await page.evaluate(async () => {
     const refresh = await import("/@react-refresh");
     refresh.default.injectIntoGlobalHook(window);

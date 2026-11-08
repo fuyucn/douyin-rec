@@ -5,6 +5,9 @@
  * `enabled ? 橙色方块 : 绿色三角形` 都会让"正在录"和"只是开着"重新混为一谈。
  */
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { startStopVisual, type RoomStatusKind } from "../../packages/web/src/lib/room-status.js";
 
 const ALL_KINDS: RoomStatusKind[] = ["attention", "recording", "processing", "waiting", "paused"];
@@ -32,6 +35,21 @@ describe("startStopVisual", () => {
       expect(mark.state).toBe("idle");
       expect(mark.filled).toBe(false);
       expect(mark.tone).toBeNull();
+    }
+  });
+});
+
+describe("start/stop rendering", () => {
+  const WEB = join(dirname(fileURLToPath(import.meta.url)), "../../packages/web/src");
+
+  it("both screens draw the control from startStopVisual, never from `enabled` alone", () => {
+    for (const file of ["pages/RoomsPage.tsx", "pages/RoomPage.tsx"]) {
+      const src = readFileSync(join(WEB, file), "utf8");
+      expect(src, file).toContain("startStopVisual(");
+      expect(src, file).toContain("mark.filled");
+      expect(src, file).toContain("data-state={mark.state}");
+      // 旧写法:enabled 就画橙色实心方块(enabled ≠ recording)
+      expect(src, file).not.toContain('style={{ color: "var(--warning-fg)" }} fill="currentColor"');
     }
   });
 });

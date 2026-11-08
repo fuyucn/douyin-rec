@@ -25,12 +25,31 @@ describe("compact room indicator facts", () => {
       source(null, { pipeline: { upload: { mode: "upload" }, steps: { nodeSideUpload: true, mergeSegments: false, burnDanmu: false, burnLivechat: false } } }),
       source(null, { pipeline: { upload: { mode: "upload" }, steps: { mergeSegments: false } } }),
     ];
-    const keys = fixtures.flatMap(room => roomModeIndicators(room).flatMap(indicator => [indicator.labelKey, ...(indicator.detailKeys ?? [])]));
+    const keys = fixtures.flatMap(room => roomModeIndicators(room).flatMap(indicator => [
+      indicator.labelKey, ...(indicator.detailKeys ?? []), ...(indicator.shortLabelKey ? [indicator.shortLabelKey] : []),
+    ]));
     for (const language of ["zh", "en"]) {
       for (const key of new Set(keys)) {
         const value = key.split(".").reduce((current, part) => current?.[part], dictionaries[language]);
         expect(value, language + ": " + key).toEqual(expect.any(String));
         expect(value).not.toBe("");
+      }
+    }
+  });
+
+  it("keeps the visible delivery word short in both languages", () => {
+    // 列表列宽 124px:短词 + 两枚图标。EN 曾是瓶颈("Rolling upload" 111px),所以按字节宽度设上限。
+    const text = readFileSync(join(__dirname, "../../packages/web/src/lib/i18n.tsx"), "utf8");
+    const start = text.indexOf("=", text.indexOf("const DICT")) + 1;
+    const expression = text.slice(start, text.lastIndexOf("\n};") + 3).trim().replace(/;$/, "");
+    const dictionaries = runInNewContext("(" + expression + ")");
+    for (const language of ["zh", "en"]) {
+      const marks = (dictionaries as Record<string, { room?: { mark?: Record<string, string> } }>)[language].room?.mark ?? {};
+      const values = Object.entries(marks);
+      expect(values.length).toBeGreaterThanOrEqual(6);
+      for (const [key, value] of values) {
+        expect(value.trim(), language + ": room.mark." + key).not.toBe("");
+        expect(value.trim().length, language + ": " + key).toBeLessThanOrEqual(language === "en" ? 8 : 3);
       }
     }
   });
