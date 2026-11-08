@@ -691,7 +691,8 @@ function queueStats(syncDbPath: string, windowDays: number, now: number): HubQue
     const db = openLedger(syncDbPath);
     try {
       if (!hasAckColumns(db) && !tableExists(db)) return undefined;
-      const since = now - windowDays * 86400000;
+      const dayMs = 24 * 60 * 60;
+      const since = now - windowDays * dayMs * 1000;
       const rows = db.prepare(
         `SELECT state, COUNT(*) AS n FROM sync_jobs WHERE updatedAt > ? GROUP BY state`,
       ).all(since) as Array<{ state: string; n: number }>;
