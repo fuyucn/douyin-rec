@@ -4,15 +4,16 @@
  * Before this there were four partial copies, and `--danmu no` fell through to "on" because that one
  * only recognised none/0/off/false. Every flag now goes through one of the two parsers in this
  * file:
- * - `parseBoolFlag` (lenient, `--danmu` only): missing/blank → the call site's default; unknown
- *   words still mean "on" — a pre-#472 behaviour kept on purpose for that one switch;
+ * - `parseBoolFlag` (lenient, used by `--danmu` and other non-upload flags such as
+ *   `--use-cookie`): missing/blank → the call site's default; unknown words still mean "on" — a
+ *   pre-#472 behaviour kept on purpose for those switches;
  * - `parseStrictBoolFlag` (strict, the upload switches `--rolling-upload` / `--stream-upload` and
  *   the stored rolling-queue setting): missing/blank → the call site's default (off for both
  *   upload switches); the off words no/n/false/0/off/none → off, the on words yes/y/true/1/on →
  *   on, matching ignores case and surrounding whitespace; any other value → `{ok:false, error}`
  *   naming the flag and quoting the raw value. Callers print that error and `process.exit(2)`
- *   before any side effect. The upload switches never fall back to "on" — only the lenient
- *   `--danmu` parser treats unknown values as "on".
+ *   before any side effect. The upload switches never fall back to "on" — only this lenient
+ *   parser treats unknown values as "on".
  */
 
 /** Values that mean "off" (case-insensitive, trimmed). */

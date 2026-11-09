@@ -3,8 +3,9 @@
  *
  * Kept out of `cli.ts` because that module runs `program.parseAsync` on import, so nothing there can
  * be unit-tested. The single on/off word list lives in core (`bool-flag.ts`), shared by the lenient
- * parser `parseBoolFlag` (used only by `--danmu`) and `parseStrictBoolFlag` (used by the upload
- * switches via `parseStrictUploadFlag` below).
+ * parser `parseBoolFlag` (lenient, used by `--danmu` and other non-upload flags such as
+ * `--use-cookie`) and `parseStrictBoolFlag` (used by the upload switches via `parseStrictUploadFlag`
+ * below — the upload switches never use the lenient parser).
  */
 import { parseBoolFlag, parseStrictBoolFlag } from "@drec/core";
 
