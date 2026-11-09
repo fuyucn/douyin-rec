@@ -2078,6 +2078,125 @@ describe("issue #574: 背压截断绝不 complete 少传分 P", () => {
   });
 });
 
+/**
+ * issue #579 — full 模式的 spool 写失败(ENOSPC/EIO,含 POSIX 短写)绝不能把截断的 spool
+ * 当完整分 P:不得 complete、不得整文件回退成「成功」,必须带「spool 写失败,本段被截断」
+ * 的显式原因,且 spooledBytes 记账 === spool 文件真实大小(不是流产生的字节数)。
+ * 注入走 PartSinkOpts.writeSpool 测试接缝(默认仍是 writeSync,生产行为不变),不依赖 /dev/full。
+ */
+describe("issue #579: spool 写失败/短写绝不被当完整分 P", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "live-pump-579-")); });
+  afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
+
+  it("F2 短写:返回值被丢弃 → 记账大于真实文件;修复后续写/判失败,记账=文件", async () => {
+    const data = tsStream({ gops: 8 });
+    installFakeFfmpeg(data, { delayMs: 1 });   // 逐块送:避免 stdout 一次读到全部(写入粒度太粗)
+    const { fake } = makeFetch();
+    // 每次「syscall」只落一半字节(ENOSPC 短写),不再推进(≤1B)时抛错:模拟写满的盘。
+    const r = await runSegment({
+      args: ["-fake"], sizeCap: CHUNK * 1000, spoolPath: join(dir, "short.mkv"),
+      session: session(), fetchImpl: fake,
+      writeSpool: (fd, buf) => {
+        const n = Math.floor(buf.length / 2);
+        if (n <= 0) throw new Error("ENOSPC: no space left on device");
+        writeSync(fd, buf.subarray(0, n));
+        return n;
+      },
+    });
+    const onDisk = statSync(join(dir, "short.mkv")).size;
+    expect(r.uploadError).toContain("spool 写失败");
+    expect(r.spoolIncomplete).toBe(true);
+    expect(r.spooledBytes).toBe(onDisk);          // 记账 === 真实文件,不多记
+    expect(onDisk).toBeLessThan(data.length);     // 确实被截断
+  });
+
+  it("F3 抛错:不得整文件回退成「成功」,截断段带原因且 spool 保留(S3 同验)", async () => {
+    const data = tsStream({ gops: 8 });
+    installFakeFfmpeg(data, { delayMs: 1 });
+    let written = 0;
+    const { fake } = makeUploadFetch();
+    const r = await pumpSegment({
+      cookiesPath: COOKIES, args: ["-fake"], fileName: "eio.ts", sizeCap: CHUNK * 1000,
+      spoolDir: dir, line: "txa", fetchImpl: fake,
+      probeDuration: async () => 60, scanDtsGap: async () => null,
+      writeSpool: (fd, buf) => {
+        if (written >= 2048) throw new Error("EIO: i/o error");   // 写了 ~2KiB 后盘坏
+        writeSync(fd, buf);
+        written += buf.length;
+        return buf.length;
+      },
+    });
+    // 截断段:不 complete、不整文件回退、保留 spool、原因明确
+    expect(r.usedFileFallback).toBeFalsy();
+    expect(r.stemOfCompleted).toBeUndefined();
+    expect(r.uploadError).toContain("spool 写失败");
+    expect(r.spoolIncomplete).toBe(true);
+    const onDisk = statSync(join(dir, "eio.ts")).size;
+    expect(r.spooledBytes).toBe(onDisk);
+    // S3: 失败点之后流里的字节也丢了(apply 抛错、flush 不补回),不得伪装完整
+    expect(onDisk).toBeLessThan(data.length);
+  });
+
+  it("S2: 写失败发生在 childClosed 之后(catch 条件为假、flush 无尾包)→ 完全静默,截断段照常可提交", async () => {
+    const total = CHUNK * 1000;
+    const data = tsStream({ gops: 40 });
+    const half = Math.floor(data.length / TS_PACKET_BYTES / 2) * TS_PACKET_BYTES;
+    let childClosed = false;
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const events = {} as Record<string, Array<(...a: unknown[]) => void>>;
+    const close = (code: number | null, signal: string | null): void => {
+      for (const fn of events.close ?? []) fn(code, signal);
+    };
+    const proc: ChildProcessLike = {
+      stdout, stderr,
+      on(ev, fn) { (events[ev] ??= []).push(fn); },
+      kill(sig) { stdout.end(); close(null, sig ?? "SIGKILL"); },
+    };
+    setSpawnForTest(() => proc);
+    const { fake } = makeFetch();
+    const p = runSegment({
+      args: ["-fake"], sizeCap: total, spoolPath: join(dir, "s2.ts"),
+      session: session(), fetchImpl: fake, queueCapacity: 64,
+      writeSpool: (fd, buf) => {
+        if (childClosed) throw new Error("ENOSPC: no space left on device"); // close 后仍到达的字节
+        writeSync(fd, buf);
+        return buf.length;
+      },
+    });
+    stdout.write(data.subarray(0, half));                   // 正常写入
+    await new Promise((r2) => setTimeout(r2, 5));
+    childClosed = true;
+    close(0, null);                                         // 子进程先 close(stdout 仍开着)
+    stdout.write(data.subarray(half));                      // 之后的字节写失败(整包对齐,flush 无尾包)
+    stdout.end();
+    const r = await p;
+    // 修复前:主循环 catch 条件为假、flush 不写 → readError/uploadError 全空,截断段零错误字段
+    expect(r.uploadError).toContain("spool 写失败");
+    expect(r.spoolIncomplete).toBe(true);
+    expect(r.spooledBytes).toBe(statSync(join(dir, "s2.ts")).size);
+  });
+
+  it("恢复路径:spoolIncomplete 的未确认分 P 拒绝自动整文件重传,需人工处理", async () => {
+    const spool = join(dir, "trunc.ts");
+    writeFileSync(spool, "x");
+    const { fake } = makeFetch();
+    const session = new LivePumpSession({
+      cookiesPath: COOKIES, room: "tr", spoolDir: dir,
+      title: "t", tid: 21, tag: "x", private: true, fetchImpl: fake,
+    });
+    const note = session.noteUnconfirmedPart({ index: 0, spoolPath: spool, title: "p1", bytes: 100, durationSec: 5, spoolIncomplete: true });
+    expect(note.ok).toBe(true);
+    const r = await session.resubmitUnconfirmedPart();
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("spool 写失败被截断");
+    // state 仍引用该 spool:清扫器不会删唯一副本,人工处理后手动
+    const state = readLivePumpState(livePumpStatePath(dir, "tr"));
+    expect(state?.parts[0]?.spoolIncomplete).toBe(true);
+  });
+});
+
 describe("countTsDiscontinuities", () => {
   it("只数时间戳不连续类警告行", () => {
     const text = [
