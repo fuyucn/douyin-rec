@@ -149,6 +149,11 @@ async function expectParseError(
   expect(r.code, r.stderr || r.stdout).toBe(2);
   // The full line cli.ts prints comes from the parser output, not a hand-written copy.
   expect(r.stderr).toContain(expectedLine);
+  // QA (H-976): the parser line is a whole stderr line (no prefix/suffix glued on), printed exactly
+  // once, and never leaks to stdout.
+  const lines = r.stderr.split(/\r?\n/);
+  expect(lines.filter((l) => l === expectedLine)).toHaveLength(1);
+  expect(r.stdout).not.toContain(p.error);
   // Unknown values must be rejected before any feature turns on and before the mutual-exclusion
   // gate: no rolling-upload banner, no exclusion message.
   expect(r.stderr).not.toContain("互斥");
@@ -173,6 +178,39 @@ describe("strict upload-switch parsers (exported from packages/cli/src/cli-flags
     for (const v of [...UNKNOWN_VALUES, ...ODD_UNKNOWN_VALUES]) {
       expect(() => parse(v)).not.toThrow();
       assertParserError(parse, v, flag, otherFlag);
+    }
+  });
+
+  // QA (H-976) edge cases on the exported parsers.
+  it.each([
+    ["--rolling-upload", parseRollingUploadFlag],
+    ["--stream-upload", parseStreamUploadFlag],
+  ] as const)("pure: %s on words (any case/whitespace) → {ok:true,value:true}", (_flag, parse) => {
+    for (const v of ["yes", "y", "true", "1", "on", " ON ", "True", "\tY\n"]) {
+      expect(parse(v), `value ${JSON.stringify(v)}`).toEqual({ ok: true, value: true });
+    }
+  });
+
+  it("pure: both parsers give the same error text apart from the flag name", () => {
+    for (const v of [...UNKNOWN_VALUES, ...ODD_UNKNOWN_VALUES, "\tnope", "enble"]) {
+      const a = parseRollingUploadFlag(v);
+      const b = parseStreamUploadFlag(v);
+      if (a.ok || b.ok) throw new Error(`unexpected ok for ${JSON.stringify(v)}`);
+      expect(b.error).toBe(a.error.split("--rolling-upload").join("--stream-upload"));
+    }
+  });
+
+  it("pure: raw value with inner tab/leading whitespace is quoted verbatim, not normalized", () => {
+    const p = parseRollingUploadFlag("\tnope");
+    if (p.ok) throw new Error("unexpected ok");
+    expect(p.error).toContain(`"\tnope"`);
+    expect(p.error).not.toContain(`"nope"`);
+  });
+
+  it("pure: parsers are deterministic (same input → equal result, no hidden state)", () => {
+    for (const v of [undefined, "", "off", "1", "nope", " f "]) {
+      expect(parseRollingUploadFlag(v)).toEqual(parseRollingUploadFlag(v));
+      expect(parseStreamUploadFlag(v)).toEqual(parseStreamUploadFlag(v));
     }
   });
 
