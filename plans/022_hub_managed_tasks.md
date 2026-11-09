@@ -12,7 +12,7 @@
 
 - **身份不变量**:任何跨节点匹配都按 `(platform, roomSlug)`;sourceTaskId 只在本机 master 的 `tasks` 表内有效。
 - **受管不变量**:`managedBy='hub'` 的任务只能由 hub 同步修改/删除;Web API 拒绝 PATCH/DELETE(以及节点 UI 的编辑/删除入口隐藏)。
-- **覆盖优先级**:node 上已存在的同名任务被收编时,保留 node 本地的 `outDir / webhook`(per-node override);其余字段以 master source task 为准。新建任务用 master 配置。**2026-11 更新**：受管任务的 `cookies`/`useCookie` 改由 master 拥有（issue #563），原文的「节点可覆盖 cookies/useCookie」已作废。
+- **覆盖优先级**:node 上已存在的同名任务被收编时,保留 node 本地的输出目录与通知地址(per-node override);其余字段以 master source task 为准。新建任务用 master 配置。**2026-11 更新**：受管任务的 `cookies`/`useCookie` 改由 master 拥有（issue #563），原文的「节点可覆盖 cookies/useCookie」已作废。
 - **安全**:cookies 只从 master 单向下发到选中 node,`_tasks` 输出永不含 cookies;日志不打印 cookies。
 - 不改 `vendor/`,不碰 VPS 生产进程;受管任务删除前先 `enabled=false`,等 daemon 自然停录后下轮再删。
 - 运行测试:仓库根 `pnpm test`;单测就近放 `packages/orchestrator/src/*.test.ts`、`test/app/*.test.ts`。
@@ -59,7 +59,7 @@
 
 - `listNodeTasks(store): NodeTaskDTO[]` — 每任务派生 `platform + roomSlug`。
 - `applyRemoteTasks(store, desired, log?)`:
-  - 每条 spec:按 `(platform, roomSlug)` 找已有任务;有 → 收编(`setManagedBy('hub')`)并更新 name/quality/engine/danmu/segmentSec/schedule/enabled/room/anchorName,**保留 node 的 outDir/webhook**（2026-11 起 `cookies`/`useCookie` 以 master 为准，见 issue #563）;无 → `addTask({ ...spec, managedBy:'hub' })`。
+  - 每条 spec:按 `(platform, roomSlug)` 找已有任务;有 → 收编(`setManagedBy('hub')`)并更新 name/quality/engine/danmu/segmentSec/schedule/enabled/room/anchorName,**保留 node 的 outDir/通知地址**（2026-11 起 `cookies`/`useCookie` 以 master 为准，见 issue #563）;无 → `addTask({ ...spec, managedBy:'hub' })`。
   - 删除:遍历 `managedBy='hub'` 且不在 desired 的任务;`enabled=true` 或 `status` 为 running/pending/draining → 只 `setEnabled(false)`(下轮删);否则 `removeTask`。
   - 返回 `{ applied, removed, pending }`。
 - cli 隐藏子命令:

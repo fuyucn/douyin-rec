@@ -568,11 +568,11 @@ describe("buildQueueView", () => {
       db.prepare("INSERT INTO sync_job_events(streamKey,state,at) VALUES(?,?,?)").run(k, "needs_manual", at);
     };
     put("douyin:SSH:2026-10-06",
-      "节点侧上传失败: ssh rc=1: Warning: Permanently added 198.51.100.7 (ED25519) to the list of known hosts.", now - 3_000);
+      "节点侧上传失败: ssh rc=1: Warning: Permanently added some-host (ED25519) to the list of known hosts.", now - 3_000);
     put("douyin:FFMPEG:2026-10-06",
       "ffmpeg 失败 (rc=1): --enable-libdrm --enable-libiec61883 --enable-chromaprint", now - 2_000);
     put("douyin:SSH_ONLY:2026-10-06",
-      "ssh rc=1: Warning: Permanently added 198.51.100.7 (ED25519) to the list of known hosts.", now - 1_000);
+      "ssh rc=1: Warning: Permanently added some-host (ED25519) to the list of known hosts.", now - 1_000);
     put("douyin:PLAIN:2026-10-06", "进程重启中断", now - 500);
     db.close();
     const { rows } = buildQueueView(dbPath, { now, stageDir: stage, pool: POOL_EMPTY });

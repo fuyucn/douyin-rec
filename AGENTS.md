@@ -329,7 +329,7 @@ tools/ scripts/rename assets/fonts   # 保留:合并辅助 / 重命名 / 烧字�
 - **硬标准代码常量**（`biliup.ts`，不可配、绝不漏）：关水印 `--extra-fields watermark.state=0`、
   copyright=1、`--is-only-self`（private 时）。可配的只有 tag/tid/desc（主播专属，写任务文件）。
 - 受管任务同步：`managedBy='hub'` 的远端任务**只读**（Web/API 禁止编辑删除）；local worker
-  `adopt=false` 时源任务保持可编辑；per-node override（outDir/webhook）保留，受管任务的 `cookies`/`useCookie` 以 master 为准（issue #563）；
+  `adopt=false` 时源任务保持可编辑；per-node override（输出目录 / 通知地址）保留，受管任务的 `cookies`/`useCookie` 以 master 为准（issue #563）；
   两阶段删除；身份按 `(platform, roomSlug)`。
 - **状态回传**：master 每 5s 经 Transport 查所选 worker 的活动录制房间（SSH `_recording-status`，
   旧 bundle 回退 `_tasks` + `_is-done`），缓存后随 `GET /api/tasks` 的 `recordingWorkers` 返回；
@@ -346,9 +346,9 @@ tools/ scripts/rename assets/fonts   # 保留:合并辅助 / 重命名 / 烧字�
   `settings.platformCookies[platform]`；B 站无显式配置时复用 biliup `cookies.json`。
 - **master 是唯一登录源（issue #563）**：平台串经隐藏命令 `_apply-cookies` 单向下发到录制节点（按指纹比对：变化才推 + **同一内容每 6h 复核一次**；
   旧节点未知命令 → 告警一次、不记已应用；节点没注册的平台记 `unsupported` 不重推）。**空值永不删除节点登录态**。
-  受管任务的 `cookies` 归 master 所有（下发 null 且**节点有平台串可回落**时才清空节点残留串、回落平台串）；`outDir`/`webhook` 仍是节点本地 override，`useCookie` 随 master 同步。
+  受管任务的 `cookies` 归 master 所有（下发 null 且**节点有平台串可回落**时才清空节点残留串、回落平台串）；`outDir`/通知地址仍是节点本地 override，`useCookie` 随 master 同步。
   因此 master 登录一次全节点生效，节点无需逐节点扫码；下发成功/登录成功会立即触发一轮同步。
-- cookie 过期时间从 `sid_guard` 解析（`parseCookieExpiry`），UI 顶栏/弹窗显示剩余天数；
+- 登录态过期时间从 `sid_guard` 解析（`parseCookieExpiry`），UI 顶栏/弹窗显示剩余天数；
   serve 的临期看门狗读**实际生效**的平台串（`getPlatformCookies`），告警文案带平台名。
 
 ### Web UI（React）
