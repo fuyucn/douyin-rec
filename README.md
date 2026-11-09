@@ -10,7 +10,7 @@
 - **引擎策略化录制**(通用 `record-engine` + 引擎 `ffmpeg`[默认,.ts] / `mesio`[rust-srec,.flv],任务字段 `engine` 选):取流靠平台 `getStream`(抖音 vendored a_bogus 签名,匿名不踢手机),引擎平台无关;已对真实直播 live 端到端验证。
 - **Platform 抽象**：平台专属逻辑收口 `Platform` 接口 + 注册表(matchUrl/getStream/getLiving/connectDanmu/…),抖音与 bilibili **均完整实装**(取流 + 弹幕);接第二平台 = 写 `<平台>-live` 包 + 注册一行。
 - **多节点 hub**(`orchestrator`):Docker `task serve --hub` 是控制器，也注册为可选的 `local` 录制 worker；VPS 运行普通 `task serve`。每个房间的 Hub 规则选择录制节点：仅 VPS 时 Docker 不会同时本地录制，选择 local+VPS 才会双录。master 按规则下发受管任务(远端只读)、收集录像、覆盖度选优、拉取后合并/烧录并穿插上传;配置文件化(`config/hub/{platform}.{roomSlug}.json` + `hub.config.json`)。详见 [多节点同步](#多节点同步hub)。
-- pnpm workspace,13 包,主线在 `main`。
+- pnpm workspace,12 包,主线在 `main`。
 
 ## 架构
 
