@@ -213,3 +213,51 @@ describe("lenient parser comments match its real callers (round-2 review)", () =
     });
   }
 });
+
+/**
+ * Round-3 guards for the brief's Edge cases: the rewritten comments must not overreach into
+ * behaviour that is NOT strict / NOT normalized, and the accurate H-974 notes must survive.
+ */
+describe("upload-switch comments stay within the brief's edge cases (round 3)", () => {
+  const CLI_TASK = read("packages", "app", "src", "cli-task.ts");
+
+  it("--stream-upload-private is not documented as strictly parsed (it still uses !== \"0\")", () => {
+    expect(CLI).toMatch(/manual\.streamUploadPrivate !== "0"/); // precondition: still lenient
+    const fieldDoc = (() => {
+      const at = CLI.indexOf("streamUploadPrivate?: string;");
+      const head = CLI.slice(0, at).trimEnd();
+      return head.endsWith("*/") ? head.slice(head.lastIndexOf("/**")) : "";
+    })();
+    expect(fieldDoc).not.toMatch(/strict|严格|parseStrict/i);
+    for (const l of comments(CLI).split("\n").filter((x) => /stream-upload-private|streamUploadPrivate/.test(x))) {
+      expect(l, l).not.toMatch(/strict|严格|parseStrict/i);
+    }
+  });
+
+  it("bool-flag.ts comments say the error quotes the raw value and never call it normalized", () => {
+    const c = comments(BOOL);
+    expect(c).toMatch(/raw value/);
+    expect(c).not.toMatch(/(normali[sz]ed|trimmed|lower-?cased) value/i);
+  });
+
+  it("RecordCliOpts upload docs do not describe the error value as normalized", () => {
+    for (const field of ["rollingUpload?: string;", "streamUpload?: string;"]) {
+      expect(docBefore(CLI, field)).not.toMatch(/normali[sz]|规范化|小写化|trim 后的取值/i);
+    }
+  });
+
+  it("no rewritten comment claims both invalid values are reported, or that 互斥 is checked first", () => {
+    for (const src of [CLI, FLAGS, BOOL]) {
+      const text = comments(src).replace(/\s*\n\s*(?:\*|\/\/)?\s*/g, " ");
+      expect(text).not.toMatch(/both errors|报告两个|两个错误都/i);
+      expect(text).not.toMatch(/互斥(?:检查)?(?:在|先于)[^。]*解析之前/);
+    }
+  });
+
+  it("keeps the accurate H-974 notes in cli-task.ts (edit validates only when given; add exits before side effects)", () => {
+    expect(CLI_TASK).toContain("仅在显式传值时校验");
+    expect(CLI_TASK).toContain("未传该 flag 时 patch 不含该字段");
+    expect(CLI_TASK).toContain("必须在任何副作用之前报错退出");
+    expect(comments(CLI_TASK)).not.toMatch(/edit[^\n]*默认(?:为)?关/);
+  });
+});
