@@ -102,7 +102,7 @@ async function expectMutualExclusion(args: string[]): Promise<Result> {
   return r;
 }
 
-describe("record --rolling-upload / --stream-upload unknown values (H-972 bug baseline, real dist entry)", () => {
+describe("record --rolling-upload / --stream-upload unknown values (H-972 bug baseline, real cli entry)", () => {
   it("sanity: two explicit on values hit the mutual-exclusion gate", async () => {
     await expectMutualExclusion(["--rolling-upload", "1", "--stream-upload", "1"]);
   }, 12_000);
@@ -120,14 +120,19 @@ describe("record --rolling-upload / --stream-upload unknown values (H-972 bug ba
     await expectMutualExclusion(["--rolling-upload", "nope", "--stream-upload", "disabled"]);
   }, 12_000);
 
+  // One subprocess per `it` (each with its own timeout headroom): a single case never runs two
+  // 8s-capped spawns inside one test, so a slow machine cannot trip the timeout by accident.
   it.each([
-    ["uppercase", "NOPE"],
-    ["surrounding whitespace", " f "],
-    ["capitalized", "Disabled"],
-  ])("case and whitespace cannot change the result: %s (%s)", async (_label, v) => {
+    ["--rolling-upload", "uppercase", "NOPE"],
+    ["--rolling-upload", "surrounding whitespace", " f "],
+    ["--rolling-upload", "capitalized", "Disabled"],
+    ["--stream-upload", "uppercase", "NOPE"],
+    ["--stream-upload", "surrounding whitespace", " f "],
+    ["--stream-upload", "capitalized", "Disabled"],
+  ])("case and whitespace cannot change the result: %s side %s (%j)", async (side, _label, v) => {
+    const other = side === "--rolling-upload" ? "--stream-upload" : "--rolling-upload";
     // Whitespace travels as its own argv element so commander never splits it; trim() inside
     // parseBoolFlag would still leave an unknown value, which the bug turns into "on".
-    await expectMutualExclusion(["--rolling-upload", v, "--stream-upload", "1"]);
-    await expectMutualExclusion(["--rolling-upload", "1", "--stream-upload", v]);
-  }, 20_000);
+    await expectMutualExclusion([side, v, other, "1"]);
+  }, 12_000);
 });
