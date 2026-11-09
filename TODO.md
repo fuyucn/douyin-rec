@@ -2,7 +2,7 @@
 
 > 本文件是本仓库 **agent 工作的唯一待办台账**。管理规则见 `AGENTS.md`「任务与 TODO 管理」。
 > 编号 `T-N` 稳定不变（引用/提交信息里用它指代条目）。
-> 最后更新：2026-10-30
+> 最后更新：2026-11-09
 
 ## 状态约定
 
@@ -14,6 +14,11 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-171 直播直传背压截断 guard（issue [#574](https://github.com/fuyucn/douyin-rec/issues/574) → PR [#580](https://github.com/fuyucn/douyin-rec/pull/580)，2026-11-09）**
+  — **做什么**: full 模式 queue overflow（`feed()` 与 `pushTail()` 两条入口）即置 `uploadError`，收尾跳过 `complete`、走整文件回退；段报告/投稿统一字节口径；保留半截会话事实。
+  **为什么**: 上传器可能正好停在已入队块数上干净收尾，`uploadError` 为空 → `complete` 一个少传分 P（静默截断）。
+  **验收**: 截断 + `pushTail()` 两条确定性用例、变异验证；全量 test/typecheck/bundle；部署后真实链路/上传验证。
+  **现状（2026-11-09）**: PR [#580](https://github.com/fuyucn/douyin-rec/pull/580) 复审代码 APPROVE；RISK（上传路径）由人拍板；base 已对齐 `main`，版本 0.0.346；待合并/待部署验证。
 - [~] **T-170 房间级「录完这场再停」支持远端独录节点（issue [#569](https://github.com/fuyucn/douyin-rec/issues/569)，2026-11-09）**
   — **做什么**: 把 drain 从「只认 master 本机 TaskManager」改成房间级意图：源任务持久化 `drainRequested`；`drainTask` 在本机没跑但规则把房间派给远端时，先探测目标节点的 `drain` 能力（`_node-capabilities`），全部支持才置停用 + 触发同步；`RemoteTaskSpec.drain` 下发，节点 apply-tasks 对 `enabled=false + drain` 走 `/drain`（SIGUSR2 优雅停）而不是 `/stop`，本地 worker 的 pending 同样不硬停；任务视图带 `drainRequested`，远端仍在录时徽标显示「排空中」；start/stop 清除意图。
   **为什么**: 房间页按 `recordingWorkers` 显示「录制中」，drain 却只查本机 `manager.isRunning` → 远端独录房间点「录完这场再停」必然 409；同步停用是硬停，会截断当前分段。
