@@ -335,6 +335,9 @@ export function applyRemoteTasks(
         // 账号开关以 master 为准(2026-11-08):此前更新路径刻意“保留节点本地值”,于是 master 后开的
         // useCookie 永远到不了已存在的节点任务(节点继续匿名录制)。
         useCookie: spec.useCookie,
+        // 排空意图随期望落进节点自己的库(issue #569):不依赖 loopback /drain 这次调用成功,
+        // 节点 UI/日志与 daemon 都能看到;重新启用 = 新一轮的明确意图,清掉上一次的排空标记。
+        ...(spec.enabled ? { drainRequested: false } : spec.drain ? { drainRequested: true } : {}),
       });
       log?.(`[task-sync] 收编任务 ${existing.id}: ${key}`);
       // 期望任务已禁用但节点上还在录/待起:必须硬停,不能等 daemon 排空到自然收播。

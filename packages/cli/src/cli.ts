@@ -1273,6 +1273,16 @@ let hubAckJob:
 let hubRunNow:
   | ((opts: { streamKey: string; winnerWorker?: string; wait?: boolean; force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string; forceable?: boolean }>)
   | undefined;
+/**
+ * 远端排空能力探测(issue #569;hubStarter.start 注入)。master 在把 hub 源任务置停用前调用;
+ * hub 未启动 / 未注入 → 返回失败(API 保持录制,不回退成硬停)。
+ */
+let hubProbeDrainSupport: ((workerIds: string[]) => Promise<{ ok: boolean; error?: string }>) | undefined;
+const requestHubProbeDrainSupport = async (
+  workerIds: string[],
+): Promise<{ ok: boolean; error?: string }> => (hubProbeDrainSupport
+  ? hubProbeDrainSupport(workerIds)
+  : { ok: false, error: "hub 未启动" });
 let hubRecordingSnapshot = new Map<string, RecordingWorkerStatusDTO[]>();
 /** Zero-disk side-node status snapshot (issue #331); replaced wholesale on each hub sync tick, display only. */
 let hubZeroDiskSnapshot = new Map<string, ZeroDiskNodeStatusDTO[]>();
@@ -1430,6 +1440,7 @@ const requestHubRunNow = async (
 const hubStarter: HubStarter = {
   fleetUpgrade: (req, socket, head) => hubFleet?.upgrade(req, socket, head) ?? false,
   requestSyncTasks: requestHubSync,
+  probeDrainSupport: requestHubProbeDrainSupport,
   recordingWorkers: readRecordingWorkers,
   zeroDiskStatus: readZeroDiskStatus,
   readZeroDiskLive,
@@ -2104,8 +2115,19 @@ const hubStarter: HubStarter = {
             // 本机(local worker)的 pending 任务直接走同一进程里的 TaskManager 硬停,
             // 与远端 `_apply-tasks` 的 serve API 硬停语义一致:停源任务/删规则要立即停,
             // 不能等排空(否则 hub settle 会一直等这场直播自然收播,迟迟不建 job)。
+            // 例外 = 源任务的「录完这场再停」(issue #569):期望里带 `enabled=false + drain=true`
+            // 时**不得硬停**,daemon 的 stopGraceful / drainTask 已经让当前场自然收播。
+            const drainKeys = new Set(
+              desired
+                .filter((s) => s.enabled === false && s.drain === true)
+                .map((s) => `${s.platform}:${s.roomSlug}`),
+            );
             if (w.kind === "local" && r.pending.length > 0) {
               for (const key of r.pending) {
+                if (drainKeys.has(key)) {
+                  opts.log(`[hub] 任务 ${key} 排空中:不硬停,等本场自然收播`);
+                  continue;
+                }
                 const task = opts.store.listTasks().find((x) => {
                   try {
                     const p = platformForRoom(x.room);
@@ -2274,6 +2296,39 @@ const hubStarter: HubStarter = {
     hubStopJob = (streamKey: string) => reconciler.stopJob(streamKey);
     hubAckJob = (streamKey, o) => reconciler.ackJob(streamKey, o);
     hubRunNow = (opts) => reconciler.runNow(opts);
+    // 远端排空能力探测(issue #569):master 只查绑定的录制节点;本机(local)跳过(自己就支持)。
+    // 任一节点旧 bundle / 不可达就失败 —— API 保持录制,绝不回退成硬停(硬停会截断当前分段)。
+    hubProbeDrainSupport = async (workerIds) => {
+      for (const id of workerIds) {
+        const w = loadWorkers().find((x) => x.id === id);
+        if (!w) {
+          // 老规则可能残留已删除的 worker id:desired 构造会忽略它(没有通道可下发),探测同样跳过,
+          // 不能因此把整个房间的排空永久判失败(issue #569 review P2)。
+          opts.warn(`[hub] 排空探测:规则的 worker ${id} 不在 hub 配置里,跳过`);
+          continue;
+        }
+        if (w.kind === "local") continue;
+        let t: ReturnType<typeof getTransport> | undefined;
+        try {
+          t = buildTransports().get(id);
+        } catch (e) {
+          return { ok: false, error: `节点 ${w.name ?? id} 通道配置无效: ${(e as Error).message}` };
+        }
+        if (!t) return { ok: false, error: `节点 ${w.name ?? id} 没有可用通道` };
+        if (!t.nodeCapabilities) {
+          return { ok: false, error: `节点 ${w.name ?? id} 不支持优雅排空(旧 bundle),请先升级节点` };
+        }
+        try {
+          const caps = await t.nodeCapabilities();
+          if (caps.drain !== true) {
+            return { ok: false, error: `节点 ${w.name ?? id} 不支持优雅排空(旧 bundle),请先升级节点` };
+          }
+        } catch (e) {
+          return { ok: false, error: `节点 ${w.name ?? id} 不可达,无法确认排空: ${(e as Error).message}` };
+        }
+      }
+      return { ok: true };
+    };
     // 队列页的「排队位次 / 资源占用」来源:读同一 ResourcePool 实例(进程内共享)。
     hubPoolSnapshot = () => pool.snapshot();
     hubBlockedBroadcasts = () => reconciler.blockedBroadcasts();
@@ -2340,6 +2395,7 @@ const hubStarter: HubStarter = {
       hubStopJob = undefined;
       hubAckJob = undefined;
       hubRunNow = undefined;
+      hubProbeDrainSupport = undefined;
       hubPoolSnapshot = undefined;
       hubBlockedBroadcasts = undefined;
       hubReceiptSettings = undefined;

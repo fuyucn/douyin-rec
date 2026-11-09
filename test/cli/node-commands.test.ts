@@ -9,7 +9,7 @@
  * app layer (tasks / node-status / notify-outbox / proc-* / enqueue / inventory / apply-tasks) are covered
  * by the stdout parity check against the previous bundle (see the PR), not here.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +18,7 @@ import { NODE_COMMANDS, notifyOutboxArgs } from "../../packages/cli/src/node-com
 const roots: string[] = [];
 const original = process.env.DOUYIN_REC_ROOT;
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
   if (original === undefined) delete process.env.DOUYIN_REC_ROOT;
   else process.env.DOUYIN_REC_ROOT = original;
@@ -63,6 +64,88 @@ describe("NODE_COMMANDS", () => {
     } finally {
       store.close();
     }
+  });
+
+  it("apply-tasks: enabled=false + drain → pending 不硬停,交给节点 daemon 录到自然收播(issue #569)", async () => {
+    const root = makeRoot();
+    const { TaskStore } = await import("../../packages/app/src/store.js");
+    const store = new TaskStore(join(root, "db", "douyin-rec.db"));
+    store.addTask({ room: "https://live.douyin.com/777777", status: "running", enabled: true, anchorName: "A" });
+    store.close();
+    const spec = {
+      platform: "douyin", roomSlug: "777777", room: "https://live.douyin.com/777777",
+      name: "A", quality: "origin", engine: "ffmpeg", danmu: 1, segmentSec: 1800,
+      scheduleStart: null, scheduleEnd: null, enabled: false, useCookie: true,
+      cookies: null, outDir: null, webhook: null, anchorName: "A", rollingUpload: false,
+      streamUpload: false, drain: true,
+    };
+    const b64 = Buffer.from(JSON.stringify({ desired: [spec] }), "utf-8").toString("base64");
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 200 }));
+    const r = await NODE_COMMANDS["apply-tasks"](root, [b64]);
+    expect(r.exitCode).toBe(0);
+    const out = oneJsonLine(r.stdout) as { pending: string[] };
+    expect(out.pending).toEqual(["douyin:777777"]);
+    // 必须走 /drain(优雅),绝不能 /stop(那会截断本场)。
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(String(fetchSpy.mock.calls[0][0])).toContain("/drain?internal=1");
+    fetchSpy.mockRestore();
+    const after = new TaskStore(join(root, "db", "douyin-rec.db"));
+    try {
+      expect(after.listTasks()[0]).toMatchObject({ enabled: false, status: "running", drainRequested: true });
+    } finally {
+      after.close();
+    }
+  });
+
+  it("apply-tasks: enabled=false 且无 drain → pending 仍立即硬停(旧行为)", async () => {
+    const root = makeRoot();
+    const { TaskStore } = await import("../../packages/app/src/store.js");
+    const store = new TaskStore(join(root, "db", "douyin-rec.db"));
+    store.addTask({ room: "https://live.douyin.com/888888", status: "running", enabled: true, anchorName: "A" });
+    store.close();
+    const spec = {
+      platform: "douyin", roomSlug: "888888", room: "https://live.douyin.com/888888",
+      name: "A", quality: "origin", engine: "ffmpeg", danmu: 1, segmentSec: 1800,
+      scheduleStart: null, scheduleEnd: null, enabled: false, useCookie: true,
+      cookies: null, outDir: null, webhook: null, anchorName: "A", rollingUpload: false,
+      streamUpload: false,
+    };
+    const b64 = Buffer.from(JSON.stringify({ desired: [spec] }), "utf-8").toString("base64");
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 200 }));
+    const r = await NODE_COMMANDS["apply-tasks"](root, [b64]);
+    expect(r.exitCode).toBe(0);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(String(fetchSpy.mock.calls[0][0])).toContain("/api/tasks/");
+    expect(String(fetchSpy.mock.calls[0][0])).toContain("/stop?internal=1");
+    fetchSpy.mockRestore();
+    const after = new TaskStore(join(root, "db", "douyin-rec.db"));
+    try {
+      expect(after.listTasks()[0]).toMatchObject({ enabled: false, drainRequested: false });
+    } finally {
+      after.close();
+    }
+  });
+
+  it("apply-tasks: 点名删除(deleted:true)即使有排空标记也仍走 /stop(删除是显式意图)", async () => {
+    const root = makeRoot();
+    const { TaskStore } = await import("../../packages/app/src/store.js");
+    const store = new TaskStore(join(root, "db", "douyin-rec.db"));
+    store.addTask({ room: "https://live.douyin.com/999000", status: "running", enabled: true, anchorName: "A", managedBy: "hub" });
+    store.close();
+    const spec = {
+      platform: "douyin", roomSlug: "999000", room: "https://live.douyin.com/999000",
+      name: "A", quality: "origin", engine: "ffmpeg", danmu: 1, segmentSec: 1800,
+      scheduleStart: null, scheduleEnd: null, enabled: false, useCookie: true,
+      cookies: null, outDir: null, webhook: null, anchorName: "A", rollingUpload: false,
+      streamUpload: false, deleted: true,
+    };
+    const b64 = Buffer.from(JSON.stringify({ desired: [spec] }), "utf-8").toString("base64");
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 200 }));
+    const r = await NODE_COMMANDS["apply-tasks"](root, [b64]);
+    expect(r.exitCode).toBe(0);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(String(fetchSpy.mock.calls[0][0])).toContain("/stop?internal=1");
+    fetchSpy.mockRestore();
   });
 
   it("disk: existing root → {freeGB} and exit 0", async () => {

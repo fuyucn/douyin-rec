@@ -116,6 +116,12 @@ export interface ApiDeps {
   nodeTasks?: (workerId: string) => Promise<import("@drec/core").NodeTasksDTO>;
   /** 录制节点状态缓存读取;避免每次列任务都同步 SSH。 */
   recordingWorkers?: (platform: string, roomSlug: string) => RecordingWorkerStatusDTO[];
+  /**
+   * 远端排空能力探测(issue #569;CLI 注入,能 import orchestrator):
+   * 在 master 把源任务置停用之前,逐个确认绑定的节点 bundle 理解 `RemoteTaskSpec.drain`。
+   * 省略 = hub 未启用 / 无该能力 → 远端独录房间的排空失败并保持录制(不回退成硬停)。
+   */
+  probeDrainSupport?: (workerIds: string[]) => Promise<{ ok: boolean; error?: string }>;
   /** Cached zero-disk side-node status reader (issue #331); only on a master hub. */
   zeroDiskStatus?: (platform: string, roomSlug: string) => ZeroDiskNodeStatusDTO[];
   /** Full current/previous timeline entries for a room (managed nodes; local is read directly). */
@@ -284,8 +290,8 @@ export interface Api {
   refreshTaskAnchor(id: number): ApiResult;
   startTask(id: number): ApiResult;
   stopTask(id: number, opts?: { internal?: boolean }): Promise<ApiResult>;
-  /** POST /api/tasks/:id/drain — 优雅排空:当前这场录完再停(不腰斩)。 */
-  drainTask(id: number): Promise<ApiResult>;
+  /** POST /api/tasks/:id/drain — 优雅排空:当前这场录完再停(不腰斩)。internal=本机回环(节点 apply-tasks)。 */
+  drainTask(id: number, opts?: { internal?: boolean }): Promise<ApiResult>;
   /** POST /api/login/qr { platform? } — start a QR-login → { sessionId, qrPng }. */
   startLogin(input?: { platform?: string }): Promise<ApiResult>;
   /** GET /api/login/qr/:sid — poll → { state, cookie? }. */

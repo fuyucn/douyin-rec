@@ -45,6 +45,12 @@ export interface Task {
    * sticks. Default false: a task must be explicitly 启动 before it runs.
    */
   enabled: boolean;
+  /**
+   * 「录完这场再停」意图(issue #569)。与 `enabled=false` 一起写:master 置停用,但远端/本机
+   * 录制器必须让当前这场录到自然收播(不得硬停)。下一个 `start`/`stop` 清除;排空完成后
+   * 标志可留到下次启动,仅作「这次停用是排空」的记录(UI 只在仍有人录时显示排空中)。
+   */
+  drainRequested: boolean;
   createdAt: string;
   /** 自动抓取的主播名（创建时 getInfo().owner / 录制时刷新）；未知为 null。显示用 name>anchorName>room。 */
   anchorName: string | null;
@@ -152,6 +158,7 @@ interface TaskRow {
   status: string;
   useCookie: number;
   enabled: number;
+  drainRequested: number;
   createdAt: string;
   anchorName: string | null;
   webhook: string | null;
@@ -217,6 +224,7 @@ function rowToTask(r: TaskRow): Task {
     status: (r.status as TaskStatus) ?? "stopped",
     useCookie: Number(r.useCookie) !== 0,
     enabled: Number(r.enabled) !== 0,
+    drainRequested: Number(r.drainRequested ?? 0) !== 0,
     createdAt: r.createdAt,
     anchorName: r.anchorName ?? null,
     webhook: r.webhook ?? null,
@@ -350,6 +358,8 @@ export class TaskStore {
         rollingEffective?: boolean | null;
         /** 自动抓取的主播名(收编时同步 master 侧名称;不在 TaskInput 上,仅 updateTask 可写)。 */
         anchorName?: string | null;
+        /** 「录完这场再停」意图(issue #569;不在 TaskInput 上,仅启停/同步路径可写)。 */
+        drainRequested?: boolean;
       }
     >,
   ): Task | null {
@@ -396,6 +406,7 @@ export class TaskStore {
     if ("scheduleEnd" in patch) set("scheduleEnd", patch.scheduleEnd ?? null);
     if ("useCookie" in patch) set("useCookie", patch.useCookie ? 1 : 0);
     if ("enabled" in patch) set("enabled", patch.enabled ? 1 : 0);
+    if ("drainRequested" in patch) set("drainRequested", patch.drainRequested ? 1 : 0);
     if ("webhook" in patch) set("webhook", patch.webhook ?? null);
     if ("anchorName" in patch) set("anchorName", patch.anchorName ?? null);
     // undefined = 未给(沿用);非法值抛错(API 层先校验回 400)。

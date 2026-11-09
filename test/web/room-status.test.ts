@@ -25,6 +25,10 @@ describe("roomStatus", () => {
   it("draining / stopping still count as recording (stream still being written)", () => {
     expect(roomStatus(room(), task({ status: "draining", running: true, recording: true }), null).kind).toBe("recording");
     expect(roomStatus(room(), task({ stopping: true, running: true }), null).kind).toBe("recording");
+    // issue #569: 远端排空 = master 已停用 + 节点仍在录;房间整体仍是「录制」,phase 供徽标显示「排空中」。
+    const remote = roomStatus(room(), task({ enabled: false, drainRequested: true, recordingWorkers: [w("recording")] }), null);
+    expect(remote.kind).toBe("recording");
+    expect(remote.phase?.kind).toBe("draining");
   });
 
   it("recording faults surface as attention even while a run is processing", () => {

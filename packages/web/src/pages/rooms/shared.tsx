@@ -134,13 +134,18 @@ const KIND_STYLE: Record<RoomStatus["kind"], { tone: string; dot: string; pulse:
 
 export function RoomBadge({ s }: { s: RoomStatus }): ReactNode {
   const t = useT();
-  const st = KIND_STYLE[s.kind];
+  // 远端排空(issue #569):房间仍在录本场,但 master 已置停用。用「排空中」而不是「录制中」,
+  // 否则点完「录完这场再停」看不出意图已生效。停用/收尾优先级仍由 taskPhase 决定。
+  const draining = s.kind === "recording" && s.phase?.kind === "draining";
+  const st = draining ? PHASE_STYLE.draining : KIND_STYLE[s.kind];
   // Recording faults use the task phase's own colour (offline/error are red there, not amber).
-  const dot = s.kind === "attention" && s.phase && (s.phase.kind === "offline" || s.phase.kind === "error") ? PHASE_STYLE[s.phase.kind].dot : st.dot;
+  const dot = draining
+    ? PHASE_STYLE.draining.dot
+    : s.kind === "attention" && s.phase && (s.phase.kind === "offline" || s.phase.kind === "error") ? PHASE_STYLE[s.phase.kind].dot : st.dot;
   return (
     <span className={`badge ${st.tone} shrink-0`}>
       {s.kind !== "paused" && <span className={`dot${st.pulse ? " dot-running" : ""}`} style={{ background: dot }} />}
-      {s.kind === "processing" && s.run ? runLabel(t, s.run.state) : t(`room.status.${s.kind}`)}
+      {draining ? t("badge.draining") : s.kind === "processing" && s.run ? runLabel(t, s.run.state) : t(`room.status.${s.kind}`)}
     </span>
   );
 }

@@ -89,7 +89,8 @@ beforeEach(() => {
 function addTask(
   over: Partial<Parameters<TaskStore["addTask"]>[0]> = {},
 ): number {
-  return store.addTask({ room: "12345", ...over }).id;
+  // 生产里进入 TaskManager 的任务都是「用户/daemon 启动意图」= enabled=true;默认值取真实形态。
+  return store.addTask({ room: "12345", enabled: true, ...over }).id;
 }
 
 describe("TaskManager beforeSpawn(边录边传起录兜底)", () => {
@@ -288,6 +289,24 @@ describe("TaskManager", () => {
     expect(spawner.spawned).toHaveLength(2); // respawned
     expect(mgr.isRunning(id)).toBe(true);
     expect(store.getTask(id)!.status).toBe("running");
+  });
+
+  it("disabled task (stop / hub drain) crashes → crash timer must not revive it (issue #569)", () => {
+    const id = addTask();
+    const spawner = new MockSpawner();
+    const mgr = new TaskManager(store, spawner, {
+      autoRestart: true,
+      restartDelayMs: 0,
+      schedule: (cb) => cb(),
+      log: () => {},
+    });
+    mgr.start(id);
+    // 排空/停用:enabled=false 是用户的明确意图,崩溃不是恢复录制的理由。
+    store.setEnabled(id, false);
+    spawner.last(id).emitExit({ code: 1, signal: null, expected: false });
+
+    expect(spawner.spawned).toHaveLength(1);   // 不重拉
+    expect(mgr.isRunning(id)).toBe(false);
   });
 
   it("0 落盘任务自行收尾(exit 0,预期外)→ 正常停止,不进崩溃重启循环", async () => {

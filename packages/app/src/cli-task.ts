@@ -314,6 +314,11 @@ export interface HubStarter {
   nodeTaskLogs?: (workerId: string, taskId: number, lines: number) => Promise<import("@drec/core").NodeTaskLogsDTO>;
   /** master 控制台读取 hub 源任务的 worker 录制状态快照。 */
   recordingWorkers?: (platform: string, roomSlug: string) => import("@drec/core").RecordingWorkerStatusDTO[];
+  /**
+   * 远端排空能力探测(issue #569):目标节点 bundle 是否理解 `RemoteTaskSpec.drain`。
+   * master 在把源任务置停用之前调用;省略/不可达 = 不允许远端排空(保持录制,绝不硬停)。
+   */
+  probeDrainSupport?: (workerIds: string[]) => Promise<{ ok: boolean; error?: string }>;
   /** The master console reads the zero-disk side-node status snapshot (issue #331). */
   zeroDiskStatus?: (platform: string, roomSlug: string) => import("@drec/core").ZeroDiskNodeStatusDTO[];
   /** Full current/previous snapshots for managed zero-disk detail. */

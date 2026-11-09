@@ -294,7 +294,8 @@ function RoomActions({ room, data, actions }: {
   const enabled = task?.enabled ?? room.recording?.enabled ?? false;
   const taskId = room.recording?.taskId ?? null;
   // 颜色说「在发生什么」,不是「按钮将做什么」:暂停/等待/离线的房间不带饱和停止块。
-  const mark = startStopVisual(enabled, data.statusOf(room).kind);
+  const status = data.statusOf(room);
+  const mark = startStopVisual(enabled, status.kind, status.phase?.kind === "draining");
   if (managed) {
     return (
       <div className="inline-flex items-center gap-1.5 justify-end">

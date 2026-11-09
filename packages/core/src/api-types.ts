@@ -765,6 +765,14 @@ export interface RemoteTaskSpec {
    */
   outputFormat?: OutputFormat;
   /**
+   * master 要求**优雅排空**(issue #569):停用这个房间,但让当前这场录到自然收播,不硬停。
+   *
+   * 只在 `enabled=false` 时有意义:节点 apply-tasks 遇到 `enabled=false + drain=true` 时**不得**
+   * 走硬停(pending 队列),交给本机 daemon 的 `stopGraceful`(SIGUSR2);重复轮次幂等。
+   * 旧 master 不下发 / 旧节点不认识 → 缺省 false(维持旧的「停用 = 硬停」行为)。
+   */
+  drain?: boolean;
+  /**
    * **可选提示**:master 明确要求「这个房间可以删了」(规则文件已消失 / sourceTaskId 解绑)。
    *
    * 默认**忽略**(DREC_EXPLICIT_DELETE 默认关):删除判定仍以「节点 store 受管任务 − 期望 keys」
@@ -961,6 +969,11 @@ export interface NodeCapabilities {
   zeroDisk?: boolean;
   /** 节点已注册的处理器 kind 列表(plans/036);缺字段 = 旧节点,派发方按「不支持」处理。 */
   processors?: string[];
+  /**
+   * 节点 apply-tasks 理解 `RemoteTaskSpec.drain`(issue #569):master 在置停用**之前**必须确认,
+   * 否则旧节点会把「停用」当硬停、截断当前分段。缺字段 = 旧节点 → 拒绝远端排空(保持录制)。
+   */
+  drain?: boolean;
 }
 
 /** POST /api/tasks + PATCH /api/tasks/:id 的请求体(部分字段;录制专属,hub 配置见 HubRule)。 */
@@ -1069,6 +1082,12 @@ export interface TaskDTO {
   scheduleEnd: string | null;
   status: string;
   enabled: boolean;
+  /**
+   * 「录完这场再停」意图已记录:本机/节点不再接新场,让当前这场自然收播(issue #569)。
+   * 与 `enabled=false` 一起出现;远端节点仍在录时 UI 显示「排空中」,收播后自然落回「已停用」。
+   * 旧后端无此字段 = 无排空意图。
+   */
+  drainRequested?: boolean;
   createdAt: string;
   /** 进程是否在跑(可能「等待开播中」)。 */
   running: boolean;

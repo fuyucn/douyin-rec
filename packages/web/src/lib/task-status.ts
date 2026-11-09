@@ -23,10 +23,12 @@ type PhaseInput = Pick<Task, "enabled" | "status" | "running"> & {
   stopping?: boolean;
   recording?: boolean;
   recordingWorkers?: Task["recordingWorkers"];
+  /** 「录完这场再停」意图(issue #569):master 已置停用,但远端节点还在录本场。 */
+  drainRequested?: boolean;
 };
 
 /**
- * 判定顺序 = 原 StatusBadge 的分支顺序(停用 > 收尾 > 排空 > 远端在录 > 远端等待/离线 > 本地在录/等待 > 错误 > 待命)。
+ * 判定顺序 = 原 StatusBadge 的分支顺序(排空中 > 停用 > 收尾 > 远端在录 > 远端等待/离线 > 本地在录/等待 > 错误 > 待命)。
  *
  * 为什么强调「顺序不能动」:这些输入会重叠(远端在录时 status 也可能是 error;排空时 recording 仍为 true),
  * 换一下顺序就会把「节点离线」显示成「等待开播」、或把「双录中某节点报错」显示成「错误」。
@@ -37,9 +39,13 @@ export function taskPhase(t: PhaseInput): TaskPhase {
   const nodes = workers.filter((w) => w.state === "recording").map((w) => w.workerName);
   const down = workers.filter((w) => w.state === "unavailable").map((w) => w.workerName);
   const base = { recordingNodes: nodes, unavailableNodes: down };
+  // 排空中必须排在「停用」之前(issue #569):排空按设计就是 enabled=false + 当前场仍在录,
+  // 否则用户点完「录完这场再停」只会看到「已停用」,以为录制被截断了。本机(status=draining)
+  // 与远端(drainRequested + 节点在录)同口径;录完/硬停后自然落回停用/收尾。
+  if (t.status === "draining") return { ...base, kind: "draining", textKey: "badge.draining" };
+  if (t.drainRequested === true && nodes.length > 0) return { ...base, kind: "draining", textKey: "badge.draining" };
   if (!t.enabled) return { ...base, kind: "disabled", textKey: "badge.disabled" };
   if (t.stopping) return { ...base, kind: "stopping", textKey: "badge.stopping" };
-  if (t.status === "draining") return { ...base, kind: "draining", textKey: "badge.draining" };
   if (nodes.length > 0) return { ...base, kind: "recording", textKey: "badge.recordingOn" };
   // 远端有绑定但都没在录:离线(红)优先于「等待开播」(灰) —— 离线是故障,不能被等待文案盖掉。
   if (workers.length > 0) {

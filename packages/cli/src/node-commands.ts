@@ -335,12 +335,13 @@ export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freez
 
   // Apply the master's desired tasks.
   "apply-tasks": async (dataRoot, [b64]) => {
-    const { applyTasksPayload } = await import("@drec/app");
+    const { applyTasksPayload, parseApplyTasksPayload } = await import("@drec/app");
     return withTaskStore(dataRoot, async (store) => {
       // T16: expectedVersion travels in the payload; an old master without it → version 0.
       // Cross-process: each _apply-tasks invocation is a fresh process and stdout is the parsed
       // JSON contract. Compatibility warnings (e.g. a legacy no-spool delivery) travel back in
       // the result object (ApplyTasksResult.warnings); the master's sync loop logs them.
+      const input = parseApplyTasksPayload(b64);
       const result = applyTasksPayload(store, b64, undefined, {
         // Audit snapshot dir is derived from dataRoot explicitly (no DOUYIN_REC_ROOT here; see managed-state.ts).
         managedStateDir: join(dataRoot, "config", "managed"),
@@ -349,22 +350,34 @@ export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freez
       // stopped the source task / removed the rule, and draining would keep the hub settle waiting for the
       // broadcast to end. Only the local serve holds the TaskManager, so ask it via
       // POST /api/tasks/:id/stop (internal=1 is accepted from loopback only).
+      //
+      // 例外 = master 的「录完这场再停」(issue #569):`enabled=false + drain=true` 是明确的排空意图,
+      // 改走 /drain(SIGUSR2)让当前场录到自然收播;硬停会截断它。守卫只看「期望里仍有这个房间、且带
+      // drain」—— 缺席/点名删除仍走 /stop(删除是显式意图)。
       const byKey = new Map(store.listTasks().map((t) => [taskRoomKey(t.room), t] as const));
+      const drainKeys = new Set(
+        input.desired
+          .filter((s) => s.enabled === false && s.drain === true)
+          .map((s) => `${s.platform}:${s.roomSlug}`),
+      );
       for (const key of result.pending) {
         const task = byKey.get(key);
         if (!task) continue;
+        const drain = drainKeys.has(key);
         try {
-          const res = await fetch(`${serveApiBase()}/api/tasks/${task.id}/stop?internal=1`, {
+          // 排空走 /drain(SIGUSR2),硬停走 /stop。两者都只在本机回环;serve down → 下一轮同步重试,
+          // 排空任务即使这轮没送达也不会被硬停(下一个 daemon tick 仍按 enabled=false 优雅收播)。
+          const res = await fetch(`${serveApiBase()}/api/tasks/${task.id}/${drain ? "drain" : "stop"}?internal=1`, {
             method: "POST",
             // Bounded: inside the resident serve a hung loopback call must not pin the request.
             signal: AbortSignal.timeout(10_000),
           });
           if (!res.ok) {
-            console.error(`[task-sync] 硬停任务 id=${task.id}(${key}) 失败: HTTP ${res.status}`);
+            console.error(`[task-sync] ${drain ? "排空" : "硬停"}任务 id=${task.id}(${key}) 失败: HTTP ${res.status}`);
           }
         } catch (e) {
           // serve down/restarting → the next sync puts it back in pending; daemon drain is the last resort.
-          console.error(`[task-sync] 硬停任务 id=${task.id}(${key}) 失败: ${(e as Error).message}`);
+          console.error(`[task-sync] ${drain ? "排空" : "硬停"}任务 id=${task.id}(${key}) 失败: ${(e as Error).message}`);
         }
       }
       // Managed tasks without an anchorName yet: ask the local serve to refetch it in the background

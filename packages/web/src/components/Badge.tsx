@@ -59,6 +59,7 @@ export function StatusBadge({
   stopping,
   recordingWorkers,
   gated,
+  drainRequested,
 }: {
   running: boolean;
   status: string;
@@ -70,13 +71,15 @@ export function StatusBadge({
   recordingWorkers?: Task["recordingWorkers"];
   /** true=判活闸门中:已启动、未开播,没有占用录制进程(仅提示,状态口径不变)。 */
   gated?: boolean;
+  /** 远端排空意图(issue #569);缺省 = 旧后端 / 无排空。 */
+  drainRequested?: boolean;
 }): ReactNode {
   const t = useT();
   // 本地每秒走一次:否则「N 秒前核对」会冻结在渲染那一刻的数字 —— 推送驱动的页面
   // 恰恰很少重渲染,不自带 ticker 就会出现「永远显示 12s 前」。
   const now = useTicker(1_000);
   // 判定顺序与配色只写在 taskPhase / PHASE_STYLE 一处(与任务详情页共用),徽标不再自带分支。
-  const phase = taskPhase({ enabled, status, running, recording, stopping, recordingWorkers });
+  const phase = taskPhase({ enabled, status, running, recording, stopping, recordingWorkers, drainRequested });
   // T17:远端状态是 SSH 探测的**缓存**,不是实时的。带出「N 秒前核对」,
   // 否则用户把一个 3 分钟前的旧结论当成实时(节点探测失败时缓存会一直是旧值)。
   const staleness = recordingAgeLabel(recordingWorkers, now);

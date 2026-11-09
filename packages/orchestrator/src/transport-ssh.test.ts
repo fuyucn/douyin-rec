@@ -574,11 +574,15 @@ describe("SshTransport.zeroDiskReport / nodeCapabilities.zeroDisk (issue #331)",
     await expect(mkT(async () => JSON.stringify({ error: "disk" })).zeroDiskReport()).rejects.toThrow("disk");
     await expect(mkT(async () => JSON.stringify({ nope: 1 })).zeroDiskReport()).rejects.toThrow("unrecognized");
   });
-  it("_node-capabilities: zeroDisk is true only when the node says so (old bundles omit it)", async () => {
+  it("_node-capabilities: zeroDisk / drain are true only when the node says so (old bundles omit them)", async () => {
     const caps = (extra: object) => mkT(async () => JSON.stringify({ biliup: true, cookies: true, diskFreeGB: 5, ...extra })).nodeCapabilities();
     expect((await caps({ zeroDisk: true })).zeroDisk).toBe(true);
     expect((await caps({})).zeroDisk).toBe(false);
     expect((await caps({ zeroDisk: "yes" })).zeroDisk).toBe(false);
+    // issue #569: master refuses remote drain unless the node advertises it.
+    expect((await caps({ drain: true })).drain).toBe(true);
+    expect((await caps({})).drain).toBe(false);
+    expect((await caps({ drain: "yes" })).drain).toBe(false);
   });
 });
 

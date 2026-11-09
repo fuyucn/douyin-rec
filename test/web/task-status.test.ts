@@ -11,6 +11,27 @@ describe("taskPhase(运行态派生唯一口径)", () => {
     expect(taskPhase(mk({ enabled: false, running: true, recording: true, stopping: true })).kind).toBe("disabled");
   });
 
+  it("排空:enabled=false 但本场仍在录 → 排空中(不是已停用);停了才落回停用(issue #569)", () => {
+    // 本机排空:stopGraceful 把 status 置 draining,同时 API 已置 enabled=false。
+    expect(taskPhase(mk({
+      enabled: false, status: "draining", running: true, recording: true,
+    })).textKey).toBe("badge.draining");
+    // 远端排空:本机没有进程,节点还在录。
+    expect(taskPhase(mk({
+      enabled: false, drainRequested: true,
+      recordingWorkers: [w("n1", "recording")],
+    })).textKey).toBe("badge.draining");
+    expect(taskPhase(mk({
+      enabled: false, drainRequested: true,
+      recordingWorkers: [w("n1", "not_recording")],
+    })).textKey).toBe("badge.disabled");
+    // 已停用但没有排空意图:旧的「停用最优先」不变。
+    expect(taskPhase(mk({
+      enabled: false, drainRequested: false,
+      recordingWorkers: [w("n1", "recording")],
+    })).textKey).toBe("badge.disabled");
+  });
+
   it("收尾优先于在录:硬停收尾 > 排空 > 在录", () => {
     expect(taskPhase(mk({ stopping: true, running: true, recording: true })).textKey).toBe("badge.stopping");
     expect(taskPhase(mk({ status: "draining", running: true, recording: true })).textKey).toBe("badge.draining");

@@ -148,6 +148,7 @@ export function desiredSpecsForWorker(workerId: string, ctx: HubDesiredCtx): Rem
       anchorName: src.anchorName,
       assigned,
       ...rollingFields,
+      ...(src.drainRequested ? { drain: true } : {}),
       streamUpload: src.streamUpload,
       // Pinned by the core constant: workers never receive the forbidden no-spool value.
       streamUploadSpool: STREAM_UPLOAD_SPOOL_REQUIRED,

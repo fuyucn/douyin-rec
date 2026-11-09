@@ -402,6 +402,9 @@ export class SshTransport implements Transport {
       cjkFonts: parsed.cjkFonts === true,
       // Absent on old bundles = not supported (issue #331): the master must not push zero-disk there.
       zeroDisk: parsed.zeroDisk === true,
+      // Absent on old bundles (issue #569): the master will refuse to drain remotely (never fall back to
+      // the disable path, which hard-stops the current broadcast on a node that ignores `drain`).
+      drain: parsed.drain === true,
       // 缺字段 = 旧节点(plans/036 D5):保持 undefined,派发方据此判「不支持」。
       ...(Array.isArray(parsed.processors) ? { processors: parsed.processors.filter((x): x is string => typeof x === "string") } : {}),
     };

@@ -803,6 +803,13 @@ export class TaskManager {
       // A start() during the restart delay may have put the task behind the gate: the gate owns
       // the next spawn, so this stale timer must not create a second owner.
       if (this.gates.has(taskId)) return;
+      // issue #569: a disabled task (user stop / hub「录完这场再停」) must not be revived by the
+      // crash timer — it would start recording a new broadcast the user just asked to finish.
+      // The daemon owns disabled tasks; it will never start one.
+      if (this.store.getTask(taskId)?.enabled !== true) {
+        this.logTask(taskId, `[task_manager] ⏹ 任务 id=${taskId} 已停用/排空,崩溃后不自动重启`);
+        return;
+      }
       if (!this.trySpawn(taskId)) return;
       this.store.setStatus(taskId, "running");
     }, this.restartDelayMs);

@@ -922,7 +922,7 @@ export async function runNodeSidePipeline(
 
 /** 节点侧上传能力探测:节点上是否有 biliup + B站 cookie + 中文字体 + 磁盘剩余。 */
 export async function probeNodeCapabilities(dataRoot: string): Promise<{
-  biliup: boolean; cookies: boolean; diskFreeGB: number; cjkFonts: boolean; zeroDisk: boolean;
+  biliup: boolean; cookies: boolean; diskFreeGB: number; cjkFonts: boolean; zeroDisk: boolean; drain: boolean;
 }> {
   const { spawnSync } = await import("node:child_process");
   const hasBiliup = spawnSync("sh", ["-c", "command -v biliup"], { stdio: "ignore" }).status === 0;
@@ -938,7 +938,9 @@ export async function probeNodeCapabilities(dataRoot: string): Promise<{
   const cjkFonts = spawnSync("sh", ["-c", "fc-list 2>/dev/null | grep -qi 'noto sans cjk'"], { stdio: "ignore" }).status === 0;
   // zeroDisk: this bundle understands master-delivered zero-disk metadata, verifies the node account
   // before uploading and reports receipts (`_zero-disk-report`). An older bundle omits the field.
-  return { biliup: hasBiliup, cookies: hasCookies, diskFreeGB, cjkFonts, zeroDisk: true };
+  // drain: this bundle understands `RemoteTaskSpec.drain` (issue #569) — the master refuses remote
+  // drain on an older node instead of letting its disable path hard-stop the current broadcast.
+  return { biliup: hasBiliup, cookies: hasCookies, diskFreeGB, cjkFonts, zeroDisk: true, drain: true };
 }
 
 /** 节点 stage 里的视频类产物:后处理容器(注册表 mp4/mkv)+ `.ts` 直传。 */

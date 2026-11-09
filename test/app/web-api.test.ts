@@ -2839,11 +2839,17 @@ describe("T18 drainTask(优雅排空)", () => {
     s.close();
   });
 
-  it("受管任务 → 403(hub 受管只能回 master 操作)", async () => {
+  it("受管任务 → 403(hub 受管只能回 master 操作);internal(节点回环)例外", async () => {
     const s = new TaskStore(":memory:");
-    const a = makeApi({ store: s, manager: new MockManager(), ...hubDeps("drain-managed-") });
+    const m = new MockManager();
+    const a = makeApi({ store: s, manager: m, ...hubDeps("drain-managed-") });
     const t = s.addTask({ room: "123456", managedBy: "hub" });
     expect((await a.drainTask(t.id)).status).toBe(403);
+    // 节点 apply-tasks 的 drain 通道:本机回环 internal=1 → 允许,并且走 stopGraceful。
+    m.forceRunning(t.id);
+    expect((await a.drainTask(t.id, { internal: true })).status).toBe(200);
+    expect(m.gracefulCalls).toContain(t.id);
+    expect(s.getTask(t.id)!.drainRequested).toBe(true);
     s.close();
   });
 
@@ -2851,6 +2857,205 @@ describe("T18 drainTask(优雅排空)", () => {
     const s = new TaskStore(":memory:");
     const a = makeApi({ store: s, manager: new MockManager(), ...hubDeps("drain-404-") });
     expect((await a.drainTask(999)).status).toBe(404);
+    s.close();
+  });
+
+  // issue #569:hub 房间只由远端节点录制时,master 本机没有进程,但排空必须下发给节点。
+  it("远端独录(本机没跑、节点在录)→ 写排空意图 + 触发同步,不走本机硬停", async () => {
+    const s = new TaskStore(":memory:");
+    const m = new MockManager();
+    const requestSyncTasks = vi.fn();
+    const probeDrainSupport = vi.fn(async () => ({ ok: true }));
+    const a = makeApi({
+      store: s, manager: m,
+      ...hubDeps("drain-remote-", {
+        requestSyncTasks,
+        probeDrainSupport,
+        recordingWorkers: () => [
+          { workerId: "vps2", workerName: "VPS", state: "recording", checkedAt: 123 },
+        ],
+      }),
+    });
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["vps2"] });
+    s.updateTask(t.id, { enabled: true });
+    requestSyncTasks.mockClear();
+
+    const r = await a.drainTask(t.id);
+    expect(r.status).toBe(200);
+    expect(probeDrainSupport).toHaveBeenCalledWith(["vps2"]);
+    expect(s.getTask(t.id)!.enabled).toBe(false);
+    expect(s.getTask(t.id)!.drainRequested).toBe(true);
+    // 本机没有进程:不能假装它 graceful 了,更不能硬停远端。
+    expect(m.gracefulCalls).toEqual([]);
+    expect(m.stopCalls).toEqual([]);
+    expect(requestSyncTasks).toHaveBeenCalled();
+    expect((r.body as { drainRequested?: boolean }).drainRequested).toBe(true);
+    s.close();
+  });
+
+  it("节点不支持 / 不可达 → 409,保持录制(绝不回退成硬停)", async () => {
+    const s = new TaskStore(":memory:");
+    const m = new MockManager();
+    const requestSyncTasks = vi.fn();
+    const a = makeApi({
+      store: s, manager: m,
+      ...hubDeps("drain-unsupported-", {
+        requestSyncTasks,
+        probeDrainSupport: async () => ({ ok: false, error: "节点 VPS 不支持优雅排空(旧 bundle)" }),
+        recordingWorkers: () => [
+          { workerId: "vps2", workerName: "VPS", state: "recording", checkedAt: 123 },
+        ],
+      }),
+    });
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["vps2"] });
+    s.updateTask(t.id, { enabled: true });
+    requestSyncTasks.mockClear();
+
+    const r = await a.drainTask(t.id);
+    expect(r.status).toBe(409);
+    expect(String((r.body as { error: string }).error)).toContain("无法安全排空");
+    expect(s.getTask(t.id)!.enabled).toBe(true);     // 没人接排空 → 任务继续录
+    expect(s.getTask(t.id)!.drainRequested).toBe(false);
+    expect(requestSyncTasks).not.toHaveBeenCalled();
+    s.close();
+  });
+
+  it("本机在录 + 远端空闲(即使节点旧)→ 仍能排空:空闲节点不探测,混部升级不回退(issue #569 P1)", async () => {
+    const s = new TaskStore(":memory:");
+    const m = new MockManager();
+    const probeDrainSupport = vi.fn(async () => ({ ok: false, error: "节点 VPS 不支持优雅排空(旧 bundle)" }));
+    const a = makeApi({
+      store: s, manager: m,
+      ...hubDeps("drain-mixed-", {
+        probeDrainSupport,
+        recordingWorkers: () => [
+          { workerId: "vps2", workerName: "VPS", state: "not_recording", checkedAt: 123 },
+        ],
+      }),
+    });
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local", "vps2"] });
+    m.forceRunning(t.id);
+
+    const r = await a.drainTask(t.id);
+    expect(r.status).toBe(200);
+    expect(probeDrainSupport).not.toHaveBeenCalled();   // 空闲旧节点不该挡住本机排空
+    expect(m.gracefulCalls).toContain(t.id);
+    expect(s.getTask(t.id)!.drainRequested).toBe(true);
+    s.close();
+  });
+
+  it("规则 workers 缺省/空 = 全节点:老规则房间也能排空(issue #569 P1)", async () => {
+    const s = new TaskStore(":memory:");
+    const m = new MockManager();
+    const probeDrainSupport = vi.fn(async () => ({ ok: true }));
+    const deps = hubDeps("drain-all-workers-", {
+      probeDrainSupport,
+      recordingWorkers: () => [
+        { workerId: "vps2", workerName: "VPS", state: "recording", checkedAt: 123 },
+      ],
+    });
+    const a = makeApi({ store: s, manager: m, ...deps });
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    // 老规则文件可能没有 workers(空 = 全选由 core 定义);直接写规则文件绕过创建校验。
+    upsertHubRule(deps.hubDir as string, {
+      platform: "douyin", roomSlug: "123456", enabled: true, recording: { sourceTaskId: t.id },
+    });
+
+    const r = await a.drainTask(t.id);
+    expect(r.status).toBe(200);
+    expect(probeDrainSupport).toHaveBeenCalledWith(["vps2"]);
+    expect(s.getTask(t.id)!.drainRequested).toBe(true);
+    s.close();
+  });
+
+  it("目标节点状态未知(unavailable / 快照缺失)→ 409 说不确定,不假装没在录(issue #569 P1)", async () => {
+    const s = new TaskStore(":memory:");
+    const probeDrainSupport = vi.fn(async () => ({ ok: true }));
+    const a = makeApi({
+      store: s, manager: new MockManager(),
+      ...hubDeps("drain-unknown-", {
+        probeDrainSupport,
+        recordingWorkers: () => [
+          { workerId: "vps2", workerName: "VPS", state: "unavailable", checkedAt: null },
+        ],
+      }),
+    });
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["vps2"] });
+
+    const r = await a.drainTask(t.id);
+    expect(r.status).toBe(409);
+    expect(String((r.body as { error: string }).error)).toContain("无法确认");
+    expect(probeDrainSupport).not.toHaveBeenCalled();
+    expect(s.getTask(t.id)!.drainRequested).toBe(false);
+    s.close();
+  });
+
+  it("远端没在录且本机没跑 → 409(不假装成功)", async () => {
+    const s = new TaskStore(":memory:");
+    const probeDrainSupport = vi.fn(async () => ({ ok: true }));
+    const a = makeApi({
+      store: s, manager: new MockManager(),
+      ...hubDeps("drain-idle-remote-", {
+        probeDrainSupport,
+        recordingWorkers: () => [
+          { workerId: "vps2", workerName: "VPS", state: "not_recording", checkedAt: 123 },
+        ],
+      }),
+    });
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["vps2"] });
+
+    const r = await a.drainTask(t.id);
+    expect(r.status).toBe(409);
+    expect(probeDrainSupport).not.toHaveBeenCalled();
+    expect(s.getTask(t.id)!.drainRequested).toBe(false);
+    s.close();
+  });
+
+  it("本机 + 远端双录 → 本机 stopGraceful,同时写远端排空意图", async () => {
+    const s = new TaskStore(":memory:");
+    const m = new MockManager();
+    const requestSyncTasks = vi.fn();
+    const a = makeApi({
+      store: s, manager: m,
+      ...hubDeps("drain-both-", {
+        requestSyncTasks,
+        probeDrainSupport: async () => ({ ok: true }),
+        recordingWorkers: () => [
+          { workerId: "vps2", workerName: "VPS", state: "recording", checkedAt: 123 },
+        ],
+      }),
+    });
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local", "vps2"] });
+    m.forceRunning(t.id);
+
+    const r = await a.drainTask(t.id);
+    expect(r.status).toBe(200);
+    expect(m.gracefulCalls).toContain(t.id);
+    expect(m.stopCalls).toEqual([]);
+    expect(s.getTask(t.id)!.drainRequested).toBe(true);
+    expect(requestSyncTasks).toHaveBeenCalled();
+    s.close();
+  });
+
+  it("start / stop 清除排空意图(重新启用或改硬停都是新的明确意图)", async () => {
+    const s = new TaskStore(":memory:");
+    const m = new MockManager();
+    const a = makeApi({ store: s, manager: m, ...hubDeps("drain-clear-") });
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    s.updateTask(t.id, { enabled: false, drainRequested: true });
+    expect((await a.startTask(t.id)).status).toBe(200);
+    expect(s.getTask(t.id)!.enabled).toBe(true);
+    expect(s.getTask(t.id)!.drainRequested).toBe(false);
+
+    s.updateTask(t.id, { drainRequested: true });
+    expect((await a.stopTask(t.id)).status).toBe(200);
+    expect(s.getTask(t.id)!.drainRequested).toBe(false);
     s.close();
   });
 });

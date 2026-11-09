@@ -269,7 +269,7 @@ worker 时，源任务在本机被抑制，这两项会显示为未录制。真�
 - **全局「抖音账号 Cookie」面板**（页面顶部）：状态徽标（✅ 已登录 / ⚠️ 未设置，基于 `GET /api/cookie` 的 `set`+`hasSession`）+ 三个按钮：**扫码登录**（QR 对话框，成功后刷新状态）· **手动粘贴**（textarea → `POST /api/cookie`）· **清除**（`DELETE /api/cookie`）。所有任务共享此 cookie。
 - **新建/编辑任务模态**（共用一个表单）：直播间(room) / 主播名 / 画质 / 分段时长 / 定时窗口 `HH:MM-HH:MM` / 弹幕开关 / 使用 cookie 开关。JS 用 `editingId`（`null`=新建模式）区分：新建→`POST /api/tasks`，编辑→`PATCH /api/tasks/:id`。编辑模式标题「编辑任务」、按钮「保存修改」、表单从该任务当前值预填（schedule 由 `scheduleStart`+`scheduleEnd` 拼回），运行中任务额外提示「下次启动生效」。**无 per-task cookie 文本字段**（cookie 全局）。
 - **任务表格**：id / 直播间+主播 / 画质 / 弹幕 / cookie / 定时 / 状态（运行中带脉冲点 + badge）/ 操作（启动·停止·**详情 📄**·**编辑 ✏️**·删除）。主播名/房间是指向详情页的链接；编辑按钮从最近一次 `GET /api/tasks` 的缓存（`lastTasks`）取该任务预填模态，无需二次请求。
-- **状态徽章**（`StatusBadge`）优先级：已停用 > 排空中 > **远端 worker 状态** > 本机运行中 > 错误 > 待命。
+- **状态徽章**（`StatusBadge` / `taskPhase`）优先级：排空中（本机 `status=draining` 或远端 `drainRequested` + 节点在录，issue #569）> 已停用 > **远端 worker 状态** > 本机运行中 > 错误 > 待命。排空按设计就是 `enabled=false` + 本场仍在写，必须先于「已停用」判定。
   有 `recordingWorkers` 时显示「录制中 · 节点名」「等待开播 · 节点名」「节点离线 · 节点名」，
   让只操作 master 网页的用户也能看到 VPS 上的真实录制情况。
 - **顶部统计**：录制中 = 远端 worker 处于 `recording` 的房间 ∪ 本机 `recording=true` 的任务；
