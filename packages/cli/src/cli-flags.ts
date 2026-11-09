@@ -4,37 +4,27 @@
  * Kept out of `cli.ts` because that module runs `program.parseAsync` on import, so nothing there can
  * be unit-tested. The vocabulary itself lives in core (`parseBoolFlag`).
  */
-import { parseBoolFlag } from "@drec/core";
+import { parseBoolFlag, parseStrictBoolFlag } from "@drec/core";
 
 /**
  * Result of the strict upload-switch parsers: either a parsed boolean, or an explicit failure
  * naming the offending flag and value. Never throws; never falls back to "on".
+ *
+ * Alias of the core type (`StrictBoolFlagResult`), so the vocabulary and the shape have a single
+ * definition and every call site (`record`, `task add/edit`) builds the same error message.
  */
-export type UploadFlagResult = { ok: true; value: boolean } | { ok: false; error: string };
-
-/**
- * On-vocabulary for the upload switches, mirroring `packages/core/src/bool-flag.ts` (the off side
- * is reused from core itself, so only this list can drift — the consistency test pins it).
- */
-const UPLOAD_ON_VALUES = new Set(["yes", "y", "true", "1", "on"]);
+export type UploadFlagResult = import("@drec/core").StrictBoolFlagResult;
 
 /**
  * Shared strict parser for `--rolling-upload` / `--stream-upload`.
  *
- * Blank input keeps the current default (both switches are off today). Off detection reuses core
- * (`parseBoolFlag(s, true) === false`) so the off list is never duplicated here. Any other value is
- * an explicit failure — unlike `parseDanmuFlag`, an unknown word must not quietly switch on an
- * upload path.
+ * Delegates entirely to core (`parseStrictBoolFlag`): blank input keeps the current default (both
+ * switches are off today), the on/off vocabulary lives only in core, and any other value is an
+ * explicit failure — unlike `parseDanmuFlag`, an unknown word must not quietly switch on an upload
+ * path.
  */
 function parseStrictUploadFlag(flagName: string, v: string | undefined): UploadFlagResult {
-  const s = typeof v === "string" ? v.trim().toLowerCase() : "";
-  if (!s) return { ok: true, value: false };
-  if (parseBoolFlag(v, true) === false) return { ok: true, value: false };
-  if (UPLOAD_ON_VALUES.has(s)) return { ok: true, value: true };
-  return {
-    ok: false,
-    error: `${flagName} 取值无效: "${v}"(可用 0/1、on/off、yes/no、true/false)`,
-  };
+  return parseStrictBoolFlag(flagName, v, false);
 }
 
 /**

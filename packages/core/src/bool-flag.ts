@@ -27,3 +27,35 @@ export function parseBoolFlag(v: string | undefined, def: boolean): boolean {
   if (ON_VALUES.has(s)) return true;
   return true;
 }
+
+/**
+ * Result of the strict parser: either a parsed boolean, or an explicit failure naming the
+ * offending flag and quoting the raw value. A failure carries no `value` key.
+ */
+export type StrictBoolFlagResult = { ok: true; value: boolean } | { ok: false; error: string };
+
+/**
+ * Strict parse of a boolean flag value, shared by every call site that must not silently enable a
+ * path on a typo (the upload switches: `record` in the CLI, `task add/edit`, and the stored
+ * rolling-queue setting).
+ *
+ * - `undefined` or blank (after trim) → `{ok:true, value:def}`;
+ * - off word → `false`, on word → `true` (matching ignores case and surrounding whitespace, same
+ *   vocabulary as `parseBoolFlag` — no separate word list here);
+ * - anything else → `{ok:false, error}` with a message that names the flag, quotes the raw value
+ *   as typed (not trimmed, original case) and lists the valid vocabulary. The message format is
+ *   identical to the one `record` already prints, so all call sites stay in parity.
+ *
+ * Never throws; a failure result has no `value` key. `parseBoolFlag` is untouched (lenient).
+ */
+export function parseStrictBoolFlag(flagName: string, v: string | undefined, def: boolean): StrictBoolFlagResult {
+  if (v === undefined) return { ok: true, value: def };
+  const s = v.trim().toLowerCase();
+  if (!s) return { ok: true, value: def };
+  if (OFF_VALUES.has(s)) return { ok: true, value: false };
+  if (ON_VALUES.has(s)) return { ok: true, value: true };
+  return {
+    ok: false,
+    error: `${flagName} 取值无效: "${v}"(可用 0/1、on/off、yes/no、true/false)`,
+  };
+}
