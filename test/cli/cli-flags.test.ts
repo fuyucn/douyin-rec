@@ -129,3 +129,53 @@ describe("upload strict parsers vs neighbours (H-973)", () => {
     if (!r.ok && !s.ok) expect(r.error).not.toBe(s.error);
   });
 });
+
+// H-973 QA round 1: edge cases from the brief not pinned above.
+describe("upload strict parsers — brief edge cases (H-973)", () => {
+  const parsers: Array<[string, (v: string | undefined) => UploadFlagResult]> = [
+    ["--rolling-upload", parseRollingUploadFlag],
+    ["--stream-upload", parseStreamUploadFlag],
+  ];
+
+  it("both parsers are named exports of cli-flags", async () => {
+    const mod = (await import("../../packages/cli/src/cli-flags.js")) as Record<string, unknown>;
+    expect(typeof mod.parseRollingUploadFlag).toBe("function");
+    expect(typeof mod.parseStreamUploadFlag).toBe("function");
+    expect(typeof mod.parseDanmuFlag).toBe("function");
+  });
+
+  for (const [flag, parse] of parsers) {
+    it(`${flag}: tab/newline-only input is blank → off`, () => {
+      for (const v of ["\t\n", " \t ", "\n"]) expect(parse(v), JSON.stringify(v)).toEqual({ ok: true, value: false });
+    });
+
+    it(`${flag}: failure carries no value key at all`, () => {
+      for (const v of ["2", "auto", "是", "f"]) {
+        const r = parse(v);
+        expect(Object.keys(r).sort(), v).toEqual(["error", "ok"]);
+        expect("value" in r, v).toBe(false);
+      }
+    });
+
+    it(`${flag}: error quotes the raw value untrimmed and with original case`, () => {
+      for (const v of [" maybe ", "MAYBE", "\tEnable\n"]) {
+        const r = parse(v);
+        expect(r.ok, JSON.stringify(v)).toBe(false);
+        if (!r.ok) expect(r.error, JSON.stringify(v)).toContain(`"${v}"`);
+      }
+    });
+
+    it(`${flag}: error lists the valid on/off values`, () => {
+      const r = parse("enable");
+      expect(r.ok).toBe(false);
+      if (!r.ok) for (const w of ["on", "off", "yes", "no", "true", "false", "0", "1"]) expect(r.error, w).toContain(w);
+    });
+
+    it(`${flag}: never falls back to on for an unknown value (unlike parseBoolFlag)`, () => {
+      for (const v of ["flv", "auto", "enable", "1x"]) {
+        expect(parseBoolFlag(v, false), v).toBe(true);
+        expect(parse(v).ok, v).toBe(false);
+      }
+    });
+  }
+});
