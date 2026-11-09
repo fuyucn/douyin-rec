@@ -86,8 +86,9 @@ interface RecordCliOpts {
   segment?: string;
   danmuXmlMode?: string;
   reconnect?: string;
+  /** 边录边传开关:经 ./cli-flags.js 的 parseRollingUploadFlag 严格解析——空/未传 = 关(站点默认),未知取值报错并 exit 2,绝不回落为开。 */
   rollingUpload?: string;
-  /** Streaming zero-disk upload: ffmpeg stdout → UPOS chunks → one archive (default off). */
+  /** 直播直传开关:经 ./cli-flags.js 的 parseStreamUploadFlag 严格解析——空/未传 = 关(站点默认),未知取值报错并 exit 2,绝不回落为开;ffmpeg stdout → UPOS 分块 → 单一稿件。 */
   streamUpload?: string;
   streamUploadSize?: string;
   streamUploadSec?: string;
@@ -567,11 +568,10 @@ program
       process.on("SIGTERM", () => onSig("SIGTERM"));
       // Window-end drain (SIGUSR2). Registered *before* the pump starts so a window-end signal
       // always finds a handler: Node's default for an unhandled SIGUSR2 is immediate process
-      // death (measured: exit 159), which cuts the in-flight part mid-upload. In
-      // `--stream-upload-spool none` there is no local copy of that part, so the video is lost
-      // for good. It would also be reported as a clean exit: `stopGraceful` marks the child
-      // `expected` *before* sending the signal, so the task log would claim
-      // "直播自然收播，排空完成" for a broadcast that was never drained.
+      // death (measured: exit 159), which cuts the in-flight part mid-upload. It would also be
+      // reported as a clean exit: `stopGraceful` marks the child `expected` *before* sending the
+      // signal, so the task log would claim "直播自然收播，排空完成" for a broadcast that was
+      // never drained.
       const drain = new AbortController();
       process.on("SIGUSR2", () => {
         if (drain.signal.aborted) return; // the daemon re-sends every tick; idempotent
