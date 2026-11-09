@@ -1237,9 +1237,11 @@ type SealedBy = NonNullable<SegmentRunResult["sealedBy"]>;
 
 /**
  * The spool write failed (ENOSPC/EIO or a short write that could not be completed): the part is
- * truncated. Never treat this as a generic stream-read error — the sink carries the typed
- * `spoolIncomplete` marker and finalize must neither `complete` nor whole-file-fallback the
- * truncated spool (issue #579).
+ * truncated. The typed class is thrown so callers *can* discriminate, but no `instanceof`
+ * consumer is required: the authoritative marker is the sink's `spoolIncomplete` flag, and the
+ * reason is carried in `uploadError` — the failure does not depend on the generic readError
+ * channel (an F3 throw may still converge through `runStream`'s catch → `cur.fail()`, which only
+ * appends bookkeeping because `uploadError` already holds the spool reason) (issue #579).
  */
 export class SpoolWriteError extends Error {
   constructor(message: string, readonly spooledBytes: number) { super(message); }
@@ -1276,6 +1278,13 @@ export interface PartSinkOpts {
   writeSpool?: (fd: number, buf: Buffer) => number;
   /** Backpressure callback: upload fell behind and the part degraded to spool-only (called once). */
   onBackpressure?: (spooledBytes: number, queuedChunks: number) => void;
+  /**
+   * Spool write failure alert, fired directly for every failure (issue #579 P2-2). Unlike
+   * {@link onDegrade} this is NOT gated by the once-per-part rule: a part that already degraded
+   * (backpressure / chunk failure) still must report the spool reason the moment it happens.
+   * Defaults to {@link onDegrade} when absent.
+   */
+  onSpoolWriteFailed?: (reason: string) => void;
   /**
    * Streaming degraded (chunk PUT failed / queue overflowed / session late): called once, the
    * moment it happens, so the caller can log + alert immediately instead of waiting for the
@@ -1443,9 +1452,14 @@ export class PartSink {
         this.spoolIncomplete = true;
         this.spooled += off;
         const why = `spool 写失败,本段被截断(已写 ${this.spooled}B,本块丢 ${buf.length - off}B): ${String((e as Error)?.message ?? e).slice(0, 200)}`;
-        this.uploadError ??= why;
-        // Same moment rule as the other degradations: a human must hear it now, not in a summary.
-        this.degrade(why);
+        // issue #579 P2-2: append, never `??=` — a prior backpressure/chunk error must not
+        // swallow this reason. And alert directly: `degrade()` fires once per part, so a part
+        // that already degraded would otherwise lose the spool reason entirely. The dedicated
+        // channel defaults to onDegrade; runLivePump passes one that logs + alerts.
+        this.uploadError = this.uploadError ? `${this.uploadError};${why}` : why;
+        this.degradedReason ??= why;
+        this.degradedNotified = true;
+        (this.o.onSpoolWriteFailed ?? this.o.onDegrade)?.(why);
         throw new SpoolWriteError(why, this.spooled);
       }
       this.spooled += off;
@@ -2047,6 +2061,8 @@ export interface RunSegmentOpts {
   onBackpressure?: (spooledBytes: number, queuedChunks: number) => void;
   /** Same as {@link PartSinkOpts.onDegrade}: fired the moment streaming degrades. */
   onDegrade?: (reason: string) => void;
+  /** Spool write failure alert; see {@link PartSinkOpts.onSpoolWriteFailed}. */
+  onSpoolWriteFailed?: (reason: string) => void;
   signal?: AbortSignal;
   /** Kill ffmpeg after this long without a stdout chunk. Default 120s; 0 disables. */
   stallTimeoutMs?: number;
@@ -2081,6 +2097,7 @@ export async function runSegment(o: RunSegmentOpts): Promise<SegmentRunResult> {
     ...(o.onChunk ? { onChunk: o.onChunk } : {}),
     ...(o.onBackpressure ? { onBackpressure: o.onBackpressure } : {}),
     ...(o.onDegrade ? { onDegrade: o.onDegrade } : {}),
+    ...(o.onSpoolWriteFailed ? { onSpoolWriteFailed: o.onSpoolWriteFailed } : {}),
     ...(o.signal ? { signal: o.signal } : {}),
   });
   const stream = await runStream({
@@ -2170,8 +2187,9 @@ async function finalizeRecordedPart(o: {
   const withSession = <T extends object>(x: T): T & { session?: PreuploadResult } => ({ ...x, ...(session ? { session } : {}) });
 
   // A zero-byte stall has no media to submit. Treat it as a no-part result so the caller can
-  // recover the stream instead of turning a dead socket into a permanent task failure.
-  if (rec.sealedBy === "stalled" && rec.spooledBytes === 0) {
+  // recover the stream instead of turning a dead socket into a permanent task failure. A spool
+  // write failure (issue #579) keeps the file: even empty, it is the record of what happened.
+  if (rec.sealedBy === "stalled" && rec.spooledBytes === 0 && !rec.spoolIncomplete) {
     if (spoolMode === "full") {
       try { rmSync(spoolPath, { force: true }); } catch { /* best effort */ }
     }
@@ -2321,6 +2339,8 @@ export async function pumpSegment(o: {
   onBackpressure?: (spooledBytes: number, queuedChunks: number) => void;
   /** 降级当场回调(块失败/背压/会话迟到),见 {@link PartSinkOpts.onDegrade}。 */
   onDegrade?: (reason: string) => void;
+  /** Spool write failure alert; see {@link PartSinkOpts.onSpoolWriteFailed}. */
+  onSpoolWriteFailed?: (reason: string) => void;
   /** Progress/diagnostic log (preupload backoff). Without it a long backoff looks like a hang. */
   log?: (msg: string) => void;
   /** 回退整文件重传成功时回调一次(调用方须告知用户:这一段不是流式传上去的)。 */
@@ -2365,6 +2385,7 @@ export async function pumpSegment(o: {
     onChunk: o.onChunk,
     onBackpressure: o.onBackpressure,
     onDegrade: o.onDegrade,
+    ...(o.onSpoolWriteFailed ? { onSpoolWriteFailed: o.onSpoolWriteFailed } : {}),
   });
   const fin = await finalizeRecordedPart({
     rec, session, cookiesPath: o.cookiesPath, fileName: o.fileName, spoolPath, spoolMode,
@@ -2656,6 +2677,10 @@ export interface RunLivePumpOptions {
   probeDuration?: (path: string) => Promise<number>;
   /** DTS gap scan seam for tests; production uses ffprobe. */
   scanDtsGap?: (path: string) => Promise<DtsGap | null | undefined>;
+  /** Spool write syscall seam for tests (default writeSync); see {@link PartSinkOpts.writeSpool}. */
+  writeSpool?: (fd: number, buf: Buffer) => number;
+  /** Spool write failure alert; see {@link PartSinkOpts.onSpoolWriteFailed}. */
+  onSpoolWriteFailed?: (reason: string) => void;
   /** Retry a failed upload from its persisted spool before returning to the caller. */
   autoRetryUpload?: boolean;
   /**
@@ -3101,7 +3126,11 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     const { index, seg, fileName, spoolPath } = ctx;
     const sig = ctx.ac.signal;
     const sinkRes = await part.sink.finished;
-    if (negligibleTail(part) && sinkRes.spooledBytes > 0) {
+    // issue #579 (review P2-1): a truncated spool must never take the tiny-tail early exit —
+    // that path deletes the spool and can end the run as ok:true, losing the only copy and
+    // hiding the truncation. Let it fall through to the failure path below (fail + keep spool).
+    const spoolIncomplete = sinkRes.spoolIncomplete || part.sink.incomplete;
+    if (negligibleTail(part) && sinkRes.spooledBytes > 0 && !spoolIncomplete) {
       log(`[直播直传] 段${seg + 1} 只有不足两帧(${sinkRes.spooledBytes}B),判定为切点后的尾巴,丢弃`);
       if (spoolMode === "full") { try { rmSync(spoolPath, { force: true }); } catch { /* best effort */ } }
       return part.sealedBy === "stalled" ? { kind: "stall-empty" } : { kind: "ended" };
@@ -3151,9 +3180,10 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     });
 
     // No bytes means there is nothing to append. Recover the source instead of turning a dead
-    // socket into a permanent task failure.
+    // socket into a permanent task failure. A truncated spool (issue #579) is a failure even
+    // with no bytes: the write already errored and must not be reported as a clean stall.
     if (r.spooledBytes === 0) {
-      if (r.sealedBy === "stalled") return { kind: "stall-empty" };
+      if (r.sealedBy === "stalled" && !r.spoolIncomplete) return { kind: "stall-empty" };
       if (!r.uploadError) {
         log("[直播直传] 本段没有写入,判定已收播");
         return { kind: "ended" };
@@ -3421,7 +3451,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
   const noteSealed = (ctx: PartCtx, part: SealedPart): void => {
     if (spoolMode !== "full" || o.submit === false) return;
     const bytes = part.sink.spooledBytes;
-    if (bytes <= 0 || negligibleTail(part) || session.parts.some((p) => p.index === ctx.index)) return;
+    if (bytes <= 0 || (negligibleTail(part) && !part.sink.incomplete) || session.parts.some((p) => p.index === ctx.index)) return;
     const note = session.noteUnconfirmedPart({
       index: ctx.index, spoolPath: ctx.spoolPath, title: titleOf(ctx), bytes, durationSec: estimateDuration(part),
       ...(part.sink.incomplete ? { spoolIncomplete: true } : {}),
@@ -3452,7 +3482,9 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     }
     const bytes = part.sink.spooledBytes;
     const sinkIncomplete = part.sink.incomplete;
-    if (negligibleTail(part)) {
+    // issue #579 (review P2-1): a truncated spool is kept even when the part is a tiny tail —
+    // it is the only copy of what the disk accepted, and it stays in the recovery state.
+    if (negligibleTail(part) && !sinkIncomplete) {
       log(`[直播直传] ${label} ${why};只有不足两帧的尾巴,不值得保留`);
       return;
     }
@@ -3672,6 +3704,13 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
           log(`[直播直传] ⚠️ 段${seg + 1} 流式上传降级: ${reason}`);
           try { o.onAlert?.(`段${seg + 1} 流式上传降级: ${reason}`); } catch { /* alert channel must not break the run */ }
         },
+        // issue #579 P2-2: the spool failure has its own channel (the once-gated onDegrade may
+        // already have fired for backpressure / a chunk failure in the same part).
+        onSpoolWriteFailed: (reason) => {
+          log(`[直播直传] ⚠️ 段${seg + 1} ${reason}`);
+          try { o.onAlert?.(`段${seg + 1} ${reason}`); } catch { /* alert channel must not break the run */ }
+        },
+        ...(o.writeSpool ? { writeSpool: o.writeSpool } : {}),
       });
       const ctx: PartCtx = { index, seg, fileName, spoolPath, openedAt: Date.now(), onChunk, ac, sealed: false, submitting: false, ...(sessionAbort ? { sessionAbort } : {}) };
       ctxs.set(sink, ctx);
