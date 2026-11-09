@@ -72,19 +72,11 @@ export function listOwnSegments(dir: string, nameBase: string): OwnMesioSegment[
  * previous reading rather than treating that as progress.
  */
 export function ownSegmentBytes(dir: string, nameBase: string): number | null {
-  const prefix = nameBase ? `${nameBase}_` : undefined;
-  let names: string[];
-  try { names = readdirSync(dir); } catch { return null; }
-  let total = 0;
-  for (const f of names) {
-    if (!/\.flv$/i.test(f)) continue;
-    // TODO(?): a caller that spawns mesio with an empty nameBase cannot be told apart from its
-    // neighbours, so fall back to counting every *.flv (the pre-#474 behaviour) instead of never
-    // reporting progress. Every current caller passes a nameBase.
-    if (prefix !== undefined && !f.startsWith(prefix)) continue;
-    try { total += statSync(join(dir, f)).size; } catch { /* file being written or just deleted */ }
-  }
-  return total;
+  // One scanner for both progress and segment reporting: the old `startsWith(prefix)` variant here
+  // could disagree with {@link listOwnSegments} (and re-introduce the #474 neighbour confusion).
+  const segs = listOwnSegments(dir, nameBase);
+  if (segs === null) return null;
+  return segs.reduce((sum, s) => sum + s.size, 0);
 }
 
 /** {@link startMesioProgressWatch} 的句柄:定时器 + 进程退出前的最后一次扫描。 */
@@ -103,9 +95,10 @@ export interface MesioProgressWatch {
  *     later segment). Index 0 stays with the recorder's spawn-time `sessionFirstPath` report; firing it
  *     twice would re-open a `-danmu-xml-mode segment` writer for the same file and re-anchor its timeline.
  *
- * The scan relies on mesio creating the next file only after the previous one stops growing (verified
- * on mesio 0.4.1), so "new file appeared" == "previous segment is sealed" for the callers that treat
- * onSegment that way. Both hooks are isolated: a throwing callback must never take down the recorder.
+ * A new file is only reported once its predecessor has stopped changing between two scans (or has
+ * disappeared, e.g. rolling/remux deleted it) — even a future mesio that pre-creates the next file
+ * cannot hand a half-written segment to rolling/remux. Both hooks are isolated: a throwing callback
+ * must never take down the recorder.
  */
 export function startMesioProgressWatch(
   dir: string,
@@ -119,10 +112,22 @@ export function startMesioProgressWatch(
   const sizes = new Map<string, number>();
   /** Segment paths already reported, so the periodic tick and {@link MesioProgressWatch.finish} never duplicate. */
   const reported = new Set<string>();
+  /** New segments waiting for their predecessor to stop changing (see the seal check inside the scan). */
+  const pending = new Set<string>();
+  const reportSegment = (path: string): void => {
+    if (reported.has(path)) return;
+    reported.add(path);
+    try { onSegment?.(path); } catch (e) {
+      // Never let a hook kill the recording; still make the failure visible in the recorder's stderr tail.
+      try { onHookError?.(e); } catch { /* the reporter itself must not throw */ }
+    }
+  };
   const scan = (): void => {
     const segs = listOwnSegments(dir, nameBase);
     if (segs === null) return; // directory not created yet (or a transient read failure)
     let grew = false;
+    const before = new Map(sizes);
+    const byIndex = new Map(segs.map((s) => [s.index, s]));
     for (const s of segs) {
       const prev = sizes.get(s.name);
       if (prev !== undefined && s.size > prev) grew = true;
@@ -131,10 +136,16 @@ export function startMesioProgressWatch(
       // An empty base cannot be told apart from our neighbours (see {@link ownSegmentBytes}); counting
       // their bytes for progress is the documented fallback, but never REPORT them as our segments.
       if (nameBase && s.index >= 1 && !reported.has(s.path)) {
-        reported.add(s.path);
-        try { onSegment?.(s.path); } catch (e) {
-          // Never let a hook kill the recording; still make the failure visible in the recorder's stderr tail.
-          try { onHookError?.(e); } catch { /* the reporter itself must not throw */ }
+        // "New file appeared" is only trustworthy once its predecessor stopped changing (or disappeared,
+        // e.g. rolling/remux deleted it). A predecessor that grew between scans may still be mid-write.
+        const predecessor = byIndex.get(s.index - 1);
+        const sizeBefore = predecessor ? before.get(predecessor.name) : undefined;
+        const predecessorSealed = !predecessor || (sizeBefore !== undefined && predecessor.size === sizeBefore);
+        if (predecessorSealed) {
+          pending.delete(s.path);
+          reportSegment(s.path);
+        } else {
+          pending.add(s.path);
         }
       }
     }
@@ -149,8 +160,15 @@ export function startMesioProgressWatch(
     finish: () => {
       clearInterval(timer);
       // One last scan: a stop that lands within one watch interval after a rollover must still
-      // report (and thereby seal) the final segment before the session-end flush runs.
+      // report (and thereby seal) the final segment before the session-end flush runs. The process
+      // has exited, so every remaining segment is sealed regardless of its predecessor's state.
       scan();
+      const last = listOwnSegments(dir, nameBase);
+      if (last) {
+        const present = new Set(last.map((s) => s.path));
+        for (const path of pending) if (present.has(path)) reportSegment(path);
+      }
+      pending.clear();
     },
   };
 }

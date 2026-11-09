@@ -193,6 +193,24 @@ describe("mesio 卡死看门狗只统计本会话的分段(issue #474)", () => {
     }
   });
 
+  it("前一拍仍在长的新段,下一拍确认前段稳定后才上报", () => {
+    vi.useFakeTimers();
+    put("mine_000.flv", 100);
+    const seen: string[] = [];
+    const watch = startMesioProgressWatch(dir, "mine", vi.fn(), (p) => seen.push(p));
+    try {
+      vi.advanceTimersByTime(FILE_WATCH_MS); // baseline: 100
+      put("mine_000.flv", 150);              // predecessor grew since the last scan (may still be writing)
+      put("mine_001.flv", 10);
+      vi.advanceTimersByTime(FILE_WATCH_MS);
+      expect(seen).toEqual([]); // not proven sealed yet
+      vi.advanceTimersByTime(FILE_WATCH_MS); // predecessor unchanged for a full scan now
+      expect(seen).toEqual([join(dir, "mine_001.flv")]);
+    } finally {
+      watch.finish();
+    }
+  });
+
   it("spawn 接线:新段走 onSegment,cleanup 停表", () => {
     vi.useFakeTimers();
     const proc = new EventEmitter() as unknown as { stderr: EventEmitter; kill: () => void };
