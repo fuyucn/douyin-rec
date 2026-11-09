@@ -23,6 +23,7 @@
   — **做什么**: `PartSink.write` 使用 `writeSync` 返回值,短写续写、无法推进/抛错时标 `spoolIncomplete`（typed error,不落 `readError` 通用路径）,`spooled` 只记实际落盘字节;收尾时截断段不 `complete`、不整文件回退,标失败并保留（部分）spool;恢复状态带 `spoolIncomplete`,重启拒绝自动整文件重传（需人工处理）。
   **为什么**: 磁盘写失败（ENOSPC/EIO,含 POSIX 短写）时,截断 spool 可能被当完整分 P 回退上传并确认（F3）或完全静默（F2 短写/S2 childClosed 后抛错）,线上稿件比实际录制短且无任何字段可见。
   **验收**: 注入用例（F2 短写/F3 抛错/S2 childClosed 后抛错/S3 流层面丢字节）先复现（撤修复必红）后修复;全量 test/typecheck/bundle;复用 #574 的「截断 ⇒ 不得 complete」判定入口,零落盘硬失败语义不动。
+  **现状（2026-11-09）**: PR [#582](https://github.com/fuyucn/douyin-rec/pull/582) 首轮 review 代码 APPROVE、合并 BLOCKED（RISK）；按 review 完成 rework-1（P2-1 极小尾段早退不删截断 spool/不按 ok:true 收尾、P2-2 原因强制追加+专用告警通道、P2-3 注释如实描述、P2-4 接缝透传主循环），新增 runLivePump 级端到端与 PartSink 级用例，变异定向撤守卫→2 红/复原→7 绿；分支 `9c99849f` 已 push，待复审；**不合并、不部署、不 close**。
 - [~] **T-170 房间级「录完这场再停」支持远端独录节点（issue [#569](https://github.com/fuyucn/douyin-rec/issues/569)，2026-11-09）**
   — **做什么**: 把 drain 从「只认 master 本机 TaskManager」改成房间级意图：源任务持久化 `drainRequested`；`drainTask` 在本机没跑但规则把房间派给远端时，先探测目标节点的 `drain` 能力（`_node-capabilities`），全部支持才置停用 + 触发同步；`RemoteTaskSpec.drain` 下发，节点 apply-tasks 对 `enabled=false + drain` 走 `/drain`（SIGUSR2 优雅停）而不是 `/stop`，本地 worker 的 pending 同样不硬停；任务视图带 `drainRequested`，远端仍在录时徽标显示「排空中」；start/stop 清除意图。
   **为什么**: 房间页按 `recordingWorkers` 显示「录制中」，drain 却只查本机 `manager.isRunning` → 远端独录房间点「录完这场再停」必然 409；同步停用是硬停，会截断当前分段。
