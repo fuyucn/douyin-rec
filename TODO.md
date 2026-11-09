@@ -18,7 +18,11 @@
   — **做什么**: full 模式 queue overflow（`feed()` 与 `pushTail()` 两条入口）即置 `uploadError`，收尾跳过 `complete`、走整文件回退；段报告/投稿统一字节口径；保留半截会话事实。
   **为什么**: 上传器可能正好停在已入队块数上干净收尾，`uploadError` 为空 → `complete` 一个少传分 P（静默截断）。
   **验收**: 截断 + `pushTail()` 两条确定性用例、变异验证；全量 test/typecheck/bundle；部署后真实链路/上传验证。
-  **现状（2026-11-09）**: PR [#580](https://github.com/fuyucn/douyin-rec/pull/580) 复审代码 APPROVE；RISK（上传路径）由人拍板；base 已对齐 `main`，版本 0.0.346；待合并/待部署验证。
+  **现状（2026-11-09）**: **已合并（merge `54cb1665`，版本 0.0.346），待部署验证**（部署后真实链路/上传验证后收口）。
+- [~] **T-172 直播直传 spool 写失败/短写不得当完整分 P（issue [#579](https://github.com/fuyucn/douyin-rec/issues/579)，2026-11-09）**
+  — **做什么**: `PartSink.write` 使用 `writeSync` 返回值,短写续写、无法推进/抛错时标 `spoolIncomplete`（typed error,不落 `readError` 通用路径）,`spooled` 只记实际落盘字节;收尾时截断段不 `complete`、不整文件回退,标失败并保留（部分）spool;恢复状态带 `spoolIncomplete`,重启拒绝自动整文件重传（需人工处理）。
+  **为什么**: 磁盘写失败（ENOSPC/EIO,含 POSIX 短写）时,截断 spool 可能被当完整分 P 回退上传并确认（F3）或完全静默（F2 短写/S2 childClosed 后抛错）,线上稿件比实际录制短且无任何字段可见。
+  **验收**: 注入用例（F2 短写/F3 抛错/S2 childClosed 后抛错/S3 流层面丢字节）先复现（撤修复必红）后修复;全量 test/typecheck/bundle;复用 #574 的「截断 ⇒ 不得 complete」判定入口,零落盘硬失败语义不动。
 - [~] **T-170 房间级「录完这场再停」支持远端独录节点（issue [#569](https://github.com/fuyucn/douyin-rec/issues/569)，2026-11-09）**
   — **做什么**: 把 drain 从「只认 master 本机 TaskManager」改成房间级意图：源任务持久化 `drainRequested`；`drainTask` 在本机没跑但规则把房间派给远端时，先探测目标节点的 `drain` 能力（`_node-capabilities`），全部支持才置停用 + 触发同步；`RemoteTaskSpec.drain` 下发，节点 apply-tasks 对 `enabled=false + drain` 走 `/drain`（SIGUSR2 优雅停）而不是 `/stop`，本地 worker 的 pending 同样不硬停；任务视图带 `drainRequested`，远端仍在录时徽标显示「排空中」；start/stop 清除意图。
   **为什么**: 房间页按 `recordingWorkers` 显示「录制中」，drain 却只查本机 `manager.isRunning` → 远端独录房间点「录完这场再停」必然 409；同步停用是硬停，会截断当前分段。
