@@ -14,6 +14,10 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-170 房间级「录完这场再停」支持远端独录节点（issue [#569](https://github.com/fuyucn/douyin-rec/issues/569)，2026-11-09）**
+  — **做什么**: 把 drain 从「只认 master 本机 TaskManager」改成房间级意图：源任务持久化 `drainRequested`；`drainTask` 在本机没跑但规则把房间派给远端时，先探测目标节点的 `drain` 能力（`_node-capabilities`），全部支持才置停用 + 触发同步；`RemoteTaskSpec.drain` 下发，节点 apply-tasks 对 `enabled=false + drain` 走 `/drain`（SIGUSR2 优雅停）而不是 `/stop`，本地 worker 的 pending 同样不硬停；任务视图带 `drainRequested`，远端仍在录时徽标显示「排空中」；start/stop 清除意图。
+  **为什么**: 房间页按 `recordingWorkers` 显示「录制中」，drain 却只查本机 `manager.isRunning` → 远端独录房间点「录完这场再停」必然 409；同步停用是硬停，会截断当前分段。
+  **验收**: 远端独录房间排空返回 200，节点下一轮同步进入 draining，收播后 stopped 且本场完整；本机+远端双录两边都排空；旧节点/不可达节点拒绝并保持录制（绝不再回退硬停）；start/stop 清除意图；全量 test/typecheck/web build/bundle/pr-gate 绿。
 - [~] **T-154 节点页与管理节点合并为一页（issue [#549](https://github.com/fuyucn/douyin-rec/issues/549) → PR [#550](https://github.com/fuyucn/douyin-rec/pull/550)，已合并 0c3ed335，版本 0.0.317，2026-11-07）** — **待部署验证**：节点卡 host/管理操作/拖拽、受管只读、i18n 实跑核对后收口。
 - [~] **T-156 房间列表与处理队列减法 pass（issue [#552](https://github.com/fuyucn/douyin-rec/issues/552) → PR [#554](https://github.com/fuyucn/douyin-rec/pull/554)，已合并 049f626a，版本 0.0.318，2026-11-07）** — **待部署验证**。独立 review APPROVE（红线逐项核实 + 门禁补跑全绿；RISK 为文案误报）。followup：筛选「需处理」为空时 idle 条与「无匹配」不可区分（一行修，下个小 PR）。残余：640-1023px 平板断点未动（留 #553 票）。
 - [~] **T-157 房间详情页重排（issue [#553](https://github.com/fuyucn/douyin-rec/issues/553) → PR [#556](https://github.com/fuyucn/douyin-rec/pull/556)，已合并 ecff51f2，版本 0.0.319，2026-11-07）** — **待部署验证**。review 打回一轮（P1 cfg CSS 漏移植等）返工后 APPROVE。核对项：详情页首屏、配置四域、图标操作、受管只读。
