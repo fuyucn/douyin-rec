@@ -5,9 +5,9 @@
  * header 现经 EngineSpawnArgs.headers → `-H 'K: V'` 透传,故合并为一个引擎)。mesio 自带 FLV/HLS
  * 一致性修复(--fix)+ 按时长分段(-d)。产物 .flv 分段 {nameBase}_%i.flv(对齐 concat 会话分组)。
  *
- * 进度上报:mesio 无 ffmpeg 的 `time=` 进度,改用「**本会话**分段总大小是否增长」喂 markProgress
- * (返回 cleanup 清掉 setInterval)。会话首段路径 = {nameBase}_000.flv(mesio 自管多段、无逐段回调)。
- * 只统计 `{nameBase}_NNN.flv`:同目录另一个任务/会话的写入不能给它续命(issue #474)。
+ * 进度上报:mesio 无 ffmpeg 的 `time=` 进度,改用「**本会话**每个分段是否增长」喂 markProgress;
+ * 同时按目录扫描把滚出的 `_NNN.flv`(段号>=1)通过 onSegment 交给录制器(#566)。
+ * 只认 `{nameBase}_NNN.flv`:同目录另一个任务/会话的写入不能给它续命(issue #474)。
  */
 import { join } from "node:path";
 import { readdirSync, statSync, existsSync } from "node:fs";
@@ -32,6 +32,38 @@ const MESIO = resolveMesioBin();
 /** 输出文件增长看门狗检查间隔(对齐原录制器的 STALL_CHECK_MS=15s)。 */
 export const FILE_WATCH_MS = 15_000;
 
+/** 本会话的一个已落盘分段(`{nameBase}_NNN.flv`)。 */
+export interface OwnMesioSegment {
+  name: string;
+  path: string;
+  index: number;
+  size: number;
+}
+
+/**
+ * 本会话的分段清单:目录里所有 `{nameBase}_NNN.flv`(N 为段号),按名字排序。
+ *
+ * 与 {@link ownSegmentBytes} 的区别:这里**必须**带段号后缀 —— 它是「新段出现」的信号源,
+ * 所以不能把别的形状的 `.flv` 当成分段。目录还不可读(mesio 尚未创建)时返回 null。
+ */
+export function listOwnSegments(dir: string, nameBase: string): OwnMesioSegment[] | null {
+  let names: string[];
+  try { names = readdirSync(dir); } catch { return null; }
+  const prefix = nameBase ? `${nameBase}_` : undefined;
+  const out: OwnMesioSegment[] = [];
+  for (const name of names) {
+    const m = /_(\d+)\.flv$/i.exec(name);
+    if (!m) continue;
+    // The digits must be the WHOLE tail after the base: `{base}_extra_001.flv` is another session's file.
+    if (prefix !== undefined && name !== `${prefix}${m[1]}.flv`) continue;
+    let size = 0;
+    try { size = statSync(join(dir, name)).size; } catch { continue; /* just deleted, or still being created */ }
+    out.push({ name, path: join(dir, name), index: Number(m[1]), size });
+  }
+  out.sort((a, b) => a.index - b.index || a.name.localeCompare(b.name));
+  return out;
+}
+
 /**
  * Bytes of the `.flv` segments **this** mesio writes: mesio names them `{nameBase}_NNN.flv`
  * (`-n {nameBase}_%i`, split into several files), so match the whole prefix, not one exact name.
@@ -40,34 +72,105 @@ export const FILE_WATCH_MS = 15_000;
  * previous reading rather than treating that as progress.
  */
 export function ownSegmentBytes(dir: string, nameBase: string): number | null {
-  const prefix = nameBase ? `${nameBase}_` : undefined;
-  let names: string[];
-  try { names = readdirSync(dir); } catch { return null; }
-  let total = 0;
-  for (const f of names) {
-    if (!/\.flv$/i.test(f)) continue;
-    // TODO(?): a caller that spawns mesio with an empty nameBase cannot be told apart from its
-    // neighbours, so fall back to counting every *.flv (the pre-#474 behaviour) instead of never
-    // reporting progress. Every current caller passes a nameBase.
-    if (prefix !== undefined && !f.startsWith(prefix)) continue;
-    try { total += statSync(join(dir, f)).size; } catch { /* file being written or just deleted */ }
-  }
-  return total;
+  // One scanner for both progress and segment reporting: the old `startsWith(prefix)` variant here
+  // could disagree with {@link listOwnSegments} (and re-introduce the #474 neighbour confusion).
+  const segs = listOwnSegments(dir, nameBase);
+  if (segs === null) return null;
+  return segs.reduce((sum, s) => sum + s.size, 0);
+}
+
+/** {@link startMesioProgressWatch} 的句柄:定时器 + 进程退出前的最后一次扫描。 */
+export interface MesioProgressWatch {
+  timer: NodeJS.Timeout;
+  /** Clear the interval and scan once more (call it on process exit). */
+  finish(): void;
 }
 
 /**
- * File-growth watchdog: every {@link FILE_WATCH_MS}, report progress when OUR segments grew.
- * Returns the (unref'd) interval so `spawn` can clear it on exit.
+ * File-growth watchdog + per-segment reporting: every {@link FILE_WATCH_MS} scan OUR segments and
+ *   - refresh progress when any of them grew (per-file deltas, so a **deleted** sealed segment never
+ *     masks growth in the next one — #566: the old `lastTotalBytes` baseline only moved up);
+ *   - report a newly appeared segment (index >= 1) through `onSegment` (#566: mesio rolls its own
+ *     files and used to report only the first one, so rolling upload / in-place remux ignored every
+ *     later segment). Index 0 stays with the recorder's spawn-time `sessionFirstPath` report; firing it
+ *     twice would re-open a `-danmu-xml-mode segment` writer for the same file and re-anchor its timeline.
+ *
+ * A new file is only reported once its predecessor has stopped changing between two scans (or has
+ * disappeared, e.g. rolling/remux deleted it) — even a future mesio that pre-creates the next file
+ * cannot hand a half-written segment to rolling/remux. Both hooks are isolated: a throwing callback
+ * must never take down the recorder.
  */
-export function startMesioProgressWatch(dir: string, nameBase: string, markProgress: () => void): NodeJS.Timeout {
-  let lastTotalBytes = -1;
-  const timer = setInterval(() => {
-    const total = ownSegmentBytes(dir, nameBase);
-    if (total === null) return; // directory not created yet
-    if (total > lastTotalBytes) { lastTotalBytes = total; markProgress(); }
-  }, FILE_WATCH_MS);
+export function startMesioProgressWatch(
+  dir: string,
+  nameBase: string,
+  markProgress: () => void,
+  onSegment?: (path: string) => void,
+  /** Called when onSegment throws; the recorder keeps running (recording wins over XML/bookkeeping). */
+  onHookError?: (err: unknown) => void,
+): MesioProgressWatch {
+  /** Size per file at the previous scan. A deleted file simply drops out; it is never a negative. */
+  const sizes = new Map<string, number>();
+  /** Segment paths already reported, so the periodic tick and {@link MesioProgressWatch.finish} never duplicate. */
+  const reported = new Set<string>();
+  /** New segments waiting for their predecessor to stop changing (see the seal check inside the scan). */
+  const pending = new Set<string>();
+  const reportSegment = (path: string): void => {
+    if (reported.has(path)) return;
+    reported.add(path);
+    try { onSegment?.(path); } catch (e) {
+      // Never let a hook kill the recording; still make the failure visible in the recorder's stderr tail.
+      try { onHookError?.(e); } catch { /* the reporter itself must not throw */ }
+    }
+  };
+  const scan = (): void => {
+    const segs = listOwnSegments(dir, nameBase);
+    if (segs === null) return; // directory not created yet (or a transient read failure)
+    let grew = false;
+    const before = new Map(sizes);
+    const byIndex = new Map(segs.map((s) => [s.index, s]));
+    for (const s of segs) {
+      const prev = sizes.get(s.name);
+      if (prev !== undefined && s.size > prev) grew = true;
+      if (prev === undefined && s.size > 0) grew = true; // a fresh segment with data is progress too
+      sizes.set(s.name, s.size);
+      // An empty base cannot be told apart from our neighbours (see {@link ownSegmentBytes}); counting
+      // their bytes for progress is the documented fallback, but never REPORT them as our segments.
+      if (nameBase && s.index >= 1 && !reported.has(s.path)) {
+        // "New file appeared" is only trustworthy once its predecessor stopped changing (or disappeared,
+        // e.g. rolling/remux deleted it). A predecessor that grew between scans may still be mid-write.
+        const predecessor = byIndex.get(s.index - 1);
+        const sizeBefore = predecessor ? before.get(predecessor.name) : undefined;
+        const predecessorSealed = !predecessor || (sizeBefore !== undefined && predecessor.size === sizeBefore);
+        if (predecessorSealed) {
+          pending.delete(s.path);
+          reportSegment(s.path);
+        } else {
+          pending.add(s.path);
+        }
+      }
+    }
+    const present = new Set(segs.map((s) => s.name));
+    for (const name of [...sizes.keys()]) if (!present.has(name)) sizes.delete(name);
+    if (grew) markProgress();
+  };
+  const timer = setInterval(scan, FILE_WATCH_MS);
   timer.unref?.();
-  return timer;
+  return {
+    timer,
+    finish: () => {
+      clearInterval(timer);
+      // One last scan: a stop that lands within one watch interval after a rollover must still
+      // report (and thereby seal) the final segment before the session-end flush runs. The process
+      // has exited, so every remaining segment is sealed regardless of its predecessor's state.
+      scan();
+      const last = listOwnSegments(dir, nameBase);
+      if (last) {
+        const present = new Set(last.map((s) => s.path));
+        for (const path of pending) if (present.has(path)) reportSegment(path);
+      }
+      pending.clear();
+    },
+  };
 }
 
 /** 构造 mesio argv(纯函数,便于单测)。 */
@@ -122,13 +225,20 @@ export const mesioEngine: DownloadEngine = {
       if (s) a.pushStderr(s);
     });
 
-    // File-growth watchdog: only the segments this mesio writes count (issue #474).
-    const fileWatch = startMesioProgressWatch(a.dir, a.nameBase, () => a.markProgress());
+    // File-growth watchdog + per-segment reporting: only the segments this mesio writes count (#474),
+    // and every rolled segment reaches the recorder's hooks (#566).
+    const fileWatch = startMesioProgressWatch(
+      a.dir,
+      a.nameBase,
+      () => a.markProgress(),
+      (p) => a.onSegment(p),
+      (e) => a.pushStderr(`[mesio] onSegment 钩子抛错(已忽略,录制继续): ${(e as Error)?.message ?? e}`),
+    );
 
     return {
       proc,
       sessionFirstPath: join(a.dir, `${a.nameBase}_000.flv`),
-      cleanup: () => clearInterval(fileWatch),
+      cleanup: () => fileWatch.finish(),
     };
   },
 };
