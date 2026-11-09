@@ -224,7 +224,7 @@ hub 规则（`config/hub/{platform}.{roomSlug}.json`）新增 `recording.sourceT
    节点回执里：本节点未注册的平台记 `unsupported`（算已覆盖，不会每 tick 重推）；值非法/超长记 `rejected`（不记指纹、下轮重试）。
 6. 远端按 `(platform, roomSlug)` 对账：新建或收编更新受管任务（`managedBy='hub'`），不再期望的任务两阶段删除（先停，等 daemon 收播后下一轮删）。受管任务 Web API/UI 禁止改删启停，只能在 master 操作。
 7. 同步触发：启动即跑 + 周期 `syncIntervalMs`（默认 1min）+ 规则/worker/源任务变更后立即触发；节点离线只 warn，下轮对账自愈。
-8. **「录完这场再停」对远端独录房间（issue #569）**：源任务写 `enabled=false + drainRequested=true`，期望任务带 `drain: true`。节点 apply-tasks 对 `enabled=false + drain` 的在录任务改走本机 `/api/tasks/:id/drain?internal=1`（SIGUSR2 优雅收播），**不得**再走 `/stop`；本地 worker 的 pending 同样跳过硬停，daemon 的 `stopGraceful` 兜底。master 在置停用**之前**先探测每个目标节点的 `_node-capabilities.drain`：旧 bundle / 不可达 → 拒绝排空并保持录制（绝不回退成硬停）。旧 master 不下发 `drain` / 旧节点不识别 → 维持原来的「停用 = 硬停」。
+8. **「录完这场再停」对远端独录房间（issue #569）**：源任务写 `enabled=false + drainRequested=true`，期望任务带 `drain: true`。节点 apply-tasks 对 `enabled=false + drain` 的在录任务改走本机 `/api/tasks/:id/drain?internal=1`（SIGUSR2 优雅收播），**不得**再走 `/stop`；本地 worker 的 pending 同样跳过硬停，daemon 的 `stopGraceful` 兜底。master 在置停用**之前**只探测**可能正在录**的目标节点（状态 recording / unavailable / 快照缺行）的 `_node-capabilities.drain`：旧 bundle / 不可达 → 拒绝排空并保持录制（绝不回退成硬停）；空闲节点不探测（它的停用是空操作，混部升级期间不挡住本机排空）。目标节点以录制状态快照里的真实 worker 为准（不另读一份 hub.config，避免 `--hub-config` 来源漂移）。旧 master 不下发 `drain` / 旧节点不识别 → 维持原来的「停用 = 硬停」。
 
 ## 清理开关语义（2026-10 实测确认）
 

@@ -21,6 +21,11 @@ describe("taskPhase(运行态派生唯一口径)", () => {
       enabled: false, drainRequested: true,
       recordingWorkers: [w("n1", "recording")],
     })).textKey).toBe("badge.draining");
+    // 节点当轮探测失败也要保持「排空中」:否则徽标落回已停用 + 绿色 ▶ 会撤销排空。
+    expect(taskPhase(mk({
+      enabled: false, drainRequested: true,
+      recordingWorkers: [w("n1", "unavailable")],
+    })).textKey).toBe("badge.draining");
     expect(taskPhase(mk({
       enabled: false, drainRequested: true,
       recordingWorkers: [w("n1", "not_recording")],

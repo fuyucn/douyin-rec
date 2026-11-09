@@ -16,8 +16,9 @@ type In = Parameters<typeof taskPhase>[0];
  */
 function referenceTextKey(t: In): string {
   const activeWorkers = (t.recordingWorkers ?? []).filter((w) => w.state === "recording");
+  const downWorkers = (t.recordingWorkers ?? []).filter((w) => w.state === "unavailable");
   if (t.status === "draining") return "badge.draining";
-  if (t.drainRequested === true && activeWorkers.length > 0) return "badge.draining";
+  if (t.drainRequested === true && (activeWorkers.length > 0 || downWorkers.length > 0)) return "badge.draining";
   if (!t.enabled) return "badge.disabled";
   if (t.stopping) return "badge.stopping";
   if (activeWorkers.length) return "badge.recordingOn";

@@ -41,9 +41,10 @@ export function taskPhase(t: PhaseInput): TaskPhase {
   const base = { recordingNodes: nodes, unavailableNodes: down };
   // 排空中必须排在「停用」之前(issue #569):排空按设计就是 enabled=false + 当前场仍在录,
   // 否则用户点完「录完这场再停」只会看到「已停用」,以为录制被截断了。本机(status=draining)
-  // 与远端(drainRequested + 节点在录)同口径;录完/硬停后自然落回停用/收尾。
+  // 与远端(drainRequested + 节点在录/不可达)同口径:节点不可达时也要保持排空中,否则徽标落回
+  // 已停用、放映绿色 ▶ 一键就能把排空撤销(review P3)。录完/硬停后自然落回停用/收尾。
   if (t.status === "draining") return { ...base, kind: "draining", textKey: "badge.draining" };
-  if (t.drainRequested === true && nodes.length > 0) return { ...base, kind: "draining", textKey: "badge.draining" };
+  if (t.drainRequested === true && (nodes.length > 0 || down.length > 0)) return { ...base, kind: "draining", textKey: "badge.draining" };
   if (!t.enabled) return { ...base, kind: "disabled", textKey: "badge.disabled" };
   if (t.stopping) return { ...base, kind: "stopping", textKey: "badge.stopping" };
   if (nodes.length > 0) return { ...base, kind: "recording", textKey: "badge.recordingOn" };

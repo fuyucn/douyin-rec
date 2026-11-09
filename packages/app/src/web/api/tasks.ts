@@ -13,7 +13,6 @@ import type { TaskStore } from "../../store.js";
 import { parseSchedule, toDanmuFlag } from "../../task-input.js";
 import { redactLogLines } from "@drec/core";
 import * as hubStore from "../../hub-store.js";
-import * as workerStore from "../../worker-store.js";
 import { liveUploadPath, readLiveHistory, readLiveUploadFile } from "../../zero-disk-node.js";
 
 /** Web 停止请求最多同步等待的时间(ms)。普通任务几秒内退出;rolling 任务可能在传末段,超时先返回。 */
@@ -282,16 +281,22 @@ export function buildTasks(ctx: ApiCtx) {
       }
 
       const localRunning = manager.isRunning(id);
-      // 绑定了该源任务的 hub 规则选中的远端节点(不含 local)。源任务在本机可能只是配置模板。
-      // 旧配置的 `workers` 缺省/空 = 全选(core `isWorkerTargeted` 语义),这里展开成当前 worker 列表,
-      // 否则老规则房间的排空按钮亮着却必 409(issue #569 review P1)。
-      // internal = 节点侧自己的动作,不再向下递归找节点(节点没有 hub 规则;也不该依赖 master 能力探测)。
-      const configuredWorkers = workerStore.listWorkers(hubConfigPath).map((w) => w.id);
-      const remoteTargets = opts.internal ? [] : [...new Set(
+      const platform = platformForRoom(t.room);
+      const roomSlug = platform.extractRoomSlug(t.room);
+      // 只有真正以 master 运行时才走远端分支:非 hub(单机/worker)上的残留规则不能让本机排空
+      // 退化成 409(hubEnabled=false 时 recordingWorkers/probe 都没注入,issue #569 review P3)。
+      const hubActive = deps.hubEnabled === true && !opts.internal;
+      // 目标节点 = 规则 workers(缺省/空 = 全选)∩ 本轮录制状态快照里的真实节点。
+      // 用快照而不是再读一份 hub.config:master 可能用 --hub-config / settings 的配置来源,
+      // 两套「谁算已配置」必然漂移;快照本身就是按真实 worker 列表探测出来的(issue #569 review P3)。
+      const states = hubActive ? (deps.recordingWorkers?.(platform.id, roomSlug) ?? []) : [];
+      const snapshotIds = [...new Set(states.map((s) => s.workerId))];
+      const ruleWorkers = hubActive ? [...new Set(
         hubStore.listHubRules(hubDir)
           .filter((r) => r.recording?.sourceTaskId === id)
-          .flatMap((r) => (r.workers && r.workers.length > 0 ? r.workers : configuredWorkers)),
-      )].filter((w) => w !== "local" && configuredWorkers.includes(w));
+          .flatMap((r) => (r.workers && r.workers.length > 0 ? r.workers : snapshotIds)),
+      )] : [];
+      const remoteTargets = ruleWorkers.filter((w) => w !== "local" && states.some((s) => s.workerId === w));
 
       if (!opts.internal && !localRunning && remoteTargets.length === 0) {
         // 没在跑就没什么可排空的:说清楚,别给一个「成功」让人以为改了状态。
@@ -300,9 +305,6 @@ export function buildTasks(ctx: ApiCtx) {
 
       if (remoteTargets.length > 0) {
         // 远端是否真的在录:只看绑定的节点(房间状态用的也是这份快照,与按钮可见性同源)。
-        const platform = platformForRoom(t.room);
-        const roomSlug = platform.extractRoomSlug(t.room);
-        const states = deps.recordingWorkers?.(platform.id, roomSlug) ?? [];
         const stateOf = (w: string) => states.find((s) => s.workerId === w)?.state;
         const recording = remoteTargets.filter((w) => stateOf(w) === "recording");
         const unknown = remoteTargets.filter((w) => stateOf(w) === "unavailable" || stateOf(w) === undefined);
