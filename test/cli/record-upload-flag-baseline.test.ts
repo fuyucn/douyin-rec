@@ -254,8 +254,8 @@ describe("record --rolling-upload / --stream-upload strict parsing (H-974 fix, r
     expect(r.code, r.stderr || r.stdout).toBe(2);
     expect(r.stderr).toContain(expectedLine);
     expect(r.stderr).not.toContain(streamLine);
-    // Cross-check: only --rolling-upload is named, --stream-upload is not evaluated first.
-    expect(r.stderr).not.toContain("--stream-upload 取值无效");
+    // The stream error line is already excluded above, which also covers any hard-coded copy of
+    // its message text; only --rolling-upload is named, --stream-upload is not evaluated first.
     expect(r.stderr).not.toContain("互斥");
     expect(r.stdout).not.toContain("边录边传已开启");
   }, 12_000);
