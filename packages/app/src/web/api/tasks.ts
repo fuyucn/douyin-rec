@@ -286,11 +286,12 @@ export function buildTasks(ctx: ApiCtx) {
       // 旧配置的 `workers` 缺省/空 = 全选(core `isWorkerTargeted` 语义),这里展开成当前 worker 列表,
       // 否则老规则房间的排空按钮亮着却必 409(issue #569 review P1)。
       // internal = 节点侧自己的动作,不再向下递归找节点(节点没有 hub 规则;也不该依赖 master 能力探测)。
+      const configuredWorkers = workerStore.listWorkers(hubConfigPath).map((w) => w.id);
       const remoteTargets = opts.internal ? [] : [...new Set(
         hubStore.listHubRules(hubDir)
           .filter((r) => r.recording?.sourceTaskId === id)
-          .flatMap((r) => (r.workers && r.workers.length > 0 ? r.workers : workerStore.listWorkers(hubConfigPath).map((w) => w.id))),
-      )].filter((w) => w !== "local");
+          .flatMap((r) => (r.workers && r.workers.length > 0 ? r.workers : configuredWorkers)),
+      )].filter((w) => w !== "local" && configuredWorkers.includes(w));
 
       if (!opts.internal && !localRunning && remoteTargets.length === 0) {
         // 没在跑就没什么可排空的:说清楚,别给一个「成功」让人以为改了状态。

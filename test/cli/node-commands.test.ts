@@ -14,6 +14,9 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NODE_COMMANDS, notifyOutboxArgs } from "../../packages/cli/src/node-commands.js";
+import { desiredSpecsForWorker } from "../../packages/app/src/hub-desired.js";
+import { hubKey, type HubRule } from "../../packages/app/src/hub-store.js";
+import type { Task } from "../../packages/app/src/store.js";
 
 const roots: string[] = [];
 const original = process.env.DOUYIN_REC_ROOT;
@@ -121,6 +124,57 @@ describe("NODE_COMMANDS", () => {
     const after = new TaskStore(join(root, "db", "douyin-rec.db"));
     try {
       expect(after.listTasks()[0]).toMatchObject({ enabled: false, drainRequested: false });
+    } finally {
+      after.close();
+    }
+  });
+
+  it("cross-seam: master 的 drainRequested → desired spec → 节点 apply 走 /drain 并落库(issue #569 review P2)", async () => {
+    const root = makeRoot();
+    const { TaskStore } = await import("../../packages/app/src/store.js");
+    const store = new TaskStore(join(root, "db", "douyin-rec.db"));
+    store.addTask({ room: "https://live.douyin.com/999111", status: "running", enabled: true, anchorName: "A", managedBy: "hub" });
+    store.close();
+
+    const src = {
+      id: 1, room: "https://live.douyin.com/999111", platform: "douyin", name: "A",
+      quality: "origin", engine: "ffmpeg", danmu: 1, segmentSec: 1800,
+      cookies: null, outDir: null, scheduleStart: null, scheduleEnd: null,
+      status: "stopped", useCookie: true, enabled: false, drainRequested: true,
+      createdAt: "2026-11-09T00:00:00.000Z", anchorName: "A", webhook: null, managedBy: null,
+      rollingUpload: false, rollingEffective: false, streamUpload: false, streamUploadSpool: true,
+      zeroDiskDelivery: null, outputFormat: "original",
+    } as Task;
+    const rule: HubRule = {
+      key: hubKey("douyin", "999111"), platform: "douyin", roomSlug: "999111", room: "https://live.douyin.com/999111",
+      enabled: true, pipeline: {}, recording: { sourceTaskId: 1 }, workers: ["vps2"],
+    };
+    const specs = desiredSpecsForWorker("vps2", {
+      rules: [rule],
+      getTask: () => src,
+      workers: [{ id: "vps2" }],
+      allowsPush: () => false,
+      blockedKey: (w, p, r) => `${w}|${p}|${r}`,
+      delivery: {
+        lastGood: () => undefined, remember: () => {}, staleWarned: () => undefined,
+        setStale: () => {}, clearStale: () => {}, block: () => {},
+      },
+      warn: () => {},
+    });
+    expect(specs).toHaveLength(1);
+    expect(specs[0].enabled).toBe(false);
+    expect(specs[0].drain).toBe(true);
+
+    const b64 = Buffer.from(JSON.stringify({ desired: specs }), "utf-8").toString("base64");
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 200 }));
+    const r = await NODE_COMMANDS["apply-tasks"](root, [b64]);
+    expect(r.exitCode).toBe(0);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(String(fetchSpy.mock.calls[0][0])).toContain("/drain?internal=1");
+    fetchSpy.mockRestore();
+    const after = new TaskStore(join(root, "db", "douyin-rec.db"));
+    try {
+      expect(after.listTasks()[0]).toMatchObject({ enabled: false, status: "running", drainRequested: true });
     } finally {
       after.close();
     }

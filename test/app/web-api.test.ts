@@ -2971,6 +2971,30 @@ describe("T18 drainTask(优雅排空)", () => {
     s.close();
   });
 
+  it("规则残留已删除 worker id → 按配置求交,不把它当未知而永久 409(issue #569 review P2)", async () => {
+    const s = new TaskStore(":memory:");
+    const m = new MockManager();
+    const probeDrainSupport = vi.fn(async () => ({ ok: true }));
+    const deps = hubDeps("drain-dangling-worker-", {
+      probeDrainSupport,
+      recordingWorkers: () => [
+        { workerId: "vps2", workerName: "VPS", state: "recording", checkedAt: 123 },
+      ],
+    });
+    const a = makeApi({ store: s, manager: m, ...deps });
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    upsertHubRule(deps.hubDir as string, {
+      platform: "douyin", roomSlug: "123456", enabled: true,
+      recording: { sourceTaskId: t.id }, workers: ["vps2", "ghost"],
+    });
+
+    const r = await a.drainTask(t.id);
+    expect(r.status).toBe(200);
+    expect(probeDrainSupport).toHaveBeenCalledWith(["vps2"]);   // ghost 被丢弃,不探测
+    expect(s.getTask(t.id)!.drainRequested).toBe(true);
+    s.close();
+  });
+
   it("目标节点状态未知(unavailable / 快照缺失)→ 409 说不确定,不假装没在录(issue #569 P1)", async () => {
     const s = new TaskStore(":memory:");
     const probeDrainSupport = vi.fn(async () => ({ ok: true }));
