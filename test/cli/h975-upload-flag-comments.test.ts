@@ -172,3 +172,44 @@ describe("bool-flag.ts comments (scope item 5)", () => {
     expect(doc).toMatch(/rolling-queue/);
   });
 });
+
+/**
+ * Round-2 Reviewer finding: the lenient parser is NOT `--danmu`-only — `task add/edit --use-cookie`
+ * (`cli-task.ts`) and `task-input.ts` call it too. Comments must not claim exclusivity, and the
+ * descriptions of the lenient parser must name a non-danmu user, derived from the real call sites.
+ */
+describe("lenient parser comments match its real callers (round-2 review)", () => {
+  const lenientName = [...BOOL.matchAll(/^export function (\w+)\(v: string \| undefined, def: boolean\)/gm)][0][1];
+  const CLI_TASK = read("packages", "app", "src", "cli-task.ts");
+  const TASK_INPUT = read("packages", "app", "src", "task-input.ts");
+  const callRe = new RegExp(`\\b${lenientName}\\(`);
+
+  it("the lenient parser really has callers beyond --danmu (precondition)", () => {
+    expect(CLI_TASK).toMatch(new RegExp(`useCookie[^\\n]*${lenientName}\\(`));
+    expect(TASK_INPUT).toMatch(callRe);
+  });
+
+  const exclusive = [
+    /--danmu`?\s*\)?\s*only/i,
+    /only\s+(?:by|for|used by)\s+`?--danmu/i,
+    /used\s+only\s+(?:by|for)\s+`?--danmu/i,
+    /only\s+the\s+lenient\s+`?--danmu`?\s+parser/i,
+    /仅(?:限|用于|被)?\s*`?--danmu/,
+  ];
+
+  for (const [label, src] of [
+    ["bool-flag.ts", BOOL],
+    ["cli-flags.ts", FLAGS],
+  ] as const) {
+    it(`${label} comments never say the lenient parser is --danmu-only`, () => {
+      const text = comments(src).replace(/\s*\n\s*\*?\s*/g, " ");
+      for (const re of exclusive) expect(text, `matches ${re}`).not.toMatch(re);
+    });
+
+    it(`${label} header names a non-danmu user of the lenient parser (--use-cookie)`, () => {
+      const header = src.slice(0, src.indexOf("*/") + 2);
+      expect(header).toContain(lenientName);
+      expect(header).toMatch(/--use-cookie|use-cookie|useCookie/);
+    });
+  }
+});
