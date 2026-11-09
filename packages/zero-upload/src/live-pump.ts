@@ -1480,11 +1480,20 @@ export class PartSink {
     this.waitingBytes = 0;
     this.carryList = [];
     this.carryLen = 0;
+    const why = reason ?? (this.fd !== undefined
+      ? `上传跟不上录制,队列已满(${this.queuedChunks} 块),本段降级为纯落盘`
+      : `上传跟不上录制,队列已满(${this.queuedChunks} 块),零落盘无本地副本,该分 P 丢失`);
+    // issue #574: in full mode the spool holds every byte, so an overflow means the streaming
+    // session is truncated (streamedBytes < spooledBytes). Finalize must never `complete` that
+    // short session — mark the part failed HERE so it takes the whole-file fallback path
+    // (plans/043: 满了落 spool → 整文件回退). Both overflow entries (`feed()` queue full and
+    // `pushTail()` tail does not fit) land in this one method, so this is the single judgment
+    // point for the truncation. Zero-disk keeps its existing hard-fail semantics
+    // (backpressured → 分 P 已丢失 at the pump level), so its uploadError is not touched.
+    if (this.fd !== undefined) this.uploadError ??= why;
     // Backpressure must be explicit: silent degradation turns "streaming upload" into "disk only".
     this.o.onBackpressure?.(this.spooled, this.queuedChunks);
-    this.degrade(reason ?? (this.fd !== undefined
-      ? `上传跟不上录制,队列已满(${this.queuedChunks} 块),本段降级为纯落盘`
-      : `上传跟不上录制,队列已满(${this.queuedChunks} 块),零落盘无本地副本,该分 P 丢失`));
+    this.degrade(why);
   }
 
   /** Slice residue into full chunks and queue them; a full queue means the uploader fell behind. */
@@ -1613,6 +1622,8 @@ export class PartSink {
       ...(this.degradedReason ? { degradedReason: this.degradedReason } : {}),
       // "Half session" = bytes PUT but the part can neither complete nor abort (UPOS has no
       // abort). Size-/duration-sealed parts uploading fewer chunks than the bound are NOT leaks.
+      // zero-disk (`fd === undefined`): backpressure hard-fails the part before submit, so an
+      // empty uploadError here only means "no submitted part", not a leak requiring action.
       sessionLeaked: this.uploadError != null && this.chunksUploaded > 0,
       backpressured: this.overflow && !this.lateDegraded,
     };
@@ -2432,6 +2443,7 @@ export async function acquireStreamWithBackoff(o: AcquireStreamOpts): Promise<St
 export interface LivePumpSegmentReport {
   seg: number;
   chunks: number;
+  /** 实际上传字节（流式，或整文件回退后的整文件大小）；可投稿分 P 上与 `spooled` 相等。 */
   bytes: number;
   spooled: number;
   ms: number;
@@ -3021,6 +3033,11 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     const base: LivePumpSegmentReport = {
       seg: seg + 1,
       chunks: r.chunksUploaded,
+      // issue #574 (S5): one byte caliber per segment — the bytes actually uploaded (streamed,
+      // or re-uploaded by the whole-file fallback). The overflow guard turns any truncation into
+      // an uploadError, so a submittable part always ends with streamedBytes === spooledBytes
+      // and the report and the archive append below read this single value, not two different
+      // numbers for the same part.
       bytes: r.streamedBytes,
       spooled: r.spooledBytes,
       ms: Date.now() - ctx.openedAt,
@@ -3197,7 +3214,11 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         spoolPath,
         stem,
         title: o.partTitle?.(index + 1, liveTitle) ?? fileName.replace(/\.live(?=\.[^.]+$)/, "").replace(/\.[^.]+$/, ""),
-        bytes: r.spooledBytes,
+        // Same single caliber as the segment report (issue #574 S5): a truncated part never
+        // reaches here — the overflow guard forces it through the whole-file fallback, which
+        // resets streamedBytes to the exact spool size. So this is the size actually in the
+        // archive, and it always equals the report's `spooled` for a submittable part.
+        bytes: base.bytes,
         durationSec: r.spoolDurationSec,
       }, sig);
       ctx.submitting = false;
