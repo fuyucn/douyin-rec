@@ -1938,6 +1938,146 @@ describe("失败回退:已录字节必须被用上,不能白躺盘上", () => {
   });
 });
 
+/**
+ * issue #574 — full 模式(有 spool)只要被背压截断(streamedBytes < spooledBytes)就绝不允许
+ * `complete` 一个少传的分 P。不依赖 UPOS 服务端对 total/parts 不一致的行为:本地 guard 必须成立。
+ * 两条 overflow 入口(feed() 队列满 / pushTail() 尾块挤不进)都经 overflowNow(),只此一处判定。
+ */
+describe("issue #574: 背压截断绝不 complete 少传分 P", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "live-pump-574-")); });
+  afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
+
+  it("F1/S5/S6: 第 1 块 PUT 在飞时封口(干净收尾、uploadError 曾为空)也绝不 complete 少传分 P,走整文件回退", async () => {
+    // 确定性时序:把第 1 块 PUT 用 gate 卡住,期间写入余下字节并封口。上传器把队列里仅有的
+    // 2 块传完后按 maxChunks 干净收尾(不抛「流比声明短」)→ 修复前 uploadError 恒空,
+    // finalizeRecordedPart 会把这个只有 2 块的会话 complete 掉,少传的分 P 被确认(spool 随后删)。
+    let releasePut1!: () => void;
+    const put1Gate = new Promise<void>((r) => { releasePut1 = r; });
+    let putCount = 0;
+    let preuploadCount = 0;
+    let uidCount = 0;
+    const completes: Array<{ uploadId: string; parts: number }> = [];
+    const putsByUid = new Map<string, number[]>();
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
+      const u = new URL(url);
+      const m = (init?.method ?? "GET").toUpperCase();
+      if (u.pathname.endsWith("/preupload")) {
+        preuploadCount++;
+        return new Response(JSON.stringify({
+          chunk_size: CHUNK, auth: "auth", endpoint: "//upos.test",
+          biz_id: "1", upos_uri: `upos://b/s${preuploadCount}.ts`, OK: 1,
+        }), { status: 200 });
+      }
+      if (m === "POST" && u.searchParams.has("uploads")) {
+        return new Response(JSON.stringify({ upload_id: `uid-${++uidCount}` }), { status: 200 });
+      }
+      if (m === "PUT") {
+        const uid = u.searchParams.get("uploadId") ?? "?";
+        if (++putCount === 1) await put1Gate; // 第 1 块 PUT 在飞
+        const ab = init?.body as ArrayBuffer | undefined;
+        putsByUid.set(uid, [...(putsByUid.get(uid) ?? []), ab?.byteLength ?? 0]);
+        return new Response("", { status: 200 });
+      }
+      if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) {
+        const body = JSON.parse(String(init!.body)) as { parts: unknown[] };
+        completes.push({ uploadId: u.searchParams.get("uploadId") ?? "?", parts: body.parts.length });
+        return new Response(JSON.stringify({ OK: 1, key: "b/stem.ts" }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ code: 0, data: {} }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    // 每次推 6 个 TS 包(1128B),经 TsCutter 后刚好产生 1 个 1024B 满块 + 少量 carry。
+    const piece = TS_PACKET_BYTES * 6;
+    const data = tsStream({ gops: 40 });
+    let pushToStdout: ((b: Buffer) => void) | undefined;
+    let endStdout: (() => void) | undefined;
+    const spawn: SpawnFn = (() => {
+      const stdout = new PassThrough();
+      const stderr = new PassThrough();
+      const events = {} as Record<string, Array<(...a: unknown[]) => void>>;
+      let closed = false;
+      const close = (code: number | null, signal: string | null): void => {
+        if (closed) return;
+        closed = true;
+        for (const fn of events.close ?? []) fn(code, signal);
+      };
+      const proc: ChildProcessLike = {
+        stdout, stderr,
+        on(ev, fn) { (events[ev] ??= []).push(fn); },
+        kill(sig) { stdout.end(); setTimeout(() => close(null, sig ?? "SIGKILL"), 1); },
+      };
+      pushToStdout = (b: Buffer) => { stdout.write(b); };
+      endStdout = () => { stdout.end(); setTimeout(() => close(0, null), 5); };
+      return proc;
+    }) as SpawnFn;
+    setSpawnForTest(spawn);
+
+    const pump = pumpSegment({
+      cookiesPath: COOKIES, args: ["-fake"], fileName: "bp.live.ts", sizeCap: CHUNK * 1000,
+      spoolDir: dir, line: "txa", fetchImpl, queueCapacity: 1,
+      probeDuration: async () => 60, scanDtsGap: async () => null,
+      signal: new AbortController().signal, keepSpool: true,
+    });
+
+    const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+    for (let i = 0; i < 200 && !pushToStdout; i++) await sleep(5);
+    expect(pushToStdout, "spawn 必须已发生").toBeTruthy();
+    pushToStdout!(data.subarray(0, piece));                 // 第 1 个满块入队
+    for (let i = 0; i < 200 && putCount < 1; i++) await sleep(5);
+    expect(putCount, "第 1 块 PUT 必须在飞").toBe(1);
+    pushToStdout!(data.subarray(piece, piece * 2));         // 队列已空 → 第 2 个满块入队
+    pushToStdout!(data.subarray(piece * 2, piece * 3));    // 队列满 → 背压截断(overflow)
+    await sleep(20);
+    endStdout!();                                          // 在第 1 块 PUT 在飞时封口
+    await sleep(30);                                       // 确保 seal 先于第 1 块 PUT 完成
+    releasePut1!();
+    const r = await pump;
+
+    // 流式会话(第 1 个 uploadId)只收到 2 块、spool 却有 3 块多:它绝不能被 complete。
+    const streamUid = "uid-1";
+    expect(putsByUid.get(streamUid) ?? []).toEqual([CHUNK, CHUNK]);
+    expect(r.spooledBytes).toBe(piece * 3);
+    expect(completes.some((c) => c.uploadId === streamUid), JSON.stringify(completes)).toBe(false);
+    // 必须走整文件回退:另一个会话上传完整 spool 并 complete。
+    expect(r.usedFileFallback).toBe(true);
+    expect(r.uploadError).toBeUndefined();
+    const fallbackUid = [...putsByUid.keys()].find((k) => k !== streamUid);
+    expect(fallbackUid, JSON.stringify([...putsByUid.keys()])).toBeTruthy();
+    expect(putsByUid.get(fallbackUid!)!.reduce((a, b) => a + b, 0)).toBe(piece * 3);
+    expect(completes.filter((c) => c.uploadId === fallbackUid)).toHaveLength(1);
+    // S5: 两种字节口径一致(段报告与投稿都读实际上传字节)。
+    expect(r.streamedBytes).toBe(r.spooledBytes);
+    // S6: 有块 PUT 到未 complete 的会话,协议无 abort;回退成功也保留这个事实。
+    expect(r.sessionLeaked).toBe(true);
+    expect(r.backpressured).toBe(true);
+  }, 30_000);
+
+  it("S1: pushTail() 溢出(封口时队列满、尾块挤不进)与 feed() 同一判定", async () => {
+    const { fake } = makeFetch();
+    const degraded: string[] = [];
+    const sink = new PartSink({
+      sizeCap: CHUNK * 3, spoolPath: join(dir, "tail-overflow.mkv"), session: session(),
+      fetchImpl: fake, queueCapacity: 1, onDegrade: (reason) => degraded.push(reason),
+    });
+    // 同步写入 + 同步封口:第 1 个满块仍在容量 1 的队列里(上传器的 dequeue 是微任务),
+    // 不足一块的尾块挤不进去 → pushTail() → overflowNow()。
+    sink.write(Buffer.alloc(CHUNK, 1));
+    sink.write(Buffer.alloc(CHUNK - 100, 2));
+    sink.seal();
+    const res = await sink.finished;
+    expect(degraded).toEqual([expect.stringMatching(/上传跟不上录制,队列已满/)]);
+    expect(res.backpressured).toBe(true);
+    // 同一判定:截断必须落进 uploadError(修复前这里只有「流比声明短」的偶然错误),
+    // 这样 finalize 不会 complete 少传分 P,而是按整文件回退。
+    expect(res.uploadError).toMatch(/队列已满/);
+    expect(res.streamedBytes).toBeLessThan(res.spooledBytes);
+    // S6: 有块 PUT 到不会 complete 的会话,协议无 abort。
+    expect(res.sessionLeaked).toBe(true);
+  });
+});
+
 describe("countTsDiscontinuities", () => {
   it("只数时间戳不连续类警告行", () => {
     const text = [
@@ -3387,7 +3527,14 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     const u = fakeUpos({ putDelayMs: () => 5 });
     const r = await runLivePump(baseOpts(u, { spoolMode: "full", queueCapacity: 1 }));
     expect(r.ok, r.error ?? "").toBe(true);
-    expect(r.segments.some((x) => x.usedFileFallback)).toBe(true);
+    // issue #574: 回退的原因不再是「readChunk 恰好抛错」这种偶然,而是背压截断本身被
+    // overflowNow() 判为不可 complete(整文件回退);且该 UPOS 会话半截泄漏的事实保留。
+    const degraded = r.segments.filter((x) => x.usedFileFallback);
+    expect(degraded.length).toBeGreaterThan(0);
+    expect(degraded.every((x) => (x.degradedReason ?? "").includes("队列已满"))).toBe(true);
+    expect(degraded.some((x) => x.backpressured && x.sessionLeaked)).toBe(true);
+    // S5: 每一段的两个字节口径一致(没有少传却被确认的分 P)。
+    expect(r.segments.every((x) => x.bytes === x.spooled)).toBe(true);
     expect(u.archive.length).toBe(r.segments.length);
   }, 30_000);
 
