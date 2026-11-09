@@ -25,7 +25,7 @@
 | 引擎 engine | ffmpeg 20/20 | 其它录制引擎未被使用 |
 | 时间窗 schedule | **0/20** | 零使用（但只占表单一行） |
 | 输出格式 outputFormat | **20/20 original** | 非 original 的处理链在空跑 |
-| Discord webhook | 未配置 | 通知通道闲置（代码极小） |
+| Discord 通知地址 | 未配置 | 通知通道闲置（代码极小） |
 
 > **重要前提**：线上没有请求访问日志（`docker logs` 里没有任何 HTTP 命中记录）。因此「/hub 页没人用」「/stats 没人看」目前**都是推断，不是证据**。删入口前必须先能证伪（见第 4 节步骤 0）。
 
@@ -39,7 +39,7 @@
 | A2 | `.hallmark/`（4KB）、`.orka/`（0B） | 空壳 | — | agent 残留目录 |
 | A3 | `dev/*.html` 原型（9 个） | 5335 行 | 12 次近期改动，可能仍在当设计稿 | 移到 `docs/design-archive/`，别直接删 |
 | A4 | `docs/` 29 + `plans/` 37 篇 | 66 篇 | **不能整目录归档**：`docs/multi-node-sync.md` 是现役运维手册，代码注释还引用 `plans/036/041/047` | 只归档已完成的设计/审计，保留现役文档并修引用 |
-| A5 | `remote/` 旧 Python 管线 | 606 行 + `vps.key` 私钥 | **不是仓库清理项**：`.gitignore:45` 已忽略，删它不会让 clone/bundle 变小 | 独立安全任务：私钥移出并轮换、留 `pull_recordings.sh`（仍指向现数据根 `~/drec/recordings`）、只删确认无用的 merge/burn Python |
+| A5 | `remote/` 旧 Python 管线 | 606 行 + 部署私钥 | **不是仓库清理项**：`.gitignore:45` 已忽略，删它不会让 clone/bundle 变小 | 独立安全任务：私钥移出并轮换、留 `pull_recordings.sh`（仍指向节点当前数据根）、只删确认无用的 merge/burn Python |
 
 ### B. 真正的「第二套真相」：遗留 `/hub` 栈（建议第一阶段删）
 
@@ -90,7 +90,7 @@
 
 | 项 | 状态 | 版本 |
 |---|---|---|
-| 访问计数取证（`<root>/config/access-stats.json`，只记路由名） | **已上线三节点**，观察中 | 0.0.333 |
+| 访问计数取证（节点数据根下的访问统计文件，只记路由名） | **已上线三节点**，观察中 | 0.0.333 |
 | 死文案清理 261 条（1478 → 1217），并修复详情页两枚裸 key | **已完成** | 0.0.334 |
 | TUI 删除（376 行 + ink/react 依赖 + `dist/tui.mjs` + release 打包位） | **已完成** | 0.0.335 |
 | 设计原型 8 个（5335 行）移入 `docs/design-archive/` | **已完成** | 0.0.336 |

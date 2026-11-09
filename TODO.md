@@ -30,16 +30,16 @@
   **F2** field-label margin 覆盖残留(2374 行 margin:0 压过新声部,表单标签贴住输入框)——删旧定义。
   **F5/F6** 禁用态透明度三档统一 0.5;主按钮禁用掉回中性(修好全部弹窗禁用键);节点卡 disabled 点从 hairline 改 muted。
   **F8** 5 处 10.5px 清完。**F10** 详情页历史全 done(≥6)折叠摘要行+最近日期锚;节点队列全零折叠「N 个执行器全部空闲」。**F12** 数据空值统一 ASCII「-」。
-  **部署发现**:VPS web/dist 是 0.0.327 时代的旧产物(biliup bundle 只带 APP_VERSION 不带新 UI)——已 scp 新 web/dist 原子替换,VPS1/VPS2 UI 现为 0.0.331。
+  **部署发现**:VPS web/dist 是 0.0.327 时代的旧产物(biliup bundle 只带 APP_VERSION 不带新 UI)——已 scp 新 web/dist 原子替换,两台录制节点的 UI 现为 0.0.331。
   **推迟单独开票**:①停止方块语义(enabled≠recording)、⑤Stats breakdown 纵向留白、⑧1024-1100 表格挤、⑨Upload 列补词、F4 --r-pill 未定义、F9 死 CSS 80 行。→ **已由 T-167 收口(2026-11-08)**
   **验收**:typecheck/test 4870 全绿、check-i18n 绿、线上实测 F1「0 running」/F2 marginBottom 6px/F10 两处折叠(凌晴页「Last 20 runs all succeeded」)。
 
 - [~] **T-165 全局 design 统一 pass(用户反馈「每个页面每个组件风格不统一」+ edit 等表单也统一)**
   — 顾问卡点 1 过审(reviewer group/plan):四轮页面迭代留下代差;两 PR 落地。
-  **PR1(0.0.328-6965ca89)**:标签声部唯一插入点(field-label 双定义合并——2371 行无作用域覆盖 386 行的 font-size/margin 是「标签贴输入框」根因;telemetry/metric/section/form/field 五份重复声明合一);散文标签去 uppercase(CSS 14 处 + tsx 4 处,机器 token 大写交给数据);字号下限 10px→11px(CSS 6 + tsx 7,rt-pill/tr-pill height→min-height 防溢出);H1 统一 .page-h1 28→32px(7 处)。
+  **PR1(0.0.328-6965ca89)**:标签声部唯一插入点(field-label 双定义合并——2371 行无作用域覆盖 386 行的 font-size/margin 是「标签贴输入框」根因;telemetry/metric/section/form/field 五份重复声明合一);散文标签去 uppercase(CSS 14 处 + tsx 4 处,机器标记大写交给数据);字号下限 10px→11px(CSS 6 + tsx 7,rt-pill/tr-pill height→min-height 防溢出);H1 统一 .page-h1 28→32px(7 处)。
   **PR2(0.0.329-ae426e70 + 0.0.330-b64ac4e6)**:队列页头三层收敛为一行(删重复 needsYou 计数、counts.done;7 天健康收行尾注脚;「已核对 N」保留;死键清理 queue.health.*/queue.flow.count.done/queue.summary.*)。
   **验收**:typecheck/test 4870 全绿、check-i18n 绿、5 页 + 表单弹窗截图核对(句首大写/32px H1/单行页头);master 已部署 0.0.330-881618。
-  **残余**:Stats 页 OUTPUT FORMAT 条留白与 Node load 表格留待后续;VPS1/VPS2 仍 0.0.321(UI 改动不急)。
+  **残余**:Stats 页 OUTPUT FORMAT 条留白与 Node load 表格留待后续;两台录制节点仍 0.0.321(UI 改动不急)。
 
 - [~] **T-126 worker 按 Release 部署:main 为 stable,开发分支按需 prerelease（issue [#392](https://github.com/fuyucn/douyin-rec/issues/392)）**（2026-10-29）
   — worker 升级靠手动换文件,流程不在仓库里;已有安装脚本和发布流程但从未发过 Release。
@@ -819,7 +819,7 @@
 
 ## 已完成
 
-- [x] **T-168 master 登录态下发到录制节点（issue [#563](https://github.com/fuyucn/douyin-rec/issues/563)，分支 `feat/563-login-sync` + 返工 `fix/563-cookie-alert-dedup`，2026-11-09）** — **做什么**:平台级会话串新增 `_apply-cookies` 单向下发（空值不删、旧节点告警一次）；`spec.cookies` 只发 master 显式 override，受管任务更新白名单纳入该字段（节点残留旧串/占位串自动清空回落）；看门狗改读实际生效的平台串并带平台名；登录/设置成功后立即触发一轮同步。**为什么**:master 重新登录不传导到节点，节点告警报的是本地旧串，且部分房间任务级串是测试占位值（弹幕匿名）。**验收**:新增/更新单测 + `pnpm test`/`typecheck` 全绿 + bundle + 版本 patch；线上两台节点串与 master 一致、临期告警消失。**部署实测补充**：临期告警跨重启去重（settings `cookieWarned`，同一到期时刻不重报；跨入「已过期」再报一次）。（2026-11-09 完成：PR [#564](https://github.com/fuyucn/douyin-rec/pull/564) + [#565](https://github.com/fuyucn/douyin-rec/pull/565)，版本 0.0.342/0.0.343，master 与两台节点已部署验证）
+- [x] **T-168 master 登录态下发到录制节点（issue [#563](https://github.com/fuyucn/douyin-rec/issues/563)，分支 `feat/563-login-sync` + 返工分支（临期告警跨重启去重），2026-11-09）** — **做什么**:平台级会话串新增 `_apply-cookies` 单向下发（空值不删、旧节点告警一次）；`spec.cookies` 只发 master 显式 override，受管任务更新白名单纳入该字段（节点残留旧串/占位串自动清空回落）；看门狗改读实际生效的平台串并带平台名；登录/设置成功后立即触发一轮同步。**为什么**:master 重新登录不传导到节点，节点告警报的是本地旧串，且部分房间任务级串是测试占位值（弹幕匿名）。**验收**:新增/更新单测 + `pnpm test`/`typecheck` 全绿 + bundle + 版本 patch；线上两台节点串与 master 一致、临期告警消失。**部署实测补充**：临期告警跨重启去重（settings `cookieWarned`，同一到期时刻不重报；跨入「已过期」再报一次）。（2026-11-09 完成：PR [#564](https://github.com/fuyucn/douyin-rec/pull/564) + [#565](https://github.com/fuyucn/douyin-rec/pull/565)，版本 0.0.342/0.0.343，master 与两台节点已部署验证）
 - [x] **T-159 Final mode SVG assets and accessible icon-only room indicators (issue [#531](https://github.com/fuyucn/douyin-rec/issues/531) → PR [#535](https://github.com/fuyucn/douyin-rec/pull/535))** — 完成于 2026-11-06。八枚 SVG 模式图标与纯图标房间标识落地；复审补齐几何宽高守卫、合并/分段/节点语义、真实 320px 房间行、严格 API 隔离和 CI 浏览器门禁，并兼容旧 stage-only 存档值。分支已同步 main 与强制本地回退策略；version 0.0.312。全量 4772 passed、42 skipped；typecheck、web build、bundle、真实浏览器回归与 CI 通过；零高度变异按预期失败。无部署。
 - [x] **T-161 统一房间入口：节点也走 Rooms，能力按角色裁剪，新增/编辑合成一个弹窗（计划 [047](plans/047_rooms_unified_ui.md)，分支 `feat/tasks-unified-ui`，2026-11-06）** — **做什么**:① 所有节点首页与导航统一为 `/rooms`，`/tasks`、`/task/:id` 退化为跳转，删除 `TaskList`/`TaskDetail`/`CreateEditTaskDialog`/`AddRoomDialog`；② 新增 `nodeCaps(hubEnabled)` 能力矩阵，worker 只留录制 + 存档格式（直播直传/边录边传的生效前提是主控的 rolling 规则，节点上只读提示"由主控配置"，见 plan §3.5 偏离记录），隐藏处理/上传/收尾的 hub 编排与节点/队列/统计页；③ `managedBy='hub'` 房间只读（无编辑/启停/删除/合并面板）；④ `RoomEditor` 双模（create 与 edit 共用同一份表单与校验），新增走新端点 `POST /api/rooms` 一次写两半、默认暂停，worker 拒绝写 `processing`。**为什么**:master 用 rooms、节点用 tasks 是两套并发维护的页面，同一房间的状态/交付/受管口径会漂移；新增弹窗只是编辑面板的最小残缺版，字段与校验都不一致（连带「建任务后再反查 key 写规则」的半成功风险）。**验收**:四期 PR 各自有回归测试（能力矩阵、`POST /api/rooms` 回滚、create 表单映射、受管只读 source-grep）；worker 页面零 master 端点请求；受管房间无任何写操作；新建房间创建即暂停；全量 test / typecheck / web build / bundle 通过。（2026-11-06，PR #536，已合入 main；version 0.0.310）
 - [x] **T-155 按分 P 的任务链:封口→上传→清理,节点队列驱动、自动重试与对账(issue [#508](https://github.com/fuyucn/douyin-rec/issues/508),计划 [046](plans/046_part_chain_queue.md),2026-11-05)** — **做什么**:每个分 P 封口入队 `upload-part`,确认后同一事务入队 `cleanup-part`;失败自动重试(退避封顶 1 小时);「不确定」进入 `reconciling` 定时对账,不再等人;边录边传迁成录制进程只入队。 **为什么**:上传环节的 `uncertain / needs_manual / order-blocked / ambiguous` 都要人处理,重试 3 次即停;实测对账解析器与真实 `biliup list` 输出不符(恒 `unknown`),旁证从未生效。 **验收**:分期 PR0–PR8 逐期有回归测试(撤修复即红);PR3 之前不改线上行为;数据验证口径见计划 §12。 **子项**:PR0 对账解析器修复([#507](https://github.com/fuyucn/douyin-rec/issues/507));biliup 固定版本升 v1.3.4([#509](https://github.com/fuyucn/douyin-rec/issues/509))。（2026-11-06，全部 9 个分期 PR0–PR8 已合并：#513/#512/#515/#516/#514/#519/#529/#520/#523；PR6 经 7 轮返工、合并前 2 份独立终审 PASS）

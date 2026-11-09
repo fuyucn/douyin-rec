@@ -203,7 +203,7 @@ h1{font-size:26px;line-height:1.2;font-weight:600;margin:0;color:var(--ink)}
   var NOW = new Date("2026-11-07T14:00:00+08:00").getTime();
   function esc(s){ return String(s).replace(/[&<>"]/g, function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]; }); }
   function waitLabel(ms){
-    var d = (NOW - ms) / 86400000;
+    var d = (NOW - ms) / 864e5;
     if (d >= 1) return Math.floor(d) + " 天";
     var h = Math.floor(d * 24);
     return (h >= 1 ? h + " 小时" : Math.max(1, Math.round(d * 24 * 60)) + " 分");
@@ -235,7 +235,7 @@ h1{font-size:26px;line-height:1.2;font-weight:600;margin:0;color:var(--ink)}
   ].map(function(t, i){
     var ms = new Date(t[2]).getTime();
     return { no: i+1, name: t[0], slug: t[1], ms: ms, reason: t[3], next: t[4],
-             days: Math.floor((NOW - ms) / 86400000) };
+             days: Math.floor((NOW - ms) / 864e5) };
   });
 
   function causeKey(reason){
@@ -268,7 +268,7 @@ h1{font-size:26px;line-height:1.2;font-weight:600;margin:0;color:var(--ink)}
   Object.keys(groups).forEach(function(k){
     var g = groups[k];
     var span = g[g.length-1].ms - g[0].ms;
-    if (g.length >= 3 && span <= 86400000) {
+    if (g.length >= 3 && span <= 864e5) {
       var det = document.createElement("details");
       det.className = "fold-row";
       det.innerHTML =
@@ -296,7 +296,7 @@ h1{font-size:26px;line-height:1.2;font-weight:600;margin:0;color:var(--ink)}
       '<span class="tk-no num">#' + (i+1) + '</span>' +
       '<span class="tk-main"><span class="tk-name">' + n + '</span>' +
       '<span class="tk-reason">已合成 · 等待手动上传</span></span>' +
-      '<span class="tk-meta"><span class="tk-wait num ' + waitCls(Math.floor((NOW-ms)/86400000)) + '">已等 ' + waitLabel(ms) + '</span></span>' +
+      '<span class="tk-meta"><span class="tk-wait num ' + waitCls(Math.floor((NOW-ms)/864e5)) + '">已等 ' + waitLabel(ms) + '</span></span>' +
       '<span class="tk-actions"><button class="act primary" type="button">复制路径</button><button class="act" type="button">打开目录</button></span>' +
       '</div></div>';
   }).join("");

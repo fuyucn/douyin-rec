@@ -175,7 +175,7 @@ body {
 
 /* ── 标签声部(唯一插入点)─────────────────────────────────────────────────
    散文标签一律句首大写 + sans(此前 4 份逐字重复的 11px mono uppercase 各自漂移)。
-   机器 token(FFMPEG / MP4)的大写来自数据本身,不靠 CSS。 */
+   机器标记(FFMPEG / MP4)的大写来自数据本身,不靠 CSS。 */
 .telemetry-label,
 .section-label,
 .form-section,

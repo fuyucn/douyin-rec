@@ -107,8 +107,8 @@ describe("planCookieAlerts（跨重启去重，issue #563 部署实测）", () =
   });
 
   it("sid_guard 含游离 % → 解析不出，不抛(一个坏串不能拖垮整轮)", () => {
-    expect(parseCookieExpiry("sessionid=A; sid_guard=tok%ZZ100%7C2%7C3")).toBeNull();
-    expect(dueCookieAlerts([{ platform: "douyin", value: "sessionid=A; sid_guard=tok%ZZ100" }], NOW, 3)).toEqual([]);
+    expect(parseCookieExpiry("sessionid=A; sid_guard=%ZZ1")).toBeNull();
+    expect(dueCookieAlerts([{ platform: "douyin", value: "sessionid=A; sid_guard=%ZZ1" }], NOW, 3)).toEqual([]);
   });
 
   it("platforms are independent", () => {
