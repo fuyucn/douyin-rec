@@ -75,3 +75,39 @@ describe("desiredSpecsForWorker — 登录态只发显式 override（issue #563�
     expect(specs[0].cookies).toBe("sessionid=OVERRIDE");
   });
 });
+
+describe("desiredSpecsForWorker — 排空意图（issue #569）", () => {
+  const srcTask = (over: Partial<Task> = {}): Task => ({
+    id: 1, room: room("444"), name: null, quality: "origin", engine: "ffmpeg", danmu: 1, segmentSec: 1800,
+    scheduleStart: null, scheduleEnd: null, enabled: false, useCookie: true, cookies: null, outDir: null,
+    webhook: null, anchorName: null, rollingUpload: false, rollingEffective: false,
+    streamUpload: false, streamUploadSpool: true, outputFormat: "original", drainRequested: true,
+    ...over,
+  } as Task);
+  const ctxWith = (task: Task) => ({
+    rules: [{
+      key: hubKey("douyin", "444"), platform: "douyin", roomSlug: "444", room: room("444"),
+      enabled: true, pipeline: {}, recording: { sourceTaskId: 1 }, workers: ["vps2"],
+    } as HubRule],
+    getTask: () => task,
+    workers: [{ id: "vps2" }],
+    allowsPush: () => false,
+    blockedKey: (w: string, p: string, r: string) => `${w}|${p}|${r}`,
+    delivery: {
+      lastGood: () => undefined, remember: () => {}, staleWarned: () => undefined,
+      setStale: () => {}, clearStale: () => {}, block: () => {},
+    },
+    warn: () => {},
+  });
+
+  it("排空意图 → spec 带 drain:true（节点据此不硬停）", () => {
+    const specs = desiredSpecsForWorker("vps2", ctxWith(srcTask()));
+    expect(specs[0].enabled).toBe(false);
+    expect(specs[0].drain).toBe(true);
+  });
+
+  it("没有排空意图 → 不下发 drain（旧行为：停用=硬停）", () => {
+    const specs = desiredSpecsForWorker("vps2", ctxWith(srcTask({ drainRequested: false })));
+    expect(specs[0].drain).toBeUndefined();
+  });
+});

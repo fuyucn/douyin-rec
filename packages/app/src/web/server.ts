@@ -314,6 +314,8 @@ export interface WebServerDeps {
   nodeTasks?: (workerId: string) => Promise<import("@drec/core").NodeTasksDTO>;
   /** worker 录制状态快照(CLI 注入;不在请求路径上同步 SSH)。 */
   recordingWorkers?: (platform: string, roomSlug: string) => import("@drec/core").RecordingWorkerStatusDTO[];
+  /** 远端排空能力探测(issue #569;CLI 注入,避免 app 依赖 orchestrator)。省略 → 远端排空失败并保持录制。 */
+  probeDrainSupport?: (workerIds: string[]) => Promise<{ ok: boolean; error?: string }>;
   /** Zero-disk side-node status snapshot (issue #331); injected by the CLI so no SSH happens on the request path. */
   zeroDiskStatus?: (platform: string, roomSlug: string) => import("@drec/core").ZeroDiskNodeStatusDTO[];
   zeroDiskLive?: (platform: string, roomSlug: string) => Array<{
@@ -604,7 +606,8 @@ async function dispatch(
     case "stopTask":
       return api.stopTask(match.id!, { internal: isLoopbackAddr(req.socket.remoteAddress) });
     case "drainTask":
-      return api.drainTask(match.id!);
+      // 与 stopTask 同一手法:internal=1 仅接受本机回环(节点 apply-tasks 的 drain 通道)。
+      return api.drainTask(match.id!, { internal: isLoopbackAddr(req.socket.remoteAddress) });
     case "startLogin": {
       const body = (await readJson(req, res)) as { platform?: string };
       return api.startLogin(body ?? {});
@@ -878,6 +881,7 @@ export function createWebServer(deps: WebServerDeps): Server {
     nodeTaskLogs: deps.nodeTaskLogs,
     nodeTasks: deps.nodeTasks,
     recordingWorkers: deps.recordingWorkers,
+    probeDrainSupport: deps.probeDrainSupport,
     zeroDiskStatus: deps.zeroDiskStatus,
     zeroDiskLive: deps.zeroDiskLive,
     managedStateDir: deps.managedStateDir,

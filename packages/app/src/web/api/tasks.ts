@@ -236,8 +236,10 @@ export function buildTasks(ctx: ApiCtx) {
         && inWindow(nowMinutesLocal(new Date()), t.scheduleStart, t.scheduleEnd);
       const admit = wouldStart ? deps.admitStart?.(t.outDir) : undefined;
       if (admit && !admit.ok) return err(409, `磁盘空间不足,未启动任务 id=${id}:${admit.reason}`);
+      // 启动 = 一轮新的明确意图,清掉上一次的排空标记(issue #569);与 enabled 写在同一条 UPDATE。
+      const prevDrain = t.drainRequested;
       try {
-        store.setEnabled(id, true);
+        store.updateTask(id, { enabled: true, drainRequested: false });
         // hub 语义:该任务是某条规则的源任务、且规则已把录制切给远端节点(workers 不含 local)
         // → 本机**不要**实跑(源任务在此只作配置模板)。否则「启动」会绕过 daemon 的抑制名单,
         // 造成本机与远端同场重复录制(实测踩到:本地 recording=true 而规则 workers=[vps2])。
@@ -248,7 +250,8 @@ export function buildTasks(ctx: ApiCtx) {
         }
       } catch (e) {
         // 启动失败要把 enabled 回滚，避免下一轮周期同步把失败状态传到节点。
-        try { store.setEnabled(id, false); } catch { /* 回滚失败以原始错误为准 */ }
+        // 若原先正在排空,连排空意图一起恢复:失败不该把「录完这场再停」降级成硬停。
+        try { store.updateTask(id, { enabled: false, drainRequested: prevDrain }); } catch { /* 回滚失败以原始错误为准 */ }
         return err(500, `启动任务失败: ${(e as Error).message}`);
       }
       if (isHubSourceTask(id)) deps.requestSyncTasks?.();
@@ -260,22 +263,82 @@ export function buildTasks(ctx: ApiCtx) {
      *
      * 与 stopTask 的区别是本任务存在的原因:硬停会**截断当前录像**(子进程被杀,分段不完整),
      * 而广播通常还在进行。窗口结束/临时停用时想要的是「不再接新场,但别腰斩现在这场」。
+     *
+     * 两条执行路径(issue #569):
+     * - 本机录制器在跑 → 置停用 + stopGraceful(原有行为);
+     * - hub 房间只由远端节点录制(master 的源任务只是配置模板,本机没有进程)→ 写排空意图,
+     *   由下一轮任务同步把 `enabled=false + drain=true` 下发到节点;节点 apply-tasks 立即走
+     *   `/drain`(SIGUSR2),daemon 的 stopGraceful 兜底。**置停用之前**只探测「可能正在录」的
+     *   目标节点(状态 recording / unavailable / 快照缺失)是否理解 drain:不支持/不可达就拒绝并
+     *   保持录制,绝不回退成硬停;空闲节点不探测(它的停用本来就是空操作,混部升级不挡本机排空)。
      */
-    async drainTask(id: number): Promise<ApiResult> {
+    async drainTask(id: number, opts: { internal?: boolean } = {}): Promise<ApiResult> {
       const t = store.getTask(id);
       if (!t) return err(404, `未找到任务 id=${id}`);
-      if (t.managedBy === "hub") return err(403, `任务 id=${id} 由 hub 管理,请在 master 上操作`);
-      if (!manager.isRunning(id)) {
+      // 内部排空仅限本机回环调用(节点 apply-tasks 的 drain 通道),与 stopTask 的 internal 同口径。
+      if (t.managedBy === "hub" && !opts.internal) {
+        return err(403, `任务 id=${id} 由 hub 管理,请在 master 上操作`);
+      }
+
+      const localRunning = manager.isRunning(id);
+      const platform = platformForRoom(t.room);
+      const roomSlug = platform.extractRoomSlug(t.room);
+      // 只有真正以 master 运行时才走远端分支:非 hub(单机/worker)上的残留规则不能让本机排空
+      // 退化成 409(hubEnabled=false 时 recordingWorkers/probe 都没注入,issue #569 review P3)。
+      const hubActive = deps.hubEnabled === true && !opts.internal;
+      // 目标节点 = 规则 workers(缺省/空 = 全选)∩ 本轮录制状态快照里的真实节点。
+      // 用快照而不是再读一份 hub.config:master 可能用 --hub-config / settings 的配置来源,
+      // 两套「谁算已配置」必然漂移;快照本身就是按真实 worker 列表探测出来的(issue #569 review P3)。
+      const states = hubActive ? (deps.recordingWorkers?.(platform.id, roomSlug) ?? []) : [];
+      const snapshotIds = [...new Set(states.map((s) => s.workerId))];
+      const ruleWorkers = hubActive ? [...new Set(
+        hubStore.listHubRules(hubDir)
+          .filter((r) => r.recording?.sourceTaskId === id)
+          .flatMap((r) => (r.workers && r.workers.length > 0 ? r.workers : snapshotIds)),
+      )] : [];
+      const remoteTargets = ruleWorkers.filter((w) => w !== "local" && states.some((s) => s.workerId === w));
+
+      if (!opts.internal && !localRunning && remoteTargets.length === 0) {
         // 没在跑就没什么可排空的:说清楚,别给一个「成功」让人以为改了状态。
         return err(409, "该任务当前没有在录制,无需排空");
       }
+
+      if (remoteTargets.length > 0) {
+        // 远端是否真的在录:只看绑定的节点(房间状态用的也是这份快照,与按钮可见性同源)。
+        const stateOf = (w: string) => states.find((s) => s.workerId === w)?.state;
+        const recording = remoteTargets.filter((w) => stateOf(w) === "recording");
+        const unknown = remoteTargets.filter((w) => stateOf(w) === "unavailable" || stateOf(w) === undefined);
+        if (!localRunning && recording.length === 0) {
+          // 「不知道」不能写成「没在录」:快照为空/节点离线时用户看到的必须是可重试的原因。
+          return unknown.length > 0
+            ? err(409, "无法确认节点是否在录制,未排空(请稍后重试)")
+            : err(409, "该任务当前没有在录制,无需排空");
+        }
+        // 置停用之前确认「可能正在录」的目标节点都理解 drain:旧节点会忽略该字段、把停用当硬停。
+        // 空闲节点不探测 —— 它收到 enabled=false 的硬停本来就是空操作;混部 master 先上线、
+        // worker 未升级时,本机单录的房间仍能排空(旧行为不回归,issue #569 review P1)。
+        const mustProbe = remoteTargets.filter((w) => stateOf(w) === "recording" || stateOf(w) === "unavailable" || stateOf(w) === undefined);
+        if (mustProbe.length > 0) {
+          if (!deps.probeDrainSupport) {
+            return err(409, "hub 未启用,无法向录制节点下发排空");
+          }
+          const support = await deps.probeDrainSupport(mustProbe);
+          if (!support.ok) {
+            return err(409, `无法安全排空:${support.error ?? "节点不支持优雅排空"}`);
+          }
+        }
+      }
+
+      // 意图先落库:即使本机 stopGraceful 失败,daemon 下一轮也会按「停用」让当前场录到自然收播。
       try {
-        // 排空的下游语义 = 「窗口结束」:置停用 + 优雅停(不会再被 daemon 拉起)。
-        store.setEnabled(id, false);
-        await manager.stopGraceful(id);
+        store.updateTask(id, { enabled: false, drainRequested: true });
       } catch (e) {
-        try { store.setEnabled(id, true); } catch { /* 回滚失败以原始错误为准 */ }
         return err(500, `排空失败: ${(e as Error).message}`);
+      }
+      if (localRunning) {
+        // 与原来的 stopGraceful 一致;失败不回滚意图 —— 回滚会让远端节点重新接新场,
+        // 而这里已经承诺「录完这场再停」。
+        await manager.stopGraceful(id).catch(() => {});
       }
       if (isHubSourceTask(id)) deps.requestSyncTasks?.();
       return { status: 200, body: view(store.getTask(id)!) };
@@ -289,12 +352,14 @@ export function buildTasks(ctx: ApiCtx) {
       if (t.managedBy === "hub" && !opts.internal) {
         return err(403, `任务 id=${id} 由 hub 管理，请在 master 上操作`);
       }
+      // 硬停 = 用户明确要立即停,同样清掉排空意图(否则下一轮同步还会带 drain、阻止硬停)。
+      const prevDrain = t.drainRequested;
       try {
-        store.setEnabled(id, false);
+        store.updateTask(id, { enabled: false, drainRequested: false });
         // 最多等 STOP_WAIT_MS:普通任务几秒内退出;rolling 任务要给末段上传留时间,超时就先返回(仍在停止中)。
         if (manager.isRunning(id)) await manager.stopWithin(id, STOP_WAIT_MS);
       } catch (e) {
-        try { store.setEnabled(id, true); } catch { /* 回滚失败以原始错误为准 */ }
+        try { store.updateTask(id, { enabled: true, drainRequested: prevDrain }); } catch { /* 回滚失败以原始错误为准 */ }
         return err(500, `停止任务失败: ${(e as Error).message}`);
       }
       if (isHubSourceTask(id)) deps.requestSyncTasks?.();

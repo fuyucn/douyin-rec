@@ -136,8 +136,12 @@ export function RoomDetail({
   /** 该房间绑定的 master 录制任务(动作都作用在它上面);未绑定 → 动作不可用。 */
   const sourceTaskId = rule.recording?.sourceTaskId ?? null;
   const sourceTask = sourceTaskId === null ? null : (tasks ?? []).find((x) => x.id === sourceTaskId) ?? null;
-  const recRunning = sourceTask?.running === true;
-  const recRecording = sourceTask?.recording === true;
+  const recRunning = sourceTask?.running === true
+    // 远端独录的 hub 房间(issue #569):本机没有进程,但节点在录 —— 动作按钮必须可用,
+    // 否则「录完这场再停」只在本机录制时才能点,与房间页口径矛盾。
+    || (sourceTask?.recordingWorkers ?? []).some((w) => w.state === "recording");
+  const recRecording = sourceTask?.recording === true
+    || (sourceTask?.recordingWorkers ?? []).some((w) => w.state === "recording");
 
   /**
    * 排空:停止接新场,当前这场录完自然收播(不腰斩)。

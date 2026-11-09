@@ -181,6 +181,10 @@ describe("TaskStore", () => {
     expect(byRoom("on").streamUploadSpool).toBe(true);
     // issue #331: the delivered zero-disk metadata column is added; existing rows have none (local behavior unchanged).
     expect(byRoom("on").zeroDiskDelivery).toBeNull();
+    // issue #569: 「录完这场再停」intent column; old rows default to false (旧的停用=硬停行为不变).
+    expect(byRoom("on").drainRequested).toBe(false);
+    store.updateTask(byRoom("on").id, { drainRequested: true });
+    expect(store.getTask(byRoom("on").id)!.drainRequested).toBe(true);
     const id = byRoom("on").id;
     store.updateTask(id, { zeroDiskDelivery: "{\"v\":1}" });
     expect(store.getTask(id)!.zeroDiskDelivery).toBe("{\"v\":1}");

@@ -58,8 +58,9 @@ function mk(probe: (t: Task) => Promise<boolean>, over: Partial<TaskManagerOpts>
     ...over,
   });
 }
+// 生产里进入 TaskManager 的任务都是「用户/daemon 启动意图」= enabled=true;默认值取真实形态。
 const add = (over: Partial<Parameters<TaskStore["addTask"]>[0]> = {}): number =>
-  store.addTask({ room: "12345", ...over }).id;
+  store.addTask({ room: "12345", enabled: true, ...over }).id;
 const advance = (ms: number): Promise<void> => vi.advanceTimersByTimeAsync(ms);
 
 describe("live gate: not live", () => {

@@ -28,6 +28,13 @@ describe("startStopVisual", () => {
     expect(mark).toEqual({ action: "stop", state: "live", filled: true, tone: "var(--warning-fg)" });
   });
 
+  it("draining (enabled=false, stream still writing) stays a stop action, not a start play (issue #569)", () => {
+    const mark = startStopVisual(false, "recording", true);
+    expect(mark).toEqual({ action: "stop", state: "live", filled: true, tone: "var(--warning-fg)" });
+    // enabled=false 但没有排空意图(硬停失败回滚后的奇怪状态不算排空):仍按停用画 play。
+    expect(startStopVisual(false, "recording", false).action).toBe("start");
+  });
+
   it("enabled but not recording stays a stop action in a neutral outline", () => {
     for (const kind of ["attention", "processing", "waiting", "paused"] as RoomStatusKind[]) {
       const mark = startStopVisual(true, kind);

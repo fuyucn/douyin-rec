@@ -56,6 +56,7 @@ export function migrate(db: DatabaseSync): void {
       status       TEXT DEFAULT 'stopped',
       useCookie    INTEGER NOT NULL DEFAULT 1,
       enabled      INTEGER NOT NULL DEFAULT 0,
+      drainRequested INTEGER NOT NULL DEFAULT 0,
       rollingUpload INTEGER NOT NULL DEFAULT 0,
       streamUpload INTEGER NOT NULL DEFAULT 0,
       streamUploadSpool INTEGER NOT NULL DEFAULT 1,
@@ -88,6 +89,9 @@ export function migrate(db: DatabaseSync): void {
   ensureColumn(db, "tasks", "useCookie", "INTEGER NOT NULL DEFAULT 1");
   // 用户意图开关：0=停用(daemon 永不启动)，1=启用(按 schedule 管理)。旧库默认停用。
   ensureColumn(db, "tasks", "enabled", "INTEGER NOT NULL DEFAULT 0");
+  // 「录完这场再停」意图(issue #569):与 enabled=0 同时存在。节点 apply-tasks 见 drainRequested
+  // 仍**不得硬停** —— 当前场由 daemon 的 stopGraceful 录到自然收播;旧库默认 0(无此意图)。
+  ensureColumn(db, "tasks", "drainRequested", "INTEGER NOT NULL DEFAULT 0");
   // engine 列（plan 031 Part A 引擎策略化）：录制器去重为「通用录制器 + ffmpeg/mesio 引擎」。
   //   新库由 CREATE TABLE 的 DEFAULT 'ffmpeg' 兜底;旧库 ensureColumn 补列(现有行取 DEFAULT),
   //   再按旧 `recorder` 值幂等回填:*-mesio-recorder → mesio,其余(含 dlr)→ ffmpeg。

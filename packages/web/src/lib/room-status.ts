@@ -97,6 +97,8 @@ export function roomStatus(room: Pick<RoomDTO, "processing" | "recording">, task
  * Start/stop control appearance. `enabled` is only what the button WILL DO; the mark's colour has to
  * state what IS happening — a room stays enabled while it waits for the stream, sits idle between runs,
  * or its schedule is paused, and painting all of those as a saturated stop block reads as "recording".
+ * `draining` (enabled=false but the current stream is still being written, issue #569) also earns the
+ * saturated stop block: a green ▶ there would undo the drain with one click.
  * Both screens (list and detail) render from this one decision so they cannot drift.
  */
 export interface StartStopVisual {
@@ -109,7 +111,10 @@ export interface StartStopVisual {
   tone: string | null;
 }
 
-export function startStopVisual(enabled: boolean, kind: RoomStatusKind): StartStopVisual {
+export function startStopVisual(enabled: boolean, kind: RoomStatusKind, draining = false): StartStopVisual {
+  // 排空中(enabled 已置 false,但本场仍在写,issue #569):控件必须仍是「停止」(带确认的硬停),
+  // 否则一个 ▶ 会把排空撤销(enabled=true + drainRequested=false),与徽标「排空中」自相矛盾。
+  if (draining) return { action: "stop", state: "live", filled: true, tone: "var(--warning-fg)" };
   if (!enabled) return { action: "start", state: "idle", filled: false, tone: "var(--success-fg)" };
   if (kind === "recording") return { action: "stop", state: "live", filled: true, tone: "var(--warning-fg)" };
   return { action: "stop", state: "idle", filled: false, tone: null };
