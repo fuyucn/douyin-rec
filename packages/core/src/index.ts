@@ -62,3 +62,5 @@ export * from "./fleet-protocol.js";
 // Recorder process state file + the single activity judge (plans/044): record child writes, node commands read.
 export * from "./recorder-state.js";
 export * from "./upload-owner.js";
+// 上传目标契约与注册表(plans/049 §2,审计 2026-11-10 P1-1):纯类型 + 纯数据结构,无 IO。
+export * from "./upload-target.js";

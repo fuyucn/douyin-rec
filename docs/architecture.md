@@ -46,8 +46,9 @@ flowchart TB
   subgraph L1["L1 · 引擎轴(共享)"]
     engine["<b>record-engine</b><br/>通用 PollingRecorder<br/>下载引擎: ffmpeg(.ts) / mesio(.flv)"]
   end
-  subgraph L05["L0.5 · 可观测性"]
+  subgraph L05["L0.5 · 可观测性 / 上传驱动"]
     observ["<b>observability</b><br/>Notifier / EventCenter / 日志"]
+    uprt["<b>upload-runtime</b><br/>UploadTarget 通用驱动<br/>(阶段 0:契约 + 注入接口)"]
   end
   subgraph L04["L0.4 · 处理器实现"]
     procs["<b>processors</b><br/>remux 处理器(校验 / 原地转换 / recover);加处理器 = 一个模块 + 注册一行"]
@@ -98,6 +99,7 @@ flowchart TB
   engine --> core
   engine --> extra
   observ --> core
+  uprt --> core
   procs --> core
   procs --> post
   procs --> zeroup
