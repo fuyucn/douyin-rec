@@ -49,12 +49,31 @@ export class NullNotifier implements Notifier {
   async notify(): Promise<void> { /* no-op */ }
 }
 
+/**
+ * Discord 链接边界（issue #588）：只有合法 http(s) URL 才包进 `<...>`，让客户端在 `>` 处结束链接，
+ * 不再把后面的全角标点/中文并进链接。纯房号、空串、无 scheme 短链、控制字符/尖括号一律原样返回。
+ */
+export function formatRoomUrl(room: string): string {
+  if (!/^https?:\/\//i.test(room)) return room;
+  if (/[\u0000-\u001f\u007f<>]/.test(room)) return room;
+  return `<${room}>`;
+}
+
 /** 事件 → 一行中文消息（带 emoji）。 */
 export function formatMessage(e: NotifyEvent): string {
   switch (e.kind) {
-    case "recordStart": return `🔴 开播录制：${e.anchor || e.room}（房间 ${e.room}，画质 ${e.quality}）`;
-    case "recordEnd":   return `⏹️ 录制结束${e.reason ? `（${e.reason}）` : ""}：${e.anchor || e.room}（房间 ${e.room}）→ ${e.outDir}`;
-    case "recordReconnect": return `⚠️ 直播中断 ${e.downSec}s 后已重连，恢复录制：${e.anchor || e.room}（房间 ${e.room}）`;
+    case "recordStart": {
+      const room = formatRoomUrl(e.room);
+      return `🔴 开播录制：${e.anchor || room}（房间 ${room}，画质 ${e.quality}）`;
+    }
+    case "recordEnd": {
+      const room = formatRoomUrl(e.room);
+      return `⏹️ 录制结束${e.reason ? `（${e.reason}）` : ""}：${e.anchor || room}（房间 ${room}）→ ${e.outDir}`;
+    }
+    case "recordReconnect": {
+      const room = formatRoomUrl(e.room);
+      return `⚠️ 直播中断 ${e.downSec}s 后已重连，恢复录制：${e.anchor || room}（房间 ${room}）`;
+    }
     case "mergeDone":   return `🎬 合并完成：${e.file}`;
     case "burnDone":    return `🔥 烧录完成（${e.style}）：${e.file}`;
     case "uploadDone":  return `⬆️ 上传完成：${e.anchor ? `${e.anchor} · ${e.date ?? ""} ` : ""}${e.bv} ${e.url}`;
