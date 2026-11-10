@@ -35,6 +35,7 @@ import {
   readLivePumpState,
   writeLivePumpState,
   livePumpStatePath,
+  livePumpHasUnconfirmed,
   runSegment,
   runStream,
   PartSink,
@@ -4220,6 +4221,225 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     // At least one part is an exact multiple of the chunk size (no partial tail chunk).
     expect(parts.some((p) => p.length % chunk === 0)).toBe(true);
   }, 30_000);
+
+  // ── issue #581: 当前正在录制的分 P 在 open 时就要进 WAL ─────────────────────────────
+  // A SIGKILL / OOM / power loss bypasses every JS handler, so the current part is never sealed
+  // and noteSealed never runs. Pre-fix: no row in the state, the spool is an unreferenced orphan
+  // (swept after the grace period), restart recovery does not adopt it, and the archive is
+  // permanently missing that part. plans/039 B14 measured exactly this on a real child process.
+  // The fix (review F12) writes a confirmed:false row at openPart, so the existing keep-set /
+  // liveGate / nextPartIndex / resubmitAllUnconfirmed all take effect without a schema change.
+  // This test asserts the FIXED behaviour and therefore FAILS if the fix is removed.
+  it("issue #581: SIGKILL mid-part is adopted on restart (current part is in the WAL at open)", async () => {
+    const repo = fileURLToPath(new URL("../../../", import.meta.url));
+    const out = join(dir, "kill-child.mjs");
+    await build({
+      entryPoints: [join(repo, "packages/zero-upload/src/live-pump-kill-child.ts")],
+      bundle: true, platform: "node", format: "esm", outfile: out, logLevel: "silent",
+      alias: {
+        "@drec/core": join(repo, "packages/core/src/index.ts"),
+        "@drec/post-process": join(repo, "packages/post-process/src/index.ts"),
+      },
+      banner: { js: "import{createRequire as __cr}from'module';const require=__cr(import.meta.url);" },
+      external: ["node:*"],
+    });
+    // Real child, real SIGKILL: no JS teardown runs, so whatever is on disk is the crash state.
+    let sawReady = false;
+    await new Promise<void>((resolve, reject) => {
+      const child = execFile(process.execPath, [out], {
+        env: { ...process.env, PUMP_DIR: dir }, timeout: 15_000, maxBuffer: 1 << 20,
+      }, () => { resolve(); });
+      let buf = "";
+      child.stdout?.on("data", (c: Buffer | string) => {
+        buf += c.toString();
+        if (!sawReady && buf.includes("READY")) { sawReady = true; child.kill("SIGKILL"); }
+      });
+      child.on("error", reject);
+    });
+    expect(sawReady, "child never reached a mid-part with bytes").toBe(true);
+
+    const statePath = livePumpStatePath(dir, "sm");
+    const st = readLivePumpState(statePath);
+    // Pre-fix (撤修复): readLivePumpState is null — the killed part was never written anywhere.
+    expect(st, "a killed-in-flight part must already have a WAL row").not.toBeNull();
+    const row = st!.parts.find((p) => p.index === 0);
+    expect(row, JSON.stringify(st!.parts)).toBeTruthy();
+    expect(row!.confirmed).toBe(false);
+    expect(row!.sealed).toBe(false); // open-time placeholder, not a sealed part
+    expect(row!.bytes).toBe(0); // real bytes are re-read from statSync at recovery
+    const spool = row!.spoolPath;
+    expect(existsSync(spool)).toBe(true);
+    expect(statSync(spool).size).toBeGreaterThan(0);
+    // The two consumers the review called out as "already working": keep-set and live gate.
+    expect(spoolPathsToKeep(st)).toContain(spool);
+    expect(livePumpHasUnconfirmed(statePath)).toBe(true);
+
+    // Restart: recovery must adopt the orphan (resubmit the whole spool) rather than orphan/sweep it.
+    const u = fakeUpos();
+    const r2 = await runLivePump(baseOpts(u, {
+      spoolMode: "full",
+      fetch: async () => ({ living: false }),
+    }));
+    expect(r2.ok, r2.error ?? "").toBe(true);
+    const st2 = readLivePumpState(statePath)!;
+    expect(st2.parts.every((p) => p.confirmed)).toBe(true);
+    expect(u.archive).toContain(st2.parts[0]!.stem);
+    expect(existsSync(spool)).toBe(false); // confirmed spool cleaned up
+  }, 30_000);
+
+  it("issue #581: a 0-byte open orphan is dropped on restart instead of blocking it (F7)", async () => {
+    const spool = join(dir, "zero_000.live.ts");
+    writeFileSync(spool, Buffer.alloc(0));
+    writeLivePumpState(livePumpStatePath(dir, "sm"), {
+      schemaVersion: 1, room: "sm", createdAt: Date.now(), title: "t", tid: 21, tag: "x", private: true,
+      bvid: "BILIfake1", aid: 7,
+      parts: [{ index: 0, spoolPath: spool, filename: "zero_000.live.ts", stem: "", title: "P1", bytes: 0, durationSec: 0, confirmed: false, sealed: false }],
+      updatedAt: Date.now(),
+    });
+    const u = fakeUpos();
+    const r = await runLivePump(baseOpts(u, { spoolMode: "full", fetch: async () => ({ living: false }) }));
+    // Pre-fix this was a head-of-line block ("unconfirmed parts: 0") that the live gate re-spawned forever.
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(readLivePumpState(livePumpStatePath(dir, "sm"))!.parts).toEqual([]);
+    expect(u.archive).toEqual([]);
+  }, 30_000);
+
+  it("issue #581: a PAT/PMT-only open orphan is dropped at recovery (probe finds no duration)", async () => {
+    const spool = join(dir, "head_000.live.ts");
+    // Only the TS head, no video PES: bytes > 0 but no readable duration — the crash window right
+    // after openPart. Must not become an unreadable "real gap" that needs a human.
+    writeFileSync(spool, Buffer.concat([pat(), pmt([[0x1b, VIDEO], [0x0f, AUDIO]])]));
+    writeLivePumpState(livePumpStatePath(dir, "sm"), {
+      schemaVersion: 1, room: "sm", createdAt: Date.now(), title: "t", tid: 21, tag: "x", private: true,
+      bvid: "BILIfake1", aid: 7,
+      parts: [{ index: 0, spoolPath: spool, filename: "head_000.live.ts", stem: "", title: "P1", bytes: statSync(spool).size, durationSec: 0, confirmed: false, sealed: false }],
+      updatedAt: Date.now(),
+    });
+    const u = fakeUpos();
+    const r = await runLivePump(baseOpts(u, { spoolMode: "full", fetch: async () => ({ living: false }) }));
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(readLivePumpState(livePumpStatePath(dir, "sm"))!.parts).toEqual([]);
+  }, 30_000);
+
+  it("issue #581: a write failure marks the open-time WAL row before any seal (F8 / #579 red line)", async () => {
+    // The row must carry spoolIncomplete WITHOUT waiting for noteSealed: a SIGKILL in the
+    // write-fail→seal window would otherwise let recovery whole-file-resubmit a truncated file.
+    const snapshots: Array<ReturnType<typeof readLivePumpState>> = [];
+    installFakeFfmpeg(tsStream({ gops: 6 }), { chunkEvery: 512, delayMs: 1 });
+    let calls = 0;
+    const u = fakeUpos();
+    await runLivePump(baseOpts(u, {
+      spoolMode: "full", maxMs: 0, sizeCap: 1 << 30, stallTimeoutMs: 0,
+      onAlert: (m) => {
+        if (m.includes("spool 写失败")) snapshots.push(readLivePumpState(livePumpStatePath(dir, "sm")));
+      },
+      writeSpool: (fd, buf) => {
+        if (++calls > 2) throw new Error("ENOSPC: no space left on device");
+        return writeSync(fd, buf);
+      },
+    }));
+    expect(snapshots.length).toBeGreaterThan(0);
+    const row = snapshots[0]!.parts.find((p) => p.index === 0);
+    expect(row, JSON.stringify(snapshots[0]!.parts)).toBeTruthy();
+    expect(row!.sealed).toBe(false);
+    expect(row!.spoolIncomplete).toBe(true);
+  }, 30_000);
+
+  it("issue #581: an open-time row marked spoolIncomplete refuses auto-resubmit on restart (needs a human)", async () => {
+    const spool = join(dir, "trunc_000.live.ts");
+    writeFileSync(spool, "truncated-but-readable");
+    const s = new LivePumpSession({
+      cookiesPath: COOKIES, room: "sm", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      fetchImpl: makeFetch().fake, probeDuration: async () => 60, scanDtsGap: async () => null,
+    });
+    expect(s.noteUnconfirmedPart({ index: 0, spoolPath: spool, title: "P1", bytes: 0, durationSec: 0, sealed: false }).ok).toBe(true);
+    s.markSpoolIncomplete(0);
+    const row = readLivePumpState(livePumpStatePath(dir, "sm"))!.parts[0]!;
+    expect(row.sealed).toBe(false);
+    expect(row.spoolIncomplete).toBe(true);
+    // Even a 0-byte/missing-spool variant must NOT be swept by the startup cleanup: the #579
+    // red line requires a human. dropUnrecoverableUnsealed skips spoolIncomplete rows.
+    expect(s.dropUnrecoverableUnsealed()).toEqual([]);
+    expect(readLivePumpState(livePumpStatePath(dir, "sm"))!.parts).toHaveLength(1);
+    const r = await s.resubmitUnconfirmedPart();
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("spool 写失败被截断");
+  });
+
+  it("issue #581: a normal stop still seals and writes exactly one WAL row (no extra open placeholder)", async () => {
+    const ac = new AbortController();
+    installFakeFfmpeg(tsStream({ gops: 24 }), { chunkEvery: 512, delayMs: 2 });
+    setTimeout(() => ac.abort(), 60);
+    const u = fakeUpos();
+    await runLivePump(baseOpts(u, { spoolMode: "full", signal: ac.signal, maxMs: 0, sizeCap: 1 << 30 }));
+    const st = readLivePumpState(livePumpStatePath(dir, "sm"))!;
+    // Exactly the one part that was opened; its open-time placeholder was replaced at the seal.
+    expect(st.parts.map((p) => p.index)).toEqual([0]);
+    expect(st.parts.every((p) => p.sealed !== false)).toBe(true);
+  }, 30_000);
+
+  it("issue #581: adopting an open-time orphan keeps the confirmed parts' index order (F5)", async () => {
+    const spool = join(dir, "orphan_002.live.ts");
+    writeFileSync(spool, tsStream({ gops: 4 }));
+    writeLivePumpState(livePumpStatePath(dir, "sm"), {
+      schemaVersion: 1, room: "sm", createdAt: Date.now(), title: "t", tid: 21, tag: "x", private: true,
+      bvid: "BILIfake1", aid: 7,
+      parts: [
+        { index: 0, spoolPath: join(dir, "gone0.ts"), filename: "gone0.ts", stem: "stem0", title: "P1", bytes: 1, durationSec: 1, confirmed: true },
+        { index: 1, spoolPath: join(dir, "gone1.ts"), filename: "gone1.ts", stem: "stem1", title: "P2", bytes: 1, durationSec: 1, confirmed: true },
+        { index: 2, spoolPath: spool, filename: "orphan_002.live.ts", stem: "", title: "P3", bytes: 0, durationSec: 0, confirmed: false, sealed: false },
+      ],
+      updatedAt: Date.now(),
+    });
+    const u = fakeUpos({ initialArchive: ["stem0", "stem1"] });
+    const r = await runLivePump(baseOpts(u, { spoolMode: "full", fetch: async () => ({ living: false }) }));
+    expect(r.ok, r.error ?? "").toBe(true);
+    const st = readLivePumpState(livePumpStatePath(dir, "sm"))!;
+    expect(st.parts.map((p) => p.index)).toEqual([0, 1, 2]); // orphan adopted in place, no reorder/dup
+    expect(st.parts.every((p) => p.confirmed)).toBe(true);
+    expect(u.archive).toEqual(["stem0", "stem1", st.parts[2]!.stem]); // appended as P3, after the confirmed parts
+  }, 30_000);
+
+  it("issue #581: old state without `sealed` is treated as sealed (backward compatible)", async () => {
+    const spool = join(dir, "old_000.live.ts");
+    writeFileSync(spool, tsStream({ gops: 4 }));
+    writeLivePumpState(livePumpStatePath(dir, "sm"), {
+      schemaVersion: 1, room: "sm", createdAt: Date.now(), title: "t", tid: 21, tag: "x", private: true,
+      bvid: "BILIfake1", aid: 7,
+      parts: [{ index: 0, spoolPath: spool, filename: "old_000.live.ts", stem: "", title: "P1", bytes: statSync(spool).size, durationSec: 1, confirmed: false }],
+      updatedAt: Date.now(),
+    }); // no `sealed` field
+    const u = fakeUpos();
+    const r = await runLivePump(baseOpts(u, { spoolMode: "full", fetch: async () => ({ living: false }) }));
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(readLivePumpState(livePumpStatePath(dir, "sm"))!.parts.every((p) => p.confirmed)).toBe(true);
+  }, 30_000);
+
+  it("issue #581: old state without `sealed` + a missing spool still blocks (never silently dropped)", async () => {
+    writeLivePumpState(livePumpStatePath(dir, "sm"), {
+      schemaVersion: 1, room: "sm", createdAt: Date.now(), title: "t", tid: 21, tag: "x", private: true,
+      parts: [{ index: 0, spoolPath: join(dir, "gone_000.live.ts"), filename: "gone_000.live.ts", stem: "", title: "P1", bytes: 1, durationSec: 1, confirmed: false }],
+      updatedAt: Date.now(),
+    }); // no `sealed`
+    const u = fakeUpos();
+    const r = await runLivePump(baseOpts(u, { spoolMode: "full", fetch: async () => ({ living: false }) }));
+    expect(r.ok).toBe(false);
+    expect(readLivePumpState(livePumpStatePath(dir, "sm"))!.parts.length).toBe(1);
+  }, 30_000);
+
+  it("issue #581: the keep-set and live gate both see an open-time placeholder (spoolPathsToKeep / livePumpHasUnconfirmed)", () => {
+    const spool = join(dir, "keep_000.live.ts");
+    writeFileSync(spool, "bytes");
+    const statePath = livePumpStatePath(dir, "sm");
+    writeLivePumpState(statePath, {
+      schemaVersion: 1, room: "sm", createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
+      parts: [{ index: 0, spoolPath: spool, filename: "keep_000.live.ts", stem: "", title: "P1", bytes: 0, durationSec: 0, confirmed: false, sealed: false }],
+      updatedAt: 1,
+    });
+    const st = readLivePumpState(statePath)!;
+    expect(spoolPathsToKeep(st)).toEqual([spool]);
+    expect(livePumpHasUnconfirmed(statePath)).toBe(true);
+  });
 });
 
 describe("runStream: cutting and stopping", () => {

@@ -335,6 +335,14 @@ export interface LivePumpState {
     confirmed: boolean;
     /** Spool write failed mid-part: the file is truncated; recovery must not auto-resubmit it (issue #579). */
     spoolIncomplete?: boolean;
+    /**
+     * Optional, defaults to `true` (old state files have no such field): this row describes a
+     * part that reached a seal. `false` marks the open-time WAL placeholder written for the part
+     * CURRENTLY being recorded (issue #581): a crash before its seal leaves a 0-byte / header-only
+     * spool that recovery must drop, not whole-file-resubmit or let it block every later start.
+     * schemaVersion stays 1 on purpose — a version bump would make every existing state unreadable.
+     */
+    sealed?: boolean;
   }>;
   /** WAL for crash recovery. */
   pending?: {
@@ -714,6 +722,17 @@ export class LivePumpSession {
       try { this.o.onAlert?.(msg); } catch { /* alert channel must not break recovery */ }
       return { ok: false, error: msg };
     }
+    // issue #581 (review F7): an open-time row (sealed===false) is a placeholder for a part that
+    // was NEVER sealed. A 0-byte / PAT-PMT-only / missing spool holds no deliverable video and
+    // must never head-of-line-block every later start. Drop it instead of failing. A sealed row
+    // (or old state without `sealed`) keeps the strict "needs a human" behaviour. Note the
+    // spoolIncomplete red line above runs FIRST, so a write-truncated orphan still needs a human.
+    const dropUnsealedOrphan = (): { ok: boolean; bvid?: string; aid?: number; error?: string } | undefined => {
+      if (target.sealed !== false) return undefined;
+      this.log(`[直播直传] 分 P ${target.index} 在封口前被中断且无可读字节,丢弃 open 占位行(不阻断后续启动)`);
+      this.dropPart(target.index);
+      return { ok: true, bvid: this.state.bvid, aid: this.state.aid };
+    };
     const doFetch = this.o.fetchImpl ?? fetch;
     let bytes = 0;
     try { bytes = statSync(target.spoolPath).size; } catch {
@@ -725,14 +744,23 @@ export class LivePumpSession {
         this.dropPart(target.index);
         return { ok: false, held: true, error: msg };
       }
+      const dropped = dropUnsealedOrphan();
+      if (dropped) return dropped;
       return { ok: false, error: `spool missing for unconfirmed part ${target.index}: ${target.spoolPath}` };
     }
-    if (bytes <= 0) return { ok: false, error: `spool empty for unconfirmed part ${target.index}` };
+    if (bytes <= 0) {
+      const dropped = dropUnsealedOrphan();
+      if (dropped) return dropped;
+      return { ok: false, error: `spool empty for unconfirmed part ${target.index}` };
+    }
     // Same gate as a freshly recorded part: a spool can reach the recovery state without ever being
     // probed (written when a stop cut its finalize short, or behind a failed part).
     let durationSec = 0;
     try { durationSec = await (this.o.probeDuration ?? ffprobeDuration)(target.spoolPath); } catch { durationSec = 0; }
     if (!(durationSec > 0)) {
+      // issue #581: a header-only (PAT/PMT) crash orphan is not deliverable; drop its open-time row.
+      const dropped = dropUnsealedOrphan();
+      if (dropped) return dropped;
       // By design this blocks the room: an unreadable spool is not a known gap, so dropping its row
       // would silently lose the only copy (and the next parts must not pass an unconfirmed one).
       // Manual fix: repair or delete the spool and remove its row from the state file (plans/043).
@@ -809,6 +837,8 @@ export class LivePumpSession {
     stem?: string;
     /** The spool is truncated (write failed mid-part, issue #579); recovery refuses to auto-resubmit it. */
     spoolIncomplete?: boolean;
+    /** `false` = the open-time placeholder for a part not yet sealed (issue #581); absent = sealed. */
+    sealed?: boolean;
   }): { ok: boolean; error?: string } {
     if (this.stateUntrusted) return { ok: false, error: "state sidecar is untrusted" };
     // A pending request belongs to one part; recording a different part's bytes does not conflict
@@ -826,6 +856,9 @@ export class LivePumpSession {
       durationSec: input.durationSec,
       confirmed: false,
       ...(input.spoolIncomplete ? { spoolIncomplete: true } : {}),
+      // Only the open-time note sets this. Re-noting at seal (noteSealed/keepOrLose/persistUnconfirmed)
+      // rebuilds the row without it, so `sealed` naturally flips false→absent(=true) once sealed.
+      ...(input.sealed === false ? { sealed: false } : {}),
     };
     this.state = {
       ...this.state,
@@ -839,6 +872,47 @@ export class LivePumpSession {
       return { ok: false, error: `cannot persist unconfirmed part: ${String((e as Error)?.message ?? e).slice(0, 200)}` };
     }
     return { ok: true };
+  }
+
+  /**
+   * Persist that an open part's spool was truncated by a write failure (#579) onto its open-time
+   * WAL row (#581). The open-time row is the ONLY durable witness before the part is sealed; a
+   * SIGKILL in the write-fail→seal window must not leave a row that recovery would whole-file
+   * resubmit. Keeps the #579 red line and does not touch the #574 uploadError⇒no-complete gate.
+   */
+  markSpoolIncomplete(index: number): void {
+    if (this.stateUntrusted) return;
+    const row = this.state.parts.find((p) => p.index === index);
+    if (!row || row.confirmed || row.spoolIncomplete) return;
+    this.state = { ...this.state, parts: this.state.parts.map((p) => p.index === index ? { ...p, spoolIncomplete: true } : p) };
+    try { this.persist(); } catch { /* the write-failure alert already surfaced the truncation */ }
+  }
+
+  /**
+   * Drop open-time WAL placeholders (issue #581) whose spool can never be delivered, so they
+   * cannot head-of-line-block recovery or keep the live gate respawning forever (review F7). A
+   * `sealed === false` row is a part that was NEVER sealed: a SIGKILL right after openPart leaves a
+   * 0-byte / header-only spool, and a negligible-tail discard deletes the spool entirely. Only
+   * such rows are dropped; a sealed row or an old state row (no `sealed` field) keeps the strict
+   * "missing spool = real gap, needs a human" behaviour, and a `spoolIncomplete` spool is never
+   * dropped (issue #579). A >0-byte spool is left for resubmitUnconfirmedPart, which stat+probes it
+   * and either resubmits the whole file or drops a header-only orphan.
+   */
+  dropUnrecoverableUnsealed(): number[] {
+    if (this.stateUntrusted) return [];
+    const doomed: number[] = [];
+    for (const p of this.state.parts) {
+      if (p.sealed !== false || p.confirmed || p.spoolIncomplete) continue;
+      let bytes = -1;
+      try { bytes = statSync(p.spoolPath).size; } catch { /* spool deleted / never created */ }
+      if (bytes > 0) continue;
+      doomed.push(p.index);
+    }
+    if (doomed.length === 0) return [];
+    const set = new Set(doomed);
+    this.state = { ...this.state, parts: this.state.parts.filter((p) => !set.has(p.index)) };
+    try { this.persist(); } catch { /* state becomes untrusted; recovery fails closed */ }
+    return doomed;
   }
 
   private persist(opts?: { seasonOnly?: boolean }): void {
@@ -2929,6 +3003,11 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
           statePath: livePumpStatePath(o.spoolDir, o.room),
         } };
       }
+      // issue #581: clear open-time placeholders whose spool is missing/empty BEFORE the
+      // unconfirmed check below (which refuses to continue if a spool is gone). A crash right
+      // after openPart, or a negligible-tail discard, leaves such a row; dropping it here is the
+      // single startup safety net for the F7 "empty row blocks every later start" case.
+      session.dropUnrecoverableUnsealed();
       // A restart after the archive was created never reaches the create hook again. Reconcile the
       // persisted BV when the marker is pending (or absent on legacy state); the add is idempotent.
       if (session.bvid || session.aid) await session.reconcileSeason(o.fetchImpl);
@@ -3132,7 +3211,12 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     const spoolIncomplete = sinkRes.spoolIncomplete || part.sink.incomplete;
     if (negligibleTail(part) && sinkRes.spooledBytes > 0 && !spoolIncomplete) {
       log(`[直播直传] 段${seg + 1} 只有不足两帧(${sinkRes.spooledBytes}B),判定为切点后的尾巴,丢弃`);
-      if (spoolMode === "full") { try { rmSync(spoolPath, { force: true }); } catch { /* best effort */ } }
+      if (spoolMode === "full") {
+        try { rmSync(spoolPath, { force: true }); } catch { /* best effort */ }
+        // issue #581 (review F7): drop the open-time placeholder too — a negligible tail left
+        // unconfirmed would keep livePumpHasUnconfirmed true and block every later start.
+        session.dropPart(index);
+      }
       return part.sealedBy === "stalled" ? { kind: "stall-empty" } : { kind: "ended" };
     }
     const r = await finalizeRecordedPart({
@@ -3183,9 +3267,12 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     // socket into a permanent task failure. A truncated spool (issue #579) is a failure even
     // with no bytes: the write already errored and must not be reported as a clean stall.
     if (r.spooledBytes === 0) {
-      if (r.sealedBy === "stalled" && !r.spoolIncomplete) return { kind: "stall-empty" };
+      // issue #581: a part with no bytes never became deliverable; its open-time placeholder must
+      // not linger in the WAL (the startup sweep would otherwise keep the gate respawning).
+      if (r.sealedBy === "stalled" && !r.spoolIncomplete) { session.dropPart(index); return { kind: "stall-empty" }; }
       if (!r.uploadError) {
         log("[直播直传] 本段没有写入,判定已收播");
+        session.dropPart(index);
         return { kind: "ended" };
       }
       // A non-stalled empty part with an upload error is a real failure. Fall through to the
@@ -3451,7 +3538,11 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
   const noteSealed = (ctx: PartCtx, part: SealedPart): void => {
     if (spoolMode !== "full" || o.submit === false) return;
     const bytes = part.sink.spooledBytes;
-    if (bytes <= 0 || (negligibleTail(part) && !part.sink.incomplete) || session.parts.some((p) => p.index === ctx.index)) return;
+    // issue #581: an open-time WAL placeholder (unconfirmed) ALWAYS exists for this part now. Do
+    // NOT skip on `row exists` — replace it with the sealed part's real bytes/duration/truncation
+    // marker. Only a row already confirmed into the archive is left alone (noteUnconfirmedPart
+    // itself no-ops for confirmed rows, so this never downgrades a delivered part either).
+    if (bytes <= 0 || (negligibleTail(part) && !part.sink.incomplete) || session.parts.some((p) => p.index === ctx.index && p.confirmed)) return;
     const note = session.noteUnconfirmedPart({
       index: ctx.index, spoolPath: ctx.spoolPath, title: titleOf(ctx), bytes, durationSec: estimateDuration(part),
       ...(part.sink.incomplete ? { spoolIncomplete: true } : {}),
@@ -3486,14 +3577,12 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     // it is the only copy of what the disk accepted, and it stays in the recovery state.
     if (negligibleTail(part) && !sinkIncomplete) {
       log(`[直播直传] ${label} ${why};只有不足两帧的尾巴,不值得保留`);
+      // issue #581 (review F7): drop the open-time placeholder for a tail that is not a part.
+      session.dropPart(ctx.index);
       return;
     }
     if (o.submit === false || bytes <= 0) {
       log(`[直播直传] ${label} ${why}(spool 保留: ${ctx.spoolPath})`);
-      return;
-    }
-    if (row) {
-      log(`[直播直传] ⚠️ ${label} ${why};已在恢复状态,下次运行按整文件补传(${ctx.spoolPath})`);
       return;
     }
     let durationSec = estimateDuration(part);
@@ -3503,9 +3592,17 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         if (Number.isFinite(d) && d > 0) durationSec = d;
       } catch { /* keep the PTS/wall estimate */ }
     }
-    const note = session.noteUnconfirmedPart({ index: ctx.index, spoolPath: ctx.spoolPath, title: titleOf(ctx), bytes, durationSec, ...(sinkIncomplete ? { spoolIncomplete: true } : {}) });
+    // issue #581 (review F8 #4): an open-time WAL placeholder already exists for this part. Do NOT
+    // short-circuit on `if (row) return` — refresh it with the real bytes, the PROBED duration and
+    // the truncation marker, otherwise recovery would see the placeholder's zero values. Preserve
+    // any stem already recorded; emit `part_unconfirmed` only for a genuinely new row.
+    const note = session.noteUnconfirmedPart({
+      index: ctx.index, spoolPath: ctx.spoolPath, title: titleOf(ctx), bytes, durationSec,
+      ...(row?.stem ? { stem: row.stem } : {}),
+      ...(sinkIncomplete ? { spoolIncomplete: true } : {}),
+    });
     if (note.ok) {
-      emit({ at: Date.now(), kind: "part_unconfirmed", part: ctx.index, bytes });
+      if (!row) emit({ at: Date.now(), kind: "part_unconfirmed", part: ctx.index, bytes });
       log(`[直播直传] ⚠️ ${label} ${why};已记入恢复状态,下次运行${sinkIncomplete ? "不自动重传(截断段需人工处理)," : "按整文件补传,"}spool: ${ctx.spoolPath}`);
     } else {
       stopLost.push(`${label}(恢复状态写入失败)`);
@@ -3669,11 +3766,29 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       return p;
     };
     /** Allocate the part index and open its sink; the index is fixed here, not at submit time. */
-    const openPart = (session: PreuploadResult | Promise<PreuploadResult>, fileName: string, sessionAbort?: AbortController): PartSink => {
+    // NOTE: the parameter is the UPOS preupload (named `preupload`), NOT the LivePumpSession — the
+    // outer `session` must stay reachable for the open-time WAL write and markSpoolIncomplete below.
+    const openPart = (preupload: PreuploadResult | Promise<PreuploadResult>, fileName: string, sessionAbort?: AbortController): PartSink => {
       const seg = partSeq++;
       const index = nextIndex++;
       partsOpened++;
       const spoolPath = `${spoolDirClean}/${fileName}`;
+      // issue #581 (review F12): the ONLY durable witness for the part currently being recorded.
+      // A SIGKILL / OOM / power loss / uncaught exit never seals it, so without this row the orphan
+      // sweep deletes the spool after the grace period and restart recovery cannot adopt it — the
+      // archive loses this part forever. Write a confirmed:false placeholder at open, BEFORE the
+      // spool file exists; bytes/duration are 0 because recovery re-reads the real size (statSync)
+      // and re-probes duration from the file. No schemaVersion change, no rename, no `pending`
+      // change: spoolPathsToKeep / livePumpHasUnconfirmed / nextPartIndex / resubmitAllUnconfirmed
+      // already consume `parts`, so index reservation + head-of-line order come for free.
+      if (spoolMode === "full" && o.submit !== false) {
+        const note = session.noteUnconfirmedPart({
+          index, spoolPath,
+          title: o.partTitle?.(index + 1, liveTitle) ?? fileName.replace(/\.live(?=\.[^.]+$)/, "").replace(/\.[^.]+$/, ""),
+          bytes: 0, durationSec: 0, sealed: false,
+        });
+        if (!note.ok) log(`[直播直传] ⚠️ 段${seg + 1} 无法在 open 时写 WAL: ${note.error}`);
+      }
       emit({ at: Date.now(), kind: "part_streaming", part: index });
       const onChunk = (b: number, n: number): void => {
         log(`[直播直传] 段${seg + 1} 第 ${n} 块完成,累计 ${(b / MiB).toFixed(1)}MiB`);
@@ -3683,7 +3798,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       // only the part still being recorded; a sealed part keeps uploading and finalizing.
       const ac = new AbortController();
       const sink = new PartSink({
-        sizeCap: o.sizeCap, spoolPath, session, spoolMode,
+        sizeCap: o.sizeCap, spoolPath, session: preupload, spoolMode,
         ...(o.fetchImpl ? { fetchImpl: o.fetchImpl } : {}),
         ...(o.queueCapacity !== undefined ? { queueCapacity: o.queueCapacity } : {}),
         signal: ac.signal,
@@ -3707,6 +3822,10 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         // issue #579 P2-2: the spool failure has its own channel (the once-gated onDegrade may
         // already have fired for backpressure / a chunk failure in the same part).
         onSpoolWriteFailed: (reason) => {
+          // issue #581 + #579: persist the truncation marker on the open-time row NOW, before any
+          // seal. A SIGKILL in the write-fail→seal window must not leave a row that recovery would
+          // whole-file-resubmit. Does NOT bypass #574's uploadError⇒no-complete entry point.
+          session.markSpoolIncomplete(index);
           log(`[直播直传] ⚠️ 段${seg + 1} ${reason}`);
           try { o.onAlert?.(`段${seg + 1} ${reason}`); } catch { /* alert channel must not break the run */ }
         },
@@ -3806,6 +3925,10 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       finalRun = enqueueFinalize(fp, stream.exit);
     } else if (stream.discardedTail) {
       // The dropped tail never became a part: give its numbers back so titles/indexes have no gap.
+      // issue #581 (review F7): also drop its open-time WAL placeholder, else the empty row keeps
+      // livePumpHasUnconfirmed true and blocks every later start (the one-frame-tail case).
+      const droppedCtx = stream.discardedSink ? ctxs.get(stream.discardedSink) : undefined;
+      if (droppedCtx) session.dropPart(droppedCtx.index);
       partSeq--;
       nextIndex--;
       partsOpened--;

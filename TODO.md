@@ -14,6 +14,11 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-173 直播直传 full 模式「当前分 P」崩溃后不进 WAL、被当孤儿清扫（issue [#581](https://github.com/fuyucn/douyin-rec/issues/581)，2026-11-10）**
+  — **做什么**: 按独立只读 review 的 F12 最小修法——仅 `spoolMode==="full" && submit!==false` 时在 `openPart` 同步写一条 `confirmed:false` 的 `parts` 行（`noteUnconfirmedPart`，bytes/durationSec 先给 0，可选 `sealed:false` 兼容老 state）；不升 `schemaVersion`（保持 1）、不改 spool 文件名、不动 `pending` WAL / `rolloverStaleState` / `spoolSweepSafe` / CLI 命名。配套 4 项：`discard()`/discardedTail/negligibleTail 要 `dropPart`；`resubmitUnconfirmedPart` 对 0 字节/仅 PAT-PMT 孤儿 `dropPart` 不 fail；写失败时同步把 `spoolIncomplete` 刷进该行（守 #579）；核对 `keepOrLose` 不再因行已存在漏写 probe 后 duration。启动 `dropUnrecoverableUnsealed()` 作 F7 安全网。
+  **为什么**: SIGKILL/OOM/断电/未捕获 exit 绕过 JS handler，当前正在录的分 P 在封口前从未进 state；`openSession()` 的 `session.recover()`+`resubmitAllUnconfirmed()` 无目录扫描→不收养；孤儿清扫在下次启动且 mtime>10min 时删→稿件永远缺这一 P（plans/039 B14 实测自证）。SIGTERM/SIGINT/SIGUSR2 会封口写行，正常停止不丢。
+  **验收**: 真子进程 SIGKILL 确定性复现（撤修复 FAIL/复原 PASS）；open 后 0 字节 / 仅 PAT-PMT / 正常半段 / 写失败后崩溃 / 旧 state 无新字段 / SIGTERM 正常停 / 已确认 index 顺序 / keep-set 用例；全量 `pnpm test` + `pnpm typecheck` + `pnpm bundle` + 本地 `task serve` 冒烟；base main、版本 0.0.347→0.0.348、PR `Part of #581`。
+  **现状（2026-11-10）**: 分支 `codex/issue-581-current-part-wal`（从 origin/main 新建）；复现已固化并 FAIL→修复后 PASS；F12+4 配套+`sealed` 可选字段已实现，全量门禁绿；PR 待开、不合并/不部署/不 close。
 - [~] **T-171 直播直传背压截断 guard（issue [#574](https://github.com/fuyucn/douyin-rec/issues/574) → PR [#580](https://github.com/fuyucn/douyin-rec/pull/580)，2026-11-09）**
   — **做什么**: full 模式 queue overflow（`feed()` 与 `pushTail()` 两条入口）即置 `uploadError`，收尾跳过 `complete`、走整文件回退；段报告/投稿统一字节口径；保留半截会话事实。
   **为什么**: 上传器可能正好停在已入队块数上干净收尾，`uploadError` 为空 → `complete` 一个少传分 P（静默截断）。
