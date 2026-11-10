@@ -12,9 +12,9 @@
   - 源码类文件(.ts/.tsx/.mjs/.js/.py/.sh/.yml/.yaml)的新增行不套「文件名」「凭证类」
     「主机名」「streamKey」四条语义词规则(代码和测试夹具里写 foo.ts / cookie / vps2 /
     douyin:xxx 是这个仓库的日常);房间号长数字 / BV / IP / 本机路径仍然拦。
-  - 文档等非源码文件全规则生效,但「文件名」命中的名字若是仓库已跟踪文件的 basename
-    (`git ls-files`,即源码/文档文件名)视为源码文件名放行;录像/字幕/产物类文件名
-    (仓库里不存在的)仍然拦。
+  - 文档等非源码文件全规则生效,但「文件名」命中的名字若是仓库里**现有**文件的 basename
+    (`git ls-files` + 工作区未跟踪文件 + `--known-files` 传入的 PR 改动文件)视为源码文件名放行;
+    录像/字幕/产物类文件名(仓库里不存在的)仍然拦。
   - 生成物 docs/architecture.html 与 .json 文件只豁免「文件名」「主机名」两条(生成物由
     scripts/gen-architecture.mjs 现算,含角色名与文件名;json 夹具/配置里写文件名、节点角色名是常态);
     IP、稿件号、长数字、本机路径、登录凭证键值对照常扫(真实数据写进生成物/json 也能拦住)。
@@ -42,9 +42,22 @@ NARROW_SKIP_RULES = {FILENAME_RULE, "主机名"}
 CODE_SKIP_RULES = {FILENAME_RULE, "主机名", "streamKey", "cookie/webhook"}
 
 
+# 已知源码名 = 仓库里真实存在的文件名。未跟踪部分很关键：PR 新增文件在 CI/本地 checkout 里
+# 存在但不在 `git ls-files` 中，正文引用它时不该被当成录像/字幕文件名（#603）。
+EXTRA_KNOWN: set[str] = set()  # --known-files 传入的 PR 改动文件 basename
+
+
 def tracked_basenames() -> set[str]:
-    proc = subprocess.run(["git", "ls-files"], capture_output=True, text=True, encoding="utf-8", errors="replace")
-    return {Path(f).name for f in proc.stdout.splitlines()} if proc.returncode == 0 else set()
+    names: set[str] = set()
+    for args in (["git", "ls-files"], ["git", "ls-files", "--others", "--exclude-standard"]):
+        proc = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if proc.returncode == 0:
+            names.update(Path(f).name for f in proc.stdout.splitlines())
+    return names
+
+
+def known_names() -> set[str]:
+    return tracked_basenames() | EXTRA_KNOWN
 
 # (名字, 正则, 说明)。宁可变红让人确认，也不要默认放过。
 RULES: list[tuple[str, str, str]] = [
@@ -97,7 +110,7 @@ def scan_block(text: str, source: str, first_line: int, added_from: int = 0) -> 
 
 def scan(text: str, source: str) -> list[str]:
     hits: list[str] = []
-    known = tracked_basenames()
+    known = known_names()
     for lineno, line in enumerate(text.splitlines(), start=1):
         for name, pattern, why in RULES:
             for match in re.finditer(pattern, line):
@@ -178,7 +191,7 @@ def scan_diff(base: str) -> tuple[list[str], list[str]]:
     """Return (hits, allowed) where allowed lists fixture lines skipped via the allow mark."""
     hits: list[str] = []
     allowed: list[str] = []
-    known = tracked_basenames()
+    known = known_names()
     block: list[str] = []
     block_path, block_start, block_next = "", 0, 0
     block_ctx: list[str] = []
@@ -218,6 +231,10 @@ def scan_diff(base: str) -> tuple[list[str], list[str]]:
 
 
 def main(argv: list[str]) -> int:
+    # --known-files: pr-gate 传入本 PR 的改动文件清单,正文引用新增源码名不再误报(#603)。
+    if len(argv) >= 2 and argv[0] == "--known-files":
+        EXTRA_KNOWN.update(Path(f).name for f in argv[1].split(",") if f)
+        argv = argv[2:]
     if not argv:
         print(__doc__, file=sys.stderr)
         return 2

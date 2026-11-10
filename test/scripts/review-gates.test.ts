@@ -354,6 +354,45 @@ describe("pr-risk-scan.sh", () => {
   });
 });
 
+describe("issue-guard.py --known-files", () => {
+  // 未跟踪文件必须真实存在于工作区:这里不 commit,靠 `git ls-files --others` 覆盖 PR 新增文件。
+  function repo() {
+    const d = mkdtempSync(join(tmpdir(), "guard-known-"));
+    const g = (...a: string[]) => spawnSync("git", a, { cwd: d, encoding: "utf-8" });
+    g("init", "-q", "-b", "base");
+    g("config", "user.email", "t@t.t");
+    g("config", "user.name", "t");
+    mkdirSync(join(d, "docs"));
+    writeFileSync(join(d, "docs", "a.md"), "seed\n");
+    g("add", ".");
+    g("commit", "-qm", "base");
+    return d;
+  }
+  const body = "变异验证：packages/core/src/widget-upload.test.ts\n";
+  const scan = (d: string, args: string[] = []) =>
+    spawnSync("python3", [GUARD, ...args, "-"], { cwd: d, encoding: "utf-8", input: body });
+
+  it("工作区里存在的未跟踪文件按源码名放行", () => {
+    const d = repo();
+    mkdirSync(join(d, "packages", "core", "src"), { recursive: true });
+    writeFileSync(join(d, "packages", "core", "src", "widget-upload.test.ts"), "x\n");
+    expect(scan(d).status).toBe(0);
+  });
+
+  it("同一个名字在仓库里不存在时照旧拦(产物文件名不能被放过)", () => {
+    const d = repo();
+    const r = scan(d);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("文件名");
+    expect(r.stderr).toContain("widget-upload.test.ts");
+  });
+
+  it("--known-files 传入 PR 改动文件后放行(本地 checkout 里没有该分支文件时)", () => {
+    const d = repo();
+    expect(scan(d, ["--known-files", "packages/core/src/widget-upload.test.ts"]).status).toBe(0);
+  });
+});
+
 describe("issue-guard.py --diff", () => {
   // `seed` writes files that must already exist on the base branch, so the feature diff shows them
   // as context (a credential file whose only changed line is `"value"` is exactly that case).
