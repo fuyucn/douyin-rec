@@ -7,6 +7,7 @@ import { hubEnabledAtom, serverTimezoneAtom } from "./atoms";
 import { Footer } from "./layout/Footer";
 import { TopNav } from "./layout/TopNav";
 import { MasterOnly } from "./components/MasterOnly";
+import { LoginScreen } from "./components/LoginScreen";
 import { useRefreshCookie } from "./lib/hooks";
 import { useT } from "./lib/i18n";
 import { useEventNotifications } from "./lib/notifications";
@@ -69,8 +70,39 @@ function RoomByTaskRedirect(): ReactNode {
   return <Navigate to={{ pathname: target ?? "/rooms", search }} replace />;
 }
 
-/** App shell: nav + routed main + dark footer + toast host. */
+/**
+ * App — 先探测远程访问是否需要密钥（issue #600）；未登录只渲染登录页，
+ * shell 的数据 hooks 在有票据后才挂载，避免一屏 401。
+ */
 export function App(): ReactNode {
+  const t = useT();
+  const [session, setSession] = useState<import("./api/client").SessionInfo | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    void api
+      .getSession()
+      .then((s) => { if (alive) setSession(s); })
+      // 探测失败不能把用户锁在登录页；按「未开启鉴权」继续，具体错误由各页面展示。
+      .catch(() => { if (alive) setSession({ authRequired: false, authenticated: true }); });
+    return () => { alive = false; };
+  }, []);
+
+  useEffect(() => {
+    const onUnauthorized = (): void => setSession({ authRequired: true, authenticated: false });
+    window.addEventListener("drec:unauthorized", onUnauthorized);
+    return () => window.removeEventListener("drec:unauthorized", onUnauthorized);
+  }, []);
+
+  if (!session) {
+    return <div className="min-h-[100dvh] grid place-items-center text-muted text-sm">{t("auth.checking")}</div>;
+  }
+  if (session.authRequired && !session.authenticated) return <LoginScreen />;
+  return <AppShell />;
+}
+
+/** App shell: nav + routed main + dark footer + toast host. */
+function AppShell(): ReactNode {
   const refreshCookie = useRefreshCookie();
   const setHubEnabled = useSetAtom(hubEnabledAtom);
   const setServerTimezone = useSetAtom(serverTimezoneAtom);

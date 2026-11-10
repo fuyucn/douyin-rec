@@ -36,10 +36,10 @@ docker compose exec douyin-rec date   # 验证容器时区
 | `DATA_ROOT` | `./docker-data` | 宿主机**单一数据根** → 容器 `/output-data`。内部布局固定：`db/douyin-rec.db`（任务/设置/cookie）、`recordings/`（录像/弹幕）、`config/`（biliup cookie + hub 配置）。 |
 | `TS_AUTHKEY` | 无（必填） | Tailscale **可复用** auth key（sidecar 用；docker 作 master 时经 tailscale 够到 VPS）。 |
 | `PORT` | `7860` | Web UI 映射到宿主机的端口。 |
-| `BIND` | `0.0.0.0` | 端口绑定网卡；有公网 IP 时建议改具体内网/Tailscale IP，避免无鉴权服务裸奔。 |
+| `BIND` | 所有网卡 | 端口绑定网卡；非回环访问强制要求 `DREC_WEB_TOKEN`（留空则首启生成 0600 密钥文件）。 |
 | `TZ` | `Asia/Shanghai` | 只是容器启动前的初始值/`date` 等诊断命令参考。**调度实际用的时区由 config 决定**(`settings.timezone`,未设默认也是 `Asia/Shanghai`,启动时 `applyTimezone()` 会**覆盖** `process.env.TZ`,不看这个 env)——查看启动日志 `[tz] 时区 = ...` 或 `GET /api/timezone`;要改用 `POST /api/timezone`,立即生效。 |
 | `DISCORD_WEBHOOK` | 空 | 可选，录制开始/结束/出错通知。 |
-| `DREC_ALLOWED_HOSTS` | 空 | 可选。Web API 入口防护的 Host 白名单**追加项**（issue #427，逗号分隔域名）。默认已放行 IP 字面量 / localhost / 单标签主机名（Tailscale MagicDNS 短名如 `master`）/ `*.local` / `*.ts.net`，比对忽略端口、末尾带点的 FQDN 先归一。**何时需要设**：经自定义域名的反代访问本服务时（如 nginx `server_name rec.example.com` + `proxy_set_header Host $host`），不加进白名单则所有请求 403。格式：`DREC_ALLOWED_HOSTS=rec.example.com,rec.example.org`。**反代前提**：必须 `proxy_set_header Host $host`（nginx 默认 `$proxy_host` 会把 Host 改写成上游地址，Origin 同源校验会 403）；TLS 终止的反代还须 `proxy_set_header X-Forwarded-Proto $scheme`（nginx 默认不带，Caddy 默认带），否则 https 页面的写请求被判跨站。 |
+| `DREC_ALLOWED_HOSTS` | 空 | 可选。Web API 入口防护的 Host 白名单**追加项**（issue #427，逗号分隔域名）。默认已放行 localhost / 单标签主机名（Tailscale MagicDNS 短名如 `master`）/ `*.local` / `*.ts.net`；局域网或公网地址需显式加入，比对忽略端口、末尾带点的 FQDN 先归一。**何时需要设**：经自定义域名的反代访问本服务时（如 nginx `server_name rec.example.com` + `proxy_set_header Host $host`），不加进白名单则所有请求 403。格式：`DREC_ALLOWED_HOSTS=rec.example.com,rec.example.org`。**反代前提**：必须 `proxy_set_header Host $host`（nginx 默认 `$proxy_host` 会把 Host 改写成上游地址，Origin 同源校验会 403）；TLS 终止的反代还须 `proxy_set_header X-Forwarded-Proto $scheme`（nginx 默认不带，Caddy 默认带），否则 https 页面的写请求被判跨站。 |
 
 > 容器内路径（`/output-data`、`/app/web/dist`）由 compose 写死，一般不用管；你只配宿主机侧的 `DATA_ROOT`。
 
@@ -52,6 +52,7 @@ docker compose exec douyin-rec date   # 验证容器时区
 TZ=Asia/Shanghai
 PORT=7860
 BIND=0.0.0.0
+DREC_WEB_TOKEN=
 DATA_ROOT=/srv/douyin
 TS_AUTHKEY=tskey-auth-xxxx
 ```

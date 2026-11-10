@@ -13,7 +13,7 @@
  * socket.
  */
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
-import { isIP } from "node:net";
+import { authRequiredFor, clearSessionCookieHeader, isAuthorized, sessionCookieHeader, tokenMatches, type WebAuthConfig } from "./auth.js";
 import {
   makeApi,
   type Api,
@@ -68,6 +68,9 @@ export interface RouteMatch {
     | "getNotifSettings"
     | "setNotifSettings"
     | "getVersion"
+    | "getSession"
+    | "login"
+    | "logout"
     | "getMesioPath"
     | "setMesioPath"
     | "getLiveGate"
@@ -168,6 +171,9 @@ const ROUTES: readonly RouteEntry[] = [
   { name: "getNotifSettings", methods: ["GET"], pattern: /^\/api\/notif-settings$/ },
   { name: "setNotifSettings", methods: ["PUT"], pattern: /^\/api\/notif-settings$/, needsBody: true },
   { name: "getVersion", methods: ["GET"], pattern: /^\/api\/version$/ },
+  { name: "getSession", methods: ["GET"], pattern: /^\/api\/session$/ },
+  { name: "login", methods: ["POST"], pattern: /^\/api\/session$/, needsBody: true },
+  { name: "logout", methods: ["DELETE"], pattern: /^\/api\/session$/ },
   { name: "getMesioPath", methods: ["GET"], pattern: /^\/api\/mesio-path$/ },
   { name: "setMesioPath", methods: ["POST"], pattern: /^\/api\/mesio-path$/, needsBody: true },
   { name: "getLiveGate", methods: ["GET"], pattern: /^\/api\/live-gate$/ },
@@ -294,6 +300,10 @@ export interface WebServerDeps {
   syncDbPath?: string;
   /** hub.config.json 路径;省略回落 rootHubConfig()。 */
   hubConfigPath?: string;
+  /** 远程访问鉴权;undefined = 未开启(回环本机信任)。 */
+  auth?: WebAuthConfig;
+  /** Host 白名单追加项(显式 --host 的具体地址)。 */
+  allowedHosts?: readonly string[];
   /**
    * master **实际解析到的** hub 配置来源(T15)。
    *
@@ -460,22 +470,22 @@ function bareHost(raw: string): string {
 }
 
 /**
- * Host 白名单(issue #427 P1 + 复审放宽):IP 字面量 / localhost / **单标签主机名**(Tailscale
- * MagicDNS 短名如 `master`)/ `*.local`(mDNS 常见形态)/ `*.ts.net`(tailscale MagicDNS,
- * 三节点部署的实际访问形态)+ env `DREC_ALLOWED_HOSTS`(逗号分隔追加,供自定义反代域名)。
- * 比对忽略端口差异;末尾带点的 FQDN 先剥点再比对。未命中 → 403:拒绝按 Host 做路由投毒 /
- * DNS rebinding 的攻击面(单标签主机名无法从公网解析,不受此影响)。
+ * Host 白名单(issue #427 P1 / #600):回环 / localhost / **单标签主机名**(Tailscale
+ * MagicDNS 短名如 `master`)/ `*.local`(mDNS 常见形态)/ `*.ts.net`(tailscale MagicDNS)
+ * + env `DREC_ALLOWED_HOSTS` 与显式 `--host` 的具体地址。
+ *
+ * **不再放行任意 IP 字面量**(审计 P0-1):局域网地址/公网 IP 必须显式加入允许列表。
+ * 比对忽略端口差异;末尾带点的 FQDN 先剥点再比对。未命中 → 403。
  */
-export function hostAllowed(host: string | undefined): boolean {
+export function hostAllowed(host: string | undefined, extraHosts: readonly string[] = []): boolean {
   if (!host) return false;
   const bare = bareHost(host);
   if (bare.length === 0) return false;
-  if (isIP(bare) > 0 || bare === "localhost") return true;
+  if (isLoopbackAddr(bare) || bare === "localhost") return true;
   if (!bare.includes(".")) return true; // 单标签短名(magicDNS 短名/hosts 别名)
   if (bare.endsWith(".local") && bare.length > ".local".length) return true;
   if (bare.endsWith(".ts.net") && bare.length > ".ts.net".length) return true;
-  const extra = (process.env.DREC_ALLOWED_HOSTS ?? "")
-    .split(",")
+  const extra = [...extraHosts, ...(process.env.DREC_ALLOWED_HOSTS ?? "").split(",")]
     .map((s) => bareHost(s.trim()))
     .filter((s) => s.length > 0);
   return extra.includes(bare);
@@ -559,8 +569,22 @@ async function dispatch(
   res: ServerResponse,
   maintenance: MaintenanceApi,
   proc: ProcApi,
+  auth: WebAuthConfig | undefined,
 ): Promise<ApiResult> {
   switch (match.name) {
+    case "getSession":
+      return { status: 200, body: { authRequired: auth !== undefined, authenticated: auth ? isAuthorized(req, auth) : true } };
+    case "login": {
+      if (!auth) return { status: 200, body: { ok: true } };
+      const body = (await readJson(req, res)) as { token?: unknown } | null;
+      const token = typeof body?.token === "string" ? body.token : "";
+      if (!tokenMatches(token, auth.token)) return { status: 401, body: { error: "访问密钥不正确", authRequired: true } };
+      res.setHeader("Set-Cookie", sessionCookieHeader(auth, requestScheme(req) === "https"));
+      return { status: 200, body: { ok: true } };
+    }
+    case "logout":
+      res.setHeader("Set-Cookie", clearSessionCookieHeader());
+      return { status: 200, body: { ok: true } };
     case "procActive":
       return proc.procActive();
     case "procPurge": {
@@ -864,6 +888,8 @@ function startHubStream(watch: HubWatch, res: ServerResponse, log: (m: string) =
 /** Build (but don't listen on) the http server. Caller calls .listen(). */
 export function createWebServer(deps: WebServerDeps): Server {
   const log = deps.log ?? ((m: string): void => console.log(m));
+  const auth = deps.auth;
+  const allowedHosts = deps.allowedHosts ?? [];
   const api = makeApi({
     store: deps.store,
     manager: deps.manager,
@@ -926,7 +952,7 @@ export function createWebServer(deps: WebServerDeps): Server {
       const pathname = url.pathname;
       // ── 请求入口防护(issue #427 P1,先于路由/静态服务)──
       // 1) Host 白名单:不符 → 403。
-      if (!hostAllowed(req.headers.host)) {
+      if (!hostAllowed(req.headers.host, allowedHosts)) {
         sendJson(res, 403, { error: `Host 不在白名单: ${String(req.headers.host)}` });
         return;
       }
@@ -938,6 +964,11 @@ export function createWebServer(deps: WebServerDeps): Server {
       // 3) 带 body 的非 GET/HEAD 请求必须 application/json(text/plain 简单请求是 CSRF 通道)→ 415。
       if (method !== "GET" && method !== "HEAD" && hasRequestBody(req) && !isJsonContentType(req)) {
         sendJson(res, 415, { error: "带请求体的请求必须使用 application/json" });
+        return;
+      }
+      // 4) 远程访问鉴权(issue #600):登录/版本/静态资源公开,其余 /api/* 一律要求共享密钥。
+      if (authRequiredFor(pathname, method, auth) && !isAuthorized(req, auth!)) {
+        sendJson(res, 401, { error: "需要访问密钥", authRequired: true });
         return;
       }
       const match = matchRoute(method, pathname);
@@ -977,7 +1008,7 @@ export function createWebServer(deps: WebServerDeps): Server {
         return;
       }
       try {
-        const result = await dispatch(api, match, req, res, maintenance, proc);
+        const result = await dispatch(api, match, req, res, maintenance, proc, auth);
         sendJson(res, result.status, result.body);
       } catch (e) {
         if (e instanceof BodyTooLargeError) {

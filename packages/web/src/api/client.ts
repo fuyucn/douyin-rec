@@ -69,6 +69,12 @@ export interface QrPoll {
   cookie?: string;
 }
 
+/** GET /api/session: 远程访问是否开启鉴权、当前票据是否有效。 */
+export interface SessionInfo {
+  authRequired: boolean;
+  authenticated: boolean;
+}
+
 /** Thrown on non-2xx responses; carries the server's error message + status. */
 export class ApiError extends Error {
   status: number;
@@ -95,6 +101,10 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     /* empty / non-json body */
   }
   if (!res.ok) {
+    // 会话票据过期/未登录:让 App 切回登录页(登录端点自身不派发,避免循环)。
+    if (res.status === 401 && path !== "/api/session") {
+      window.dispatchEvent(new CustomEvent("drec:unauthorized"));
+    }
     let msg = `HTTP ${res.status}`;
     if (data && typeof data === "object" && "error" in data) {
       msg = String((data as { error: unknown }).error);
@@ -105,6 +115,11 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 export const api = {
+  // ── 会话 / 远程访问鉴权(issue #600)─────────────────────────────────────
+  getSession: (): Promise<SessionInfo> => request("GET", "/api/session"),
+  login: (token: string): Promise<{ ok: boolean }> => request("POST", "/api/session", { token }),
+  logout: (): Promise<{ ok: boolean }> => request("DELETE", "/api/session"),
+
   // ── Tasks ──────────────────────────────────────────────────────────────
   listTasks: (): Promise<Task[]> => request("GET", "/api/tasks"),
   getPlatforms: (): Promise<PlatformsDTO> => request("GET", "/api/platforms"),

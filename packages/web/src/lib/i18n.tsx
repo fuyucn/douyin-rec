@@ -54,6 +54,7 @@ const DICT = {
   zh: {
     common: { cancel: "取消", confirm: "确定", save: "保存", delete: "删除", refresh: "刷新", close: "关闭", optional: "可选", yes: "是", no: "否", localTimeTooltip: "当前时区：{serverTz}\n你的本地时间：{local}" },
     nav: { title: "抖音录制控制台", rooms: "房间", nodes: "节点", stats: "统计", queue: "处理队列", advanced: "高级", login: "扫码登录", paste: "手动粘贴", clear: "清除", },
+    auth: { title: "需要访问密钥", desc: "此节点开启了远程访问保护。输入数据根 config 目录下的访问密钥；也可以使用环境变量里的共享密钥。", token: "访问密钥", submit: "进入控制台", checking: "检查访问权限…", wrong: "访问密钥不正确", },
     stats: {
       title: "统计", subtitle: "最近 {days} 天 · 时区 {tz}",
       daysOption: "{days} 天", retry: "重试",
@@ -680,6 +681,7 @@ const DICT = {
   en: {
     common: { cancel: "Cancel", confirm: "Confirm", save: "Save", delete: "Delete", refresh: "Refresh", close: "Close", optional: "optional", yes: "Yes", no: "No", localTimeTooltip: "Current timezone: {serverTz}\nYour local time: {local}" },
     nav: { title: "Douyin Recorder", rooms: "Rooms", nodes: "Nodes", stats: "Stats", queue: "Queue", advanced: "Advanced", login: "QR Login", paste: "Paste Cookie", clear: "Clear", },
+    auth: { title: "Access key required", desc: "This node protects remote access. Enter the key from the data root config directory, or the shared secret from the environment.", token: "Access key", submit: "Enter console", checking: "Checking access…", wrong: "Incorrect access key", },
     stats: {
       title: "Stats", subtitle: "Last {days} days · timezone {tz}",
       daysOption: "{days} days", retry: "Retry",
