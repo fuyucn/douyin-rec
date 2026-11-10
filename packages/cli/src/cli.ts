@@ -15,6 +15,7 @@ import { SyncGate } from "./sync-gate.js";
 import { streamPartMaxMs } from "./stream-part-duration.js";
 import { zeroDiskSpoolName, zeroDiskXmlPath } from "./zero-disk-room.js";
 import { zeroDiskUploadCookie } from "./zero-disk-upload-cookie.js";
+import { runWithUploadQuota } from "./upload-quota.js";
 import { Command } from "commander";
 // 节点侧上传(experimental,plans/027)的节点侧命令(隔离在独立文件,便于快速开关/回退)。
 import { applyNodeDataRoot, registerNodePipelineCommands } from "./node-pipeline-commands.js";
@@ -827,42 +828,48 @@ program
       if (!existsSync(cookies)) throw new Error(`cookies 不存在: ${cookies}`);
       const parts: Array<{ file: string; stem: string; bytes: number; ms: number }> = [];
       const videos: Array<{ filename: string; title: string }> = [];
-      for (const file of req.files) {
-        if (!existsSync(file)) throw new Error(`文件不存在: ${file}`);
-        const t0 = Date.now();
-        const buf = readFileSync(file);
-        const name = basename(file);
-        // B 站对「连续建新分 P」会 601 限流(实测:多 P 连传时第 7 个开始的 preupload 被拒)。
-        // 冷却是唯一解——重试本身没错,只是要退后。指数退避封顶 5 分钟,最多 8 次。
-        let session!: Awaited<ReturnType<typeof preupload>>;
-        for (let attempt = 0; ; attempt++) {
-          try {
-            session = await preupload({ cookiesPath: cookies, fileName: name, totalSize: buf.length, line: "txa" });
-            break;
-          } catch (e) {
-            if (!(e instanceof UposRateLimited) || attempt >= 8) throw e;
-            const wait = Math.min(30_000 * 2 ** attempt, 300_000);
-            process.stderr.write(`[upos] 601 限流,${wait / 1000}s 后重试 preupload (第 ${attempt + 1} 次): ${name}\n`);
-            await new Promise((r) => setTimeout(r, wait));
+      const result = await runWithUploadQuota(
+        { cookiesPath: cookies, log: (m) => process.stderr.write(`[upos] ${m}\n`) },
+        async () => {
+          for (const file of req.files) {
+            if (!existsSync(file)) throw new Error(`文件不存在: ${file}`);
+            const t0 = Date.now();
+            const buf = readFileSync(file);
+            const name = basename(file);
+            // B 站对「连续建新分 P」会 601 限流(实测:多 P 连传时第 7 个开始的 preupload 被拒)。
+            // 冷却是唯一解——重试本身没错,只是要退后。指数退避封顶 5 分钟,最多 8 次。
+            let session!: Awaited<ReturnType<typeof preupload>>;
+            for (let attempt = 0; ; attempt++) {
+              try {
+                session = await preupload({ cookiesPath: cookies, fileName: name, totalSize: buf.length, line: "txa" });
+                break;
+              } catch (e) {
+                if (!(e instanceof UposRateLimited) || attempt >= 8) throw e;
+                const wait = Math.min(30_000 * 2 ** attempt, 300_000);
+                process.stderr.write(`[upos] 601 限流,${wait / 1000}s 后重试 preupload (第 ${attempt + 1} 次): ${name}\n`);
+                await new Promise((r) => setTimeout(r, wait));
+              }
+            }
+            const chunks = await uploadChunks({
+              session, totalSize: buf.length,
+              readChunk: async (i, size) => buf.subarray(i * session.bucket.chunkSize, i * session.bucket.chunkSize + size),
+            });
+            const done = await complete({ session, parts: chunks });
+            if (!done.ok) throw new Error(`complete 失败: ${JSON.stringify(done.raw).slice(0, 400)}`);
+            const stem = done.stem;
+            if (!stem) throw new Error(`complete 未返回可用 UPOS stem: ${JSON.stringify(done.raw).slice(0, 400)}`);
+            parts.push({ file: name, stem, bytes: buf.length, ms: Date.now() - t0 });
+            videos.push({ filename: stem, title: name.replace(/\.[^.]+$/, "") });
           }
-        }
-        const chunks = await uploadChunks({
-          session, totalSize: buf.length,
-          readChunk: async (i, size) => buf.subarray(i * session.bucket.chunkSize, i * session.bucket.chunkSize + size),
-        });
-        const done = await complete({ session, parts: chunks });
-        if (!done.ok) throw new Error(`complete 失败: ${JSON.stringify(done.raw).slice(0, 400)}`);
-        const stem = done.stem;
-        if (!stem) throw new Error(`complete 未返回可用 UPOS stem: ${JSON.stringify(done.raw).slice(0, 400)}`);
-        parts.push({ file: name, stem, bytes: buf.length, ms: Date.now() - t0 });
-        videos.push({ filename: stem, title: name.replace(/\.[^.]+$/, "") });
-      }
-      const r = await submitStudio({
-        cookiesPath: cookies, title: req.title, tid: req.tid, tag: req.tag,
-        private: req.private !== false, videos,
-      });
-      if (!r.ok) throw new Error(`submit 失败: ${JSON.stringify(r.raw).slice(0, 400)}`);
-      process.stdout.write(JSON.stringify({ ok: true, bvid: r.bvid, aid: r.aid, parts }) + "\n");
+          const r = await submitStudio({
+            cookiesPath: cookies, title: req.title, tid: req.tid, tag: req.tag,
+            private: req.private !== false, videos,
+          });
+          if (!r.ok) throw new Error(`submit 失败: ${JSON.stringify(r.raw).slice(0, 400)}`);
+          return { ok: true, bvid: r.bvid, aid: r.aid, parts };
+        },
+      );
+      process.stdout.write(JSON.stringify(result) + "\n");
     } catch (e) {
       process.stdout.write(JSON.stringify({ error: String((e as Error)?.message ?? e) }) + "\n");
       process.exitCode = 1;
@@ -1215,16 +1222,22 @@ program
   .option("--public", "公开（默认仅自己可见）", false)
   .option("--desc <s>", "简介")
   .option("--cookies-file <path>", "biliup cookies.json", DEFAULT_COOKIES)
-  .action(async (o: { video: string; title: string; tag: string; tid: string; public: boolean; desc?: string; cookiesFile: string }) => {
+  .option("--slot-wait <sec>", "等待本机上传槽位的上限秒数（默认 600；0=只检查一次）", "600")
+  .action(async (o: { video: string; title: string; tag: string; tid: string; public: boolean; desc?: string; cookiesFile: string; slotWait: string }) => {
     // 预检失败直接 exit 2，不发通知（在 try 之外）
     const err = await checkBiliup(o.cookiesFile);
     if (err) { console.error(`[upload] 预检失败: ${err}`); process.exit(2); return; }
     try {
       console.log(`[upload] ${o.title} (tid=${o.tid}, ${o.public ? "公开" : "仅自己可见"}) → 上传中…`);
-      const { bv } = await biliUpload({
-        video: o.video, cookies: o.cookiesFile, title: o.title,
-        tag: o.tag, tid: Number(o.tid), public: o.public, desc: o.desc,
-      });
+      const slotWaitSec = Number(o.slotWait);
+      const slotWaitMs = Number.isFinite(slotWaitSec) && slotWaitSec >= 0 ? slotWaitSec * 1000 : 600_000;
+      const { bv } = await runWithUploadQuota(
+        { cookiesPath: o.cookiesFile, log: (m) => console.error(`[upload] ${m}`), slotWaitMs },
+        () => biliUpload({
+          video: o.video, cookies: o.cookiesFile, title: o.title,
+          tag: o.tag, tid: Number(o.tid), public: o.public, desc: o.desc,
+        }),
+      );
       console.log(`[upload] 完成: ${bv}  https://www.bilibili.com/video/${bv}`);
       await toggledNotifier(webhookOf()).notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}` });
     } catch (e) {
