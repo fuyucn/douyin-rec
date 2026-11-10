@@ -9,7 +9,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sweepOrphanSpools, ORPHAN_SPOOL_GRACE_MS } from "../../packages/app/src/live-pump-spool.js";
-import { spoolPathsToKeep } from "../../packages/zero-upload/src/live-pump.js";
+import { spoolPathsToKeep, livePumpHasUnconfirmed, writeLivePumpState, readLivePumpState, livePumpStatePath } from "../../packages/zero-upload/src/live-pump.js";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "spool-sweep-")); });
@@ -80,6 +80,35 @@ describe("sweepOrphanSpools", () => {
     expect(sweepOrphanSpools({ spoolDir: join(dir, "missing"), knownSpoolPaths: [] })).toEqual([]);
   });
 
+});
+
+describe("issue #581: open-time WAL placeholder keeps the spool the orphan sweep would delete", () => {
+  it("a confirmed:false/sealed:false row protects the current part's spool past the grace window", () => {
+    // The fix (review F12) writes a `parts` row the moment a part opens. Before it, the spool was
+    // unreferenced: the startup sweep matched SPOOL_NAME_RE, found no keep-set entry, and deleted
+    // it once mtime exceeded 10 minutes — the archive lost this part for good.
+    const spoolName = `${Date.now()}_000.live.ts`;
+    const spool = join(dir, spoolName);
+    writeFileSync(spool, "the part being recorded when the process was killed");
+    const stateFile = join(dir, "live-pump-sm.state.json");
+    writeLivePumpState(stateFile, {
+      schemaVersion: 1, room: "sm", createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
+      parts: [{ index: 0, spoolPath: spool, filename: spoolName, stem: "", title: "P1", bytes: 0, durationSec: 0, confirmed: false, sealed: false }],
+      updatedAt: 1,
+    });
+    const st = readLivePumpState(stateFile)!;
+    expect(livePumpHasUnconfirmed(stateFile)).toBe(true);
+    const keep = spoolPathsToKeep(st);
+    expect(keep).toContain(spool);
+    age(spoolName, ORPHAN_SPOOL_GRACE_MS + 60_000);
+    // With the keep-set from the WAL row, the sweep must NOT delete the orphan.
+    expect(sweepOrphanSpools({ spoolDir: dir, knownSpoolPaths: keep })).toEqual([]);
+    expect(existsSync(spool)).toBe(true);
+    // Control: the same file with NO state/keep-set (the pre-fix crash state) IS deleted.
+    expect(sweepOrphanSpools({ spoolDir: dir, knownSpoolPaths: [] })).toEqual([spoolName]);
+    expect(existsSync(spool)).toBe(false);
+    expect(livePumpStatePath(dir, "sm")).toBe(stateFile);
+  });
 });
 
 describe("issue #360: room-layout spool names", () => {
