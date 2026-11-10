@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { cleanupSourcesShared, consecutiveSidecarSkips, removeEmptyStageDir, xmlKeepRule, runPipeline, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
 import { ResourcePool } from "./workflow.js";
 import { SyncLedger } from "./ledger.js";
-import { addArchiveToSeasonIfConfigured, closeStageReady, STAGE_READY } from "@drec/core";
+import { addArchiveToSeasonIfConfigured, APPEND_AMBIGUOUS_MARKER, closeStageReady, STAGE_READY } from "@drec/core";
 import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { NotifyEvent } from "@drec/core";
@@ -1386,6 +1386,52 @@ describe("runPipeline", () => {
       expect(deps.appendGroup.mock.calls.every((c) => c[0].bv === "BVexisting")).toBe(true);
       expect(r).toEqual({ state: "done", bv: "BVexisting" });
       expect(deps.ledger.get(b.streamKey)?.state).toBe("done");
+      deps.ledger.close();
+    });
+
+    it("续跑:append 抛结果不确定 → 只调用一次，不自动重试(防重复分P)", async () => {
+      const { mkdirSync, writeFileSync } = await import("node:fs");
+      const stageDir = mkdtempSync(join(tmpdir(), "resume-ambiguous-"));
+      const deps = makeDeps({ cfg: { ...makeDeps().cfg, stageDir } });
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey);
+      for (const st of ["syncing", "merging", "uploading"] as const) deps.ledger.setState(b.streamKey, st);
+      deps.ledger.setBv(b.streamKey, "BV" + "existing");
+      deps.ledger.logStep(b.streamKey, "append_danmu", "done"); // 只剩 livechat 一组
+      const sub = join(stageDir, "douyin_test-room_2026-06-27");
+      mkdirSync(sub, { recursive: true });
+      for (const suf of [".mp4", "_danmu.mp4", "_livechat.mp4", ".xml"]) writeFileSync(join(sub, "主播名_2026-06-27" + suf), "x");
+      deps.appendGroup.mockRejectedValue(new Error(APPEND_AMBIGUOUS_MARKER + " append 结果无法确认"));
+
+      await expect(runPipeline(b, deps)).rejects.toThrow(APPEND_AMBIGUOUS_MARKER);
+
+      expect(deps.appendGroup).toHaveBeenCalledTimes(1); // 撤修复:单文件组固定 5 次
+      expect(deps.ledger.get(b.streamKey)?.bv).toBe("BV" + "existing");
+      deps.ledger.close();
+    });
+
+    it("续跑:601 限流仍按冷却重试，不把限流当不确定", async () => {
+      const { mkdirSync, writeFileSync } = await import("node:fs");
+      const stageDir = mkdtempSync(join(tmpdir(), "resume-601-"));
+      // 601 会让 pool 记冷却；测试把冷却压到 0，只验证「限流仍会重试」而非真等 30 分钟。
+      const deps = makeDeps({
+        cfg: { ...makeDeps().cfg, stageDir },
+        pool: new ResourcePool({ minBurnFreeMemMB: 0, maxCpuParallel: 1, maxNetParallel: 1, uploadRateLimit: 0, uploadCooldownMs: 0 }),
+      });
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey);
+      for (const st of ["syncing", "merging", "uploading"] as const) deps.ledger.setState(b.streamKey, st);
+      deps.ledger.setBv(b.streamKey, "BV" + "existing");
+      deps.ledger.logStep(b.streamKey, "append_danmu", "done");
+      const sub = join(stageDir, "douyin_test-room_2026-06-27");
+      mkdirSync(sub, { recursive: true });
+      for (const suf of [".mp4", "_danmu.mp4", "_livechat.mp4", ".xml"]) writeFileSync(join(sub, "主播名_2026-06-27" + suf), "x");
+      deps.appendGroup.mockRejectedValueOnce(new Error("code: 601 您上传视频过快")).mockResolvedValue(undefined);
+
+      const r = await runPipeline(b, deps);
+
+      expect(deps.appendGroup).toHaveBeenCalledTimes(2); // 限流 → 重试一次后成功
+      expect(r).toEqual({ state: "done", bv: "BV" + "existing" });
       deps.ledger.close();
     });
 
