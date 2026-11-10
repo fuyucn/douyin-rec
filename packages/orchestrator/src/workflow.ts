@@ -340,10 +340,11 @@ async function appendGroupSafe(o: {
   retry?: typeof retry;
 }): Promise<void> {
   if (o.files.length === 0) return;
-  // B站追加分 P 后稿件会短暂锁定(code 10010),退避 60s*2^n 等锁释放,避免几分钟的
-  // 上传白跑 3 次就转人工。多段组无 per-part checkpoint,仍不自动重试(可能已 append 部分)。
-  // 601(频率限制)与 append 结果无关,应重试;其余多文件组不重试(可能已部分提交)。
-  const tries = o.files.length === 1 ? 5 : 3;
+  // B站追加分 P 后稿件会短暂锁定(code 10010),单文件组退避 60s*2^n 等锁释放,避免几分钟的
+  // 上传白跑 3 次就转人工。
+  // 多文件组没有 per-part checkpoint:任何失败(含 601)都可能已提交部分段,重试会重复分 P,
+  // 因此只提交一次(与 segment-pipeline 的多文件 batch 同口径),失败交给上传类失败门禁转人工。
+  const tries = o.files.length === 1 ? 5 : 1;
   const fn = (): Promise<void> => o.deps.appendGroup({
     bv: o.bv, files: o.files, cookies: o.deps.cfg.cookies, public: o.isPublic,
   });

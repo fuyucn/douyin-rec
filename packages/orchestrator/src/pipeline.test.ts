@@ -1329,6 +1329,20 @@ describe("runPipeline", () => {
       deps.ledger.close();
     });
 
+    it("appendGroup 多文件组失败 → 不整体重试(无 per-part checkpoint,重试会重复分P)", async () => {
+      // 模拟 >16GB 切分:danmu / livechat 各 2 段
+      const deps = makeDeps({ sleep: async () => {}, splitForUpload: async (mp4: string) => [mp4, mp4 + ".part2"] });
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey);
+      deps.appendGroup.mockRejectedValue(new Error("Connection timed out"));
+
+      const r = await runPipeline(b, deps);
+
+      expect(r.state).toBe("failed");
+      expect(deps.appendGroup).toHaveBeenCalledTimes(1); // 撤修复:3 次
+      deps.ledger.close();
+    });
+
     it("append 循环跳过 isStepDone 已完成的组(续跑幂等基石)", async () => {
       const deps = makeDeps();
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
