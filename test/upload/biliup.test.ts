@@ -181,6 +181,13 @@ describe("isUploadRateLimited：识别 601 与 21566", () => {
     const msg = 'create failed: {"code":21186,"message":"您投稿的频率过快，请稍等2秒","ttl":1}';
     expect(isUploadRateLimited(new Error(msg))).toBe(true);
   });
+  it("JSON 形态（引号键、无中文文案）同样识别 601/21540/21566/21186", () => {
+    // 直传路径把 JSON.stringify(raw) 交给本函数:键带引号，旧正则只认 code: 601。
+    expect(isUploadRateLimited(new Error('append failed: {"code":601}'))).toBe(true);
+    expect(isUploadRateLimited(new Error('{"code" : 21540, "ttl":1}'))).toBe(true);
+    expect(isUploadRateLimited(new Error("{'code':21566}"))).toBe(true);
+    expect(isUploadRateLimited(new Error('{"code":21186,"message":""}'))).toBe(true);
+  });
   it("普通错误不误判", () => {
     expect(isUploadRateLimited(new Error("登录已失效"))).toBe(false);
     expect(isUploadRateLimited(new Error("biliup 失败 (rc=1): HTTP status server error (500)"))).toBe(false);

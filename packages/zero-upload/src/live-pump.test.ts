@@ -2749,7 +2749,8 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
       }
       edits++;
       if (edits === 1) {
-        return new Response(JSON.stringify({ code: 21540, message: "请求过于频繁，请稍后再试", ttl: 1 }), { status: 200 });
+        // B 站改文案也不影响判定:只保留 JSON 数字码，钉住引号键形态（#592）。
+        return new Response(JSON.stringify({ code: 21540, ttl: 1 }), { status: 200 });
       }
       const body = JSON.parse(String(init?.body ?? "{}")) as { videos?: Array<{ filename: string; title?: string }> };
       videos.length = 0;
