@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { useSetAtom } from "jotai";
 import { Navigate, Route, Routes, useLocation, useParams } from "react-router-dom";
 import { Toaster } from "sonner";
-import { api } from "./api/client";
+import { api, type SessionInfo } from "./api/client";
 import { hubEnabledAtom, serverTimezoneAtom } from "./atoms";
 import { Footer } from "./layout/Footer";
 import { TopNav } from "./layout/TopNav";
@@ -71,20 +71,27 @@ function RoomByTaskRedirect(): ReactNode {
 }
 
 /**
+ * 会话探测只发一次：StrictMode 双挂载、并发渲染都复用同一个 promise。
+ * 后续的会话变化走 `drec:unauthorized` 事件；登录成功是整页重载，无需失效缓存。
+ */
+let sessionProbe: Promise<SessionInfo> | null = null;
+function probeSession(): Promise<SessionInfo> {
+  // 探测失败不能把用户锁在登录页；按「未开启鉴权」继续，具体错误由各页面展示。
+  sessionProbe ??= api.getSession().catch(() => ({ authRequired: false, authenticated: true }));
+  return sessionProbe;
+}
+
+/**
  * App — 先探测远程访问是否需要密钥（issue #600）；未登录只渲染登录页，
  * shell 的数据 hooks 在有票据后才挂载，避免一屏 401。
  */
 export function App(): ReactNode {
   const t = useT();
-  const [session, setSession] = useState<import("./api/client").SessionInfo | null>(null);
+  const [session, setSession] = useState<SessionInfo | null>(null);
 
   useEffect(() => {
     let alive = true;
-    void api
-      .getSession()
-      .then((s) => { if (alive) setSession(s); })
-      // 探测失败不能把用户锁在登录页；按「未开启鉴权」继续，具体错误由各页面展示。
-      .catch(() => { if (alive) setSession({ authRequired: false, authenticated: true }); });
+    void probeSession().then((s) => { if (alive) setSession(s); });
     return () => { alive = false; };
   }, []);
 

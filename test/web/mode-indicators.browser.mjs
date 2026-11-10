@@ -133,6 +133,8 @@ async function assertMobileRoomRow(page) {
     window.EventSource = undefined;
   });
   const responses = {
+      // App 先探测会话再挂载 shell(#600)；声明成期望请求,否则会被隔离门判成未声明 API 调用。
+      "GET /api/session": { authRequired: false, authenticated: true },
       "GET /api/rooms": [room],
       "GET /api/tasks": [],
       "GET /api/hub/latest-runs": { rooms: [] },
