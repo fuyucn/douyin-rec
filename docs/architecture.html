@@ -83,7 +83,7 @@
     <div>
       <h1>直播录制 · 架构图</h1>
       <p class="sub">抖音 / B站 / 快手直播录制 + 弹幕 + 多节点 hub 后处理。两个可插拔接缝:平台轴 + 引擎轴。</p>
-      <p class="gen">由 scripts/gen-architecture.mjs 生成 · 热度窗口近 90 天 · 2026-11-08 19:56</p>
+      <p class="gen">由 scripts/gen-architecture.mjs 生成 · 热度窗口近 90 天 · 2026-11-11 01:46</p>
     </div>
     <div class="tools">
       <button class="tbtn" id="theme">◐ 主题</button>
@@ -98,12 +98,12 @@
 
   <div class="band">
       <div class="blabel">L0 · 基础叶子</div>
-      <div class="grid"><div class="card" style="--role:#94a3b8;--mix:25%" title="@drec/core · 8184 LOC · 47 文件 · 34 测试 · 近 90 天 208 次提交">
+      <div class="grid"><div class="card" style="--role:#94a3b8;--mix:24%" title="@drec/core · 8369 LOC · 48 文件 · 35 测试 · 近 90 天 213 次提交">
           <span class="rail" style="background:#94a3b8"></span>
           <div class="t">core</div>
           <div class="pkg">@drec/core</div>
-          <div class="m"><span><b>8184</b> LOC</span><span><b>47</b> 文件</span><span><b>34</b> 测试</span><span><b>208</b> Δ</span></div>
-          <div class="hbar"><i style="width:64%;background:#94a3b8"></i></div>
+          <div class="m"><span><b>8369</b> LOC</span><span><b>48</b> 文件</span><span><b>35</b> 测试</span><span><b>213</b> Δ</span></div>
+          <div class="hbar"><i style="width:63%;background:#94a3b8"></i></div>
         </div><div class="card" style="--role:#94a3b8;--mix:8%" title="@drec/ffmpeg-recorder-extra · 102 LOC · 1 文件 · 0 测试 · 近 90 天 0 次提交">
           <span class="rail" style="background:#94a3b8"></span>
           <div class="t">ffmpeg-recorder-extra</div>
@@ -134,32 +134,38 @@
     </div>
   <div class="band">
       <div class="blabel">rank 0.35</div>
-      <div class="grid"><div class="card" style="--role:#94a3b8;--mix:14%" title="@drec/zero-upload · 5064 LOC · 7 文件 · 5 测试 · 近 90 天 71 次提交">
+      <div class="grid"><div class="card" style="--role:#94a3b8;--mix:14%" title="@drec/zero-upload · 5437 LOC · 8 文件 · 5 测试 · 近 90 天 76 次提交">
           <span class="rail" style="background:#94a3b8"></span>
           <div class="t">zero-upload</div>
           <div class="pkg">@drec/zero-upload</div>
-          <div class="m"><span><b>5064</b> LOC</span><span><b>7</b> 文件</span><span><b>5</b> 测试</span><span><b>71</b> Δ</span></div>
-          <div class="hbar"><i style="width:22%;background:#94a3b8"></i></div>
+          <div class="m"><span><b>5437</b> LOC</span><span><b>8</b> 文件</span><span><b>5</b> 测试</span><span><b>76</b> Δ</span></div>
+          <div class="hbar"><i style="width:23%;background:#94a3b8"></i></div>
         </div></div>
     </div>
   <div class="band">
       <div class="blabel">L0.4 · 处理器实现</div>
-      <div class="grid"><div class="card" style="--role:#94a3b8;--mix:12%" title="@drec/processors · 2499 LOC · 10 文件 · 11 测试 · 近 90 天 51 次提交">
+      <div class="grid"><div class="card" style="--role:#94a3b8;--mix:12%" title="@drec/processors · 2497 LOC · 10 文件 · 11 测试 · 近 90 天 52 次提交">
           <span class="rail" style="background:#94a3b8"></span>
           <div class="t">processors</div>
           <div class="pkg">@drec/processors</div>
-          <div class="m"><span><b>2499</b> LOC</span><span><b>10</b> 文件</span><span><b>11</b> 测试</span><span><b>51</b> Δ</span></div>
-          <div class="hbar"><i style="width:16%;background:#94a3b8"></i></div>
+          <div class="m"><span><b>2497</b> LOC</span><span><b>10</b> 文件</span><span><b>11</b> 测试</span><span><b>52</b> Δ</span></div>
+          <div class="hbar"><i style="width:15%;background:#94a3b8"></i></div>
         </div></div>
     </div>
   <div class="band">
-      <div class="blabel">L0.5 · 可观测性</div>
-      <div class="grid"><div class="card" style="--role:#94a3b8;--mix:9%" title="@drec/observability · 422 LOC · 8 文件 · 1 测试 · 近 90 天 9 次提交">
+      <div class="blabel">L0.5 · 可观测性 / 上传驱动</div>
+      <div class="grid"><div class="card" style="--role:#94a3b8;--mix:9%" title="@drec/observability · 441 LOC · 8 文件 · 1 测试 · 近 90 天 10 次提交">
           <span class="rail" style="background:#94a3b8"></span>
           <div class="t">observability</div>
           <div class="pkg">@drec/observability</div>
-          <div class="m"><span><b>422</b> LOC</span><span><b>8</b> 文件</span><span><b>1</b> 测试</span><span><b>9</b> Δ</span></div>
+          <div class="m"><span><b>441</b> LOC</span><span><b>8</b> 文件</span><span><b>1</b> 测试</span><span><b>10</b> Δ</span></div>
           <div class="hbar"><i style="width:3%;background:#94a3b8"></i></div>
+        </div><div class="card" style="--role:#94a3b8;--mix:8%" title="@drec/upload-runtime · 99 LOC · 3 文件 · 1 测试 · 近 90 天 1 次提交">
+          <span class="rail" style="background:#94a3b8"></span>
+          <div class="t">upload-runtime</div>
+          <div class="pkg">@drec/upload-runtime</div>
+          <div class="m"><span><b>99</b> LOC</span><span><b>3</b> 文件</span><span><b>1</b> 测试</span><span><b>1</b> Δ</span></div>
+          <div class="hbar"><i style="width:0%;background:#94a3b8"></i></div>
         </div></div>
     </div>
   <div class="band">
@@ -174,18 +180,18 @@
     </div>
   <div class="band">
       <div class="blabel">L1.5 · 平台轴(可插拔)</div>
-      <div class="grid"><div class="card" style="--role:#22d3ee;--mix:9%" title="@drec/douyin-live · 1436 LOC · 9 文件 · 6 测试 · 近 90 天 11 次提交">
+      <div class="grid"><div class="card" style="--role:#22d3ee;--mix:9%" title="@drec/douyin-live · 1432 LOC · 9 文件 · 6 测试 · 近 90 天 12 次提交">
           <span class="rail" style="background:#22d3ee"></span>
           <div class="t">douyin-live<span class="seam" style="color:#22d3ee">平台轴</span></div>
           <div class="pkg">@drec/douyin-live</div>
-          <div class="m"><span><b>1436</b> LOC</span><span><b>9</b> 文件</span><span><b>6</b> 测试</span><span><b>11</b> Δ</span></div>
-          <div class="hbar"><i style="width:3%;background:#22d3ee"></i></div>
+          <div class="m"><span><b>1432</b> LOC</span><span><b>9</b> 文件</span><span><b>6</b> 测试</span><span><b>12</b> Δ</span></div>
+          <div class="hbar"><i style="width:4%;background:#22d3ee"></i></div>
         </div><div class="card" style="--role:#22d3ee;--mix:8%" title="@drec/bilibili-live · 731 LOC · 5 文件 · 4 测试 · 近 90 天 5 次提交">
           <span class="rail" style="background:#22d3ee"></span>
           <div class="t">bilibili-live<span class="seam" style="color:#22d3ee">平台轴</span></div>
           <div class="pkg">@drec/bilibili-live</div>
           <div class="m"><span><b>731</b> LOC</span><span><b>5</b> 文件</span><span><b>4</b> 测试</span><span><b>5</b> Δ</span></div>
-          <div class="hbar"><i style="width:2%;background:#22d3ee"></i></div>
+          <div class="hbar"><i style="width:1%;background:#22d3ee"></i></div>
         </div><div class="card" style="--role:#22d3ee;--mix:9%" title="@drec/kuaishou-live · 470 LOC · 2 文件 · 1 测试 · 近 90 天 7 次提交">
           <span class="rail" style="background:#22d3ee"></span>
           <div class="t">kuaishou-live<span class="seam" style="color:#22d3ee">平台轴</span></div>
@@ -201,42 +207,42 @@
           <div class="t">manager</div>
           <div class="pkg">@drec/manager</div>
           <div class="m"><span><b>942</b> LOC</span><span><b>5</b> 文件</span><span><b>7</b> 测试</span><span><b>25</b> Δ</span></div>
-          <div class="hbar"><i style="width:8%;background:#a78bfa"></i></div>
+          <div class="hbar"><i style="width:7%;background:#a78bfa"></i></div>
         </div></div>
     </div>
   <div class="band">
       <div class="blabel">L4 · 有状态应用</div>
-      <div class="grid"><div class="card" style="--role:#34d399;--mix:34%" title="@drec/app · 19179 LOC · 74 文件 · 77 测试 · 近 90 天 327 次提交">
+      <div class="grid"><div class="card" style="--role:#34d399;--mix:34%" title="@drec/app · 19849 LOC · 76 文件 · 81 测试 · 近 90 天 336 次提交">
           <span class="rail" style="background:#34d399"></span>
           <div class="t">app</div>
           <div class="pkg">@drec/app</div>
-          <div class="m"><span><b>19179</b> LOC</span><span><b>74</b> 文件</span><span><b>77</b> 测试</span><span><b>327</b> Δ</span></div>
+          <div class="m"><span><b>19849</b> LOC</span><span><b>76</b> 文件</span><span><b>81</b> 测试</span><span><b>336</b> Δ</span></div>
           <div class="hbar"><i style="width:100%;background:#34d399"></i></div>
-        </div><div class="card" style="--role:#34d399;--mix:30%" title="@drec/web (独立 Vite) · 15351 LOC · 100 文件 · 0 测试 · 近 90 天 281 次提交">
+        </div><div class="card" style="--role:#34d399;--mix:30%" title="@drec/web (独立 Vite) · 15344 LOC · 100 文件 · 0 测试 · 近 90 天 290 次提交">
           <span class="rail" style="background:#34d399"></span>
           <div class="t">web</div>
           <div class="pkg">@drec/web (独立 Vite)</div>
-          <div class="m"><span><b>15351</b> LOC</span><span><b>100</b> 文件</span><span><b>0</b> 测试</span><span><b>281</b> Δ</span></div>
+          <div class="m"><span><b>15344</b> LOC</span><span><b>100</b> 文件</span><span><b>0</b> 测试</span><span><b>290</b> Δ</span></div>
           <div class="hbar"><i style="width:86%;background:#34d399"></i></div>
         </div></div>
     </div>
   <div class="band">
       <div class="blabel">L4.5 · 多节点 hub</div>
-      <div class="grid"><div class="card" style="--role:#fbbf24;--mix:26%" title="@drec/orchestrator · 10912 LOC · 38 文件 · 54 测试 · 近 90 天 228 次提交">
+      <div class="grid"><div class="card" style="--role:#fbbf24;--mix:26%" title="@drec/orchestrator · 10933 LOC · 38 文件 · 54 测试 · 近 90 天 233 次提交">
           <span class="rail" style="background:#fbbf24"></span>
           <div class="t">orchestrator</div>
           <div class="pkg">@drec/orchestrator</div>
-          <div class="m"><span><b>10912</b> LOC</span><span><b>38</b> 文件</span><span><b>54</b> 测试</span><span><b>228</b> Δ</span></div>
-          <div class="hbar"><i style="width:70%;background:#fbbf24"></i></div>
+          <div class="m"><span><b>10933</b> LOC</span><span><b>38</b> 文件</span><span><b>54</b> 测试</span><span><b>233</b> Δ</span></div>
+          <div class="hbar"><i style="width:69%;background:#fbbf24"></i></div>
         </div></div>
     </div>
   <div class="band">
       <div class="blabel">L5 · 入口</div>
-      <div class="grid"><div class="card" style="--role:#f472b6;--mix:24%" title="@drec/cli · 4061 LOC · 15 文件 · 15 测试 · 近 90 天 197 次提交">
+      <div class="grid"><div class="card" style="--role:#f472b6;--mix:24%" title="@drec/cli · 4286 LOC · 16 文件 · 16 测试 · 近 90 天 202 次提交">
           <span class="rail" style="background:#f472b6"></span>
           <div class="t">cli</div>
           <div class="pkg">@drec/cli</div>
-          <div class="m"><span><b>4061</b> LOC</span><span><b>15</b> 文件</span><span><b>15</b> 测试</span><span><b>197</b> Δ</span></div>
+          <div class="m"><span><b>4286</b> LOC</span><span><b>16</b> 文件</span><span><b>16</b> 测试</span><span><b>202</b> Δ</span></div>
           <div class="hbar"><i style="width:60%;background:#f472b6"></i></div>
         </div></div>
     </div>
@@ -717,7 +723,7 @@
       <td><code>core</code></td>
       <td>L0 · 基础叶子</td>
       <td><span style="color:#94a3b8">●</span> 基础/契约</td>
-      <td class="n">8184</td><td class="n">47</td><td class="n">34</td><td class="n">208</td>
+      <td class="n">8369</td><td class="n">48</td><td class="n">35</td><td class="n">213</td>
     </tr>
     <tr>
       <td><code>ffmpeg-recorder-extra</code></td>
@@ -741,19 +747,25 @@
       <td><code>zero-upload</code></td>
       <td>0.35</td>
       <td><span style="color:#94a3b8">●</span> 基础/契约</td>
-      <td class="n">5064</td><td class="n">7</td><td class="n">5</td><td class="n">71</td>
+      <td class="n">5437</td><td class="n">8</td><td class="n">5</td><td class="n">76</td>
     </tr>
     <tr>
       <td><code>processors</code></td>
       <td>L0.4 · 处理器实现</td>
       <td><span style="color:#94a3b8">●</span> 基础/契约</td>
-      <td class="n">2499</td><td class="n">10</td><td class="n">11</td><td class="n">51</td>
+      <td class="n">2497</td><td class="n">10</td><td class="n">11</td><td class="n">52</td>
     </tr>
     <tr>
       <td><code>observability</code></td>
-      <td>L0.5 · 可观测性</td>
+      <td>L0.5 · 可观测性 / 上传驱动</td>
       <td><span style="color:#94a3b8">●</span> 基础/契约</td>
-      <td class="n">422</td><td class="n">8</td><td class="n">1</td><td class="n">9</td>
+      <td class="n">441</td><td class="n">8</td><td class="n">1</td><td class="n">10</td>
+    </tr>
+    <tr>
+      <td><code>upload-runtime</code></td>
+      <td>L0.5 · 可观测性 / 上传驱动</td>
+      <td><span style="color:#94a3b8">●</span> 基础/契约</td>
+      <td class="n">99</td><td class="n">3</td><td class="n">1</td><td class="n">1</td>
     </tr>
     <tr>
       <td><code>record-engine</code></td>
@@ -765,7 +777,7 @@
       <td><code>douyin-live</code></td>
       <td>L1.5 · 平台轴(可插拔)</td>
       <td><span style="color:#22d3ee">●</span> 平台轴</td>
-      <td class="n">1436</td><td class="n">9</td><td class="n">6</td><td class="n">11</td>
+      <td class="n">1432</td><td class="n">9</td><td class="n">6</td><td class="n">12</td>
     </tr>
     <tr>
       <td><code>bilibili-live</code></td>
@@ -789,30 +801,30 @@
       <td><code>app</code></td>
       <td>L4 · 有状态应用</td>
       <td><span style="color:#34d399">●</span> 应用/前端</td>
-      <td class="n">19179</td><td class="n">74</td><td class="n">77</td><td class="n">327</td>
+      <td class="n">19849</td><td class="n">76</td><td class="n">81</td><td class="n">336</td>
     </tr>
     <tr>
       <td><code>web</code></td>
       <td>L4 · 有状态应用</td>
       <td><span style="color:#34d399">●</span> 应用/前端</td>
-      <td class="n">15351</td><td class="n">100</td><td class="n">0</td><td class="n">281</td>
+      <td class="n">15344</td><td class="n">100</td><td class="n">0</td><td class="n">290</td>
     </tr>
     <tr>
       <td><code>orchestrator</code></td>
       <td>L4.5 · 多节点 hub</td>
       <td><span style="color:#fbbf24">●</span> 多节点 hub</td>
-      <td class="n">10912</td><td class="n">38</td><td class="n">54</td><td class="n">228</td>
+      <td class="n">10933</td><td class="n">38</td><td class="n">54</td><td class="n">233</td>
     </tr>
     <tr>
       <td><code>cli</code></td>
       <td>L5 · 入口</td>
       <td><span style="color:#f472b6">●</span> 入口</td>
-      <td class="n">4061</td><td class="n">15</td><td class="n">15</td><td class="n">197</td>
+      <td class="n">4286</td><td class="n">16</td><td class="n">16</td><td class="n">202</td>
     </tr></tbody>
   </table>
 
   <h2>依赖边</h2>
-  <div class="edge"><span>app <em>→</em> core</span><span>app <em>→</em> observability</span><span>app <em>→</em> douyin-live</span><span>app <em>→</em> manager</span><span>app <em>→</em> post-process</span><span>app <em>→</em> proc-queue</span><span>app <em>→</em> processors</span><span>app <em>→</em> record-engine</span><span>app <em>→</em> zero-upload</span><span>bilibili-live <em>→</em> core</span><span>cli <em>→</em> core</span><span>cli <em>→</em> observability</span><span>cli <em>→</em> manager</span><span>cli <em>→</em> post-process</span><span>cli <em>→</em> proc-queue</span><span>cli <em>→</em> processors</span><span>cli <em>→</em> zero-upload</span><span>cli <em>→</em> app</span><span>cli <em>→</em> record-engine</span><span>cli <em>→</em> douyin-live</span><span>cli <em>→</em> bilibili-live</span><span>cli <em>→</em> kuaishou-live</span><span>cli <em>→</em> orchestrator</span><span>douyin-live <em>→</em> core</span><span>douyin-live <em>→</em> ffmpeg-recorder-extra</span><span>kuaishou-live <em>→</em> core</span><span>manager <em>→</em> core</span><span>observability <em>→</em> core</span><span>orchestrator <em>→</em> core</span><span>orchestrator <em>→</em> post-process</span><span>post-process <em>→</em> core</span><span>proc-queue <em>→</em> core</span><span>processors <em>→</em> core</span><span>processors <em>→</em> post-process</span><span>processors <em>→</em> zero-upload</span><span>record-engine <em>→</em> core</span><span>record-engine <em>→</em> ffmpeg-recorder-extra</span><span>zero-upload <em>→</em> core</span><span>zero-upload <em>→</em> post-process</span></div>
+  <div class="edge"><span>app <em>→</em> core</span><span>app <em>→</em> observability</span><span>app <em>→</em> douyin-live</span><span>app <em>→</em> manager</span><span>app <em>→</em> post-process</span><span>app <em>→</em> proc-queue</span><span>app <em>→</em> processors</span><span>app <em>→</em> record-engine</span><span>app <em>→</em> zero-upload</span><span>bilibili-live <em>→</em> core</span><span>cli <em>→</em> core</span><span>cli <em>→</em> observability</span><span>cli <em>→</em> manager</span><span>cli <em>→</em> post-process</span><span>cli <em>→</em> proc-queue</span><span>cli <em>→</em> processors</span><span>cli <em>→</em> zero-upload</span><span>cli <em>→</em> app</span><span>cli <em>→</em> record-engine</span><span>cli <em>→</em> douyin-live</span><span>cli <em>→</em> bilibili-live</span><span>cli <em>→</em> kuaishou-live</span><span>cli <em>→</em> orchestrator</span><span>douyin-live <em>→</em> core</span><span>douyin-live <em>→</em> ffmpeg-recorder-extra</span><span>kuaishou-live <em>→</em> core</span><span>manager <em>→</em> core</span><span>observability <em>→</em> core</span><span>orchestrator <em>→</em> core</span><span>orchestrator <em>→</em> post-process</span><span>post-process <em>→</em> core</span><span>proc-queue <em>→</em> core</span><span>processors <em>→</em> core</span><span>processors <em>→</em> post-process</span><span>processors <em>→</em> zero-upload</span><span>record-engine <em>→</em> core</span><span>record-engine <em>→</em> ffmpeg-recorder-extra</span><span>upload-runtime <em>→</em> core</span><span>zero-upload <em>→</em> core</span><span>zero-upload <em>→</em> post-process</span></div>
 
   <div class="note">
     <b>接新平台</b> = 写一个 <code>&lt;平台&gt;-live</code>(实现 Platform:getStream / getLiving / connectDanmu? / matchUrl)+ providers-register.ts 注册一行 → 引擎白嫖 record-engine。<br>
@@ -971,6 +983,15 @@
    ]
   },
   {
+   "dir": "upload-runtime",
+   "name": "@drec/upload-runtime",
+   "rank": 0.5,
+   "role": "基础/契约",
+   "deps": [
+    "@drec/core"
+   ]
+  },
+  {
    "dir": "web",
    "name": "@drec/web (独立 Vite)",
    "rank": 4,
@@ -1026,6 +1047,7 @@
   "@drec/processors -> @drec/zero-upload",
   "@drec/record-engine -> @drec/core",
   "@drec/record-engine -> @drec/ffmpeg-recorder-extra",
+  "@drec/upload-runtime -> @drec/core",
   "@drec/zero-upload -> @drec/core",
   "@drec/zero-upload -> @drec/post-process"
  ],
@@ -1039,7 +1061,7 @@
   "0.3": "L0.3 · 处理任务队列",
   "0.35": "rank 0.35",
   "0.4": "L0.4 · 处理器实现",
-  "0.5": "L0.5 · 可观测性",
+  "0.5": "L0.5 · 可观测性 / 上传驱动",
   "1.5": "L1.5 · 平台轴(可插拔)",
   "4.5": "L4.5 · 多节点 hub"
  },
@@ -3486,7 +3508,7 @@
    "status": "decision-gated"
   }
  ],
- "mermaid": "flowchart TB\n  subgraph L5[\"L5 · 入口\"]\n    cli[\"\u003cb>cli\u003c/b>\u003cbr/>record / merge / burn / probe + task 命令组\u003cbr/>providers-register: 注册平台 + 引擎\"]\n  end\n  subgraph L45[\"L4.5 · 多节点 hub\"]\n    orch[\"\u003cb>orchestrator\u003c/b>\u003cbr/>Transport(local/ssh/tailscale-ssh) / identity 聚类\u003cbr/>select 选优 / reconciler / pipeline / SyncLedger\"]\n  end\n  subgraph L4[\"L4 · 有状态应用\"]\n    app[\"\u003cb>app\u003c/b>\u003cbr/>db/store/hub-store(文件版规则)/ daemon/scheduler/task-manager\u003cbr/>web(api+server)/ login(扫码)/ upload / anchor\"]\n  end\n  subgraph L3[\"L3 · 会话编排\"]\n    manager[\"\u003cb>manager\u003c/b>\u003cbr/>RecordingSession 会话生命周期\u003cbr/>onLive→connectDanmu / 断流重连 / drain\"]\n  end\n  subgraph L15[\"L1.5 · 平台轴(可插拔)\"]\n    bilibili[\"\u003cb>bilibili-live\u003c/b>\u003cbr/>bilibiliPlatform\u003cbr/>getStream + connectDanmu(WBI + 二进制 WS)\"]\n    douyin[\"\u003cb>douyin-live\u003c/b>\u003cbr/>douyinPlatform\u003cbr/>stream(a_bogus 取流) + danmaku(自有 TS WS)\"]\n    kuaishou[\"\u003cb>kuaishou-live\u003c/b>\u003cbr/>kuaishouPlatform\u003cbr/>取流 = 直播页 __INITIAL_STATE__(无弹幕)\"]\n  end\n  subgraph L1[\"L1 · 引擎轴(共享)\"]\n    engine[\"\u003cb>record-engine\u003c/b>\u003cbr/>通用 PollingRecorder\u003cbr/>下载引擎: ffmpeg(.ts) / mesio(.flv)\"]\n  end\n  subgraph L05[\"L0.5 · 可观测性\"]\n    observ[\"\u003cb>observability\u003c/b>\u003cbr/>Notifier / EventCenter / 日志\"]\n  end\n  subgraph L04[\"L0.4 · 处理器实现\"]\n    procs[\"\u003cb>processors\u003c/b>\u003cbr/>remux 处理器(校验 / 原地转换 / recover);加处理器 = 一个模块 + 注册一行\"]\n  end\n  subgraph L035[\"rank 0.35\"]\n    zeroup[\"\u003cb>zero-upload\u003c/b>\u003cbr/>0 落盘流式直传(自研 UPOS)\u003cbr/>live-pump: 一段一 ffmpeg 边录边传\"]\n  end\n  subgraph L03[\"L0.3 · 处理任务队列\"]\n    procq[\"\u003cb>proc-queue\u003c/b>\u003cbr/>ProcQueueStore 持久任务表(sqlite)\u003cbr/>ProcRunner 租约 / 心跳 / fencing / 关停\"]\n  end\n  subgraph L02[\"rank 0.2\"]\n    post[\"\u003cb>post-process\u003c/b>\u003cbr/>concat / burn / ass / merge / ffmpeg / fonts\"]\n  end\n  subgraph L0[\"L0 · 基础叶子\"]\n    core[\"\u003cb>core\u003c/b>\u003cbr/>Platform / DownloadEngine 契约\u003cbr/>+ 注册表 + types/config/notify/api-types\"]\n    extra[\"\u003cb>ffmpeg-recorder-extra\u003c/b>\u003cbr/>logStreamMeta + detectDevice\"]\n  end\n\n  cli --> app\n  cli --> bilibili\n  cli --> core\n  cli --> douyin\n  cli --> kuaishou\n  cli --> manager\n  cli --> observ\n  cli --> orch\n  cli --> post\n  cli --> procq\n  cli --> procs\n  cli --> engine\n  cli --> zeroup\n  orch --> core\n  orch --> post\n  app --> core\n  app --> douyin\n  app --> manager\n  app --> observ\n  app --> post\n  app --> procq\n  app --> procs\n  app --> engine\n  app --> zeroup\n  manager --> core\n  bilibili --> core\n  douyin --> core\n  douyin --> extra\n  kuaishou --> core\n  engine --> core\n  engine --> extra\n  observ --> core\n  procs --> core\n  procs --> post\n  procs --> zeroup\n  zeroup --> core\n  zeroup --> post\n  procq --> core\n  post --> core\n\n  classDef axisPlat fill:#dcfce7,stroke:#16a34a,color:#14532d;\n  classDef axisEng fill:#ffedd5,stroke:#ea580c,color:#7c2d12;\n  class bilibili,douyin,kuaishou axisPlat;\n  class engine axisEng;"
+ "mermaid": "flowchart TB\n  subgraph L5[\"L5 · 入口\"]\n    cli[\"\u003cb>cli\u003c/b>\u003cbr/>record / merge / burn / probe + task 命令组\u003cbr/>providers-register: 注册平台 + 引擎\"]\n  end\n  subgraph L45[\"L4.5 · 多节点 hub\"]\n    orch[\"\u003cb>orchestrator\u003c/b>\u003cbr/>Transport(local/ssh/tailscale-ssh) / identity 聚类\u003cbr/>select 选优 / reconciler / pipeline / SyncLedger\"]\n  end\n  subgraph L4[\"L4 · 有状态应用\"]\n    app[\"\u003cb>app\u003c/b>\u003cbr/>db/store/hub-store(文件版规则)/ daemon/scheduler/task-manager\u003cbr/>web(api+server)/ login(扫码)/ upload / anchor\"]\n  end\n  subgraph L3[\"L3 · 会话编排\"]\n    manager[\"\u003cb>manager\u003c/b>\u003cbr/>RecordingSession 会话生命周期\u003cbr/>onLive→connectDanmu / 断流重连 / drain\"]\n  end\n  subgraph L15[\"L1.5 · 平台轴(可插拔)\"]\n    bilibili[\"\u003cb>bilibili-live\u003c/b>\u003cbr/>bilibiliPlatform\u003cbr/>getStream + connectDanmu(WBI + 二进制 WS)\"]\n    douyin[\"\u003cb>douyin-live\u003c/b>\u003cbr/>douyinPlatform\u003cbr/>stream(a_bogus 取流) + danmaku(自有 TS WS)\"]\n    kuaishou[\"\u003cb>kuaishou-live\u003c/b>\u003cbr/>kuaishouPlatform\u003cbr/>取流 = 直播页 __INITIAL_STATE__(无弹幕)\"]\n  end\n  subgraph L1[\"L1 · 引擎轴(共享)\"]\n    engine[\"\u003cb>record-engine\u003c/b>\u003cbr/>通用 PollingRecorder\u003cbr/>下载引擎: ffmpeg(.ts) / mesio(.flv)\"]\n  end\n  subgraph L05[\"L0.5 · 可观测性 / 上传驱动\"]\n    observ[\"\u003cb>observability\u003c/b>\u003cbr/>Notifier / EventCenter / 日志\"]\n    uprt[\"\u003cb>upload-runtime\u003c/b>\u003cbr/>UploadTarget 通用驱动\u003cbr/>(阶段 0:契约 + 注入接口)\"]\n  end\n  subgraph L04[\"L0.4 · 处理器实现\"]\n    procs[\"\u003cb>processors\u003c/b>\u003cbr/>remux 处理器(校验 / 原地转换 / recover);加处理器 = 一个模块 + 注册一行\"]\n  end\n  subgraph L035[\"rank 0.35\"]\n    zeroup[\"\u003cb>zero-upload\u003c/b>\u003cbr/>0 落盘流式直传(自研 UPOS)\u003cbr/>live-pump: 一段一 ffmpeg 边录边传\"]\n  end\n  subgraph L03[\"L0.3 · 处理任务队列\"]\n    procq[\"\u003cb>proc-queue\u003c/b>\u003cbr/>ProcQueueStore 持久任务表(sqlite)\u003cbr/>ProcRunner 租约 / 心跳 / fencing / 关停\"]\n  end\n  subgraph L02[\"rank 0.2\"]\n    post[\"\u003cb>post-process\u003c/b>\u003cbr/>concat / burn / ass / merge / ffmpeg / fonts\"]\n  end\n  subgraph L0[\"L0 · 基础叶子\"]\n    core[\"\u003cb>core\u003c/b>\u003cbr/>Platform / DownloadEngine 契约\u003cbr/>+ 注册表 + types/config/notify/api-types\"]\n    extra[\"\u003cb>ffmpeg-recorder-extra\u003c/b>\u003cbr/>logStreamMeta + detectDevice\"]\n  end\n\n  cli --> app\n  cli --> bilibili\n  cli --> core\n  cli --> douyin\n  cli --> kuaishou\n  cli --> manager\n  cli --> observ\n  cli --> orch\n  cli --> post\n  cli --> procq\n  cli --> procs\n  cli --> engine\n  cli --> zeroup\n  orch --> core\n  orch --> post\n  app --> core\n  app --> douyin\n  app --> manager\n  app --> observ\n  app --> post\n  app --> procq\n  app --> procs\n  app --> engine\n  app --> zeroup\n  manager --> core\n  bilibili --> core\n  douyin --> core\n  douyin --> extra\n  kuaishou --> core\n  engine --> core\n  engine --> extra\n  observ --> core\n  uprt --> core\n  procs --> core\n  procs --> post\n  procs --> zeroup\n  zeroup --> core\n  zeroup --> post\n  procq --> core\n  post --> core\n\n  classDef axisPlat fill:#dcfce7,stroke:#16a34a,color:#14532d;\n  classDef axisEng fill:#ffedd5,stroke:#ea580c,color:#7c2d12;\n  class bilibili,douyin,kuaishou axisPlat;\n  class engine axisEng;"
 }</script>
 <script>
   const root = document.documentElement;

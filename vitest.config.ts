@@ -55,6 +55,8 @@ export default defineConfig({
       // processors 的入口 re-export 它,别名顺序不影响结果但指明了归属。
       "@drec/zero-upload": fileURLToPath(new URL("./packages/zero-upload/src/index.ts", import.meta.url)),
       "@drec/post-process": fileURLToPath(new URL("./packages/post-process/src/index.ts", import.meta.url)),
+      // 上传目标通用驱动(plans/049):阶段 0 只有接口,没有任何生产路径 import 它。
+      "@drec/upload-runtime": fileURLToPath(new URL("./packages/upload-runtime/src/index.ts", import.meta.url)),
       "@drec/douyin-live": fileURLToPath(new URL("./packages/douyin-live/src/index.ts", import.meta.url)),
       "@drec/record-engine": fileURLToPath(new URL("./packages/record-engine/src/index.ts", import.meta.url)),
       "@drec/ffmpeg-recorder-extra": fileURLToPath(new URL("./packages/ffmpeg-recorder-extra/src/index.ts", import.meta.url)),
