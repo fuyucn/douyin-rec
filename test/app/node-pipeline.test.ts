@@ -62,13 +62,21 @@ vi.mock("@drec/post-process", async (orig) => {
 });
 
 // biliup 上传外部进程换成 spy(issue #2 A3：幂等重入须证明「有 bv → 绝不重复 uploadPlain」)。
-vi.mock("../../packages/app/src/upload/biliup.js", () => ({
-  uploadPlain: vi.fn(async () => "BV1NEW"),
-  appendGroup: vi.fn(async () => {}),
-  countVideoParts: vi.fn(async () => null),
-  runBiliup: vi.fn(async () => ""),
-  isAllFilesUploadedLine: (line: string) => /All files uploaded successfully/.test(line),
-}));
+// 上传走 `UploadTarget`(阶段 1b-4),假 target 里包的就是下面这两个 spy ——
+// 断言仍数此次数,但生产侧不能再直接调旧函数。
+vi.mock("../../packages/app/src/upload/biliup.js", async () => {
+  const { fakeUploadTarget } = await import("@drec/core");
+  const uploadPlain = vi.fn(async () => ("BV" + "1NEW"));
+  const appendGroup = vi.fn(async () => {});
+  return {
+    uploadPlain,
+    appendGroup,
+    createBiliupFileTarget: () => fakeUploadTarget({ uploadPlain, appendGroup }),
+    countVideoParts: vi.fn(async () => null),
+    runBiliup: vi.fn(async () => ""),
+    isAllFilesUploadedLine: (line: string) => /All files uploaded successfully/.test(line),
+  };
+});
 
 const silence = (): void => {};
 const tmp = (): string => join(mkdtempSync(join(tmpdir(), "node-gate-")), "x.db");
@@ -796,18 +804,18 @@ describe("issue #2 A3:执行体幂等重入(有 bv 绝不重复建稿)", () => {
     vi.mocked(uploadPlain).mockReset();
     const seen: string[] = [];
     const step = (): string => { const r = readNodeResult(sub); return `${r?.phase}/${r?.step}`; };
-    vi.mocked(runBiliup).mockImplementation((async (_argv: string[], hooks?: { onSpawn?: (p?: number) => void; onLine?: (l: string) => void }) => {
+    // 上传走 target:子进程的 spawn/line 变成 target 的 hooks,由这里假扮 biliup 逐拍回调。
+    const child = async (o: { hooks?: { onSpawn?: (p?: number) => void; onLine?: (l: string) => void } }): Promise<void> => {
       seen.push(`before:${step()}`);
-      hooks?.onSpawn?.(4242);
+      o.hooks?.onSpawn?.(4242);
       seen.push(`spawned:${step()}`);
-      hooks?.onLine?.("uploading part 1/1");
+      o.hooks?.onLine?.("uploading part 1/1");
       seen.push(`midway:${step()}`);
-      hooks?.onLine?.("All files uploaded successfully, checkpoint removed");
+      o.hooks?.onLine?.("All files uploaded successfully, checkpoint removed");
       seen.push(`all-uploaded:${step()}`);
-      return "ok";
-    }) as never);
-    vi.mocked(uploadPlain).mockImplementation(async (o) => { await o.run!(["upload"]); return "BV1STEP"; });
-    vi.mocked(appendGroup).mockImplementation(async (o) => { await o.run!(["append"]); });
+    };
+    vi.mocked(uploadPlain).mockImplementation(async (o) => { await child(o as never); return "BV1STEP"; });
+    vi.mocked(appendGroup).mockImplementation(async (o) => { await child(o as never); });
     const r = await runNodeSidePipeline(spec, silence, gate);
     expect(r.ok).toBe(true);
     expect(seen.slice(0, 4)).toEqual([
@@ -828,11 +836,7 @@ describe("issue #2 A3:执行体幂等重入(有 bv 绝不重复建稿)", () => {
     const { spec, gate } = scene();
     vi.mocked(appendGroup).mockReset();
     vi.mocked(uploadPlain).mockReset();
-    vi.mocked(runBiliup).mockImplementation((async (_argv: string[], hooks?: { onSpawn?: (p?: number) => void }) => {
-      hooks?.onSpawn?.(1);
-      return "ok";
-    }) as never);
-    vi.mocked(uploadPlain).mockImplementation(async (o) => { await o.run!(["upload"]); return "BV1SOFT"; });
+    vi.mocked(uploadPlain).mockImplementation(async (o) => { await o.hooks!.onSpawn!(1); o.hooks!.onLine!("All files uploaded successfully"); return "BV1SOFT"; });
     vi.mocked(appendGroup).mockImplementation(async () => {});
     // 只让「step=transfer」的那次落盘(rename)失败,其余照常 → 上传仍应成功
     const fsMod = await import("node:fs");
@@ -1157,10 +1161,12 @@ describe("节点侧:.ts 直传的安全边界(审查补测)", () => {
     const { spec, gate } = scene({});
     const r = await runNodeSidePipeline(spec, silence, gate);
     expect(r.ok).toBe(true);
-    const created = vi.mocked(uploadPlain).mock.calls[0]![0] as { plain: { video: string } };
-    expect(created.plain.video).toMatch(/\.ts$/);
-    expect(created.plain.video).toContain("/.upload/");
-    const appended = vi.mocked(appendGroup).mock.calls[0]![0] as { files: string[] };
+    const created = vi.mocked(uploadPlain).mock.calls[0]![0] as { video: string };
+    expect(created.video).toMatch(/\.ts$/);
+    expect(created.video).toContain("/.upload/");
+    const appended = vi.mocked(appendGroup).mock.calls[0]![0] as { files: string[]; public?: boolean };
+    // 默认私有:target 的 policy 由 `public` 决定,这里钉住一次,免得将来把它改成恒 true 也没人发现。
+    expect(appended.public).toBe(false);
     expect(appended.files[0]).toMatch(/\.ts$/);
     expect(vi.mocked(remuxSegment)).not.toHaveBeenCalled();
   });

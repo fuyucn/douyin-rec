@@ -6,7 +6,7 @@
  *   - append 走 `appendGroup`（逐线路重试 + 分 P 数回读 + 不确定标记），不是裸 `run`。
  * 本文件只做三件事：契约输入 → 既有函数入参、返回值 → `proof`、错误 → core 的分类。
  *
- * 不接任何生产路径：orchestrator / app / node-pipeline 仍走旧实现，直到阶段 1b。
+ * 已是全部生产路径的唯一入口：orchestrator / app / node-pipeline 仍走旧实现，直到阶段 1b。
  */
 import { createHash } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";

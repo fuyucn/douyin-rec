@@ -11,18 +11,18 @@
  *
  * 本模块在**节点**上执行(`_node-pipeline` 隐藏子命令)。复用:
  *   - @drec/post-process 的 remuxSegment / mergeSession / ffprobeDuration
- *   - @drec/app 的 uploadPlain / appendGroup(biliup)
+ *   - @drec/app 的 UploadTarget(biliup,经 createArchive / appendArchive)
  *   - core 的 title-template(与 master 同源的产物命名/稿件标题)
  */
 import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, openSync, closeSync, fsyncSync, renameSync } from "node:fs";
 import path from "node:path";
 import {
   addArchiveToSeasonIfConfigured, seasonCheckpointState, linkOrCopy, biliAccountKey, biliAccountKeyFromCookiesJson, resolveSubmissionTitle, formatPartTitle, isAppendAmbiguous,
-  isUploadRateLimited, normalizeNodeResultFile, openUploadLimitStore, openUploadSlot, partTitleToFilename, resolveOutputStem, sanitizeStreamKey, stageSessionDir,
+  isUploadRateLimited, createArchive, appendArchive, normalizeNodeResultFile, openUploadLimitStore, openUploadSlot, partTitleToFilename, resolveOutputStem, sanitizeStreamKey, stageSessionDir,
   processTimeZone, stampedSessionBaseOf as sessionBaseOfFile, STAGE_EXT_ALT, UploadGate, freeGBOf, type UploadSlot, type NodePipelineResult, type NodePipelineResultFile, type NodePipelineSpec, type NodeUploadStep, type UploadGateStore,
 } from "@drec/core";
 import { ffprobeDuration, mergeSession, planSegmentGroups, remuxSegment, unreadableParts } from "@drec/post-process";
-import { appendGroup, countVideoParts, isAllFilesUploadedLine, runBiliup, uploadPlain } from "./upload/biliup.js";
+import { countVideoParts, createBiliupFileTarget, isAllFilesUploadedLine } from "./upload/biliup.js";
 import { procQueueDbPath, rootBiliupCookies, rootDbPath, rootStageDir, readOutputLayout } from "./paths.js";
 
 /**
@@ -790,10 +790,13 @@ export async function runNodeSidePipeline(
     }
   };
   // biliup 起进程 = 配额已拿到、开始传输;打印 `All files uploaded` = 传完、进入提交。
-  const observedRun = (argv: string[]): Promise<string> => runBiliup(argv, {
+  // 起进程 = 配额已拿到、开始传输;打印 `All files uploaded` = 传完、进入提交。
+  // 这两件事经 `UploadChildHooks` 上报(阶段 1b-4),不再自己拼 runBiliup 的 argv。
+  const uploadHooks = {
     onSpawn: () => markStep("transfer"),
-    onLine: (line) => { if (isAllFilesUploadedLine(line)) markStep("submit"); },
-  });
+    onLine: (line: string) => { if (isAllFilesUploadedLine(line)) markStep("submit"); },
+  };
+  const uploadTarget = createBiliupFileTarget();
   const startSeason = (bvid: string, confirmed: number, reconcileFirst: boolean): void => {
     seasonTail = seasonTail.then(async () => {
       const season = await addArchiveToSeasonIfConfigured({
@@ -828,7 +831,7 @@ export async function runNodeSidePipeline(
     } else {
       bv = await withGate(uploadGate, accountKey, () =>
         withRetry(
-          () => uploadPlain({ plain: { ...meta, video: aliasFor(parts[0]!.plain, 1, totalParts), title }, run: observedRun }),
+          () => createArchive(uploadTarget, { ...meta, video: aliasFor(parts[0]!.plain, 1, totalParts), title }, uploadHooks),
           { tries: 3, backoffMs: 60_000, shouldRetry: isUploadRateLimited },
         ),
       );
@@ -856,10 +859,10 @@ export async function runNodeSidePipeline(
         withRetry(
           // countParts 与 master 路径同一装配:失败后回读分 P 数 → 变多=已提交(跳过)、没变=安全重试、
           // 查不到=抛 ambiguous 转人工;缺它则「已提交但响应丢失」会换线重复追加分 P(#59)。
-          () => appendGroup({
-            ...meta, bv, files: [aliasFor(p.plain, i + 1, totalParts)], run: observedRun,
+          () => appendArchive(uploadTarget, {
+            bv, files: [aliasFor(p.plain, i + 1, totalParts)], cookies, public: meta.public === true,
             countParts: () => countVideoParts(bv, cookies),
-          }),
+          }, uploadHooks),
           { tries: 5, backoffMs: 60_000, shouldRetry: (e) => isUploadRateLimited(e) || !isAppendAmbiguous(e) },
         ),
       );
