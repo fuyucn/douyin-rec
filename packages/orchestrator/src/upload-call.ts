@@ -27,7 +27,9 @@ export async function createArchive(upload: UploadTarget, opts: UploadOpts): Pro
     files,
     policy: policyOf(opts),
     desc: opts.desc,
-    tags: opts.tag ? opts.tag.split(",").map((t) => t.trim()).filter(Boolean) : [],
+    // **原样透传**:旧链把 `tag` 整个交给 biliup 的 `--tag`,不切分、不 trim。target 侧再
+    // `.join(",")` 还原,所以这里必须放一个元素,拆开再拼会把 "a, b" 变成 "a,b"。
+    tags: opts.tag ? [opts.tag] : [],
     tid: opts.tid,
   });
   if (r.proof !== "created" || !r.ref?.id) {

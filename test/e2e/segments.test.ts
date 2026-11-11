@@ -147,7 +147,7 @@ describe("e2e: 半成品产物(issue #140)", () => {
         },
         upload: fakeUploadTarget({
           uploadPlain: async (o) => {
-            const p = String((o as { videos?: string[] }).videos?.[0] ?? "");
+            const p = String((o as { video?: string; videos?: string[] }).video ?? (o as { videos?: string[] }).videos?.[0] ?? "");
             uploaded.push({ path: p, body: existsSync(p) ? readFileSync(p, "utf-8") : "(missing)" });
             return s.fake.uploadPlain({ video: p } as never);
           },

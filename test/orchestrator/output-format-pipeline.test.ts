@@ -122,9 +122,10 @@ describe("合并路径产物容器", () => {
     const r = await runPipeline(b, deps);
     expect(r.state).toBe("done");
     expect(cmds().find((c) => c.includes(" merge "))).not.toContain("--format");
-    const video = ((deps as unknown as never).uploadPlain.mock.calls[0]![0] as { video: string }).video;
+    const sent = (deps as unknown as { upload: { uploadPlain: { mock: { calls: Array<[{ video: string }]> } } } }).upload.uploadPlain.mock.calls[0]![0];
+    const video = sent.video;
     expect(video.endsWith(".mp4")).toBe(true);
-    for (const c of ((deps as unknown as { appendGroup: { mock: { calls: Array<[{ files: string[] }]> } } }).appendGroup.mock.calls as Array<[{ files: string[] }]>).flatMap((x) => x[0].files)) {
+    for (const c of (deps as unknown as { upload: { appendGroup: { mock: { calls: Array<[{ files: string[] }]> } } } }).upload.appendGroup.mock.calls.flatMap((x) => x[0].files)) {
       expect(c.endsWith(".mp4")).toBe(true);
     }
     deps.ledger.close();
@@ -178,8 +179,8 @@ describe("分段路径产物容器(mergeSegments=false,存档)", () => {
     const r = await runPipeline(SEG_BC(), h.deps);
     expect(r.state).toBe("done");
     expect(h.remuxOuts.every((p) => p.endsWith(".mp4"))).toBe(true);
-    const uploaded = (h.deps as unknown as { upload: { uploadPlain: Mock } }).upload.uploadPlain.mock.calls[0]![0] as { videos: string[] };
-    expect(uploaded.videos[0]!.endsWith(".mp4")).toBe(true);
+    const uploaded = (h.deps.upload as unknown as { uploadPlain: Mock }).uploadPlain.mock.calls[0]![0] as { videos?: string[]; video?: string };
+    expect((uploaded.video ?? uploaded.videos?.[0]!).endsWith(".mp4")).toBe(true);
     h.deps.ledger.close();
   });
 });

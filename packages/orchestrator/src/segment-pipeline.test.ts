@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { SyncLedger } from "./ledger.js";
 import type { PipelineDeps } from "./pipeline.js";
 import { runSegmentPipeline, sessionWindowOffsets, splitGroupsBySession, derivePartXmlPath, planPartXmlDerivation } from "./segment-pipeline.js";
+import { fakeUploadTarget } from "./test-target.js";
 
 /** 供 planPartXmlDerivation 的构造件(window 为 null = 无弹幕段)。 */
 const part = (index: number, window: { startSec: number; endSec: number; xmlPath: string } | null) => ({
@@ -145,8 +146,7 @@ describe("runSegmentPipeline season checkpoint", () => {
       transports: new Map(),
       ledger,
       sh: async () => {},
-      uploadPlain,
-      appendGroup,
+      upload: fakeUploadTarget({ uploadPlain, appendGroup }),
       remuxSegment: async (_src: string, out: string) => {
         mkdirSync(dirname(out), { recursive: true });
         writeFileSync(out, "x");

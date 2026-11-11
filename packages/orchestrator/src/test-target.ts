@@ -22,8 +22,10 @@ export function fakeUploadTarget(o: {
     defaults: () => ({ tid: 21, tags: [], titleMaxLength: 80, maxParts: null }),
     async create(input: CreateArchiveInput) {
       const videos = input.files.map((f) => f.path);
+      // 与旧链同形:单文件走 `video`、多文件走 `videos`(既有用例就是这么断言的)。
+      const payload = videos.length === 1 ? { video: videos[0] } : { videos };
       const bv = await (o.uploadPlain ?? (async () => "BV1FAKE"))({
-        videos,
+        ...payload,
         cookies: input.cred.locator,
         title: input.title,
         tid: input.tid ?? 21,

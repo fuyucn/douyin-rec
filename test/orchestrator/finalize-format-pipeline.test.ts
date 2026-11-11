@@ -138,8 +138,8 @@ describe("T9b 接线:done + 清理之后才派发", () => {
     const h = makeHarness({ outputFormat: "mkv" });
     h.deps.ledger.upsertPending(STREAM_KEY);
     await runPipeline(broadcast(tsFiles), h.deps);
-    const video = ((h.deps as unknown as { upload: { uploadPlain: Mock } }).upload.uploadPlain as Mock).mock.calls[0]![0] as { videos: string[] };
-    expect(video.videos[0]!.endsWith(".mp4")).toBe(true);
+    const video = ((h.deps as unknown as { upload: { uploadPlain: Mock } }).upload.uploadPlain as Mock).mock.calls[0]![0] as { video?: string; videos?: string[] };
+    expect((video.video ?? video.videos?.[0]!).endsWith(".mp4")).toBe(true);
     h.deps.ledger.close();
   });
 

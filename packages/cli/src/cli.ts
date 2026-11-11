@@ -1492,7 +1492,7 @@ const hubStarter: HubStarter = {
     const { ffprobeVideo } = await import("@drec/post-process");
     const { handleEnqueue, handleProcStatus, handleProcCancel } = await import("@drec/app");
     const { statSync } = await import("node:fs");
-    const { uploadPlain, appendGroup, countVideoParts, hubStore, resolveRuleSyncRoom, desiredSpecsForWorker, workerStore, rootHubDir, rootHubConfig, rootConfigDir, rootStageDir, rootLogsDir, drecRoot, listNodeTasks, applyRemoteTasks, recordRoomSessions } = await import("@drec/app");
+    const { countVideoParts, hubStore, resolveRuleSyncRoom, desiredSpecsForWorker, workerStore, rootHubDir, rootHubConfig, rootConfigDir, rootStageDir, rootLogsDir, drecRoot, listNodeTasks, applyRemoteTasks, recordRoomSessions } = await import("@drec/app");
     const { FileLogger } = await import("@drec/observability");
     const { recordExpectedVersion, recordSyncError, cookiesFingerprint, readCookiesApplied, recordCookiesApplied, shouldPushCookies, cookiesPushVerdict, collectPlatformCookies } = await import("@drec/app");
 
