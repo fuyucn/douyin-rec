@@ -10,8 +10,10 @@
 上下文只用来拼接跨行凭证,命中必须落到新增行上)。
 规则与上面一致,额外四条约定(只为让源码里的正常引用不误报,隐私向的规则不放松):
   - 源码类文件(.ts/.tsx/.mjs/.js/.py/.sh/.yml/.yaml)的新增行不套「文件名」「凭证类」
-    「主机名」「streamKey」四条语义词规则(代码和测试夹具里写 foo.ts / cookie / vps2 /
+    「主机名」「streamKey」「登录会话键值」五条语义词规则(代码和测试夹具里写 foo.ts / cookie / vps2 /
     douyin:xxx 是这个仓库的日常);房间号长数字 / BV / IP / 本机路径仍然拦。
+  - 「登录会话键值」只在带值形态命中(`cookie=...`、`Cookie: ...`、JSON 字段带值);文档里讨论
+    「会话 cookie 判定」「cookie 提示文案」这类技术术语不算泄漏(#606)。
   - 文档等非源码文件全规则生效,但「文件名」命中的名字若是仓库里**现有**文件的 basename
     (`git ls-files` + 工作区未跟踪文件 + `--known-files` 传入的 PR 改动文件)视为源码文件名放行;
     录像/字幕/产物类文件名(仓库里不存在的)仍然拦。
@@ -39,7 +41,9 @@ FILENAME_RULE = "文件名"
 # Generated output and .json: only the role-name / filename rules are waived.
 NARROW_SKIP_RULES = {FILENAME_RULE, "主机名"}
 # 源码里是语义词/夹具、不是泄露的规则:--diff 模式下对源码类文件不生效。
-CODE_SKIP_RULES = {FILENAME_RULE, "主机名", "streamKey", "cookie/webhook"}
+CODE_SKIP_RULES = {FILENAME_RULE, "主机名", "streamKey", "凭证类", "会话词键值"}
+# 只描述「凭据放在哪」的通用文件名:文件本身不含值,任何目标都用这几个名字。
+GENERIC_NAMES = {"cookies.json", "cookies.txt", "cookie.json", "cookie.txt"}
 
 
 # 已知源码名 = 仓库里真实存在的文件名。未跟踪部分很关键：PR 新增文件在 CI/本地 checkout 里
@@ -63,7 +67,7 @@ def known_names() -> set[str]:
 RULES: list[tuple[str, str, str]] = [
     ("房间号/长数字", r"(?<!\d)\d{8,}(?!\d)", "抖音/B站房间号、taskId、aid 等"),
     ("BV 号", r"BV[0-9A-Za-z]{8,}", "B站稿件号"),
-    ("IP 地址", r"(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)", "节点 IP"),
+    ("IP 地址", r"(?<!\d)(?!(?:0\.0\.0\.0|127\.0\.0\.1|255\.255\.255\.255)\b)(?:\d{1,3}\.){3}\d{1,3}(?!\d)", "节点 IP"),
     # /root/ /mnt/ 只拦独立出现的绝对路径(左边界防 "$t/root/x" 这类相对拼接),并放行容器标准路径
     # /root/.ssh、/root/.cache(Dockerfile/compose 常规写法),否则 CI 会硬拦正常基础设施改动。
     # /srv/ 不拦:文档与 e2e 脚本大量用 /srv/... 作示例/默认安装路径,误报远多于真实泄漏。
@@ -71,7 +75,12 @@ RULES: list[tuple[str, str, str]] = [
      "家目录、节点路径"),
     ("streamKey", r"\b(?:douyin|bilibili|kuaishou):[\w:.\-]+", "内部场次键"),
     ("文件名", r"\b\w[\w.\-]*\.(?:ts|mp4|flv|xml|ass|json)\b", "录像/字幕文件名"),
-    ("cookie/webhook", r"(?i)\b(?:cookie|webhook|token|secret|authkey)\b", "凭证类"),
+    # 凭证类裸词:webhook / secret / authkey(它们几乎只以具体凭据名出现)。
+    ("凭证类", r"(?i)\b(?:webhook|secret|authkey)\b", "凭证类"),
+    # token / cookie 这类**技术术语**只在键值/头部/Bearer 带值形态拦:文档里「token / 密码检查」
+    # 「会话 cookie 判定」是技术写作常态(#606),泄漏的是 `token=...` / `Cookie: ...` /
+    # "token": "..." / Bearer <长串> 这类带值写法。
+    ("会话词键值", r"(?i)(?:\bset-cookie\b|\bcookie(?:s)?_?header\b|(?:^|[^\w])(?:cookie|cookies|token)\s*[:=]\s*[^\s,;)\]]|\"(?:cookie|cookies|token)\"\s*:\s*\"|\bBearer\s+[A-Za-z0-9._~+/=\-]{16,})", "登录会话键值"),
     # Login-cookie key/value pairs (douyin / bilibili / kuaishou session keys) with a real-looking value.
     ("登录凭证键值", r"(?i)\b(?:sessionid(?:_ss)?|sid_guard|sid_tt|uid_tt|odin_tt|ttwid|passport_csrf_token|"
      r"sessdata|bili_jct|dedeuserid(?:__ckmd5)?|buvid3|kuaishou\.server\.web_(?:st|ph))"
@@ -116,7 +125,7 @@ def scan(text: str, source: str) -> list[str]:
             for match in re.finditer(pattern, line):
                 # Same exemption as diff mode: a filename that is a tracked repo file is source code,
                 # not a recording artifact (audit/design docs cite source filenames all the time).
-                if name == FILENAME_RULE and Path(match.group(0)).name in known:
+                if name == FILENAME_RULE and (Path(match.group(0)).name in known or match.group(0).lower() in GENERIC_NAMES):
                     continue
                 hits.append(
                     f"{source}:{lineno}: [{name}] {why} -> {match.group(0)!r}"
@@ -223,7 +232,7 @@ def scan_diff(base: str) -> tuple[list[str], list[str]]:
             if name in skip:
                 continue
             for match in re.finditer(pattern, line):
-                if name == FILENAME_RULE and Path(match.group(0)).name in known:
+                if name == FILENAME_RULE and (Path(match.group(0)).name in known or match.group(0).lower() in GENERIC_NAMES):
                     continue
                 hits.append(f"{path}:{lineno}: [{name}] {why} -> {match.group(0)!r}")
     flush_block()

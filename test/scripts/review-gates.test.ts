@@ -426,6 +426,17 @@ describe("issue-guard.py --diff", () => {
     expect(r.status).toBe(1);
     expect(r.stderr).toContain("BV 号");
   });
+  it("文档里的技术词与保留地址不算泄漏,带值写法照拦(#606)", () => {
+    const { d, g } = repo();
+    appendFileSync(join(d, "docs", "a.md"), "没有 token / 密码检查;compose 默认 0.0.0.0;凭据路径 …/cookies.json\n"); // issue-guard: allow
+    g("commit", "-qam", "c1");
+    expect(guard(d).status).toBe(0);
+    appendFileSync(join(d, "docs", "a.md"), "token=abcdef123456\n"); // issue-guard: allow
+    g("commit", "-qam", "c2");
+    const r = guard(d);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("会话词键值");
+  });
   it("源码里的文件名/cookie 字样放行,IP 仍拦", () => {
     const { d, g } = repo();
     writeFileSync(join(d, "x.ts"), "const f = 'foo.ts'; // cookie token\n");
