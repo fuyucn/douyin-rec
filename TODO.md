@@ -839,6 +839,12 @@
 
 ## 已完成
 
+- [x] **T-190 live-pump 收尾超时断言贴着理论值，慢机必翻（issue [#622](https://github.com/fuyucn/douyin-rec/issues/622) → PR [#623](https://github.com/fuyucn/douyin-rec/pull/623)，2026-11-11）** — **做什么**:把「收尾忽略 abort」用例的对照值 2500 → 5000、阈值 2000 → 3000、尾部等待改为对照值 + 200。**为什么**:理论值 200(预算)+1500(grace)≈1780，阈值 2000 只剩 220ms 余量；本地全量 5 轮红 4 轮、CI 也红过一条（2161ms）。**验收**:该文件 219 passed;变异（阈值收回 1000）两个模式都红在 1788/1783ms。**版本**:无需 bump + 理由（只改测试文件，不进 dist）。（2026-11-11 合并）
+
+- [x] **T-189 README 包数量与实际不符（issue [#620](https://github.com/fuyucn/douyin-rec/issues/620) → PR [#621](https://github.com/fuyucn/douyin-rec/pull/621)，2026-11-11）** — **做什么**:README 两处包数量改为 18;`test/arch/layering.test.ts` 加断言「README 包数 == `packages/` 子包总数(含 web)」。**为什么**:三处口径各自为政(workspace 成员 17、目录 18、@drec 命名 17)，人记的数字合并三个包后必过期。**验收**:6 passed;变异(README 写回 13)报出「实际 18」。**版本**:无需 bump + 理由（文档 + 既有守护文件）。（2026-11-11 合并）
+
+- [x] **T-188 上传开关未知取值静默开启（H-972…H-976 收敛，issue [#618](https://github.com/fuyucn/douyin-rec/issues/618) → PR [#619](https://github.com/fuyucn/douyin-rec/pull/619)，2026-11-11）** — **做什么**:core 新增 `parseStrictBoolFlag`(未知值返回 `{ok:false,error}`)，`record` 两个上传开关与 `task add/edit` 全部接严格解析并在副作用前 `exit 2`；`rollingQueueMode` 未知值回退关闭;五张堆叠卡(基线→解析→接线→注释→翻转)收敛成一个 PR。**为什么**:宽松解析把任何未知词都当「开启」，一个笔误就能打开上传路径。**验收**:`test/cli` 195 passed;变异(未知即开启)多条红;gpt-6.1-sol APPROVE。**版本**:0.0.357 → 0.0.358。（2026-11-11 合并，待部署实跑确认 `record --rolling-upload nope` 不上传）
+
 - [x] **T-187 biliup 上传目标包装与 argv 对拍（审计 P1-1 阶段 1a，issue [#614](https://github.com/fuyucn/douyin-rec/issues/614) → PR [#615](https://github.com/fuyucn/douyin-rec/pull/615)，2026-11-11）** — **做什么**:新包 `@drec/bilibili-upload`（rank 0.5）把既有 biliup 链包装成 `UploadTarget`：建稿走 `uploadPlain`（线路重试）、append 走 `appendGroup`（分 P 数回读 + 不确定标记），本包只做契约输入映射与 proof 翻译；argv 用写死的 golden 数组对拍（不再拿同一个 builder 自证）；core 新增 `PLAIN_NO_BV_MARKER` 结构化标记 + 守护测试扫全部抛错点；架构登记四处同步（18 包）。**为什么**:上传目标抽象停在契约层，10 条上传路径各自重写建稿/追加/重试；阶段 1b 接线前必须先有一个「行为等价」的真实目标。**验收**:argv 与旧链逐字一致（4 处变异全红）、零生产接入（orchestrator/app 无 import）、18 条用例 + 全量 test/typecheck/arch check 绿；gpt-6.1-sol 三轮复核后 APPROVE。（2026-11-11 合并，version 0.0.357，待部署确认无感）
 
 - [x] **T-186 roadmap 与台账失真：Phase 0 全做完没打勾，进行中 85 项（issue [#612](https://github.com/fuyucn/douyin-rec/issues/612)，2026-11-11）** — **做什么**:新增 `docs/roadmap.md` 作为唯一进度入口（合并 plans/045 的 Phase 0–4 与 11-10 架构审计的 P0/P1/P2）；把本轮合并的 7 条从「进行中」移入已完成、补登记 4 条新票，不碰未核实的 78 条历史条目。**为什么**:plans/045 的 Phase 0 已全部 CLOSED 却一条没打勾；TODO.md「进行中」85 项（规则最多 1–2 项）；问「下一步做什么」时两份文档都答不出来。**验收**:roadmap 能回答「现在在哪、下一步做哪几项」；进行中条目不再含已合并票；纯文档不影响 test/typecheck。（2026-11-11，无 bump）
