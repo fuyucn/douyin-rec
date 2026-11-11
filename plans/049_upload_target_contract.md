@@ -302,6 +302,54 @@ verify
 
 每个阶段单独 PR；阶段 0/1 先做，阶段 2 需要真实稿件验证 UPOS 封面行为。
 
+### 8.1 阶段 1b 执行清单（上传轴接线）
+
+阶段 1a 交付了 `@drec/bilibili-upload`，但是**零接入**。接线之前先认清现实：上传路径不是一条，是**五条
+并行的**，各有自己的幂等、重试与台账语义。把它们一次全改，等于一次改五套行为——这正是审计说的「上传轴
+散落」。所以 1b 必须分批。
+
+| 路径 | 建稿 | append | 装配点 |
+|---|---|---|---|
+| workflow（节点式） | `orchestrator/workflow.ts:229` | `:348` | `app/node-pipeline.ts` 注入 |
+| 分段 | `orchestrator/segment-pipeline.ts:571-573` | `:626`、`:732`、`:864` | 同上 |
+| 合并续跑（只补 append） | —（已有 bv 绝不重建） | `orchestrator/pipeline.ts:1550-1551` | 同上 |
+| 滚动上传 | `app/rolling-upload.ts:1355`（`uploadPlainRaw ?? uploadPlain`） | `:1377` | app 直连 |
+| 处理器 | `processors/biliup.ts:298`、`processors/upload-part.ts:117` | `biliup.ts:359`、`upload-part.ts:121` | 直接 import `run-biliup` |
+
+装配面：`cli/cli.ts:1857-1860`（把旧函数塞进 pipeline deps）、`app/node-pipeline.ts:831`/`:859`、
+`app/rolling-upload.ts:1355`。
+
+**分批（每批单独 PR、可回滚）**：
+
+| 批 | 内容 | 行为 | 决策门 |
+|---|---|---|---|
+| 1b-1 | workflow 两处（`:229` 建稿、`:348` append）改经 `UploadTarget`；app 侧提供把旧函数包成 target 的适配器；`cli` 装配注入 | argv/重试/分 P 回读等价；`proof: unknown` 有意改变（见下） | **needs-decision** |
+| 1b-2 | 分段路径四处接 target | 同上 | **needs-decision** |
+| 1b-3 | 滚动上传接 target（`uploadPlainRaw`/`appendGroupRaw` 收进 target） | 同上 | **needs-decision** |
+| 1b-4 | 处理器路径接 target（`biliup.ts` / `upload-part.ts`） | 同上 | **needs-decision** |
+| 1b-5 | `run-biliup` / `biliup-progress` / `biliup` 从 `processors` 纯搬进 `bilibili-upload`；删掉兼容字段与全部旧引用 | 纯迁移 | 纯迁移，走常规门禁 |
+
+**决策门说明**：上传是危险类（`docs/agent-workflow.md`），1b-1…1b-4 都改变生产上传路径，一律
+`needs-decision`，不得由 agent 自行 accept 或自动合并；哪怕是文档/计划 PR，也不构成豁免。
+
+**「等价」的边界要写清，别混为一谈**：
+
+- **等价**：argv 逐字一致、线路重试次数与换线顺序、`countVideoParts` 的分 P 数回读、cover/标题处理。
+  这些由 adapter 委托旧实现即可保证，可用 1a 的 golden argv 断言复验。
+- **有意改变**：`proof: unknown`。旧实现是「解析不到 BV → 抛错 → 上层 retry」，重试会再建一份稿
+  （B 站不可逆，只能删稿）。新契约是「不确定 → 不重试、转人工」。所以接 target 时**必须同批改上层**：
+  台账状态、通知文案、`needs_manual` 入口、以及「已有 bv 绝不重建」这条断言的判定来源。这不是包装层
+  能顺带完成的，要单独列进每个批次的验收项。
+
+**测试面**：全仓有 **32 个文件**出现过 `uploadPlain` / `appendGroup`（含 `test/e2e/harness/scenario.ts`
+这种集中 seam，以及 `workflow.test.ts`、`segment-pipeline.test.ts`、`reconciler.test.ts`、
+`node-upload-poll.test.ts` 等构造旧字段的测试）。因此 1b-1 的取舍是 **保留旧字段做兼容**：新增可选
+`uploadTarget`，传了就用 target、没传走旧字段。这样 1b-1 的 diff 只有两处调用点 + 适配器，32 个文件
+不动；1b-5 才连兼容字段一起删。
+
+**1b-5 的完成条件（防「兼容字段永久化」）**：全仓 `grep -rnE "uploadPlain|appendGroup" packages/ test/` 引用归零（只有 `bilibili-upload` 内部与 `run-biliup` 搬迁后的实现除外）、适配器文件删除、32 个文件里的
+旧字段全部迁移成 target、并且加一条守护测试断言「新代码不得出现 `uploadPlain(`/`appendGroup(` 直接调用」。
+
 ## §9 验收清单（对应审计「复审验收点」）
 
 - [ ] 新增假上传目标 + 假平台：一个包 + 一行注册；app/web/orchestrator 零改动；
