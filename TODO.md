@@ -14,7 +14,11 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
-<<<<<<< HEAD
+- [~] **T-180 Web 访问强制共享密钥 + 默认回环（#419 P1，issue [#600](https://github.com/fuyucn/douyin-rec/issues/600) → PR [#601](https://github.com/fuyucn/douyin-rec/pull/601)，2026-11-10）**
+  — **做什么**: `serve` 默认监听回环（`--host all` = 所有网卡）；非回环必须有共享密钥（环境变量优先，否则数据根 config 下 0600 密钥文件，缺失时首启生成）；新增 `/api/session` 登录（HttpOnly + SameSite=Strict 会话票据；API 支持 Bearer/自定义请求头）；除 `/api/version` 与 `/api/session` 外 `/api/*`（含 SSE）一律鉴权；Host 白名单去掉任意 IP；前端登录页；Docker/env/README 同步。
+  **为什么**: 审计 P0-1 的 Web API 完全无鉴权；Host 白名单放行任意 IP，组合默认所有网卡可被同网段/公网调用删任务、停录制、写登录态。
+  **验收**: 回环无密钥行为不变；非回环无密钥生成并强制鉴权；无密钥/错密钥 401、正确票据 200、版本公开；局域网地址默认 403，加入允许列表后放行；全量 test/typecheck/web build/bundle 绿。
+  **现状（2026-11-10）**: PR #601 已开，pr-gate PASS；待独立 review；未部署实测。
 - [~] **T-178 上传目标契约设计（审计 P1-1，issue [#597](https://github.com/fuyucn/douyin-rec/issues/597) → PR [#598](https://github.com/fuyucn/douyin-rec/pull/598)，2026-11-10）**
   — **做什么**: `plans/049_upload_target_contract.md`：core 的 `UploadTarget` 契约/注册表、`upload-runtime` 通用驱动、`bilibili-upload` 目标实现与两套传输、硬策略/凭据/账号键收敛、`proc-queue` 迁移与回滚、五阶段落地与未决问题。
   **为什么**: 上传目标完全没有抽象；建稿→append→重试写了 5 遍；B 站硬常量两份、可见性极性相反、凭据路径二十余处。

@@ -33,6 +33,7 @@ import { TaskLogStore } from "@drec/observability";
 import { NodeRecordSpawner } from "./process/spawner.js";
 import { sweepCredentialFiles } from "./process/credential-file.js";
 import { createWebServer, enableAccessStats } from "./web/server.js";
+import { resolveWebAuth, webTokenPath } from "./web/auth.js";
 import { HubWatch } from "./hub-watch.js";
 import { QrLoginManager } from "./login/login-manager.js";
 import { PlaywrightQrLogin } from "./login/qr-login.js";
@@ -75,7 +76,17 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
   const { getWebhook, hubStarter } = deps;
     const store = new TaskStore(o.db);
     const port = o.port !== undefined ? Number(o.port) : 7860;
-    const host = o.host?.trim() || undefined;
+    // issue #600:默认只监听回环；远程访问必须显式 --host + 共享密钥(见 resolveWebAuth)。
+    // `all` 是给部署模板用的别名（listen 时用 undefined = 所有网卡）。
+    const rawHost = o.host?.trim() || "localhost";
+    const listenHost = rawHost === "all" ? undefined : rawHost;
+    const auth = resolveWebAuth({ host: rawHost, root: drecRoot(), log: (m) => serveLog.info(m) });
+    const allowedHosts = rawHost === "all" ? [] : [rawHost];
+    if (auth) {
+      serveLog.info(`Web 访问鉴权已启用（远程访问密钥：${webTokenPath(drecRoot())} 或环境变量 DREC_WEB_TOKEN）`);
+    } else {
+      serveLog.info("Web 仅本机访问（默认回环；远程访问请显式 --host 并配置共享密钥）");
+    }
 
     // 时区由 config(settings.timezone)决定,不看 host/容器的 TZ 环境变量——覆盖式应用,
     // 启动就打日志,免得再靠挖 /proc/<pid>/environ 才能确认服务实际用的哪个时区(踩过的坑)。
@@ -302,6 +313,8 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     // 访问计数(精简审计用):只记路由名,30s 防抖落盘到 <root>/config/access-stats.json。
     const accessStats = enableAccessStats(join(rootConfigDir(), "access-stats.json"), (m) => serveLog.warn(m));
     const server = createWebServer({
+      auth,
+      allowedHosts,
       procActive: procRunnerRef ? () => procRunnerRef.active() : undefined,
       procPurge: procStoreRef ? (o) => ({ deleted: procStoreRef.gc({ purgeFailed: o.purgeFailed }) }) : undefined,
       store, manager, login, events, hubEnabled, syncDbPath, hubConfigPath: rootHubConfig(),
@@ -629,7 +642,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     process.on("SIGTERM", () => shutdown("SIGTERM"));
 
     const onListen = (): void => {
-      const displayHost = host && host !== "0.0.0.0" && host !== "::" ? host : "localhost";
+      const displayHost = listenHost ?? "localhost";
       serveLog.info(`Web 控制台已启动: http://${displayHost}:${port}`);
       if (daemon) {
         daemon.start();
@@ -643,6 +656,6 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     server.on("upgrade", (req, socket, head) => {
       if (!(hubEnabled && hubStarter?.fleetUpgrade?.(req, socket, head))) socket.destroy();
     });
-    if (host) server.listen(port, host, onListen);
+    if (listenHost) server.listen(port, listenHost, onListen);
     else server.listen(port, onListen);
 }

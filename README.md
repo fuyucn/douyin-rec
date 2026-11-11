@@ -165,7 +165,7 @@ docker compose down           # 停
 | `DATA_ROOT` | `./docker-data` | 宿主机**单一数据根** → 容器 `/output-data`（内部固定：`db/` `recordings/` `config/`） |
 | `TS_AUTHKEY` | 无（必填） | Tailscale 可复用 auth key（sidecar 用；docker 作 master 时经它够到 VPS） |
 | `PORT` | `7860` | Web UI 宿主机端口 |
-| `BIND` | `0.0.0.0` | 端口绑定网卡；有公网 IP 时建议改具体内网/Tailscale IP |
+| `BIND` | 所有网卡 | 端口绑定网卡；非回环访问强制要求 `DREC_WEB_TOKEN`（留空则首启生成密钥文件） |
 | `TZ` | `Asia/Shanghai` | 仅作容器启动前几毫秒 + `date` 等诊断命令的参考值；**调度实际用的时区由 config 决定**(`settings.timezone`,未设默认也是 `Asia/Shanghai`,启动时 `applyTimezone()` 覆盖 `process.env.TZ`,不看这个 env)。查/改走 `GET`/`POST /api/timezone`,或看启动日志 `[tz] 时区 = ...` |
 | `DISCORD_WEBHOOK` | 空 | 可选通知 |
 

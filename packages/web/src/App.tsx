@@ -2,11 +2,12 @@ import { useEffect, useState, type ReactNode } from "react";
 import { useSetAtom } from "jotai";
 import { Navigate, Route, Routes, useLocation, useParams } from "react-router-dom";
 import { Toaster } from "sonner";
-import { api } from "./api/client";
+import { api, type SessionInfo } from "./api/client";
 import { hubEnabledAtom, serverTimezoneAtom } from "./atoms";
 import { Footer } from "./layout/Footer";
 import { TopNav } from "./layout/TopNav";
 import { MasterOnly } from "./components/MasterOnly";
+import { LoginScreen } from "./components/LoginScreen";
 import { useRefreshCookie } from "./lib/hooks";
 import { useT } from "./lib/i18n";
 import { useEventNotifications } from "./lib/notifications";
@@ -69,8 +70,46 @@ function RoomByTaskRedirect(): ReactNode {
   return <Navigate to={{ pathname: target ?? "/rooms", search }} replace />;
 }
 
-/** App shell: nav + routed main + dark footer + toast host. */
+/**
+ * 会话探测只发一次：StrictMode 双挂载、并发渲染都复用同一个 promise。
+ * 后续的会话变化走 `drec:unauthorized` 事件；登录成功是整页重载，无需失效缓存。
+ */
+let sessionProbe: Promise<SessionInfo> | null = null;
+function probeSession(): Promise<SessionInfo> {
+  // 探测失败不能把用户锁在登录页；按「未开启鉴权」继续，具体错误由各页面展示。
+  sessionProbe ??= api.getSession().catch(() => ({ authRequired: false, authenticated: true }));
+  return sessionProbe;
+}
+
+/**
+ * App — 先探测远程访问是否需要密钥（issue #600）；未登录只渲染登录页，
+ * shell 的数据 hooks 在有票据后才挂载，避免一屏 401。
+ */
 export function App(): ReactNode {
+  const t = useT();
+  const [session, setSession] = useState<SessionInfo | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    void probeSession().then((s) => { if (alive) setSession(s); });
+    return () => { alive = false; };
+  }, []);
+
+  useEffect(() => {
+    const onUnauthorized = (): void => setSession({ authRequired: true, authenticated: false });
+    window.addEventListener("drec:unauthorized", onUnauthorized);
+    return () => window.removeEventListener("drec:unauthorized", onUnauthorized);
+  }, []);
+
+  if (!session) {
+    return <div className="min-h-[100dvh] grid place-items-center text-muted text-sm">{t("auth.checking")}</div>;
+  }
+  if (session.authRequired && !session.authenticated) return <LoginScreen />;
+  return <AppShell />;
+}
+
+/** App shell: nav + routed main + dark footer + toast host. */
+function AppShell(): ReactNode {
   const refreshCookie = useRefreshCookie();
   const setHubEnabled = useSetAtom(hubEnabledAtom);
   const setServerTimezone = useSetAtom(serverTimezoneAtom);

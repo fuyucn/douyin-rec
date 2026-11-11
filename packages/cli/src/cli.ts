@@ -2521,7 +2521,7 @@ taskCmd
   .command("serve")
   .description("启动 Web 控制台：HTTP 服务 + SPA + 定时调度守护（默认开；--no-schedule 关）")
   .option("--port <n>", "监听端口（默认 7860）")
-  .option("--host <host>", "监听地址（默认所有网卡；worker 建议 127.0.0.1）")
+  .option("--host <host>", "监听地址（默认回环；all=所有网卡；远程访问需配置共享密钥）")
   .option("--db <path>", "数据库路径")
   // 调度默认开：启用的任务无窗口=24h 录、有窗口=窗口内录。--no-schedule 退化为纯手动控制台。
   .option("--no-schedule", "关闭定时调度，仅手动启停（默认开启调度）")
