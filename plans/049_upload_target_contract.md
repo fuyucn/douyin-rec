@@ -347,8 +347,30 @@ verify
 `uploadTarget`，传了就用 target、没传走旧字段。这样 1b-1 的 diff 只有两处调用点 + 适配器，32 个文件
 不动；1b-5 才连兼容字段一起删。
 
-**1b-5 的完成条件（防「兼容字段永久化」）**：全仓 `grep -rnE "uploadPlain|appendGroup" packages/ test/` 引用归零（只有 `bilibili-upload` 内部与 `run-biliup` 搬迁后的实现除外）、适配器文件删除、32 个文件里的
-旧字段全部迁移成 target、并且加一条守护测试断言「新代码不得出现 `uploadPlain(`/`appendGroup(` 直接调用」。
+**1b-5 的完成条件（防「兼容字段永久化」）**：生产代码对旧函数的**引用归零**——即除
+`@drec/bilibili-upload`（旧函数的所有者）之外，任何包都不再出现 `uploadPlain(` / `appendGroup(` 直接调用。
+
+注意这里是「调用归零」而不是「名字归零」：`export { uploadPlain } from "@drec/bilibili-upload"` 这类
+**re-export 是合法代理**，不是绕道，必须保留。这不只是措辞问题——实测过一次代价：删掉
+`packages/app/src/upload/biliup.ts` 的转发后，`test/e2e/clean-visibility.test.ts` 的十条用例整片变红
+（12 passed → 10 failed）。原因是 ESM 在**链接期**解析具名导入，删掉导出会让任何间接 import 它的模块
+在加载时就失败，而不是等到调用。因此收口判据只能是「调用式」；守护测试
+`test/arch/upload-single-path.test.ts` 也据此写成「名字 + 调用括号」，并附一条金丝雀断言防止规则被改弱。
+
+**落地记录（2026-11-11）**：
+
+| 批 | 实际 PR | 说明 |
+|---|---|---|
+| （前置） | #633 / PR #634 | `UploadChildHooks` 进契约；`upload-call` 从 orchestrator 移到 core（`app`(4) 不能依赖 `orchestrator`(4.5)） |
+| 搬迁 | #629 / PR #630 | `run-biliup` / `biliup-progress` / `biliup` / `upload-part` 搬进 `bilibili-upload`；这同时让原 1b-4「处理器路径接线」**失去意义**——搬完之后它们就是 target 的所有者本身 |
+| 1b-1 + 1b-2 | #631 / PR #632 | workflow、分段、合并续跑一次收完（同属编排层，共用一处装配，拆开反而要两次改同一批测试）；`PipelineDeps` 换成 `upload: UploadTarget` |
+| 1b-3 | #635 / PR #636 | 滚动上传接 target；`hooks` 与 `countParts` 两处等价性细节 |
+| 1b-4（计划外） | #637 / PR #638 | 计划里漏掉的**第六条生产路径**：`app/node-pipeline.ts`（`_node-pipeline` 执行体）自己拼 argv、自己写重试判定 |
+| 1b-5 | 部分 | 调用归零已由守护测试钉住；`test-target.ts`（测试双）**保留**——它被 95 处测试引用，删它等于重写全部测试注入，与等价性无关，按需再决定 |
+
+教训（写给下一个改这里的人）：**「调用点数量 / 文件数」必须 grep 实测，不能凭结构推断。** 我在 1b 里
+三次数错——1b-1 前以为「只有两处」，实测五条路径；测试面以为「10 个文件」，实测 32 个；1b-3 之后以为
+「最后一条」，实测还有 `node-pipeline`。这三个错误都会让「上传轴已接完」的结论提前成立。
 
 ## §9 验收清单（对应审计「复审验收点」）
 
