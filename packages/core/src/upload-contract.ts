@@ -33,6 +33,16 @@ export interface UploadOpts {
  */
 export const APPEND_AMBIGUOUS_MARKER = "[append-ambiguous]";
 
+/**
+ * 「上传跑完但解析不到稿件号」的结构化标记：建稿结果**不确定**（可能已建、可能没建），
+ * 调用方必须转人工，绝不能重试。匹配文案而不是匹配自然语言，避免上游改字就改变语义。
+ */
+export const PLAIN_NO_BV_MARKER = "[plain-no-bv]";
+
+export function isPlainNoBv(err: unknown): boolean {
+  return String((err as Error)?.message ?? err).includes(PLAIN_NO_BV_MARKER);
+}
+
 export function isAppendAmbiguous(err: unknown): boolean {
   return String((err as Error)?.message ?? err).includes(APPEND_AMBIGUOUS_MARKER);
 }

@@ -40,7 +40,8 @@ export interface ArchiveRef {
 export interface ArchiveInfo {
   ref: ArchiveRef;
   title: string;
-  visibility: UploadVisibility;
+  /** 可见性；**无法确认时省略**——调用方不得把它当成 private（阶段 1a 的 biliup 目标就查不到）。 */
+  visibility?: UploadVisibility;
   /** null = 查不到 / 无法确认，不是 0。 */
   partCount: number | null;
   parts?: Array<{ index: number; title?: string }>;

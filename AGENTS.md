@@ -6,7 +6,7 @@
 提供 CLI 子命令与 Web UI（React）。支持 **master + worker 多节点架构**：master 通过 hub 编排把录制任务
 同步下发到选定节点，收播后在 master 侧做合并/烧录/上传。
 
-**技术栈**：Node 24（ESM，`.js` import 后缀）、pnpm workspace（17 个包）、TypeScript、vitest、
+**技术栈**：Node 24（ESM，`.js` import 后缀）、pnpm workspace（18 个包）、TypeScript、vitest、
 commander、esbuild 打包（`dist/douyin-rec.mjs`）、`node:sqlite`（内置）。
 录制自研：`record-engine` 提供通用轮询基类 + 可插拔 ffmpeg/mesio 引擎；取流靠 vendored a_bogus 签名
 （`packages/douyin-live/src/vendor`）；弹幕 WS 客户端自研（参考 `douyin-danma-listener` 重写，
@@ -136,7 +136,7 @@ pnpm serve:local                                           # 本地开发（port
 ## 仓库布局（pnpm workspace monorepo，`packages/*`）
 
 分层由 `test/arch/layering.test.ts` 守护：依赖只能向下，**新增包必须在该测试 `RANKS` 登记**。
-当前 rank：core=0、observability=0.5、upload-runtime=0.5、post-process=0.2、ffmpeg-recorder-extra=0、
+当前 rank：core=0、observability=0.5、upload-runtime=0.5、bilibili-upload=0.5、post-process=0.2、ffmpeg-recorder-extra=0、
 proc-queue=0.3、processors=0.4、record-engine=1、douyin-live/bilibili-live/kuaishou-live=1.5、manager=3、app=4、orchestrator=4.5、cli=5。
 
 ```
@@ -146,6 +146,7 @@ packages/
 │                             #   + platform(Platform 接口 + 注册表) + notify + api-types
 ├── observability/            # L0.5 logs + notification 实现(端口在 core;app/cli 依赖,manager/orchestrator 不依赖)
 ├── upload-runtime/            # L0.5 上传目标通用驱动(plans/049):阶段 0 只有契约与注入接口,未被生产路径引用
+├── bilibili-upload/           # L0.5 B 站上传目标实现:包装既有 biliup 链(argv 对拍),由 cli 注册
 ├── post-process/             # L0 后处理(纯函数):concat 多会话拼接 / burn 烧字幕 / ass / merge / ffmpeg spawn / fonts
 ├── proc-queue/               # L0.3 每节点持久任务表(node:sqlite)+ ProcRunner 租约/心跳/fencing/关停;只经 core 注册表找处理器
 ├── processors/               # L0.4 后处理处理器实现:remux(校验/原地转换/recover);加处理器 = 一个模块 + providers-register 一行
