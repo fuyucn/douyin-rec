@@ -1,6 +1,6 @@
 # 路线图（活文档）
 
-**最后更新：2026-11-11（main 0.0.356）**
+**最后更新：2026-11-11（main 0.0.357）**
 
 本文件只回答三件事：**现在做到哪、下一步做什么、哪些在等人拍板或部署验证**。
 细节留在两份原始文档里，不在这里重复：
@@ -33,6 +33,11 @@ B1–B12 全部合并并关闭（issue #470–#481，PR #483–#502，版本 0.0
 上传目标抽象的第一步：`UploadTarget` 契约 + `UploadTargetRegistry` + `@drec/upload-runtime` 骨架，
 行为零变化、无生产路径接入。 → #602 → PR #605（0.0.356）
 
+### 11-10 审计 · P1-1 阶段 1a（biliup 目标包装）
+新包 `@drec/bilibili-upload`：把既有 biliup 链包装成 `UploadTarget`——建稿走 `uploadPlain`、append 走
+`appendGroup`，线路重试与不确定标记一行没重写；argv 用写死的 golden 数组对拍；**零生产接入**。
+→ #614 → PR #615（0.0.357）
+
 ### 11-10 审计 · P2 已做的三项
 - 分层守护改为扫源码 import（原来只看 `package.json` 声明）：#610 → PR #611
 - 文档与配置漂移第一刀（幽灵 `tui` 包、包数注释、node 编译目标）：#608 → PR #609
@@ -42,10 +47,11 @@ B1–B12 全部合并并关闭（issue #470–#481，PR #483–#502，版本 0.0
 
 ## 二、下一步（按依赖顺序）
 
-### 1. P1-1 阶段 1：biliup 搬迁（**当前主线**）
-把 `packages/app/src/upload/biliup.ts` 的上传实现搬进 `bilibili-upload` 包，作为第一个真实目标实现；
-`run-biliup` 纯搬迁、orchestrator 接驱动、argv 逐字对拍（同一输入必须产出同一 argv）。
-依据：[`plans/049_upload_target_contract.md`](../plans/049_upload_target_contract.md) §3 / §8。
+### 1. P1-1 阶段 1b：接线（**当前主线**）
+阶段 1a 已有目标实现（PR #615），但没有任何生产路径调用它。这一步把 orchestrator / cli 的旧上传调用点
+换成 `UploadTarget`，**并把旧链的线路重试、分 P 数回读、台账 checkpoint、合集关联一并迁进驱动**——
+只换调用点会丢掉重试与幂等语义（这是阶段 1a 审查里明确记下的接缝）。
+依据：[`plans/049_upload_target_contract.md`](../plans/049_upload_target_contract.md) §4 / §8。
 
 ### 2. P1-2 管线统一
 `workflow.ts`（DAG）、`segment-pipeline.ts`、`node-pipeline.ts` 三份实现收敛成一份引擎 + 一份拓扑表。
@@ -81,7 +87,7 @@ F1–F6（单一事实源）、U1–U7（上传 ctx 与 hooks，逐条 RISK）�
 
 ## 三、在等人的事
 
-- **部署实跑验证（12 项）**：P0 五项 + 通知链接 + 多文件 append + 上传目标阶段 0 + 四张工具票。
+- **部署实跑验证（13 项）**：P0 五项 + 通知链接 + 多文件 append + 上传目标阶段 0 + 阶段 1a + 四张工具票。
   清单与逐项验收点见 PR 正文与各 issue 的「待验证」状态。
 - **draft stacked 链**（6 张，H-972→H-976）：`#571 → #573 → #576 → #577 → #578`，另 `#570`（readme 包数已过时需重算）。
   父 PR 未合时子 PR 的 base 不是 `main`，必须按序审、按序 rebase。
