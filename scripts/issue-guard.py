@@ -4,7 +4,7 @@
 用法:
     python3 scripts/issue-guard.py <body-file> [more-files ...]
     gh issue view 12 --json body -q .body | python3 scripts/issue-guard.py -
-    python3 scripts/issue-guard.py --diff origin/feat/hub-optimization   # 只扫 PR 新增行(CI 用)
+    python3 scripts/issue-guard.py --diff origin/main           # 只扫 PR 新增行(CI 用 PR 的 base 分支)
 
 --diff <base> 模式:对 `git diff -U3 <base>...HEAD` 只扫**新增行**(历史内容不会把 CI 卡红;新增块上方 3 行未改动
 上下文只用来拼接跨行凭证,命中必须落到新增行上)。
