@@ -41,13 +41,14 @@ export async function createArchive(upload: UploadTarget, opts: UploadOpts, hook
 }
 
 /** append:成功即返回;`proof` 不是 observed 时抛 `[append-ambiguous]`,上层不重试(避免重复分 P)。 */
-export async function appendArchive(upload: UploadTarget, o: { bv: string; files: string[]; cookies: string; public: boolean }, hooks?: UploadChildHooks): Promise<void> {
+export async function appendArchive(upload: UploadTarget, o: { bv: string; files: string[]; cookies: string; public: boolean; countParts?: () => Promise<number | null> }, hooks?: UploadChildHooks): Promise<void> {
   const r = await upload.append({
     cred: { targetId: upload.id, locator: o.cookies },
     ref: { targetId: upload.id, id: o.bv },
     files: o.files.map((path) => ({ path })),
     policy: { visibility: o.public ? "public" : "private", watermark: false, copyright: "self" },
     ...(hooks ? { hooks } : {}),
+    ...(o.countParts ? { countParts: o.countParts } : {}),
   });
   if (r.proof !== "observed") {
     throw new Error(`${APPEND_AMBIGUOUS_MARKER} append 结果不确定(proof=${r.proof}),不重试,转人工核对`);

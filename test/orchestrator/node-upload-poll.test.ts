@@ -13,7 +13,7 @@ import {
 import { createUploadQueuePoller } from "../../packages/orchestrator/src/node-upload-poll.js";
 import { ensureUploadPlan, type UploadInput } from "../../packages/orchestrator/src/node-upload-queue.js";
 import { ProcUnsupported, type NodeTasks, type Transport } from "../../packages/orchestrator/src/transport.js";
-import { fakeUploadTarget } from "../../packages/orchestrator/src/test-target.js";
+import { fakeUploadTarget } from "@drec/core";
 
 const KEY = "douyin:1:2026-10-17";
 const fresh = (): SyncLedger => new SyncLedger(join(mkdtempSync(join(tmpdir(), "nup-")), "j.db"));

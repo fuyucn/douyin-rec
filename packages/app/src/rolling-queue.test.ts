@@ -8,7 +8,7 @@ import path from "node:path";
 import { RollingUploader, makeRollingUploadHookFactory } from "./rolling-upload.js";
 import { ProcQueueStore, procQueueDbPath } from "@drec/proc-queue";
 import { TaskStore } from "./store.js";
-import { PART_KINDS, jobIdOf, partLogicalKey, type PartCtx, type ProcessJob } from "@drec/core";
+import { PART_KINDS, jobIdOf, partLogicalKey, type PartCtx, type ProcessJob, fakeUploadTarget } from "@drec/core";
 import {
   enqueueRollingUploadPart, enqueueRollingSkipPart, importRollingConfirmedPart, rollingQueueModeEnabled,
   queueOrderHasRows, rollingQueueMaxSeq,
@@ -84,8 +84,10 @@ function queueUploader(over: Partial<ConstructorParameters<typeof RollingUploade
     enqueueQueueSkip: (i) => { skips.push({ ...i }); return "queued"; },
     importQueueConfirmed: (i) => { imports.push({ ...i }); return "already"; },
     // Legacy seams must never be reached in queue mode: they would be a second uploader.
-    uploadPlainRaw: vi.fn(async () => { throw new Error("biliup must not run in queue mode"); }),
-    appendGroupRaw: vi.fn(async () => { throw new Error("biliup must not run in queue mode"); }),
+    upload: fakeUploadTarget({
+      uploadPlain: vi.fn(async () => { throw new Error("biliup must not run in queue mode"); }),
+      appendGroup: vi.fn(async () => { throw new Error("biliup must not run in queue mode"); }),
+    }),
     removeFile: vi.fn(() => { throw new Error("queue mode must not delete"); }),
     ...over,
   });
@@ -161,7 +163,7 @@ describe("rolling queue mode (方案 A)", () => {
   it("queue mode never takes the upload slot or spawns biliup, even with a slot injected", async () => {
     const slot = { acquire: vi.fn(async () => true), release: vi.fn(), touch: vi.fn() };
     const up = vi.fn(async () => "BVx");
-    const u = queueUploader({ slot: slot as never, uploadPlainRaw: up, minSegmentSec: 0 });
+    const u = queueUploader({ slot: slot as never, upload: fakeUploadTarget({ uploadPlain: up }), minSegmentSec: 0 });
     expect(u.uploadSlot()).toBeNull(); // 构造即置空:queue mode 不得持有节点上传槽
     const paths = segs(2);
     paths.forEach((p) => u.noteSegment(p));
@@ -176,7 +178,7 @@ describe("rolling queue mode (方案 A)", () => {
     const remove = vi.fn(() => true);
     const u = new RollingUploader({
       room, uploadMeta, minSegmentSec: 0, now: () => NOW_MS, gate: { run: async (_k: string, fn: () => Promise<unknown>) => fn() } as never,
-      uploadPlainRaw: up as never, appendGroupRaw: (async () => {}) as never, removeFile: remove,
+      upload: fakeUploadTarget({ uploadPlain: up as never, appendGroup: (async () => { })}) as never, removeFile: remove,
     });
     paths.forEach((p) => u.noteSegment(p));
     const r = await u.flush({ recordingActive: false });
@@ -801,7 +803,7 @@ describe("rework addenda 5-7", () => {
     const u = new RollingUploader({
       room, uploadMeta, minSegmentSec: 0, now: () => NOW_MS,
       gate: { run: async (_k: string, fn: () => Promise<unknown>) => fn() } as never,
-      uploadPlainRaw: up as never, appendGroupRaw: (async () => {}) as never, removeFile: remove,
+      upload: fakeUploadTarget({ uploadPlain: up as never, appendGroup: (async () => { })}) as never, removeFile: remove,
       notify: (m) => notes.push(m), queueOrderHasRows,
     });
     paths.forEach((p) => u.noteSegment(p));
@@ -820,7 +822,7 @@ describe("rework addenda 5-7", () => {
     const u = new RollingUploader({
       room, uploadMeta, minSegmentSec: 0, now: () => NOW_MS,
       gate: { run: async (_k: string, fn: () => Promise<unknown>) => fn() } as never,
-      uploadPlainRaw: up as never, appendGroupRaw: (async () => {}) as never, removeFile: remove,
+      upload: fakeUploadTarget({ uploadPlain: up as never, appendGroup: (async () => { })}) as never, removeFile: remove,
       queueOrderHasRows,
     });
     paths.forEach((p) => u.noteSegment(p));
@@ -845,7 +847,7 @@ describe("rework addenda 5-7", () => {
     const u = new RollingUploader({
       room, uploadMeta, minSegmentSec: 0, now: () => NOW_MS,
       gate: { run: async (_k: string, fn: () => Promise<unknown>) => fn() } as never,
-      uploadPlainRaw: up as never, appendGroupRaw: (async () => {}) as never,
+      upload: fakeUploadTarget({ uploadPlain: up as never, appendGroup: (async () => { })}) as never,
       queueOrderHasRows, ownerWaitMs: 0,
     });
     u.noteSegment(segs(1)[0]!);
@@ -943,7 +945,7 @@ describe("rework addendum 9", () => {
     const u = new RollingUploader({
       room, uploadMeta, minSegmentSec: 0, now: () => NOW_MS,
       gate: { run: async (_k: string, fn: () => Promise<unknown>) => fn() } as never,
-      uploadPlainRaw: up as never, appendGroupRaw: (async () => {}) as never,
+      upload: fakeUploadTarget({ uploadPlain: up as never, appendGroup: (async () => { })}) as never,
     });
     u.noteSegment(segs(1)[0]!);
     const r = await u.flush({ recordingActive: false });
@@ -985,7 +987,7 @@ describe("rework addendum 9", () => {
     const u = new RollingUploader({
       room, uploadMeta, minSegmentSec: 0, now: () => NOW_MS,
       gate: { run: async (_k: string, fn: () => Promise<unknown>) => fn() } as never,
-      uploadPlainRaw: up as never, appendGroupRaw: (async () => {}) as never, removeFile: remove,
+      upload: fakeUploadTarget({ uploadPlain: up as never, appendGroup: (async () => { })}) as never, removeFile: remove,
       notify: (m) => notes.push(m), queueOrderHasRows,
     });
     paths.forEach((p) => u.noteSegment(p));

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { APPEND_AMBIGUOUS_MARKER, PLAIN_NO_BV_MARKER } from "@drec/core";
 import { appendArchive, createArchive } from "./upload-call.js";
-import { fakeUploadTarget } from "../../../packages/orchestrator/src/test-target.js";
+import { fakeUploadTarget } from "@drec/core";
 
 const opts = { video: "/s/plain.mp4", cookies: "/c", title: "T", tag: "a,b", tid: 21, public: false };
 

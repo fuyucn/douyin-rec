@@ -7,11 +7,14 @@
  *
  * 生产代码**不得**使用它:真实装配在 `cli`(注入 `createBiliupFileTarget()`)。
  */
-import type { AppendPartsInput, CreateArchiveInput, UploadTarget } from "@drec/core";
+import type { AppendPartsInput, CreateArchiveInput, UploadChildHooks, UploadTarget } from "./upload-target.js";
 
 export function fakeUploadTarget(o: {
-  uploadPlain?: (plain: { video?: string; videos?: string[]; cookies: string; title: string; tid: number; tag: string; public: boolean; desc?: string }) => Promise<string>;
-  appendGroup?: (o: { bv: string; files: string[]; cookies: string; public: boolean }) => Promise<void>;
+  uploadPlain?: (plain: {
+    video?: string; videos?: string[]; cookies: string; title: string; tid: number; tag: string;
+    public: boolean; desc?: string; hooks?: UploadChildHooks;
+  }) => Promise<string>;
+  appendGroup?: (o: { bv: string; files: string[]; cookies: string; public: boolean; countParts?: () => Promise<number | null> }) => Promise<void>;
 } = {}): UploadTarget & { uploadPlain: unknown; appendGroup: unknown } {
   const t: UploadTarget = {
     id: "fake",
@@ -24,8 +27,10 @@ export function fakeUploadTarget(o: {
       const videos = input.files.map((f) => f.path);
       // 与旧链同形:单文件走 `video`、多文件走 `videos`(既有用例就是这么断言的)。
       const payload = videos.length === 1 ? { video: videos[0] } : { videos };
+      const hookArg = input.hooks ? { hooks: input.hooks } : {};
       const bv = await (o.uploadPlain ?? (async () => "BV1FAKE"))({
         ...payload,
+        ...hookArg,
         cookies: input.cred.locator,
         title: input.title,
         tid: input.tid ?? 21,
@@ -37,6 +42,8 @@ export function fakeUploadTarget(o: {
     },
     async append(input: AppendPartsInput) {
       await (o.appendGroup ?? (async () => {}))({
+        ...(input.hooks ? { hooks: input.hooks } : {}),
+        ...(input.countParts ? { countParts: input.countParts } : {}),
         bv: input.ref.id,
         files: input.files.map((f) => f.path),
         cookies: input.cred.locator,

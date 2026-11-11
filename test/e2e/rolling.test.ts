@@ -7,6 +7,7 @@ import type { Transport } from "@drec/orchestrator";
 import { RollingUploader, type RollingUploaderOpts } from "../../packages/app/src/rolling-upload.js";
 import { ANCHOR, ROOM, Scenario } from "./harness/scenario.js";
 import { pastStartMs, sessionBaseOf, writeRecording } from "./harness/fake-recordings.js";
+import { fakeUploadTarget } from "@drec/core";
 
 let s: Scenario;
 afterEach(() => s?.dispose());
@@ -32,8 +33,7 @@ function uploader(logs: string[], over: Partial<RollingUploaderOpts> = {}): Roll
     cookies: join(s.root, "cookies.json"),
     gate: gate(),
     log: (m) => logs.push(m),
-    uploadPlainRaw: (o) => s.fake.uploadPlain(o.plain),
-    appendGroupRaw: (o) => s.fake.appendGroup(o),
+    upload: fakeUploadTarget({ uploadPlain: (o) => s.fake.uploadPlain(o), appendGroup: (o) => s.fake.appendGroup(o) }),
     countPartsRaw: (bv) => s.fake.countVideoParts(bv),
     ...over,
   });
@@ -147,7 +147,7 @@ describe("e2e: rolling(边录边传)", () => {
       const oldBase = sessionBaseOf(ANCHOR, oldStart);
       writeSidecars(oldStart);
       // append 永不返回 = 进程在「上传中」被杀;随后整个进程内存态丢弃(不再 flush 旧上传器)。
-      const u = uploader([], { appendGroupRaw: () => new Promise<void>(() => {}) });
+      const u = uploader([], { upload: fakeUploadTarget({ uploadPlain: (o) => s.fake.uploadPlain(o), appendGroup: () => new Promise<void>(() => {}) }) });
       const files: string[] = [];
       for (let i = 0; i < 3; i++) { const p = writeSegment(oldStart, i); files.push(p); u.noteSegment(p); }
       void u.flush({ recordingActive: true }); // 段0建稿;段1 append 挂起
@@ -191,7 +191,7 @@ describe("e2e: rolling(边录边传)", () => {
       const start = pastStartMs(0, 10, 0);
       writeSidecars(start);
       // 建稿(create)永不返回 = 进程在「建稿中」被杀:意图标记已落盘,稿件号没有。
-      const u = uploader([], { uploadPlainRaw: () => new Promise(() => {}) });
+      const u = uploader([], { upload: fakeUploadTarget({ uploadPlain: () => new Promise(() => {}) }) });
       const files: string[] = [];
       for (let i = 0; i < 2; i++) { const p = writeSegment(start, i); files.push(p); u.noteSegment(p); }
       void u.flush({ recordingActive: false });
