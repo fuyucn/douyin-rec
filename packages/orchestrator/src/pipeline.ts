@@ -1553,6 +1553,9 @@ async function resumeAppends(
       tries,
       backoffMs: 60_000,
       sleep: deps.sleep,
+      // append 结果不确定（请求已发出但没拿到响应）→ 服务端可能已追加，**绝不重试**（会重复分P）。
+      // 601 限流是「本次提交未生效」，仍按冷却退避重试；与主 workflow / 分段路径同一口径。
+      shouldRetry: (err) => isUploadRateLimited(err) || !isAppendAmbiguous(err),
       onRetry: (attempt, err) => jlog(`续跑 append ${g.step} 第 ${attempt} 次失败,重试: ${String((err as Error)?.message ?? err).slice(0, 200)}`),
     }));
     // 续跑补的 append 同样要记 checkpoint(T11.8):否则核验基线只含首轮提交的组,
