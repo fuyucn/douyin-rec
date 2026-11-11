@@ -7,7 +7,7 @@
 同步下发到选定节点，收播后在 master 侧做合并/烧录/上传。
 
 **技术栈**：Node 24（ESM，`.js` import 后缀）、pnpm workspace（16 个包）、TypeScript、vitest、
-commander、esbuild 双产物打包（`dist/douyin-rec.mjs` + `dist/tui.mjs`）、`node:sqlite`（内置）。
+commander、esbuild 打包（`dist/douyin-rec.mjs`）、`node:sqlite`（内置）。
 录制自研：`record-engine` 提供通用轮询基类 + 可插拔 ffmpeg/mesio 引擎；取流靠 vendored a_bogus 签名
 （`packages/douyin-live/src/vendor`）；弹幕 WS 客户端自研（参考 `douyin-danma-listener` 重写，
 仅 vendored `webmssdk.js` 签名 + `proto.js` schema，无 pnpm patch）。
@@ -136,7 +136,7 @@ pnpm serve:local                                           # 本地开发（port
 ## 仓库布局（pnpm workspace monorepo，`packages/*`）
 
 分层由 `test/arch/layering.test.ts` 守护：依赖只能向下，**新增包必须在该测试 `RANKS` 登记**。
-当前 rank：core=0、observability=0.5、post-process=0.2、tui/ffmpeg-recorder-extra=0、
+当前 rank：core=0、observability=0.5、post-process=0.2、ffmpeg-recorder-extra=0、
 proc-queue=0.3、processors=0.4、record-engine=1、douyin-live/bilibili-live/kuaishou-live=1.5、manager=3、app=4、orchestrator=4.5、cli=5。
 
 ```
@@ -149,7 +149,6 @@ packages/
 ├── proc-queue/               # L0.3 每节点持久任务表(node:sqlite)+ ProcRunner 租约/心跳/fencing/关停;只经 core 注册表找处理器
 ├── processors/               # L0.4 后处理处理器实现:remux(校验/原地转换/recover);加处理器 = 一个模块 + providers-register 一行
 ├── ffmpeg-recorder-extra/    # L0 附加插件:logStreamMeta(流信息) + detectDevice(ffprobe encoder)
-├── tui/                      # L0 Ink TUI(独立打包 dist/tui.mjs)
 ├── record-engine/            # L1 通用 PollingRecorder(平台无关 + 引擎无关)+ 引擎策略 DownloadEngine:
 │                             #   ffmpegEngine(-c copy → .ts)/ mesioEngine(rust-srec --fix -d → .flv)
 ├── douyin-live/              # L1.5 抖音平台核心:vendored a_bogus 签名 + getStream/getInfo/resolveShortURL
@@ -326,7 +325,7 @@ tools/ scripts/rename assets/fonts   # 保留:合并辅助 / 重命名 / 烧字�
   done/needs_manual/failed）+ sync_candidates（选优明细，含 `danmuCount`）。reconciler：本机 `recordEnd`
   可即时触发 + 周期 `reconcileAll`（默认 30min；远端收播由扫描发现；in-flight 守卫 + settle 等收播，
   仍在录的场跳过）。`SyncLedger` 记录步骤时间线/ETA（Web「hub 任务」页展示）。
-- **硬标准代码常量**（`biliup.ts`，不可配、绝不漏）：关水印 `--extra-fields watermark.state=0`、
+- **硬标准代码常量**（`packages/app/src/upload/biliup.ts`，不可配、绝不漏）：关水印 `--extra-fields watermark.state=0`、
   copyright=1、`--is-only-self`（private 时）。可配的只有 tag/tid/desc（主播专属，写任务文件）。
 - 受管任务同步：`managedBy='hub'` 的远端任务**只读**（Web/API 禁止编辑删除）；local worker
   `adopt=false` 时源任务保持可编辑；per-node override（输出目录 / 通知地址）保留，受管任务的 `cookies`/`useCookie` 以 master 为准（issue #563）；
@@ -386,7 +385,7 @@ node dist/douyin-rec.mjs _apply-tasks <dataRoot> <base64>   # 远端应用 maste
 
 ⚠️ **库 interop**：录制必须跑打包后的 `node dist/douyin-rec.mjs`，不能 `tsx`/直 import
 （douyin-live 的 vendored 签名 / sm-crypto / protobufjs ESM 坑；esbuild 把 cli 打成
-`dist/douyin-rec.mjs` + `dist/tui.mjs`）。vitest 无法 import 这些包 → 平台实例**零单测**，
+`dist/douyin-rec.mjs`）。vitest 无法 import 这些包 → 平台实例**零单测**，
 靠 store/hub/orchestrator 测 + `test/setup.ts` 注册假平台 + 真实录制覆盖。
 
 📁 **数据目录**：db / recordings / stage / logs（hub 场次日志，永久保留，不在 stage 内）/ config（含 hub 规则、biliup cookies）全收在**一个数据根**
