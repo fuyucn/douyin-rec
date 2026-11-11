@@ -14,41 +14,6 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
-- [~] **T-180 Web 访问强制共享密钥 + 默认回环（#419 P1，issue [#600](https://github.com/fuyucn/douyin-rec/issues/600) → PR [#601](https://github.com/fuyucn/douyin-rec/pull/601)，2026-11-10）**
-  — **做什么**: `serve` 默认监听回环（`--host all` = 所有网卡）；非回环必须有共享密钥（环境变量优先，否则数据根 config 下 0600 密钥文件，缺失时首启生成）；新增 `/api/session` 登录（HttpOnly + SameSite=Strict 会话票据；API 支持 Bearer/自定义请求头）；除 `/api/version` 与 `/api/session` 外 `/api/*`（含 SSE）一律鉴权；Host 白名单去掉任意 IP；前端登录页；Docker/env/README 同步。
-  **为什么**: 审计 P0-1 的 Web API 完全无鉴权；Host 白名单放行任意 IP，组合默认所有网卡可被同网段/公网调用删任务、停录制、写登录态。
-  **验收**: 回环无密钥行为不变；非回环无密钥生成并强制鉴权；无密钥/错密钥 401、正确票据 200、版本公开；局域网地址默认 403，加入允许列表后放行；全量 test/typecheck/web build/bundle 绿。
-  **现状（2026-11-10）**: PR #601 已开，pr-gate PASS；待独立 review；未部署实测。
-- [~] **T-178 上传目标契约设计（审计 P1-1，issue [#597](https://github.com/fuyucn/douyin-rec/issues/597) → PR [#598](https://github.com/fuyucn/douyin-rec/pull/598)，2026-11-10）**
-  — **做什么**: `plans/049_upload_target_contract.md`：core 的 `UploadTarget` 契约/注册表、`upload-runtime` 通用驱动、`bilibili-upload` 目标实现与两套传输、硬策略/凭据/账号键收敛、`proc-queue` 迁移与回滚、五阶段落地与未决问题。
-  **为什么**: 上传目标完全没有抽象；建稿→append→重试写了 5 遍；B 站硬常量两份、可见性极性相反、凭据路径二十余处。
-  **验收**: 设计评审通过后再拆实现 PR；阶段 0 的假目标验收为「一个包 + 一行注册，app/web/orchestrator 零改动」。
-  **现状（2026-11-10）**: PR #598 已开，pr-gate PASS；待独立 review；未实现代码。
-- [~] **T-176 多文件 append 组整体重试 3 次，与注释/分段路径相反（issue [#591](https://github.com/fuyucn/douyin-rec/issues/591) → PR [#594](https://github.com/fuyucn/douyin-rec/pull/594)，2026-11-10）**
-  — **做什么**: `appendGroupSafe` 多文件组 `tries` 由 3 改为 1（与 segment-pipeline 的多文件 batch 一致），单文件组仍 5 次 + `shouldRetry` 排除 ambiguous；注释同步改写，不再声称 601 应重试。
-  **为什么**: 多文件组没有 per-part checkpoint，任何失败都可能已提交部分段，整体重试会重复分 P。
-  **验收**: 撤修复时多文件组被调 3 次、复原后 1 次；全量 test/typecheck/bundle 绿；失败后由 reconciler 的上传类失败门禁转 needs_manual。
-  **现状（2026-11-10）**: PR #594 已开，pr-gate PASS；待独立 review。
-- [~] **T-175 续跑 append 遇到结果不确定错误仍重试（issue [#590](https://github.com/fuyucn/douyin-rec/issues/590) → PR [#593](https://github.com/fuyucn/douyin-rec/pull/593)，2026-11-10）**
-  — **做什么**: 续跑单文件组 append 的 `retry` 补 `shouldRetry`：`isAppendAmbiguous`（请求已发出、结果不明）不重试，601 限流仍按冷却重试；与主 workflow / 分段 / 节点侧三条 append 路径同口径。补 ambiguous 只调一次、601 重试后 done 两条回归。
-  **为什么**: 续跑是唯一漏掉 `shouldRetry` 的 append 路径；ambiguous 后重试 5 次，服务端可能已追加成功 → 重复分 P，且后续按数量核验发现不了。
-  **验收**: 撤修复时 appendGroup 被调 5 次且用例红、复原后 1 次；全量 test/typecheck/bundle 绿；reconciler 对 append 类失败转 needs_manual，不再自动重入。
-  **现状（2026-11-10）**: PR #593 已开，pr-gate PASS；审计文档随本 PR 入库；待独立 review。
-- [~] **T-177 直传限流码 601 的 JSON 形态匹配不上，文案一变即永久失败（issue [#592](https://github.com/fuyucn/douyin-rec/issues/592) → PR [#595](https://github.com/fuyucn/douyin-rec/pull/595)，2026-11-10）**
-  — **做什么**: `isUploadRateLimited` 放行 JSON 引号键（`"code":601` / `'code':21566` / 键值间空格），中文文案保留为兜底；补四种码的单测；live-pump 的 21540 用例改成只返回数字码。
-  **为什么**: 直传把 `JSON.stringify(raw)` 交给判定，旧正则只认裸 `code:`；B 站一改文案，601/21540/21566/21186 就被当永久失败，分 P 头阻塞。
-  **验收**: 撤修复时 JSON 单测与 21540 用例双红、复原双绿；全量 test/typecheck/bundle 绿；直传撞 21540 仍冷却重试。
-  **现状（2026-11-10）**: PR #595 已开，pr-gate PASS；待独立 review。
-- [~] **T-179 手动 upload / _upos-upload 绕过上传闸门与冷却（审计 P0-5，issue [#596](https://github.com/fuyucn/douyin-rec/issues/596) → PR [#599](https://github.com/fuyucn/douyin-rec/pull/599)，2026-11-10）**
-  — **做什么**: 新增 `runWithUploadQuota`：先等账号 `UploadGate`（冷却/滑动窗口），再拿本机 `UploadSlot`，命中限流记冷却，`finally` 释放；`upload` 增加 `--slot-wait`（默认 600s），`_upos-upload` 整段接线。两条手动命令统一走 helper。
-  **为什么**: 生产上传都有 Gate/槽位，手动路径是唯一旁路；并发时会打爆频控，且 601 冷却不跨进程可见。
-  **验收**: 单测覆盖顺序/601 记冷却/槽位超时/槽位库不可用；源码守卫钉住两条命令；全量 test/typecheck/bundle 绿；部署后手动上传可见等待原因。
-  **现状（2026-11-10）**: PR #599 已开，pr-gate PASS；待独立 review。
-- [~] **T-174 Discord 通知里的房间链接被全角标点吞并（issue [#588](https://github.com/fuyucn/douyin-rec/issues/588) → PR [#589](https://github.com/fuyucn/douyin-rec/pull/589)，2026-11-10）**
-  — **做什么**: `formatMessage` 的三条 record 文案（开播/收播/重连）统一经 `formatRoomUrl`：仅合法 http(s) 房间 URL 用 Discord 尖括号包出链接边界，纯房号/空串/无 scheme 短链/控制字符原样；anchor 为空时 URL 兜底也带边界；hubTaskStart 不动。补 6 组 vitest 回归；bump 0.0.348→0.0.349 并 bundle。
-  **为什么**: URL 后直接跟全角 `，`/`）`，Discord 客户端把「，画质 origin」等并进链接，点击进入错误地址。
-  **验收**: 三条 record 消息的 URL 有显式边界、hubTaskStart 纯房号无包裹、空 room 走 anchor 兜底；撤修复 3 例失败、复原全绿；全量 test/typecheck/bundle 绿；部署后 Discord 实看点链接进入直播间。
-  **现状（2026-11-10）**: PR #589 已开，pr-gate PASS；待独立 review；部署后 Discord 实跑收口。
 - [~] **T-173 直播直传 full 模式「当前分 P」崩溃后不进 WAL、被当孤儿清扫（issue [#581](https://github.com/fuyucn/douyin-rec/issues/581)，2026-11-10）**
   — **做什么**: 按独立只读 review 的 F12 最小修法——仅 `spoolMode==="full" && submit!==false` 时在 `openPart` 同步写一条 `confirmed:false` 的 `parts` 行（`noteUnconfirmedPart`，bytes/durationSec 先给 0，可选 `sealed:false` 兼容老 state）；不升 `schemaVersion`（保持 1）、不改 spool 文件名、不动 `pending` WAL / `rolloverStaleState` / `spoolSweepSafe` / CLI 命名。配套 4 项：`discard()`/discardedTail/negligibleTail 要 `dropPart`；`resubmitUnconfirmedPart` 对 0 字节/仅 PAT-PMT 孤儿 `dropPart` 不 fail；写失败时同步把 `spoolIncomplete` 刷进该行（守 #579）；核对 `keepOrLose` 不再因行已存在漏写 probe 后 duration。启动 `dropUnrecoverableUnsealed()` 作 F7 安全网。
   **为什么**: SIGKILL/OOM/断电/未捕获 exit 绕过 JS handler，当前正在录的分 P 在封口前从未进 state；`openSession()` 的 `session.recover()`+`resubmitAllUnconfirmed()` 无目录扫描→不收养；孤儿清扫在下次启动且 mtime>10min 时删→稿件永远缺这一 P（plans/039 B14 实测自证）。SIGTERM/SIGINT/SIGUSR2 会封口写行，正常停止不丢。
@@ -873,6 +838,32 @@
   属模型取舍，不是可顺手加的功能。**为什么**：冗余模型把轮询量乘了 N，是 VPS 被限流的根因之一。
 
 ## 已完成
+
+- [x] **T-186 roadmap 与台账失真：Phase 0 全做完没打勾，进行中 85 项（issue [#612](https://github.com/fuyucn/douyin-rec/issues/612)，2026-11-11）** — **做什么**:新增 `docs/roadmap.md` 作为唯一进度入口（合并 plans/045 的 Phase 0–4 与 11-10 架构审计的 P0/P1/P2）；把本轮合并的 7 条从「进行中」移入已完成、补登记 4 条新票，不碰未核实的 78 条历史条目。**为什么**:plans/045 的 Phase 0 已全部 CLOSED 却一条没打勾；TODO.md「进行中」85 项（规则最多 1–2 项）；问「下一步做什么」时两份文档都答不出来。**验收**:roadmap 能回答「现在在哪、下一步做哪几项」；进行中条目不再含已合并票；纯文档不影响 test/typecheck。（2026-11-11，无 bump）
+
+- [x] **T-185 上传目标契约与注册表 + upload-runtime 骨架（审计 P1-1 阶段 0，issue [#602](https://github.com/fuyucn/douyin-rec/issues/602) → PR [#605](https://github.com/fuyucn/douyin-rec/pull/605)，2026-11-11）** — **做什么**:core 新增 `UploadTarget` 契约与 `createUploadTargetRegistry()`（重复 id / 空 id / 同平台多目标直接抛错），新包 `@drec/upload-runtime`（rank 0.5）只放状态存储注入接口与驱动类型边界；架构登记四处同步。**为什么**:上传目标完全没有抽象，10 条上传路径、两套栈、建稿→append→重试写 5 遍。**验收**:假 target 一行注册即被找到；重复 id 抛错（撤检查即红）；全量 test/typecheck/arch check 绿；行为零变化。（2026-11-11 合并，version 0.0.356，待部署确认无感）
+
+- [x] **T-184 分层守护只扫依赖声明，源码 import 可绕过（issue [#610](https://github.com/fuyucn/douyin-rec/issues/610) → PR [#611](https://github.com/fuyucn/douyin-rec/pull/611)，2026-11-11）** — **做什么**:分层守护新增源码 import 扫描（`from` / 动态 `import()` / 副作用 `import`），被依赖包 rank 必须严格小于本包；未登记层级的引用显式报错。**为什么**:原来只读 `package.json` 依赖声明，漏写一行依赖就能跨层 import。**验收**:当前 17 包实测 0 违规；核心包加一行跨层引用即红；全量 test/typecheck 绿。（2026-11-11 合并，无 bump）
+
+- [x] **T-183 文档与配置漂移：幽灵 tui 包、包数注释、Node 编译目标（issue [#608](https://github.com/fuyucn/douyin-rec/issues/608) → PR [#609](https://github.com/fuyucn/douyin-rec/pull/609)，2026-11-11）** — **做什么**:删 `AGENTS.md` 的幽灵 `tui` 包与 `dist/tui.mjs`（4 处）、根 `tsconfig` 的 `@drec/tui` 映射、CI 注释的「13 packages」；`esbuild` target 由 node20 改为 node24 对齐引擎与 CI；新增「文档列了不存在的包即红」的守护断言。**为什么**:审计 P2 已核实这些漂移，rank 清单同样缺项。**验收**:幽灵条目加回即红、复原即绿；bundle/arch check/typecheck/全量 test 绿。（2026-11-11 合并，version 0.0.350）
+
+- [x] **T-182 隐私闸门把文档里的登录会话术语判成泄漏（issue [#606](https://github.com/fuyucn/douyin-rec/issues/606) → PR [#607](https://github.com/fuyucn/douyin-rec/pull/607)，2026-11-11）** — **做什么**:「凭证类」裸词收窄；登录会话词只在键值/头部/JSON 带值/Bearer 长串形态命中；保留地址（`0.0.0.0`/`127.0.0.1`/广播）不再当节点 IP；通用凭据文件名放行。**为什么**:#593 的审计文档被拦 6 处，全是技术写作里的正常术语。**验收**:文档术语放行、带值写法照拦；57→58 条闸门用例全绿。（2026-11-11 合并，无 bump）
+
+- [x] **T-181 隐私闸门把 PR 新增文件当成录像文件名（issue [#603](https://github.com/fuyucn/douyin-rec/issues/603) → PR [#604](https://github.com/fuyucn/douyin-rec/pull/604)，2026-11-11）** — **做什么**:已知文件名集合改为「`git ls-files` + 工作区未跟踪 + `--known-files`（PR 改动清单）」，pr-gate 自动传入 PR 文件列表。**为什么**:#599 与 #605 的正文引用自己的新文件被拦，只能改写措辞绕过。**验收**:新增三条回归用例；变异验 2 红→57 绿。（2026-11-11 合并，无 bump）
+
+- [x] **T-180 Web 访问强制共享密钥 + 默认回环（审计 P0-1，issue [#600](https://github.com/fuyucn/douyin-rec/issues/600) → PR [#601](https://github.com/fuyucn/douyin-rec/pull/601)，2026-11-10→11）** — **做什么**:`serve` 默认监听回环（`--host all` 才开所有网卡）；非回环必须有共享密钥（环境变量优先，否则数据根 0600 密钥文件，缺失时首启生成）；新增 `/api/session` 登录（HttpOnly + SameSite=Strict 会话票据，API 支持 Bearer/自定义头）；除 `/api/version` 与 `/api/session` 外一律鉴权；Host 白名单去掉任意 IP；前端登录页；Docker/env/README 同步。**为什么**:Web API 完全无鉴权且默认绑所有网卡，同网段可删任务、停录制、写登录态。**验收**:回环无密钥行为不变；非回环无密钥强制鉴权；错密钥 401、正确票据 200；局域网默认 403、加入允许列表后放行。（2026-11-11 合并，version 0.0.351，待部署实跑）
+
+- [x] **T-179 手动 upload / _upos-upload 绕过上传闸门与冷却（审计 P0-5，issue [#596](https://github.com/fuyucn/douyin-rec/issues/596) → PR [#599](https://github.com/fuyucn/douyin-rec/pull/599)，2026-11-10→11）** — **做什么**:手动上传与节点上传共用同一上传闸门与槽位（`runWithUploadQuota`）。**为什么**:CLI 的手动上传命令绕过限流与配额，可与节点上传并发打满账号。**验收**:并发手动+节点上传时槽位排队生效；全量 test/typecheck/bundle 绿。（2026-11-11 合并，version 0.0.354，待部署实跑）
+
+- [x] **T-178 上传目标契约设计（审计 P1-1，issue [#597](https://github.com/fuyucn/douyin-rec/issues/597) → PR [#598](https://github.com/fuyucn/douyin-rec/pull/598)，2026-11-10→11）** — **做什么**:`plans/049_upload_target_contract.md`：core 的 `UploadTarget` 契约/注册表、`upload-runtime` 通用驱动、`bilibili-upload` 目标实现与两套传输、硬策略/凭据/账号键收敛、`proc-queue` 迁移与回滚、五阶段落地与未决问题。**为什么**:上传目标无抽象；建稿→append→重试写 5 遍；B 站硬常量两份、可见性极性相反、凭据路径二十余处。**验收**:设计评审通过后拆实现 PR；阶段 0 验收为「一个包 + 一行注册，app/web/orchestrator 零改动」。（2026-11-11 合并，无 bump；阶段 0 实现见 T-185）
+
+- [x] **T-177 直传限流码 601 的 JSON 形态匹配不上（审计 P0-4，issue [#592](https://github.com/fuyucn/douyin-rec/issues/592) → PR [#595](https://github.com/fuyucn/douyin-rec/pull/595)，2026-11-10→11）** — **做什么**:`isUploadRateLimited` 放行 JSON 引号键（`"code":601` / `'code':21566` / 键值间空格），中文文案保留兜底；补四种码单测。**为什么**:直传把 `JSON.stringify(raw)` 交给判定，旧正则只认裸 `code:`，文案一改即永久失败。**验收**:撤修复双红、复原双绿；直传撞 21540 仍冷却重试。（2026-11-11 合并，version 0.0.353，待部署实跑）
+
+- [x] **T-176 多文件 append 组整体重试 3 次（审计 P0-3，issue [#591](https://github.com/fuyucn/douyin-rec/issues/591) → PR [#594](https://github.com/fuyucn/douyin-rec/pull/594)，2026-11-10→11）** — **做什么**:`appendGroupSafe` 多文件组 `tries` 由 3 改为 1（与分段路径一致），单文件组仍 5 次 + `shouldRetry` 排除 ambiguous。**为什么**:多文件组无 per-part checkpoint，整体重试会重复分 P。**验收**:撤修复时被调 3 次、复原后 1 次；全量 test/typecheck/bundle 绿。（2026-11-11 合并，version 0.0.349，待部署实跑）
+
+- [x] **T-175 续跑 append 遇到结果不确定错误仍重试（审计 P0-2，issue [#590](https://github.com/fuyucn/douyin-rec/issues/590) → PR [#593](https://github.com/fuyucn/douyin-rec/pull/593)，2026-11-10→11）** — **做什么**:续跑单文件组 append 的 `retry` 补 `shouldRetry`：`isAppendAmbiguous` 不重试、601 限流仍按冷却重试；补两条回归。**为什么**:续跑是唯一漏掉 `shouldRetry` 的 append 路径，ambiguous 后重试可能重复分 P 且按数量核验发现不了。**验收**:撤修复时 5 次且红、复原 1 次；reconciler 对 append 类失败转 needs_manual。（2026-11-11 合并，version 0.0.352，待部署实跑）
+
+- [x] **T-174 Discord 通知里的房间链接被全角标点吞并（issue [#588](https://github.com/fuyucn/douyin-rec/issues/588) → PR [#589](https://github.com/fuyucn/douyin-rec/pull/589)，2026-11-10→11）** — **做什么**:新增 `formatRoomUrl`，通知里的房间链接用尖括号包住，Discord 客户端按边界解析。**为什么**:全角标点与链接相邻时被吞进链接，点击跳到错误地址。**验收**:带全角标点的链接整段可点、后续文字保留；通知单测绿。（2026-11-11 合并，version 0.0.355，待部署实跑）
 
 - [x] **T-169 main CI 门禁回绿（PR [#568](https://github.com/fuyucn/douyin-rec/pull/568)，2026-11-09）** — `issue-guard --diff` 的基线仍是已与 main 分叉 138 个提交的 `feat/hub-optimization`，每轮把历史内容当「新增行」重扫；本次清掉全部 25 条命中（含 T-168 引入的 7 条），只改文档/测试夹具/静态原型/CSS 注释，运行态语义不变，版本 0.0.344（未部署）。PR CI 与 main push CI 均绿。**残余**：建议另开一票把基线改为「PR base / push 前一提交」。
 
