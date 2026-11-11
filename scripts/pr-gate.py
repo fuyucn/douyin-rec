@@ -162,12 +162,17 @@ def check_version(sec: str, title: str, files: list[str] | None) -> list[str]:
     return [] if has_content(sec) else ["版本段为空(未触及运行时路径也要写「无需 bump + 理由」)"]
 
 
-def run_guard(body: str) -> list[str]:
+def run_guard(body: str, files: list[str] | None = None) -> list[str]:
+    """把 PR 改动文件清单传给闸门:正文引用本 PR 新增的源码名不算产物文件名(#603)。"""
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as tf:
         tf.write(body)
         tmp = tf.name
+    cmd = [sys.executable, str(GUARD)]
+    if files:
+        cmd += ["--known-files", ",".join(files)]
+    cmd.append(tmp)
     try:
-        p = subprocess.run([sys.executable, str(GUARD), tmp], capture_output=True, text=True)
+        p = subprocess.run(cmd, capture_output=True, text=True)
     finally:
         os.unlink(tmp)
     if p.returncode == 0:
@@ -203,7 +208,7 @@ def gate(body: str, title: str = "", files: list[str] | None = None, guard: bool
     if "版本" in secs:
         errs += check_version(secs["版本"], title, files)
     if guard:
-        errs += run_guard(strip_comments(body))
+        errs += run_guard(strip_comments(body), files)
     return errs
 
 
