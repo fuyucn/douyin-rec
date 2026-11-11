@@ -12,11 +12,19 @@ import { expectHealthyDone, expectLegalTrail, expectSourceSidecarsKept } from ".
 
 // 节点侧执行体(app/node-pipeline)直接 import biliup 模块、没有注入口 → 在模块边界顶替为假 biliup。
 const h = vi.hoisted(() => ({ fake: null as unknown as FakeBiliup }));
-vi.mock("../../packages/app/src/upload/biliup.js", () => ({
-  uploadPlain: (o: { plain: Parameters<FakeBiliup["uploadPlain"]>[0] }) => h.fake.uploadPlain(o.plain),
-  appendGroup: (o: Parameters<FakeBiliup["appendGroup"]>[0]) => h.fake.appendGroup(o),
-  countVideoParts: (bv: string) => h.fake.countVideoParts(bv),
-}));
+// 上传经 `UploadTarget`:假 target 把两个旧函数包起来,节点执行体不再自己拼 biliup 调用。
+vi.mock("../../packages/app/src/upload/biliup.js", async () => {
+  const { fakeUploadTarget } = await import("@drec/core");
+  return {
+    uploadPlain: (o: { plain: Parameters<FakeBiliup["uploadPlain"]>[0] }) => h.fake.uploadPlain(o.plain),
+    appendGroup: (o: Parameters<FakeBiliup["appendGroup"]>[0]) => h.fake.appendGroup(o),
+    createBiliupFileTarget: () => fakeUploadTarget({
+      uploadPlain: (o) => h.fake.uploadPlain(o as never),
+      appendGroup: (o) => h.fake.appendGroup(o as never),
+    }),
+    countVideoParts: (bv: string) => h.fake.countVideoParts(bv),
+  };
+});
 // ffmpeg 外部进程 → 占位文件。
 vi.mock("@drec/post-process", async (orig) => {
   const actual = await orig<typeof import("@drec/post-process")>();
