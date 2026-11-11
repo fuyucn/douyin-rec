@@ -3812,7 +3812,10 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
   it.each(["none", "full"] as const)("[%s] a finalize that ignores abort: the run returns after budget+grace, reports it, and the result is never touched afterwards", async (spoolMode) => {
     installFakeFfmpeg(tsStream({ gops: 40 }), { chunkEvery: 752, delayMs: 3 });
     const ac = new AbortController();
-    const u = fakeUpos({ completeDelayMs: (n) => (n === 1 ? 2_500 : 0), completeIgnoresAbort: (n) => n === 1 });
+    // 对照值要离阈值足够远：实现正确时 ~200(budget)+1500(grace)=1700ms 就返回；
+    // 若实现退化成「一直等完成」，这里会变成 5000ms。阈值取中间(3000)才对慢机有余量、又抓得住退化。
+    const COMPLETE_DELAY_MS = 5_000;
+    const u = fakeUpos({ completeDelayMs: (n) => (n === 1 ? COMPLETE_DELAY_MS : 0), completeIgnoresAbort: (n) => n === 1 });
     const t = setInterval(() => { if (u.events.includes("complete-start 1")) { ac.abort(); clearInterval(t); } }, 5);
     const logs: string[] = [];
     const alerts: string[] = [];
@@ -3821,11 +3824,11 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     try {
       r = await runLivePump(baseOpts(u, { spoolMode, signal: ac.signal, log: (m) => logs.push(m), onAlert: (m) => alerts.push(m), finalizeBudgetMs: 200, autoRetryUpload: false }));
     } finally { clearInterval(t); }
-    expect(Date.now() - t0).toBeLessThan(2_000);
+    expect(Date.now() - t0).toBeLessThan(3_000);
     expect(logs.join("\n")).toContain("停止后收尾超时");
     const snap = JSON.stringify(r);
     const archiveAtReturn = [...u.archive];
-    await new Promise((res) => setTimeout(res, 2_800)); // the uncancellable request now finishes
+    await new Promise((res) => setTimeout(res, COMPLETE_DELAY_MS + 200)); // the uncancellable request now finishes
     expect(JSON.stringify(r)).toBe(snap);
     expect(u.archive).toEqual(archiveAtReturn); // nothing was submitted after the run returned
     if (spoolMode === "none") {
