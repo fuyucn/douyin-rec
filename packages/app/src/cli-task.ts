@@ -53,7 +53,7 @@ export function resolveHubConfigJson(arg: string | undefined, store: TaskStore):
   return resolveHubConfig(arg, store).json;
 }
 import { RecordingSession } from "@drec/manager";
-import { createLogger, getEngine, getPlatform, platformForRoom } from "@drec/core";
+import { createLogger, getEngine, getPlatform, parseStrictBoolFlag, platformForRoom } from "@drec/core";
 import { PollingRecorder } from "@drec/record-engine";
 import {
   makeNotifier,
@@ -374,6 +374,13 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
     .option("--rolling-upload <0|1>", "[已弃用] 旧边录边传开关;请改在 hub 规则设 pipeline.upload.mode=rolling(旧值 1 且规则未配置 ≡ rolling)")
     .option("--db <path>", "数据库路径（默认 ./douyin-rec.db 或 env DOUYIN_REC_DB）")
     .action(async (o: AddOpts) => {
+      // 上传开关严格解析(H-974):未知取值(如手误 enble)必须在任何副作用之前报错退出——
+      // 不建库、不解析平台、不做任何网络调用;空值/未传 = 关(站点默认 false)。
+      const rollingParsed = parseStrictBoolFlag("--rolling-upload", o.rollingUpload, false);
+      if (!rollingParsed.ok) {
+        log.error(rollingParsed.error);
+        process.exit(2);
+      }
       const store = new TaskStore(o.db);
       let scheduleStart: string | null = null;
       let scheduleEnd: string | null = null;
@@ -412,7 +419,7 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
         outDir: o.out ?? null,
         scheduleStart,
         scheduleEnd,
-        rollingUpload: parseBoolFlag(o.rollingUpload, false),
+        rollingUpload: rollingParsed.value,
       });
       store.close();
       log.info(`已创建任务 id=${t.id}（${t.name ?? t.room}）`);
@@ -436,6 +443,17 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
     .option("--rolling-upload <0|1>", "[已弃用] 旧边录边传开关(1=开 0=关,默认不改);请改在 hub 规则设 pipeline.upload.mode=rolling")
     .option("--db <path>", "数据库路径（默认 ./douyin-rec.db 或 env DOUYIN_REC_DB）")
     .action((id: string, o: AddOpts & { id?: string }) => {
+      // 上传开关严格解析(H-974):仅在显式传值时校验,且在 new TaskStore 之前——失败即退出,
+      // 不建/不打开库文件;未传该 flag 时 patch 不含该字段(保持「只更新本次提供的字段」)。
+      let rollingUpload: boolean | undefined;
+      if (o.rollingUpload !== undefined) {
+        const rollingParsed = parseStrictBoolFlag("--rolling-upload", o.rollingUpload, false);
+        if (!rollingParsed.ok) {
+          log.error(rollingParsed.error);
+          process.exit(2);
+        }
+        rollingUpload = rollingParsed.value;
+      }
       const store = new TaskStore(o.db);
       const existing = store.getTask(Number(id));
       if (!existing) {
@@ -470,7 +488,7 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
       }
       if (o.useCookie !== undefined) patch.useCookie = parseBoolFlag(o.useCookie, true);
       if (o.out !== undefined) patch.outDir = o.out;
-      if (o.rollingUpload !== undefined) patch.rollingUpload = parseBoolFlag(o.rollingUpload, false);
+      if (rollingUpload !== undefined) patch.rollingUpload = rollingUpload;
       if (o.schedule !== undefined) {
         const [s, e] = parseSchedule(o.schedule);
         patch.scheduleStart = s;

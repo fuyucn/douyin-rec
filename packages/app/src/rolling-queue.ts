@@ -13,7 +13,7 @@
  */
 import { existsSync, statSync } from "node:fs";
 import {
-  PART_KINDS, ROLLING_QUEUE_MODE_SETTING, jobIdOf, partLogicalKey, rollingSidecarPathOf,
+  PART_KINDS, ROLLING_QUEUE_MODE_SETTING, jobIdOf, parseStrictBoolFlag, partLogicalKey, rollingSidecarPathOf,
   type PartCtx, type ProcessJob,
 } from "@drec/core";
 import { ProcQueueStore, procQueueDbPath } from "@drec/proc-queue";
@@ -48,16 +48,17 @@ export interface QueuePartInput {
 }
 
 /**
- * Explicit-on parser for this switch. parseBoolFlag is deliberately fail-open (an unknown flag means "on"),
- * which is wrong for a switch that disables the recorder's only upload path: a typo must mean OFF.
+ * Explicit-on parser for this switch, via the core strict parser (H-974): the on/off vocabulary
+ * lives only in core, and an unknown stored value (a typo, a blank, an unreadable db) must mean
+ * OFF — this switch disables the recorder's only upload path, so fail closed, never throw.
  */
 export function rollingQueueModeEnabled(dbPath: string = resolveDbPath()): boolean {
   try {
     if (!existsSync(dbPath)) return false;
     const store = new TaskStore(dbPath);
     try {
-      const raw = (store.getSetting(ROLLING_QUEUE_MODE_SETTING) ?? "").trim().toLowerCase();
-      return raw === "1" || raw === "true" || raw === "on" || raw === "yes" || raw === "y";
+      const r = parseStrictBoolFlag(ROLLING_QUEUE_MODE_SETTING, store.getSetting(ROLLING_QUEUE_MODE_SETTING) ?? undefined, false);
+      return r.ok && r.value;
     } finally { store.close(); }
   } catch {
     return false;

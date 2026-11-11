@@ -23,8 +23,8 @@ import { NODE_COMMANDS, localRoomProbes, notifyOutboxArgs, runNodeCommandCli } f
 import { registerRecoverOrderCommands } from "./hub-recover-order-commands.js";
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { ZERO_DISK_DELIVERY_ENV, biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, normalizeSeasonSectionId, parseBoolFlag, parseOutputFormat, resolveSeasonSectionId, stageExt, resolveDiskMinGB, resolveJobLogPath, stageSessionDir, ttlMemoAsync, sanitizePathSegment, zonedStamp } from "@drec/core";
-import { parseDanmuFlag, rejectsNoSpoolFlag } from "./cli-flags.js";
+import { ZERO_DISK_DELIVERY_ENV, biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, normalizeSeasonSectionId, parseOutputFormat, resolveSeasonSectionId, stageExt, resolveDiskMinGB, resolveJobLogPath, stageSessionDir, ttlMemoAsync, sanitizePathSegment, zonedStamp } from "@drec/core";
+import { parseDanmuFlag, parseRollingUploadFlag, parseStreamUploadFlag, rejectsNoSpoolFlag } from "./cli-flags.js";
 import type { EnqueueRequest, HubResources, OutputFormat, StageFormat } from "@drec/core";
 import { RecordingSession, XmlDanmuWriter } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
@@ -87,8 +87,9 @@ interface RecordCliOpts {
   segment?: string;
   danmuXmlMode?: string;
   reconnect?: string;
+  /** 边录边传开关:经 ./cli-flags.js 的 parseRollingUploadFlag 严格解析——空/未传 = 关(站点默认),未知取值报错并 exit 2,绝不回落为开。 */
   rollingUpload?: string;
-  /** Streaming zero-disk upload: ffmpeg stdout → UPOS chunks → one archive (default off). */
+  /** 直播直传开关:经 ./cli-flags.js 的 parseStreamUploadFlag 严格解析——空/未传 = 关(站点默认),未知取值报错并 exit 2,绝不回落为开;ffmpeg stdout → UPOS 分块 → 单一稿件。 */
   streamUpload?: string;
   streamUploadSize?: string;
   streamUploadSec?: string;
@@ -226,6 +227,21 @@ program
       console.error("[rec] --stream-upload-spool none 已禁用:直播直传必须保留本地回退文件");
       process.exit(2);
     }
+    // 上传开关严格解析(H-974):未知取值(如手误 enble)必须报错退出,不能沿用宽粒度解析
+    // 的「未知=开」旧行为悄悄打开上传路径。空值/未传 = 关。先 rolling 后 stream,两个都非法
+    // 时只报第一个;报错在互斥检查/initRecorderState/任何网络调用之前。
+    const rollingParsed = parseRollingUploadFlag(o.rollingUpload);
+    if (!rollingParsed.ok) {
+      console.error(`[rec] ${rollingParsed.error}`);
+      process.exit(2);
+    }
+    const streamParsed = parseStreamUploadFlag(o.streamUpload);
+    if (!streamParsed.ok) {
+      console.error(`[rec] ${streamParsed.error}`);
+      process.exit(2);
+    }
+    const rollingEnabled = rollingParsed.value;
+    const streamUploadEnabled = streamParsed.value;
 
     // 平台驱动默认:命令行 --engine > 兼容别名 --recorder > config > 平台默认引擎。
     // 旧 config.recorder 可能是已废弃的录制器 provider 名(非引擎 id)→ getEngine 返 undefined,
@@ -282,8 +298,8 @@ program
       },
     };
     // 边录边传(T-33,默认关):开启时注入「每会话一个」上传钩子工厂(metadata 读 hub 规则/hub.config);
-    // 关闭时 undefined → session 完全不启用,行为与改动前一致。开关 0/1/on/off/true/false(与 task-input 同套假值)。
-    const rollingEnabled = parseBoolFlag(o.rollingUpload, false);
+    // 关闭时 undefined → session 完全不启用,行为与改动前一致。开关 0/1/on/off/true/false(与 task-input
+    // 同套假值),已在 action 开头用 parseRollingUploadFlag 严格解析:未知取值直接报错退出,不再当「开」。
     let makeRolling: (() => import("@drec/manager").RollingUploadHook) | undefined;
     if (rollingEnabled) {
       const { makeRollingUploadHookFactory, uploadOwnerForTask, enqueueHubOwnedSkip, rootHubDir, resolveDbPath, TaskStore } = await import("@drec/app");
@@ -326,7 +342,6 @@ program
       });
       console.log(`[rec] 边录边传已开启:每封口一段上传后删该段源(room=${slug})`);
     }
-    const streamUploadEnabled = parseBoolFlag(o.streamUpload, false);
     // streaming upload replaces the file-based recorder; running both would pull the same
     // stream twice and upload a duplicate archive, so it must be mutually exclusive.
     if (streamUploadEnabled && rollingEnabled) {
@@ -554,11 +569,10 @@ program
       process.on("SIGTERM", () => onSig("SIGTERM"));
       // Window-end drain (SIGUSR2). Registered *before* the pump starts so a window-end signal
       // always finds a handler: Node's default for an unhandled SIGUSR2 is immediate process
-      // death (measured: exit 159), which cuts the in-flight part mid-upload. In
-      // `--stream-upload-spool none` there is no local copy of that part, so the video is lost
-      // for good. It would also be reported as a clean exit: `stopGraceful` marks the child
-      // `expected` *before* sending the signal, so the task log would claim
-      // "直播自然收播，排空完成" for a broadcast that was never drained.
+      // death (measured: exit 159), which cuts the in-flight part mid-upload. It would also be
+      // reported as a clean exit: `stopGraceful` marks the child `expected` *before* sending the
+      // signal, so the task log would claim "直播自然收播，排空完成" for a broadcast that was
+      // never drained.
       const drain = new AbortController();
       process.on("SIGUSR2", () => {
         if (drain.signal.aborted) return; // the daemon re-sends every tick; idempotent
