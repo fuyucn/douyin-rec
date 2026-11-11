@@ -6,9 +6,9 @@ import { join } from "node:path";
 import {
   APPEND_AMBIGUOUS_MARKER, PART_KINDS, jobIdOf, type ProcessContext, type ProcessJob, type PartCtx,
 } from "@drec/core";
-import { makeUploadPartProcessor, shouldChainCleanup, PART_WORKFLOW_PARAM, uploadPartProcessor } from "@drec/processors";
-import type { BiliupHooks } from "../../packages/processors/src/run-biliup.js";
-import { parseSsAcked } from "../../packages/processors/src/biliup-progress.js";
+import { makeUploadPartProcessor, shouldChainCleanup, PART_WORKFLOW_PARAM, uploadPartProcessor } from "@drec/bilibili-upload";
+import type { BiliupHooks } from "../../packages/bilibili-upload/src/run-biliup.js";
+import { parseSsAcked } from "../../packages/bilibili-upload/src/biliup-progress.js";
 
 let dir: string;
 const setup = (): void => { dir = mkdtempSync(join(tmpdir(), "upload-part-")); };

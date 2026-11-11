@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { existsSync, statSync } from "node:fs";
 import { basename, dirname } from "node:path";
-import { aliasPartFiles, makeBiliupProcessor } from "../../packages/processors/src/biliup.js";
+import { aliasPartFiles, makeBiliupProcessor } from "../../packages/bilibili-upload/src/biliup.js";
 
 function job(files: string[], params: Record<string, unknown> = {}) {
   return {

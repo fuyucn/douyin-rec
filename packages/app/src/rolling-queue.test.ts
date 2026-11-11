@@ -13,7 +13,7 @@ import {
   enqueueRollingUploadPart, enqueueRollingSkipPart, importRollingConfirmedPart, rollingQueueModeEnabled,
   queueOrderHasRows, rollingQueueMaxSeq,
 } from "./rolling-queue.js";
-import { makeUploadPartProcessor } from "@drec/processors";
+import { makeUploadPartProcessor } from "@drec/bilibili-upload";
 import { enqueueHubOwnedSkip } from "./hub-owner.js";
 import { uploadOwnerForTask } from "./hub-rule-match.js";
 

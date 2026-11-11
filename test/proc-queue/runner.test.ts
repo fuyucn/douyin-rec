@@ -4,8 +4,8 @@ import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path";
 import { registerProcessor, _resetProcessors, UncertainOutcome, type ProcessContext, type ProcessJob } from "@drec/core";
 import { ProcRunner, SimpleSlotLimiter, readProcActive, LEASE_MS, type ProcRunnerOpts } from "@drec/proc-queue";
-import { makeUploadPartProcessor } from "@drec/processors";
-import type { BiliupHooks } from "../../packages/processors/src/run-biliup.js";
+import { makeUploadPartProcessor } from "@drec/bilibili-upload";
+import type { BiliupHooks } from "../../packages/bilibili-upload/src/run-biliup.js";
 import { makeEnv, fakeProcessor, gate, type Env } from "./helpers.js";
 
 let env: Env;

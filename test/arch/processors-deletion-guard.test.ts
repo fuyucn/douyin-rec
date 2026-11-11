@@ -6,11 +6,19 @@ import { describe, it, expect } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const SRC = join(import.meta.dirname, "..", "..", "packages", "processors", "src");
+// 阶段 1b 步 1 把 biliup / upload-part 的实现在两个包里分了家,所以删除点要两处都扫:
+// 只扫 processors 会让「搬走一个删除点」变成「删除点消失」,那是放宽而不是收紧。
+const SRCS = [
+  join(import.meta.dirname, "..", "..", "packages", "processors", "src"),
+  join(import.meta.dirname, "..", "..", "packages", "bilibili-upload", "src"),
+];
 // Call-shaped only (identifier + "("): comments like "unlink below is irreversible" do not match.
 const DELETION_RE = /\b(?:unlinkSync|unlink|rmdirSync|rmdir|rmSync|rimraf|fs\.rm|rm)\s*\(/;
 
-/** The sanctioned deleter (plan 046 §8 risk 3). Any other file must keep only legacy anchors. */
+/**
+ * 唯一允许**新增**删除点的模块(plan 046 §8 risk 3)。legacy 的删除点(biliup.ts / remux.ts)
+ * 不算豁免:它们必须继续被 PINNED 钉住,只是不允许再多出新的。
+ */
 const SANCTIONED_DELETER = "cleanup-part.ts";
 
 /** Pinned sites as normalized call-text prefixes; each must match exactly one scanned line. */
@@ -29,8 +37,8 @@ const normalize = (line: string): string => line.trim().replace(/\s+/g, " ");
 
 function scanDeletionSites(): Array<{ file: string; call: string }> {
   const hits: Array<{ file: string; call: string }> = [];
-  for (const name of readdirSync(SRC).filter((f) => f.endsWith(".ts")).sort()) {
-    for (const raw of readFileSync(join(SRC, name), "utf8").split("\n")) {
+  for (const src of SRCS) for (const name of readdirSync(src).filter((f) => f.endsWith(".ts")).sort()) {
+    for (const raw of readFileSync(join(src, name), "utf8").split("\n")) {
       if (/^\s*(import|export .*from|\s*\*)/.test(raw)) continue;
       if (!DELETION_RE.test(raw)) continue;
       hits.push({ file: name, call: normalize(raw) });

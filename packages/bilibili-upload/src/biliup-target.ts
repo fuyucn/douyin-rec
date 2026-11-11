@@ -1,7 +1,7 @@
 /**
  * biliup-target.ts — 把既有 biliup 上传链包装成 core 的 `UploadTarget`（plans/049 §8 阶段 1a）。
  *
- * 阶段 1a 的原则：**只包装，不重写**。参数构造与重试语义仍由 `@drec/processors` 负责——
+ * 阶段 1a 的原则：**只包装，不重写**。参数构造与重试语义仍由 `./run-biliup.js` 负责——
  *   - 建稿走 `uploadPlain`（逐线路重试 + parseBV），不是裸 `buildUploadArgs + run`；
  *   - append 走 `appendGroup`（逐线路重试 + 分 P 数回读 + 不确定标记），不是裸 `run`。
  * 本文件只做三件事：契约输入 → 既有函数入参、返回值 → `proof`、错误 → core 的分类。
@@ -17,7 +17,7 @@ import {
   runBiliup,
   uploadPlain,
   type BiliupHooks,
-} from "@drec/processors";
+} from "./run-biliup.js";
 import {
   isAppendAmbiguous,
   isPlainNoBv,

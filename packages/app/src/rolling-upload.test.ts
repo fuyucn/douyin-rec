@@ -10,7 +10,7 @@ import {
   UploadGate, RecorderStateWriter, parseRecorderState, recorderActivity, recorderStatePath, rollingUploadSingleNode,
   type ProcProbe, type RecorderActivity, type SeasonAddOutcome,
 } from "@drec/core";
-import type { AckSample } from "@drec/processors";
+import type { AckSample } from "@drec/bilibili-upload";
 
 const seasonHook = vi.hoisted(() => ({
   calls: [] as Array<{ bvid: string; persistedBv?: string; persistedState?: string; reconcileFirst?: boolean }>,

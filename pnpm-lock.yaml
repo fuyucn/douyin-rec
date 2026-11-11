@@ -51,6 +51,9 @@ importers:
 
   packages/app:
     dependencies:
+      '@drec/bilibili-upload':
+        specifier: workspace:*
+        version: link:../bilibili-upload
       '@drec/core':
         specifier: workspace:*
         version: link:../core
@@ -115,6 +118,9 @@ importers:
       '@drec/bilibili-live':
         specifier: workspace:*
         version: link:../bilibili-live
+      '@drec/bilibili-upload':
+        specifier: workspace:*
+        version: link:../bilibili-upload
       '@drec/core':
         specifier: workspace:*
         version: link:../core
