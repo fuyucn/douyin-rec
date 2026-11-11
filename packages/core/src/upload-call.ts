@@ -11,7 +11,8 @@
  * 所以这里把 `unknown` **重新抛成结构化错误**,让上层保持原有判定——不重试、交给上传类
  * 失败门禁转人工。这样接驱动的同时,重试与转人工的口径一个字节都没变。
  */
-import { APPEND_AMBIGUOUS_MARKER, PLAIN_NO_BV_MARKER, type UploadOpts, type UploadPolicy, type UploadTarget } from "@drec/core";
+import { APPEND_AMBIGUOUS_MARKER, PLAIN_NO_BV_MARKER, type UploadOpts } from "./upload-contract.js";
+import type { UploadChildHooks, UploadPolicy, UploadTarget } from "./upload-target.js";
 
 /** 平台不可配的硬策略:关水印 + 自制;可见性由调用方给(默认仅自己)。 */
 function policyOf(opts: UploadOpts): UploadPolicy {
@@ -19,7 +20,7 @@ function policyOf(opts: UploadOpts): UploadPolicy {
 }
 
 /** 建稿:返回 BV;`proof` 不是 created 时抛 `[plain-no-bv]`,上层不重试(避免建出第二份稿)。 */
-export async function createArchive(upload: UploadTarget, opts: UploadOpts): Promise<string> {
+export async function createArchive(upload: UploadTarget, opts: UploadOpts, hooks?: UploadChildHooks): Promise<string> {
   const files = (opts.videos && opts.videos.length > 0 ? opts.videos : opts.video ? [opts.video] : []).map((path) => ({ path }));
   const r = await upload.create({
     cred: { targetId: upload.id, locator: opts.cookies },
@@ -31,6 +32,7 @@ export async function createArchive(upload: UploadTarget, opts: UploadOpts): Pro
     // `.join(",")` 还原,所以这里必须放一个元素,拆开再拼会把 "a, b" 变成 "a,b"。
     tags: opts.tag ? [opts.tag] : [],
     tid: opts.tid,
+    ...(hooks ? { hooks } : {}),
   });
   if (r.proof !== "created" || !r.ref?.id) {
     throw new Error(`${PLAIN_NO_BV_MARKER} 建稿结果不确定(proof=${r.proof}),不重试,转人工核对`);
@@ -39,12 +41,13 @@ export async function createArchive(upload: UploadTarget, opts: UploadOpts): Pro
 }
 
 /** append:成功即返回;`proof` 不是 observed 时抛 `[append-ambiguous]`,上层不重试(避免重复分 P)。 */
-export async function appendArchive(upload: UploadTarget, o: { bv: string; files: string[]; cookies: string; public: boolean }): Promise<void> {
+export async function appendArchive(upload: UploadTarget, o: { bv: string; files: string[]; cookies: string; public: boolean }, hooks?: UploadChildHooks): Promise<void> {
   const r = await upload.append({
     cred: { targetId: upload.id, locator: o.cookies },
     ref: { targetId: upload.id, id: o.bv },
     files: o.files.map((path) => ({ path })),
     policy: { visibility: o.public ? "public" : "private", watermark: false, copyright: "self" },
+    ...(hooks ? { hooks } : {}),
   });
   if (r.proof !== "observed") {
     throw new Error(`${APPEND_AMBIGUOUS_MARKER} append 结果不确定(proof=${r.proof}),不重试,转人工核对`);

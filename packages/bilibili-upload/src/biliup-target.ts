@@ -139,7 +139,7 @@ export function createBiliupFileTarget(deps: BiliupTargetDeps = {}): UploadTarge
       };
       try {
         // uploadPlain = 逐线路重试 + parseBV；拿不到 BV 时它自己抛「解析不到」。
-        const bv = await uploadPlain({ plain: opts, run });
+        const bv = await uploadPlain({ plain: opts, run, ...(input.hooks ? { hooks: input.hooks } : {}) });
         return { proof: "created", ref: { targetId: BILIUP_TARGET_ID, id: bv } };
       } catch (err) {
         // 只有「确定没建稿」才能重试；不确定一律 unknown 交人工，绝不猜第二个稿件。
@@ -158,6 +158,7 @@ export function createBiliupFileTarget(deps: BiliupTargetDeps = {}): UploadTarge
           files: input.files.map((f) => f.path),
           public: input.policy.visibility === "public",
           run,
+          ...(input.hooks ? { hooks: input.hooks } : {}),
           countParts: () => countParts(input.ref.id, credPath(input.cred)),
           sleep,
         });
