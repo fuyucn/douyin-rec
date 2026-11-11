@@ -70,6 +70,16 @@ function loadPackages(): PkgInfo[] {
   return out;
 }
 
+function walkTs(dir: string): string[] {
+  const out: string[] = [];
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) out.push(...walkTs(p));
+    else if (e.name.endsWith(".ts") && !e.name.endsWith(".test.ts")) out.push(p);
+  }
+  return out;
+}
+
 describe("架构分层(依赖只能向下)", () => {
   const pkgs = loadPackages();
 
@@ -102,6 +112,31 @@ describe("架构分层(依赖只能向下)", () => {
     expect(listed.length).toBeGreaterThan(10);
     const ghosts = listed.filter((n) => !existsSync(join(PKG_DIR, n)));
     expect(ghosts, `AGENTS.md 列了不存在的包: ${ghosts.join(", ")}`).toEqual([]);
+  });
+
+  it("源码 import 也只能向下(不经依赖声明也能抓)", () => {
+    const violations: string[] = [];
+    for (const p of pkgs) {
+      const myRank = RANKS[p.name];
+      if (myRank === undefined) continue;
+      const dir = join(PKG_DIR, p.name.slice("@drec/".length), "src");
+      if (!existsSync(dir)) continue;
+      for (const file of walkTs(dir)) {
+        const text = readFileSync(file, "utf-8");
+        for (const m of text.matchAll(/(?:from\s+"|import\(\s*"|import\s+")(@drec\/[\w-]+)"/g)) {
+          const dep = m[1]!;
+          const depRank = RANKS[dep];
+          if (depRank === undefined) {
+            violations.push(`${file}: 引用了未登记层级的 ${dep}`);
+            continue;
+          }
+          if (depRank >= myRank) {
+            violations.push(`${file}: ${p.name}(L${myRank}) → ${dep}(L${depRank}) 违反向下依赖`);
+          }
+        }
+      }
+    }
+    expect(violations, `源码 import 分层违规:\n  ${violations.join("\n  ")}`).toEqual([]);
   });
 
   it("core 是纯契约层,不依赖任何 @drec 包", () => {
