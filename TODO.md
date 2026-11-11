@@ -839,6 +839,8 @@
 
 ## 已完成
 
+- [x] **T-191 门禁基线漂移 + 票被 `Fixes` 自动关闭（issue [#585](https://github.com/fuyucn/douyin-rec/issues/585) → PR [#626](https://github.com/fuyucn/douyin-rec/pull/626)，2026-11-11）** — **做什么**:CI 隐私闸门与 `pr-risk-scan` 的 diff 基线改为跟随 PR base；文档六处 base 口径统一到 `main`；改写「`Fixes #N` 不会自动关票」为「在默认分支上会自动关票，所以有实跑项的票必须写 `Part of #N`」；分步票改为「除最后一步之外都写 `Part of #N`」；review 永不 close；`pr-risk-scan` 输出区分「改动行」与「仅上下文命中」（判定未变）；roadmap 删掉已失效的 draft 陈述。**为什么**:base 早已是 `main` 而基线写死在一条分叉一百多个提交的开发分支上，闸门把历史内容当新增行重扫（#615 的假稿件号就是这么被拦的）；更严重的是 `Fixes` 会自动关票，实测 #614/#618/#620/#622/#624 合并后全部 CLOSED，跳过待验证。**验收**:新增 `test/docs/workflow-baseline.test.ts` 四条断言（分句判定）；六条变异全红（CI 基线/脚本基线/文档 base/最后一步旧写法/第 8 条/分步票旧说法）；`test/scripts`+`test/docs` 150 passed，全量 5198 passed。**版本**:无需 bump + 理由（只动 CI 配置、审查脚本、文档与测试；`scripts/` 里只有两个 install 脚本在运行时路径）。gpt-6.1-sol 四轮审查后合并。（2026-11-11 合并）
+
 - [x] **T-190 live-pump 收尾超时断言贴着理论值，慢机必翻（issue [#622](https://github.com/fuyucn/douyin-rec/issues/622) → PR [#623](https://github.com/fuyucn/douyin-rec/pull/623)，2026-11-11）** — **做什么**:把「收尾忽略 abort」用例的对照值 2500 → 5000、阈值 2000 → 3000、尾部等待改为对照值 + 200。**为什么**:理论值 200(预算)+1500(grace)≈1780，阈值 2000 只剩 220ms 余量；本地全量 5 轮红 4 轮、CI 也红过一条（2161ms）。**验收**:该文件 219 passed;变异（阈值收回 1000）两个模式都红在 1788/1783ms。**版本**:无需 bump + 理由（只改测试文件，不进 dist）。（2026-11-11 合并）
 
 - [x] **T-189 README 包数量与实际不符（issue [#620](https://github.com/fuyucn/douyin-rec/issues/620) → PR [#621](https://github.com/fuyucn/douyin-rec/pull/621)，2026-11-11）** — **做什么**:README 两处包数量改为 18;`test/arch/layering.test.ts` 加断言「README 包数 == `packages/` 子包总数(含 web)」。**为什么**:三处口径各自为政(workspace 成员 17、目录 18、@drec 命名 17)，人记的数字合并三个包后必过期。**验收**:6 passed;变异(README 写回 13)报出「实际 18」。**版本**:无需 bump + 理由（文档 + 既有守护文件）。（2026-11-11 合并）
