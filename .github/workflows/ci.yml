@@ -33,12 +33,15 @@ jobs:
         # 版本不写死在这里：pnpm/action-setup@v4 自动读 package.json 的 packageManager 字段。
 
       - name: "Privacy gate (issue-guard --diff,只扫 PR 新增行)"
-        run: python3 scripts/issue-guard.py --diff origin/feat/hub-optimization
+        # 基线用 PR 的 base 分支;写死成某条开发分支会把历史内容当新增行重扫。
+        # `push` 事件没有 GITHUB_BASE_REF,回落到 main:那时扫的是「分支相对 main 的累积差异」,
+        # 范围偏宽(可能多拦),不会漏扫——不要改成「为空就跳过」,那才是漏扫。
+        run: python3 scripts/issue-guard.py --diff "origin/${GITHUB_BASE_REF:-main}"
 
       - name: "Install (root)"
         run: pnpm install --frozen-lockfile
 
-      - name: "Typecheck (root, 17 packages)"
+      - name: "Typecheck (root, 18 packages)"
         run: pnpm typecheck
 
       - name: "Unit tests (vitest, 含分层守护)"

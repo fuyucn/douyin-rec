@@ -2,7 +2,7 @@
 # pr-risk-scan.sh — 按 diff 判定「危险类」(上传 / 清理 / 删除 / ledger 状态转换)。
 #
 # 用法:
-#   scripts/pr-risk-scan.sh [base]            # 默认 base=origin/feat/hub-optimization,扫 base...HEAD
+#   scripts/pr-risk-scan.sh [base]            # 默认 base=origin/main,扫 base...HEAD
 #   scripts/pr-risk-scan.sh --diff-file <f|-> # 直接读 unified diff(文件或 stdin),便于样例/测试
 #
 # 输出:第一行恒为 `PASS` 或 `RISK`;RISK 后每行一条命中原因(路径或内容)。
@@ -19,7 +19,7 @@
 #   - 路径同时取自 `diff --git` 头(权限变更、二进制、带引号路径只有这一行)。
 set -euo pipefail
 
-DEFAULT_BASE="origin/feat/hub-optimization"
+DEFAULT_BASE="origin/main"
 SELF="scripts/pr-risk-scan.sh"
 
 if [[ "${1:-}" == "--diff-file" ]]; then
@@ -93,6 +93,7 @@ head_left=0
 old_left=0
 new_left=0
 hunk=""           # text matched for the current hunk: function header + changes + nearby context
+changed_only=""   # only the +/- lines of the current hunk: tells "the change itself" from "just context"
 hunk_changed=0
 pre=()            # trailing context lines seen since the last change (at most CTX)
 after=0           # context lines still to keep after the last change
@@ -123,21 +124,29 @@ flush_hunk() {
     # Every signature in the hunk participates: a change deep inside a second function (or inside a
     # callback that itself has a signature) must still see all enclosing names.
     if (( ${#hit_sigs[@]} )); then hunk="$(printf '%s\n' "${hit_sigs[@]}")"$'\n'"$hunk"; fi
-    local pair label re text display=0 f
+    # `strict` = signatures + the +/- lines only. The verdict is unchanged (a context hit is still
+    # RISK, a one-line flip that enables cleanup elsewhere must not slip through); the label just
+    # says which case it is, so a human can decide without re-reading the whole hunk.
+    local strict="$changed_only"
+    if (( ${#hit_sigs[@]} )); then strict="$(printf '%s\n' "${hit_sigs[@]}")"$'\n'"$strict"; fi
+    local pair label re display=0 f
     for f in "${DISPLAY_ONLY[@]}"; do [[ "$cur" == "$f" ]] && display=1; done
-    text="$hunk"
     # A display file whose hunk calls the network gets the full rules for the whole hunk: the keyword
     # may sit on a wrapped argument line or in a URL variable, not on the call line itself.
-    (( display )) && grep -Eq "$CALL_RE" <<< "$text" && display=0
+    (( display )) && grep -Eq "$CALL_RE" <<< "$hunk" && display=0
     for pair in "上传:$UPLOAD_RE" "清理/删除:$DELETE_RE" "ledger 状态转换:$LEDGER_RE"; do
       label="${pair%%:*}"; re="${pair#*:}"
-      if grep -Eiq "$re" <<< "$text"; then
-        if (( display )); then notes+=("提示[$label](仅展示,不计 RISK): $cur")
-        else reasons+=("内容[$label]: $cur"); fi
+      if (( display )); then
+        grep -Eiq "$re" <<< "$hunk" && notes+=("提示[$label](仅展示,不计 RISK): $cur")
+      elif grep -Eiq "$re" <<< "$strict"; then
+        reasons+=("内容[$label]: $cur")
+      elif grep -Eiq "$re" <<< "$hunk"; then
+        reasons+=("内容[$label](仅上下文命中): $cur")
       fi
     done
   fi
   hunk=""
+  changed_only=""
   hunk_changed=0
   pre=()
   after=0
@@ -211,12 +220,12 @@ while IFS= read -r line; do
     if (( head_left > 0 )); then
       # With --function-context the hunk opens on the enclosing function's signature: always match it.
       hunk+="$body"$'\n'; head_left=$((head_left - 1))
-      [[ "$line" == [+-]* ]] && { hunk_changed=1; after=$CTX; }
+      [[ "$line" == [+-]* ]] && { hunk_changed=1; after=$CTX; changed_only+="$body"$'\n'; }
     else
       case "$line" in
         [+-]*)
           (( ${#pre[@]} )) && hunk+="$(printf '%s\n' "${pre[@]}")"$'\n'
-          pre=(); hunk+="$body"$'\n'; hunk_changed=1; after=$CTX ;;
+          pre=(); hunk+="$body"$'\n'; hunk_changed=1; after=$CTX; changed_only+="$body"$'\n' ;;
         *)
           if (( after > 0 )); then hunk+="$body"$'\n'; after=$((after - 1))
           else pre+=("$body"); (( ${#pre[@]} > CTX )) && pre=("${pre[@]:1}")
