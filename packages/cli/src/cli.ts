@@ -9,6 +9,7 @@
  *
  * 设计：核心逻辑全在 core/，CLI 仅薄封装 → 二期 UI 复用同一核心。
  */
+import { createBiliupFileTarget } from "@drec/bilibili-upload";
 import "./load-env.js"; // 副作用:必须最先 import——从 <cwd>/.env 灌 env(如 DOUYIN_REC_ROOT),
                          // 抢在下面 @drec/app 的 DEFAULT_COOKIES(模块加载时就读 env)求值之前生效。
 import { SyncGate } from "./sync-gate.js";
@@ -1491,7 +1492,7 @@ const hubStarter: HubStarter = {
     const { ffprobeVideo } = await import("@drec/post-process");
     const { handleEnqueue, handleProcStatus, handleProcCancel } = await import("@drec/app");
     const { statSync } = await import("node:fs");
-    const { uploadPlain, appendGroup, countVideoParts, hubStore, resolveRuleSyncRoom, desiredSpecsForWorker, workerStore, rootHubDir, rootHubConfig, rootConfigDir, rootStageDir, rootLogsDir, drecRoot, listNodeTasks, applyRemoteTasks, recordRoomSessions } = await import("@drec/app");
+    const { countVideoParts, hubStore, resolveRuleSyncRoom, desiredSpecsForWorker, workerStore, rootHubDir, rootHubConfig, rootConfigDir, rootStageDir, rootLogsDir, drecRoot, listNodeTasks, applyRemoteTasks, recordRoomSessions } = await import("@drec/app");
     const { FileLogger } = await import("@drec/observability");
     const { recordExpectedVersion, recordSyncError, cookiesFingerprint, readCookiesApplied, recordCookiesApplied, shouldPushCookies, cookiesPushVerdict, collectPlatformCookies } = await import("@drec/app");
 
@@ -1853,17 +1854,10 @@ const hubStarter: HubStarter = {
           else res(`${stdout}\n${stderr}`);
         });
       }),
-      // 穿插上传接缝:pipeline 先 fire uploadPlain(网络)与烧录并行,再 await BV 后串行 appendGroup。
-      uploadPlain: (plain: UploadOpts) => uploadPlain({ plain }),
-      appendGroup: (o: { bv: string; files: string[]; cookies: string; public: boolean }) =>
-        // countParts 让 append 具备幂等判定:失败后查分 P 数,变多=实际已成功、查不到=转人工不重试。
-        appendGroup({
-          cookies: o.cookies,
-          bv: o.bv,
-          files: o.files,
-          public: o.public,
-          countParts: () => countVideoParts(o.bv, o.cookies),
-        }),
+      // 穿插上传接缝:pipeline 先 fire 建稿(网络)与烧录并行,再 await BV 后串行 append。
+      // 阶段 1b:建稿与 append 交给 UploadTarget(taget 内部仍是同一套 biliup 调用:
+      // 逐线路重试 + parseBV + 分 P 数回读),并且把「结果不确定」表达成 proof 而不是靠错误文案。
+      upload: createBiliupFileTarget(),
       // T11 核验接缝:取该稿件在 B站的**实际分 P 数**。核验的期望值来自上传时写下的
       // sync_parts 检查点(实际提交了几段),不用「文件大小上界」—— 那是评审明确否决的做法。
       // 缺省不注入 = 不做回读;这里注入 = 主控路径删最后一份源之前延后回读分 P 数,不一致则保留源并转人工(issue #327)。

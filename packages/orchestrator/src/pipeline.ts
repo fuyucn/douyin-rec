@@ -3,9 +3,10 @@ import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, rmdirSyn
 import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { NodeUploadConfig } from "./node-upload-config.js";
+import { appendArchive } from "./upload-call.js";
 import type { JobState, SyncLedger } from "./ledger.js";
 import { resolveSubmissionTitle, isAtomicTempName, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, resolveJobLogPath, stageSessionDir, anchorNameOfSessionBase, type PathLayout, survivingArtifacts, throwIfAborted, closeStageReady, USER_STOP, VIDEO_EXT_ALT, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, isSidecarSkipEvent, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
-import type { OutputFormat, UploadOpts } from "@drec/core";
+import type { OutputFormat, UploadOpts, UploadTarget } from "@drec/core";
 import { groupSessionsInDir } from "@drec/post-process";
 import { selectWinner } from "./select.js";
 import { retry } from "./retry.js";
@@ -244,13 +245,8 @@ export interface PipelineDeps {
   pool?: ResourcePool;
   /** 执行子命令(merge/burn 等)。可选返回 stdout+stderr 文本 → pipeline 会摘尾写进该场 job.log。 */
   sh: (cmd: string) => Promise<void | string>;
-  /** 仅上传 plain(P1)拿 BV —— **穿插上传接缝**:pipeline 先 fire 它(网络),与烧录(CPU)并行。 */
-  uploadPlain: (plain: UploadOpts) => Promise<string>;
-  /** 分段模式的 P1 建稿(可选):给定时优先于 `uploadPlain`(便于测试注入)。 */
-  uploadPlainRaw?: (plain: UploadOpts) => Promise<string>;
-  /** 追加一个逻辑组到稿件(空组跳过)。多组**串行**调用(同稿件并发 append 会撞)。
-   *  public 透传 → append 保留 P1 的水印关/可见性(防 append 重置)。 */
-  appendGroup: (o: { bv: string; files: string[]; cookies: string; public: boolean }) => Promise<void>;
+  /** 上传目标(core `UploadTarget`)。建稿与 append 都经它 —— 阶段 1b 起不再传裸函数。 */
+  upload: UploadTarget;
   /** 把单个烧录产物按 16GB 上限切成多段(默认 splitToSizeLimit);可注入测试。 */
   splitForUpload?: (mp4: string) => Promise<string[]>;
   /** 分段模式:单段 remux(默认 @drec/post-process remuxSegment);可注入测试。 */
@@ -997,7 +993,7 @@ async function runPipelineInner(
   deps: PipelineDeps,
   jlog: (msg: string) => void,
 ): Promise<{ state: JobState; bv?: string; stageReady?: true }> {
-  const { transports, ledger, uploadPlain, appendGroup, notify, cfg } = deps;
+  const { transports, ledger, notify, cfg } = deps;
   // 子命令统一经此执行:命令行 + 耗时 + 输出摘尾(最后 2KB,biliup 输出可能很长)都进 job.log。
   const sh = async (cmd: string): Promise<void> => {
     jlog(`$ ${cmd}`);
@@ -1448,7 +1444,7 @@ async function resumeAppends(
   jlog: (msg: string) => void,
   members: Broadcast["members"],
 ): Promise<{ state: JobState; bv?: string }> {
-  const { ledger, appendGroup, notify, cfg } = deps;
+  const { ledger, notify, cfg } = deps;
   jlog(`续跑:已建稿 bv=${bv},跳过 select/pull/merge/burn/uploadPlain,只补 append`);
   const splitForUpload = deps.splitForUpload ?? defaultSplitForUpload;
   const { burnDanmu, burnLivechat } = burnFlags(cfg.steps);
@@ -1547,8 +1543,8 @@ async function resumeAppends(
     // 提交限速与 601 冷却,多场同时续跑时直接打爆 B 站频率限制。
     const submit = (): Promise<void> =>
       deps.pool
-        ? deps.pool.withUpload(() => appendGroup({ bv, files, cookies: cfg.cookies, public: isPublic }), streamKey)
-        : appendGroup({ bv, files, cookies: cfg.cookies, public: isPublic });
+        ? deps.pool.withUpload(() => appendArchive(deps.upload, { bv, files, cookies: cfg.cookies, public: isPublic }), streamKey)
+        : appendArchive(deps.upload, { bv, files, cookies: cfg.cookies, public: isPublic });
     await drainSeasonOnThrow(() => retry(submit, {
       tries,
       backoffMs: 60_000,

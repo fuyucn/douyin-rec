@@ -16,6 +16,7 @@ import type { JobState, SyncLedger } from "./ledger.js";
 import { retry } from "./retry.js";
 import { prepareUploadAlias, SEG_WORK_DIR, segmentStem, segWorkPath, UPLOAD_ALIAS_DIR, type SegmentPlan } from "./session-plan.js";
 import { cleanupSourcesShared, clearCleanFailure, defaultRmStage, defaultSplitForUpload, finalizeAfterUpload, finalizeOnly, readdirSyncSafe, recordCleanFailure, removeEmptyStageDir, stageVideoLeftovers, videoOnly, xmlKeepRule, type CleanupOutcome, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
+import { appendArchive, createArchive } from "./upload-call.js";
 
 /** 默认单段 remux(ts/flv → mp4,无损,-c copy + 时基钉 90000)。 */
 const defaultRemuxSegment = (src: string, out: string): Promise<void> =>
@@ -568,9 +569,7 @@ export async function runSegmentPipeline(o: {
     // P1 建稿:可用 `uploadPlain` 建稿接缝(有线路换线),也可注入 `uploadPlainRaw`(测试用)。
     // 601 频率限制 → 重试(队列会先冷却);其余错误不重试(避免重复建稿)。
     bv = await retry(
-      () => runUpload(deps, () => deps.uploadPlainRaw
-        ? deps.uploadPlainRaw({ ...plainOpts, video: p1Path, title: uploadTitle })
-        : deps.uploadPlain({ ...plainOpts, video: p1Path, title: uploadTitle }), streamKey),
+      () => runUpload(deps, () => createArchive(deps.upload, { ...plainOpts, video: p1Path, title: uploadTitle }), streamKey),
       { tries: 3, backoffMs: 60_000, sleep: deps.sleep, shouldRetry: (e) => isUploadRateLimited(e) },
     );
     if (cfg.uploadMeta.seasonSectionId) {
@@ -623,7 +622,7 @@ export async function runSegmentPipeline(o: {
       jlog(`append plain 段 ${idxs.join(",")}: ${batch.length} 文件`);
       const tries = batch.length === 1 ? 5 : 1;
       await retry(
-        () => runUpload(deps, () => deps.appendGroup({ ...plainOpts, bv, files: batch }), streamKey),
+        () => runUpload(deps, () => appendArchive(deps.upload, { ...plainOpts, bv, files: batch }), streamKey),
         { tries, backoffMs: 60_000, sleep: deps.sleep, shouldRetry: (e) => isUploadRateLimited(e) || (batch.length === 1 && !isAppendAmbiguous(e)) },
       );
       for (const k of idxs) ledger.markPartDone(streamKey, "plain", k);
@@ -729,7 +728,7 @@ async function appendSegmentGroup(
     const tries = batch.length === 1 ? 5 : 1;
     // retry 包在 runUpload 外:每次重试都重新获取上传配额(命中 601 后队列已记冷却)。
     await retry(
-      () => runUpload(deps, () => deps.appendGroup({ bv, files: batch, cookies: deps.cfg.cookies, public: isPublic }), streamKey),
+      () => runUpload(deps, () => appendArchive(deps.upload, { bv, files: batch, cookies: deps.cfg.cookies, public: isPublic }), streamKey),
       {
         tries,
         backoffMs: 60_000,
@@ -861,7 +860,7 @@ async function resumeSegmentAppends(
     if (batch.length === 0) continue;
     jlog(`续跑 append plain 分 P ${idxs.join(",")}`);
     await drainSeasonOnThrow(() => retry(
-      () => runUpload(deps, () => deps.appendGroup({ bv, files: batch, cookies: cfg.cookies, public: isPublic }), streamKey),
+      () => runUpload(deps, () => appendArchive(deps.upload, { bv, files: batch, cookies: cfg.cookies, public: isPublic }), streamKey),
       { tries: batch.length === 1 ? 5 : 1, backoffMs: 60_000, sleep: deps.sleep, shouldRetry: (e) => isUploadRateLimited(e) || (batch.length === 1 && !isAppendAmbiguous(e)) },
     ));
     for (const k of idxs) ledger.markPartDone(streamKey, "plain", k);

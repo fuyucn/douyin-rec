@@ -6,6 +6,7 @@ import { pastStartMs } from "./harness/fake-recordings.js";
 import { expectHealthyDone } from "./harness/invariants.js";
 import { segWorkPath } from "../../packages/orchestrator/src/session-plan.js";
 import { addArchiveToSeasonIfConfigured } from "@drec/core";
+import { fakeUploadTarget } from "../../packages/orchestrator/src/test-target.js";
 
 vi.mock("@drec/core", async (orig) => {
   const m = await orig<typeof import("@drec/core")>();
@@ -144,11 +145,13 @@ describe("e2e: 半成品产物(issue #140)", () => {
           if (residue.delete(f)) return 0;
           return /_\d{3}\.mp4$/.test(f) && !f.includes(".work/") ? 60 : probeJson(f);
         },
-        uploadPlain: async (o) => {
-          const p = String((o as { video?: string }).video ?? "");
-          uploaded.push({ path: p, body: existsSync(p) ? readFileSync(p, "utf-8") : "(missing)" });
-          return s.fake.uploadPlain(o);
-        },
+        upload: fakeUploadTarget({
+          uploadPlain: async (o) => {
+            const p = String((o as { video?: string; videos?: string[] }).video ?? (o as { videos?: string[] }).videos?.[0] ?? "");
+            uploaded.push({ path: p, body: existsSync(p) ? readFileSync(p, "utf-8") : "(missing)" });
+            return s.fake.uploadPlain({ video: p } as never);
+          },
+        }),
       },
     });
     s.record({ sessions: [{ startMs: pastStartMs(0, 10, 0), segments: 1, segSec: 600 }] });

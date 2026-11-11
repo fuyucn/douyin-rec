@@ -15,6 +15,8 @@ import {
 import { SyncLedger } from "./ledger.js";
 import { JobDispatcher } from "./job-dispatcher.js";
 import type { PipelineDeps } from "./pipeline.js";
+import { fakeUploadTarget } from "./test-target.js";
+import type { UploadTarget } from "@drec/core";
 
 vi.mock("@drec/core", async (orig) => {
   const m = await orig<typeof import("@drec/core")>();
@@ -50,6 +52,7 @@ interface TestDeps {
   sh: Mock<(cmd: string) => Promise<void>>;
   uploadPlain: Mock<(plain: { video?: string; public?: boolean }) => Promise<string>>;
   appendGroup: Mock<(o: { bv: string; files: string[]; cookies: string; public: boolean }) => Promise<void>>;
+  upload: UploadTarget;
 }
 
 function makeDeps(overrides: Partial<PipelineDeps> = {}): TestDeps {
@@ -92,15 +95,14 @@ function makeDeps(overrides: Partial<PipelineDeps> = {}): TestDeps {
     transports: new Map(),
     ledger,
     sh,
-    uploadPlain,
-    appendGroup,
+    upload: fakeUploadTarget({ uploadPlain, appendGroup }),
     pool: new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0 }),
     splitForUpload: async (mp4: string) => [mp4],
     notify: vi.fn(),
     cfg,
     ...overrides,
   };
-  return { deps, ledger, stageDir, stageSub, products, sh, uploadPlain, appendGroup };
+  return { deps, ledger, stageDir, stageSub, products, sh, uploadPlain, appendGroup, upload: deps.upload };
 }
 
 function build(t: TestDeps, opts: { burnDanmu?: boolean; burnLivechat?: boolean; willUpload?: boolean } = {}): Workflow {
