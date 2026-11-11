@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { freemem } from "node:os";
 import type { SyncLedger, StepName } from "./ledger.js";
 import type { PipelineCfg, PipelineDeps } from "./pipeline.js";
-import { appendArchive, createArchive } from "./upload-call.js";
+import { appendArchive, createArchive } from "@drec/core";
 import { humanBytes } from "./format.js";
 import { addArchiveToSeasonIfConfigured, seasonCheckpointState, effectiveStageFormat, isAppendAmbiguous, isJobAbort, isUploadRateLimited, throwIfAborted, USER_STOP, UPLOAD_FAIL_CLOSED_MS } from "@drec/core";
 import { retry } from "./retry.js";

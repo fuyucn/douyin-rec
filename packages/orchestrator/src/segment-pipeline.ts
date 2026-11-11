@@ -16,7 +16,7 @@ import type { JobState, SyncLedger } from "./ledger.js";
 import { retry } from "./retry.js";
 import { prepareUploadAlias, SEG_WORK_DIR, segmentStem, segWorkPath, UPLOAD_ALIAS_DIR, type SegmentPlan } from "./session-plan.js";
 import { cleanupSourcesShared, clearCleanFailure, defaultRmStage, defaultSplitForUpload, finalizeAfterUpload, finalizeOnly, readdirSyncSafe, recordCleanFailure, removeEmptyStageDir, stageVideoLeftovers, videoOnly, xmlKeepRule, type CleanupOutcome, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
-import { appendArchive, createArchive } from "./upload-call.js";
+import { appendArchive, createArchive } from "@drec/core";
 
 /** 默认单段 remux(ts/flv → mp4,无损,-c copy + 时基钉 90000)。 */
 const defaultRemuxSegment = (src: string, out: string): Promise<void> =>

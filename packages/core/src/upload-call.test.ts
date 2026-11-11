@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { APPEND_AMBIGUOUS_MARKER, PLAIN_NO_BV_MARKER } from "@drec/core";
 import { appendArchive, createArchive } from "./upload-call.js";
-import { fakeUploadTarget } from "./test-target.js";
+import { fakeUploadTarget } from "../../../packages/orchestrator/src/test-target.js";
 
 const opts = { video: "/s/plain.mp4", cookies: "/c", title: "T", tag: "a,b", tid: 21, public: false };
 
@@ -30,6 +30,15 @@ describe("upload-call: proof 判定与错误语义(阶段 1b 步 2)", () => {
     await createArchive(t as never, { ...opts, tag: "a, b,c ," });
     // 原样:一个元素;target 侧 join 后仍是 "a, b,c ," —— 拆开再拼会变成 "a,b,c"。
     expect(seen[0]!.tags).toEqual(["a, b,c ,"]);
+  });
+
+  it("hooks 透传到目标(1b-3 要用它把子进程进度回报给编排层)", async () => {
+    const seen: Array<{ hooks?: { onLine?: (l: string) => void } }> = [];
+    const lines: string[] = [];
+    const t = { ...fakeUploadTarget(), create: async (i: { hooks?: { onLine?: (l: string) => void } }) => { seen.push(i); i.hooks?.onLine?.("progress"); return { proof: "created" as const, ref: { targetId: "fake", id: "BV1" } }; } };
+    await createArchive(t as never, opts, { onLine: (l) => lines.push(l) });
+    expect(lines).toEqual(["progress"]);
+    expect(seen[0]!.hooks).toBeDefined();
   });
 
   it("append: proof observed → 静默成功", async () => {

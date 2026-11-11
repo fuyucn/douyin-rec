@@ -69,8 +69,16 @@ export interface UploadTargetCapabilities {
   seasons: boolean;
 }
 
+/** 上传子进程的观察钩子：目标实现把底层进度事件透传出去,编排层据此回报进度(不参与判定)。 */
+export interface UploadChildHooks {
+  onSpawn?(pid: number | undefined): void;
+  onLine?(line: string): void;
+  onClose?(): void;
+}
+
 export interface CreateArchiveInput {
   cred: CredentialRef;
+  hooks?: UploadChildHooks;
   title: string;
   files: UploadFile[];
   policy: UploadPolicy;
@@ -90,6 +98,7 @@ export interface CreateArchiveResult {
 
 export interface AppendPartsInput {
   cred: CredentialRef;
+  hooks?: UploadChildHooks;
   ref: ArchiveRef;
   files: UploadFile[];
   policy: UploadPolicy;
