@@ -10,7 +10,7 @@ import {
 } from "@drec/core";
 import { appendGroup, countVideoParts, isAllFilesUploadedLine, runBiliup, uploadPlain, type BiliupHooks } from "./run-biliup.js";
 import { TransferWatch, readTcpAcked, watchConfigOf, type AckSample } from "./biliup-progress.js";
-import { findRecentArchive, type ArchiveQuery } from "./archive-lookup.js";
+import { findRecentArchive, type ArchiveQuery } from "@drec/processors";
 
 export interface BiliupParams {
   cookies: string;

@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerProcessor, _resetProcessors, advertisedCapabilities, isUncertainOutcome } from "@drec/core";
 import { openUploadSlot } from "@drec/core";
-import { makeBiliupProcessor, type BiliupDeps } from "../../packages/processors/src/biliup.js";
-import { DEFAULT_WATCH, TransferWatch, parseSsAcked, watchConfigOf } from "../../packages/processors/src/biliup-progress.js";
-import type { BiliupHooks } from "../../packages/processors/src/run-biliup.js";
+import { makeBiliupProcessor, type BiliupDeps } from "../../packages/bilibili-upload/src/biliup.js";
+import { DEFAULT_WATCH, TransferWatch, parseSsAcked, watchConfigOf } from "../../packages/bilibili-upload/src/biliup-progress.js";
+import type { BiliupHooks } from "../../packages/bilibili-upload/src/run-biliup.js";
 
 const SS = [
   "ESTAB 0      0         local:53844 peer-a:443   users:((\"biliup\",pid=4242,fd=9))",

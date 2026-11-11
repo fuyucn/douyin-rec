@@ -70,6 +70,7 @@ flowchart TB
 
   cli --> app
   cli --> bilibili
+  cli --> bup
   cli --> core
   cli --> douyin
   cli --> kuaishou
@@ -83,6 +84,7 @@ flowchart TB
   cli --> zeroup
   orch --> core
   orch --> post
+  app --> bup
   app --> core
   app --> douyin
   app --> manager

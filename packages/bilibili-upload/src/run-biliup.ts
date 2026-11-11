@@ -17,7 +17,7 @@ export type { UploadLine, UploadOpts } from "@drec/core";
 
 /**
  * Cookie 头提取已下沉 core(单一真理源,0 落盘直传包也要用,不能让 L4 反向依赖)。
- * 这里 re-export 保持既有调用点(`@drec/processors` 的导入方)不变。
+ * 阶段 1b 步 1 起实现归属本包；`@drec/processors` 不再 re-export 它,调用点统一从 @drec/bilibili-upload 取。
  */
 export { biliupCookieHeader } from "@drec/core";
 

@@ -18,6 +18,7 @@
     "@drec/douyin-live": "workspace:*",
     "@drec/bilibili-live": "workspace:*",
     "@drec/kuaishou-live": "workspace:*",
-    "@drec/orchestrator": "workspace:*"
+    "@drec/orchestrator": "workspace:*",
+    "@drec/bilibili-upload": "workspace:*"
   }
 }

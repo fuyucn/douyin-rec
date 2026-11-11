@@ -68,7 +68,7 @@ import {
   type UploadOwner,
 } from "@drec/core";
 import { appendGroup, countVideoParts, uploadPlain, type BiliupHooks } from "./upload/biliup.js";
-import { readTcpAckedAsync, type AckSample } from "@drec/processors";
+import { readTcpAckedAsync, type AckSample } from "@drec/bilibili-upload";
 import { rootBiliupCookies } from "./paths.js";
 import { openNodeUploadGate, openNodeUploadSlot, resolveUploadAccountKey } from "./node-pipeline.js";
 

@@ -1,5 +1,6 @@
 /**
- * processors/upload-part.ts — per-part chain upload (plan 046 §5.4 / §10 PR5 prelude).
+ * upload-part.ts — per-part chain upload (plan 046 §5.4 / §10 PR5 prelude)。
+ * 阶段 1b 步 1 起实现归属本包(此前在 processors,因 processors 排在下层无法引用本包)。
  *
  * The ctx is the only pointer: one absolute video file + the in-queue fingerprint + an optional
  * inherited draft id. bv empty => create; bv present => append. No directory scan, no archive list

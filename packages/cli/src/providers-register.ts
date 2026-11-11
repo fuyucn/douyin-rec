@@ -17,7 +17,8 @@ import { bilibiliPlatform } from "@drec/bilibili-live";
 import { kuaishouPlatform } from "@drec/kuaishou-live";
 import { ffmpegEngine, mesioEngine } from "@drec/record-engine";
 import { existsSync } from "node:fs";
-import { cleanupPartProcessor, makeBiliupProcessor, makeUploadPartProcessor, reconcilePartProcessor, remuxProcessor, uploadPrepProcessor } from "@drec/processors";
+import { cleanupPartProcessor, reconcilePartProcessor, remuxProcessor, uploadPrepProcessor } from "@drec/processors";
+import { makeBiliupProcessor, makeUploadPartProcessor } from "@drec/bilibili-upload";
 import { openNodeUploadGate, openNodeUploadSlot, resolveUploadAccountKey, rootBiliupCookies } from "@drec/app";
 
 // ── 平台 ────────────────────────────────────────────────────────────────────

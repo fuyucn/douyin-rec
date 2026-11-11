@@ -1,7 +1,7 @@
 // test/upload/biliup-append.test.ts
 import { describe, it, expect } from "vitest";
 import { appendGroup, buildAppendArgs, uploadThenAppend, uploadThenAppendGroups } from "../../packages/app/src/upload/biliup.js";
-import { APPEND_REREAD_DELAYS_MS, APPEND_UNREADABLE_REREAD_DELAYS_MS } from "../../packages/processors/src/run-biliup.js";
+import { APPEND_REREAD_DELAYS_MS, APPEND_UNREADABLE_REREAD_DELAYS_MS } from "../../packages/bilibili-upload/src/run-biliup.js";
 
 // 防御:append 也带关水印 + 仅自己可见(防 append 重置稿件设置,见 biliup.ts 注释)。
 const WM = '{"watermark":{"state":0}}';

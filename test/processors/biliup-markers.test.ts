@@ -10,7 +10,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { PLAIN_NO_BV_MARKER, isPlainNoBv } from "@drec/core";
 
-const SRC = fileURLToPath(new URL("../../packages/processors/src/run-biliup.ts", import.meta.url));
+const SRC = fileURLToPath(new URL("../../packages/bilibili-upload/src/run-biliup.ts", import.meta.url));
 
 describe("biliup 的稿件号解析失败标记", () => {
   it("run-biliup.ts 里每一处「解析不到 BV」的抛错都带标记", () => {
