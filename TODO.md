@@ -44,6 +44,11 @@
   **为什么**: 生产上传都有 Gate/槽位，手动路径是唯一旁路；并发时会打爆频控，且 601 冷却不跨进程可见。
   **验收**: 单测覆盖顺序/601 记冷却/槽位超时/槽位库不可用；源码守卫钉住两条命令；全量 test/typecheck/bundle 绿；部署后手动上传可见等待原因。
   **现状（2026-11-10）**: PR #599 已开，pr-gate PASS；待独立 review。
+- [~] **T-174 Discord 通知里的房间链接被全角标点吞并（issue [#588](https://github.com/fuyucn/douyin-rec/issues/588) → PR [#589](https://github.com/fuyucn/douyin-rec/pull/589)，2026-11-10）**
+  — **做什么**: `formatMessage` 的三条 record 文案（开播/收播/重连）统一经 `formatRoomUrl`：仅合法 http(s) 房间 URL 用 Discord 尖括号包出链接边界，纯房号/空串/无 scheme 短链/控制字符原样；anchor 为空时 URL 兜底也带边界；hubTaskStart 不动。补 6 组 vitest 回归；bump 0.0.348→0.0.349 并 bundle。
+  **为什么**: URL 后直接跟全角 `，`/`）`，Discord 客户端把「，画质 origin」等并进链接，点击进入错误地址。
+  **验收**: 三条 record 消息的 URL 有显式边界、hubTaskStart 纯房号无包裹、空 room 走 anchor 兜底；撤修复 3 例失败、复原全绿；全量 test/typecheck/bundle 绿；部署后 Discord 实看点链接进入直播间。
+  **现状（2026-11-10）**: PR #589 已开，pr-gate PASS；待独立 review；部署后 Discord 实跑收口。
 - [~] **T-173 直播直传 full 模式「当前分 P」崩溃后不进 WAL、被当孤儿清扫（issue [#581](https://github.com/fuyucn/douyin-rec/issues/581)，2026-11-10）**
   — **做什么**: 按独立只读 review 的 F12 最小修法——仅 `spoolMode==="full" && submit!==false` 时在 `openPart` 同步写一条 `confirmed:false` 的 `parts` 行（`noteUnconfirmedPart`，bytes/durationSec 先给 0，可选 `sealed:false` 兼容老 state）；不升 `schemaVersion`（保持 1）、不改 spool 文件名、不动 `pending` WAL / `rolloverStaleState` / `spoolSweepSafe` / CLI 命名。配套 4 项：`discard()`/discardedTail/negligibleTail 要 `dropPart`；`resubmitUnconfirmedPart` 对 0 字节/仅 PAT-PMT 孤儿 `dropPart` 不 fail；写失败时同步把 `spoolIncomplete` 刷进该行（守 #579）；核对 `keepOrLose` 不再因行已存在漏写 probe 后 duration。启动 `dropUnrecoverableUnsealed()` 作 F7 安全网。
   **为什么**: SIGKILL/OOM/断电/未捕获 exit 绕过 JS handler，当前正在录的分 P 在封口前从未进 state；`openSession()` 的 `session.recover()`+`resubmitAllUnconfirmed()` 无目录扫描→不收养；孤儿清扫在下次启动且 mtime>10min 时删→稿件永远缺这一 P（plans/039 B14 实测自证）。SIGTERM/SIGINT/SIGUSR2 会封口写行，正常停止不丢。
