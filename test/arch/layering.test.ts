@@ -28,6 +28,8 @@ const RANKS: Record<string, number> = {
   // 0.5 上传目标通用驱动(plans/049):只依赖 core 契约与纯函数;被 orchestrator/app 注入使用,
   //      不反向依赖任何具体目标包(bilibili-upload 也在 0.5,只由 cli 注册)。
   "@drec/upload-runtime": 0.5,
+  // 0.5:B 站上传目标实现(包装既有 biliup 链;依赖 core + processors 0.4;cli 注册,orchestrator/app 不 import)
+  "@drec/bilibili-upload": 0.5,
   // 0.2:依赖 core 的会话基名(issue #50);被 processors/app/orchestrator/cli 依赖
   "@drec/post-process": 0.2,
   // 0.3:每节点持久任务表 + 租约执行循环(依赖 core + node:sqlite;被 app/cli 依赖,不依赖 observability)

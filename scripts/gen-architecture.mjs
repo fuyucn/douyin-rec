@@ -136,7 +136,7 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
 
 // ── 语义角色 → 颜色(Archify 风格:深色底 + 语义色) ──────────────────────────────
 const SEMANTIC = {
-  "@drec/core": "core", "@drec/observability": "core", "@drec/upload-runtime": "core", "@drec/post-process": "core", "@drec/proc-queue": "core", "@drec/processors": "core",
+  "@drec/core": "core", "@drec/observability": "core", "@drec/upload-runtime": "core", "@drec/bilibili-upload": "core", "@drec/post-process": "core", "@drec/proc-queue": "core", "@drec/processors": "core",
   "@drec/ffmpeg-recorder-extra": "core",
   "@drec/record-engine": "engine",
   "@drec/douyin-live": "platform", "@drec/bilibili-live": "platform", "@drec/kuaishou-live": "platform",
@@ -307,6 +307,7 @@ const PKG_BLURB = {
   "@drec/core": "Platform / DownloadEngine 契约<br/>+ 注册表 + types/config/notify/api-types",
   "@drec/observability": "Notifier / EventCenter / 日志",
   "@drec/upload-runtime": "UploadTarget 通用驱动<br/>(阶段 0:契约 + 注入接口)",
+  "@drec/bilibili-upload": "B 站上传目标<br/>(包装 biliup;argv 对拍)",
   "@drec/post-process": "concat / burn / ass / merge / ffmpeg / fonts",
   "@drec/proc-queue": "ProcQueueStore 持久任务表(sqlite)<br/>ProcRunner 租约 / 心跳 / fencing / 关停",
   "@drec/zero-upload": "0 落盘流式直传(自研 UPOS)<br/>live-pump: 一段一 ffmpeg 边录边传",
@@ -322,7 +323,7 @@ const PKG_BLURB = {
   "@drec/cli": "record / merge / burn / probe + task 命令组<br/>providers-register: 注册平台 + 引擎",
 };
 const NODE_ID = {
-  "@drec/core": "core", "@drec/observability": "observ", "@drec/post-process": "post", "@drec/upload-runtime": "uprt", "@drec/proc-queue": "procq", "@drec/zero-upload": "zeroup",
+  "@drec/core": "core", "@drec/observability": "observ", "@drec/post-process": "post", "@drec/upload-runtime": "uprt", "@drec/bilibili-upload": "bup", "@drec/proc-queue": "procq", "@drec/zero-upload": "zeroup",
   "@drec/processors": "procs",
   "@drec/ffmpeg-recorder-extra": "extra", "@drec/record-engine": "engine",
   "@drec/douyin-live": "douyin", "@drec/bilibili-live": "bilibili", "@drec/kuaishou-live": "kuaishou",

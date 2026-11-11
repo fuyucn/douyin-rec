@@ -47,6 +47,7 @@ flowchart TB
     engine["<b>record-engine</b><br/>通用 PollingRecorder<br/>下载引擎: ffmpeg(.ts) / mesio(.flv)"]
   end
   subgraph L05["L0.5 · 可观测性 / 上传驱动"]
+    bup["<b>bilibili-upload</b><br/>B 站上传目标<br/>(包装 biliup;argv 对拍)"]
     observ["<b>observability</b><br/>Notifier / EventCenter / 日志"]
     uprt["<b>upload-runtime</b><br/>UploadTarget 通用驱动<br/>(阶段 0:契约 + 注入接口)"]
   end
@@ -98,6 +99,8 @@ flowchart TB
   kuaishou --> core
   engine --> core
   engine --> extra
+  bup --> core
+  bup --> procs
   observ --> core
   uprt --> core
   procs --> core

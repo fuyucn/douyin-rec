@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import {
   APPEND_AMBIGUOUS_MARKER,
+  PLAIN_NO_BV_MARKER,
   biliupCookieHeader,
   registerChild,
   throwIfAborted,
@@ -185,7 +186,7 @@ export async function upload(o: UploadOpts): Promise<{ bv: string }> {
     try {
       const combined = await runBiliup(buildUploadArgs({ ...o, line }));
       const bv = parseBV(combined);
-      if (!bv) throw new Error(`biliup 上传完成但解析不到 BV：${combined.slice(-300).trim()}`);
+      if (!bv) throw new Error(`${PLAIN_NO_BV_MARKER} biliup 上传完成但解析不到 BV：${combined.slice(-300).trim()}`);
       return { bv };
     } catch (e) {
       last = e;
@@ -228,7 +229,7 @@ export async function uploadPlain(o: {
     try {
       const out = await run(buildUploadArgs({ ...o.plain, line }), o.hooks);
       const bv = parseBV(out);
-      if (!bv) throw new Error(`upload plain 完成但解析不到 BV：${out.slice(-300)}`);
+      if (!bv) throw new Error(`${PLAIN_NO_BV_MARKER} upload plain 完成但解析不到 BV：${out.slice(-300)}`);
       return bv;
     } catch (e) {
       last = e;
@@ -356,7 +357,7 @@ export async function uploadThenAppend(o: {
   const run = o.run ?? runBiliup;
   const uploadOut = await run(buildUploadArgs(o.plain));
   const bv = parseBV(uploadOut);
-  if (!bv) throw new Error(`upload plain 完成但解析不到 BV：${uploadOut.slice(-300)}`);
+  if (!bv) throw new Error(`${PLAIN_NO_BV_MARKER} upload plain 完成但解析不到 BV：${uploadOut.slice(-300)}`);
   if (o.extras.length > 0) {
     await run(buildAppendArgs({ cookies: o.plain.cookies, bv, files: o.extras, public: o.plain.public }));
   }
@@ -377,7 +378,7 @@ export async function uploadThenAppendGroups(o: {
   const run = o.run ?? runBiliup;
   const uploadOut = await run(buildUploadArgs(o.plain));
   const bv = parseBV(uploadOut);
-  if (!bv) throw new Error(`upload plain 完成但解析不到 BV：${uploadOut.slice(-300)}`);
+  if (!bv) throw new Error(`${PLAIN_NO_BV_MARKER} upload plain 完成但解析不到 BV：${uploadOut.slice(-300)}`);
   for (const files of o.groups) {
     if (files.length > 0) {
       await run(buildAppendArgs({ cookies: o.plain.cookies, bv, files, public: o.plain.public }));
