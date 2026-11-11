@@ -6,7 +6,7 @@
  * 悄悄引入跨层耦合)。这守护的是 cli/app → manager → 插件 → 平台 core/base → core 的单向分层。
  *
  * 分层(rank 越小越底层,只能被更高层依赖):
- *   0 基础叶子:契约 core / 后处理 post-process / TUI / ffmpeg 附加
+ *   0 基础叶子:契约 core / 后处理 post-process / ffmpeg 附加
  *   1 平台共享层:通用录制器 + ffmpeg/mesio 引擎 record-engine
  *   1.5 平台 core:douyin-live / bilibili-live(实现 Platform)
  *   3 编排:manager(会话生命周期)
@@ -21,7 +21,7 @@ const PKG_DIR = join(import.meta.dirname, "..", "..", "packages");
 
 /** 每个 @drec/* 包的层级。新增包必须在此登记(否则测试失败,逼你想清楚它属哪层)。 */
 const RANKS: Record<string, number> = {
-  // 0 基础叶子(纯契约 / 后处理 / TUI / ffmpeg 附加)
+  // 0 基础叶子(纯契约 / 后处理 / ffmpeg 附加)
   "@drec/core": 0,
   // 0.5 可观测性:logs + notification 实现(端口在 core;被 app/cli 依赖,manager/orchestrator 不依赖)
   "@drec/observability": 0.5,
@@ -92,6 +92,16 @@ describe("架构分层(依赖只能向下)", () => {
       }
     }
     expect(violations, `分层违规:\n  ${violations.join("\n  ")}`).toEqual([]);
+  });
+
+  it("AGENTS.md 目录树里列的包都必须真实存在(防幽灵条目)", () => {
+    const doc = readFileSync(join(PKG_DIR, "..", "AGENTS.md"), "utf8");
+    const tree = doc.match(/```[\s\S]*?```/g)?.find((b) => b.includes("├──"));
+    expect(tree, "AGENTS.md 缺少包目录树代码块").toBeDefined();
+    const listed = [...tree!.matchAll(/[├└]──\s+([\w-]+)\//g)].map((m) => m[1]!);
+    expect(listed.length).toBeGreaterThan(10);
+    const ghosts = listed.filter((n) => !existsSync(join(PKG_DIR, n)));
+    expect(ghosts, `AGENTS.md 列了不存在的包: ${ghosts.join(", ")}`).toEqual([]);
   });
 
   it("core 是纯契约层,不依赖任何 @drec 包", () => {

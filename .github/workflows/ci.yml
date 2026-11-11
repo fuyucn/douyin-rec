@@ -38,7 +38,7 @@ jobs:
       - name: "Install (root)"
         run: pnpm install --frozen-lockfile
 
-      - name: "Typecheck (root, 13 packages)"
+      - name: "Typecheck (root, 17 packages)"
         run: pnpm typecheck
 
       - name: "Unit tests (vitest, 含分层守护)"
