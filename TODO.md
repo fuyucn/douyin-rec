@@ -839,6 +839,8 @@
 
 ## 已完成
 
+- [x] **T-187 biliup 上传目标包装与 argv 对拍（审计 P1-1 阶段 1a，issue [#614](https://github.com/fuyucn/douyin-rec/issues/614) → PR [#615](https://github.com/fuyucn/douyin-rec/pull/615)，2026-11-11）** — **做什么**:新包 `@drec/bilibili-upload`（rank 0.5）把既有 biliup 链包装成 `UploadTarget`：建稿走 `uploadPlain`（线路重试）、append 走 `appendGroup`（分 P 数回读 + 不确定标记），本包只做契约输入映射与 proof 翻译；argv 用写死的 golden 数组对拍（不再拿同一个 builder 自证）；core 新增 `PLAIN_NO_BV_MARKER` 结构化标记 + 守护测试扫全部抛错点；架构登记四处同步（18 包）。**为什么**:上传目标抽象停在契约层，10 条上传路径各自重写建稿/追加/重试；阶段 1b 接线前必须先有一个「行为等价」的真实目标。**验收**:argv 与旧链逐字一致（4 处变异全红）、零生产接入（orchestrator/app 无 import）、18 条用例 + 全量 test/typecheck/arch check 绿；gpt-6.1-sol 三轮复核后 APPROVE。（2026-11-11 合并，version 0.0.357，待部署确认无感）
+
 - [x] **T-186 roadmap 与台账失真：Phase 0 全做完没打勾，进行中 85 项（issue [#612](https://github.com/fuyucn/douyin-rec/issues/612)，2026-11-11）** — **做什么**:新增 `docs/roadmap.md` 作为唯一进度入口（合并 plans/045 的 Phase 0–4 与 11-10 架构审计的 P0/P1/P2）；把本轮合并的 7 条从「进行中」移入已完成、补登记 4 条新票，不碰未核实的 78 条历史条目。**为什么**:plans/045 的 Phase 0 已全部 CLOSED 却一条没打勾；TODO.md「进行中」85 项（规则最多 1–2 项）；问「下一步做什么」时两份文档都答不出来。**验收**:roadmap 能回答「现在在哪、下一步做哪几项」；进行中条目不再含已合并票；纯文档不影响 test/typecheck。（2026-11-11，无 bump）
 
 - [x] **T-185 上传目标契约与注册表 + upload-runtime 骨架（审计 P1-1 阶段 0，issue [#602](https://github.com/fuyucn/douyin-rec/issues/602) → PR [#605](https://github.com/fuyucn/douyin-rec/pull/605)，2026-11-11）** — **做什么**:core 新增 `UploadTarget` 契约与 `createUploadTargetRegistry()`（重复 id / 空 id / 同平台多目标直接抛错），新包 `@drec/upload-runtime`（rank 0.5）只放状态存储注入接口与驱动类型边界；架构登记四处同步。**为什么**:上传目标完全没有抽象，10 条上传路径、两套栈、建稿→append→重试写 5 遍。**验收**:假 target 一行注册即被找到；重复 id 抛错（撤检查即红）；全量 test/typecheck/arch check 绿；行为零变化。（2026-11-11 合并，version 0.0.356，待部署确认无感）
