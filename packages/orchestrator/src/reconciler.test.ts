@@ -11,6 +11,7 @@ import { zeroDiskStreamKey } from "@drec/core";
 import type { JobState } from "./ledger.js";
 import { processTimeZone, zonedStamp, JobAbortedError, USER_STOP, _resetJobAbort, beginJob, endJob, isJobLive } from "@drec/core";
 import type { NotifyEvent } from "@drec/core";
+import { fakeUploadTarget } from "./test-target.js";
 
 function freshLedger(): SyncLedger {
   return new SyncLedger(join(mkdtempSync(join(tmpdir(), "rec-test-")), "test.db"));
@@ -45,8 +46,10 @@ function makePipelineDeps(ledger: SyncLedger, transports: Map<string, Transport>
     transports,
     ledger,
     sh: vi.fn<(cmd: string) => Promise<void>>().mockResolvedValue(undefined),
-    uploadPlain: vi.fn<(plain: unknown) => Promise<string>>().mockResolvedValue("BV123"),
-    appendGroup: vi.fn<(o: unknown) => Promise<void>>().mockResolvedValue(undefined),
+    upload: fakeUploadTarget({
+      uploadPlain: vi.fn<(plain: unknown) => Promise<string>>().mockResolvedValue("BV123"),
+      appendGroup: vi.fn<(o: unknown) => Promise<void>>().mockResolvedValue(undefined),
+    }),
     notify: vi.fn<(e: NotifyEvent) => void>(),
     cfg: {
       cleanMaxGapSec: 30,

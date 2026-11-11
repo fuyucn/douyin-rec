@@ -13,6 +13,7 @@ import {
 import { createUploadQueuePoller } from "../../packages/orchestrator/src/node-upload-poll.js";
 import { ensureUploadPlan, type UploadInput } from "../../packages/orchestrator/src/node-upload-queue.js";
 import { ProcUnsupported, type NodeTasks, type Transport } from "../../packages/orchestrator/src/transport.js";
+import { fakeUploadTarget } from "../../packages/orchestrator/src/test-target.js";
 
 const KEY = "douyin:1:2026-10-17";
 const fresh = (): SyncLedger => new SyncLedger(join(mkdtempSync(join(tmpdir(), "nup-")), "j.db"));
@@ -235,7 +236,7 @@ describe("Reconciler with queue-managed orders", () => {
     await new Promise((r) => setTimeout(r, 5));
     const r = new Reconciler({
       platform: "douyin", transports: new Map(), ledger, staleMs: 0,
-      pipelineDeps: { transports: new Map(), ledger, sh: async () => {}, uploadPlain: async () => "BV", appendGroup: async () => {}, notify: () => {}, cfg: { cleanMaxGapSec: 30, stageDir: "/tmp/s", cookies: "/c", uploadMode: "upload", uploadMeta: { tag: "x", tid: 21, desc: "" } } },
+      pipelineDeps: { transports: new Map(), ledger, sh: async () => {}, upload: fakeUploadTarget({ uploadPlain: async () => "BV", appendGroup: async () => {} }), notify: () => {}, cfg: { cleanMaxGapSec: 30, stageDir: "/tmp/s", cookies: "/c", uploadMode: "upload", uploadMeta: { tag: "x", tid: 21, desc: "" } } },
       settle: { maxWaitMs: 1, pollMs: 1 }, sleep: async () => {},
     });
     await r.reconcileAll();

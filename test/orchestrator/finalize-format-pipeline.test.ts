@@ -13,6 +13,7 @@ import { SyncLedger } from "../../packages/orchestrator/src/ledger.js";
 import { _resetFinalizeFormatState, parseFollowups } from "../../packages/orchestrator/src/finalize-format.js";
 import type { Broadcast } from "../../packages/orchestrator/src/identity.js";
 import type { NodeRecording, Transport } from "../../packages/orchestrator/src/transport.js";
+import { fakeUploadTarget } from "../../packages/orchestrator/src/test-target.js";
 
 const STREAM_KEY = "douyin:test-room:2026-06-27";
 const SUB = "douyin_test-room_2026-06-27";
@@ -94,7 +95,7 @@ function makeHarness(cfgOver: Partial<PipelineCfg>, o: { finalize?: boolean; han
   };
   const deps = {
     transports: new Map([["node-1", transport]]), ledger, sh,
-    uploadPlain: vi.fn().mockResolvedValue("BV1"), appendGroup: vi.fn().mockResolvedValue(undefined),
+    upload: fakeUploadTarget({ uploadPlain: vi.fn().mockResolvedValue("BV1"), appendGroup: vi.fn().mockResolvedValue(undefined) }),
     pool: new ResourcePool({ minBurnFreeMemMB: 0, maxCpuParallel: 1, maxNetParallel: 1, uploadRateLimit: 0 }),
     splitForUpload: async (p: string) => [p], rmStage,
     notify: vi.fn<(e: NotifyEvent) => void>(), sleep: async () => {}, cfg,
@@ -137,8 +138,8 @@ describe("T9b 接线:done + 清理之后才派发", () => {
     const h = makeHarness({ outputFormat: "mkv" });
     h.deps.ledger.upsertPending(STREAM_KEY);
     await runPipeline(broadcast(tsFiles), h.deps);
-    const video = (h.deps.uploadPlain as Mock).mock.calls[0]![0] as { video: string };
-    expect(video.video.endsWith(".mp4")).toBe(true);
+    const video = ((h.deps as unknown as { upload: { uploadPlain: Mock } }).upload.uploadPlain as Mock).mock.calls[0]![0] as { videos: string[] };
+    expect(video.videos[0]!.endsWith(".mp4")).toBe(true);
     h.deps.ledger.close();
   });
 

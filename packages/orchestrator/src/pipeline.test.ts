@@ -9,6 +9,8 @@ import { addArchiveToSeasonIfConfigured, APPEND_AMBIGUOUS_MARKER, closeStageRead
 import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { NotifyEvent } from "@drec/core";
+import { fakeUploadTarget } from "./test-target.js";
+import type { UploadTarget } from "@drec/core";
 
 // Concatenated so the privacy guard does not flag a fake BV literal.
 const SHARED_BV2 = ["B", "V", "1shared2"].join("");
@@ -84,8 +86,9 @@ function makeTransport(workerId: string, exists = true): Transport {
   };
 }
 
-type TestDeps = Omit<PipelineDeps, "sh" | "uploadPlain" | "appendGroup" | "notify"> & {
+type TestDeps = Omit<PipelineDeps, "sh" | "upload" | "notify"> & {
   sh: Mock<(cmd: string) => Promise<void>>;
+  upload: UploadTarget;
   uploadPlain: Mock<(plain: { video?: string; public?: boolean }) => Promise<string>>;
   appendGroup: Mock<(o: { bv: string; files: string[]; cookies: string; public: boolean }) => Promise<void>>;
   notify: Mock<(e: NotifyEvent) => void>;
@@ -142,8 +145,7 @@ function makeDeps(overrides: Partial<PipelineDeps> = {}): TestDeps {
     transports,
     ledger,
     sh,
-    uploadPlain,
-    appendGroup,
+    upload: fakeUploadTarget({ uploadPlain, appendGroup }),
     pool,
     // 默认 passthrough(不切);个别用例覆盖以模拟超限切分。
     splitForUpload: async (mp4: string) => [mp4],
@@ -193,7 +195,7 @@ describe("runPipeline", () => {
 
     await runPipeline(broadcast, deps);
     expect(vi.mocked(addArchiveToSeasonIfConfigured)).toHaveBeenCalledTimes(1);
-    expect(deps.uploadPlain).not.toHaveBeenCalled();
+    expect((deps as unknown as TestDeps).uploadPlain).not.toHaveBeenCalled();
     deps.ledger.close();
   });
 
@@ -265,13 +267,13 @@ describe("runPipeline", () => {
       const cmds = (deps.sh as Mock).mock.calls.map((c) => c[0] as string);
       expect(cmds.some((c) => c.includes(" merge "))).toBe(false);
       // P1 单文件建稿(不一次塞多文件):uploadPlain 只收第一段
-      expect(deps.uploadPlain).toHaveBeenCalledTimes(1);
-      const first = (deps.uploadPlain as Mock).mock.calls[0][0] as { video?: string; videos?: string[] };
+      expect((deps as unknown as TestDeps).uploadPlain).toHaveBeenCalledTimes(1);
+      const first = ((deps as unknown as TestDeps).uploadPlain as Mock).mock.calls[0][0] as { video?: string; videos?: string[] };
       expect(first.video).toContain("_000.mp4"); // 规范上传名
       expect(first.videos).toBeUndefined();
       // 其余 plain 段 append(批大小 5 → 2 段一批);再加两个烧录组各 3 段(danmu/livechat)
       // 共 1(plain 批)+ 2(danmu/livechat,已过滤碎片后各 3 段)批
-      const groups = (deps.appendGroup as Mock).mock.calls.map((c) => (c[0] as { files: string[] }).files);
+      const groups = ((deps as unknown as TestDeps).appendGroup as Mock).mock.calls.map((c) => (c[0] as { files: string[] }).files);
       const flat = groups.flat();
       // 顺序:先 plain 组(_001, _002),再 danmu 组(3),再 livechat 组(3)
       expect(flat.filter((f) => /_\d{3}\.mp4$/.test(f))).toHaveLength(2);
@@ -471,8 +473,9 @@ describe("runPipeline", () => {
       const result = await runPipeline(broadcast, deps);
 
       expect(result.state).toBe("needs_manual");
-      expect(deps.uploadPlain).not.toHaveBeenCalled();
-      expect(deps.appendGroup).not.toHaveBeenCalled();
+      // 契约只有 upload:两个旧 mock 挂在 fake target 上,「一次都没调」仍然可断言。
+      expect((deps as unknown as TestDeps).uploadPlain).not.toHaveBeenCalled();
+      expect((deps as unknown as TestDeps).appendGroup).not.toHaveBeenCalled();
       deps.ledger.close();
     });
 
@@ -588,7 +591,7 @@ describe("runPipeline", () => {
       const result = await runPipeline(broadcast, deps);
 
       expect(result.state).toBe("done");
-      expect(deps.uploadPlain).not.toHaveBeenCalled();  // 绝不重传 P1
+      expect((deps as unknown as TestDeps).uploadPlain).not.toHaveBeenCalled();  // 绝不重传 P1
       // 续跑 done → 节点源被删。
       expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
       // 且 stage 里拉来的源 .ts 被清(有合并?分P模式不删交付物,但拉来源段副本可清)。
@@ -610,7 +613,7 @@ describe("runPipeline", () => {
 
       expect(result.state).toBe("done");
       expect(deps.ledger.get(broadcast.streamKey)?.state).toBe("done");
-      expect(deps.uploadPlain).not.toHaveBeenCalled();
+      expect((deps as unknown as TestDeps).uploadPlain).not.toHaveBeenCalled();
       expect(warn.mock.calls.filter((c) => String(c[0]).includes("[ledger] 拒绝"))).toEqual([]);
       warn.mockRestore();
       deps.ledger.close();
@@ -628,9 +631,9 @@ describe("runPipeline", () => {
 
       expect(result.state).toBe("done");
       // 产出 2 段(seg000, seg001 —— 碎片跳过后重编号连续),碎片不进任何上传
-      const first = (deps.uploadPlain as Mock).mock.calls[0][0] as { video?: string };
+      const first = ((deps as unknown as TestDeps).uploadPlain as Mock).mock.calls[0][0] as { video?: string };
       expect(first.video).toContain("_000.mp4"); // 规范上传名
-      const allFiles = (deps.appendGroup as Mock).mock.calls.flatMap((c) => (c[0] as { files: string[] }).files);
+      const allFiles = ((deps as unknown as TestDeps).appendGroup as Mock).mock.calls.flatMap((c) => (c[0] as { files: string[] }).files);
       // 不应出现第 3 个 plain 段(seg002.mp4);danmu/livechat 也只 2 段
       expect(allFiles.filter((f) => /_\d{3}\.mp4$/.test(f)).length).toBe(1); // 只剩 _001 plain
       deps.ledger.close();
@@ -655,7 +658,7 @@ describe("runPipeline", () => {
       expect(merges[0].out).toMatch(/_000\.mp4$/);
       expect(merges[0].out).not.toContain("_seg");
       // 上传的是合并产物,不是单个成员段
-      expect((deps.uploadPlain as Mock).mock.calls[0][0].video).toMatch(/_000\.mp4$/);
+      expect(((deps as unknown as TestDeps).uploadPlain as Mock).mock.calls[0][0].video).toMatch(/_000\.mp4$/);
       deps.ledger.close();
     });
 
@@ -667,10 +670,10 @@ describe("runPipeline", () => {
       const result = await runPipeline(broadcast, deps);
 
       expect(result.state).toBe("done");
-      const first = (deps.uploadPlain as Mock).mock.calls[0][0] as { video?: string };
+      const first = ((deps as unknown as TestDeps).uploadPlain as Mock).mock.calls[0][0] as { video?: string };
       expect(first.video).toMatch(/_000\.mp4$/);
       expect(first.video).not.toContain("_seg");
-      const allFiles = (deps.appendGroup as Mock).mock.calls.flatMap((c) => (c[0] as { files: string[] }).files);
+      const allFiles = ((deps as unknown as TestDeps).appendGroup as Mock).mock.calls.flatMap((c) => (c[0] as { files: string[] }).files);
       expect(allFiles.some((f) => f.includes("_seg"))).toBe(false);
       deps.ledger.close();
     });
@@ -817,11 +820,11 @@ describe("runPipeline", () => {
     expect(shCalls[2]).toContain(stageSubOf(deps));
 
     // 穿插上传:uploadPlain 一次(P1)+ 每逻辑组一条 appendGroup(danmu、livechat 各一,串行)
-    expect(deps.uploadPlain).toHaveBeenCalledTimes(1);
-    expect((deps.uploadPlain as Mock).mock.calls[0][0].video).toContain(".mp4");
-    expect((deps.uploadPlain as Mock).mock.calls[0][0].public).toBe(false); // auto-private → 仅自己可见
-    expect(deps.appendGroup).toHaveBeenCalledTimes(2);
-    const apCalls = (deps.appendGroup as Mock).mock.calls.map((c) => c[0] as { bv: string; files: string[] });
+    expect((deps as unknown as TestDeps).uploadPlain).toHaveBeenCalledTimes(1);
+    expect(((deps as unknown as TestDeps).uploadPlain as Mock).mock.calls[0][0].video).toContain(".mp4");
+    expect(((deps as unknown as TestDeps).uploadPlain as Mock).mock.calls[0][0].public).toBe(false); // auto-private → 仅自己可见
+    expect((deps as unknown as TestDeps).appendGroup).toHaveBeenCalledTimes(2);
+    const apCalls = ((deps as unknown as TestDeps).appendGroup as Mock).mock.calls.map((c) => c[0] as { bv: string; files: string[] });
     expect(apCalls[0].bv).toBe("BV123");
     expect(apCalls[0].files[0]).toContain("_danmu");
     expect(apCalls[1].files[0]).toContain("_livechat");
@@ -882,7 +885,7 @@ describe("runPipeline", () => {
     expect(deps.transports.get("node-1")!.pull).not.toHaveBeenCalled();
     expect(deps.transports.get("node-2")!.pull).not.toHaveBeenCalled();
     expect(deps.sh).toHaveBeenCalledTimes(0);
-    expect(deps.uploadPlain).toHaveBeenCalledTimes(0);
+    expect((deps as unknown as TestDeps).uploadPlain).toHaveBeenCalledTimes(0);
     expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
     expect(deps.transports.get("node-2")!.cleanup).not.toHaveBeenCalled();
 
@@ -911,7 +914,7 @@ describe("runPipeline", () => {
     const result = await runPipeline(broadcast, deps);
     expect(result.state).toBe("done");
     expect(deps.ledger.get(broadcast.streamKey)?.outputStem).toBe("主播名_2026-06-27_080000");
-    const uploaded = (deps.uploadPlain as Mock).mock.calls[0][0] as { title?: string; video?: string };
+    const uploaded = ((deps as unknown as TestDeps).uploadPlain as Mock).mock.calls[0][0] as { title?: string; video?: string };
     expect(uploaded.title).toBe("主播名_2026-06-27_080000");
     expect(uploaded.video).toContain("主播名_2026-06-27_080000.mp4");
     const mergeCmd = deps.sh.mock.calls.map((c) => c[0] as string).find((c) => c.includes(" merge "));
@@ -981,7 +984,7 @@ describe("runPipeline", () => {
     expect(result.state).toBe("done");
 
     // danmu append 组含两 part、livechat 组 1 段(两条独立 appendGroup)
-    const apCalls = (deps.appendGroup as Mock).mock.calls.map((c) => c[0] as { files: string[] });
+    const apCalls = ((deps as unknown as TestDeps).appendGroup as Mock).mock.calls.map((c) => c[0] as { files: string[] });
     expect(apCalls).toHaveLength(2);
     expect(apCalls[0].files).toHaveLength(2);
     expect(apCalls[0].files[0]).toContain("_danmu_part0");
@@ -1053,7 +1056,7 @@ describe("runPipeline", () => {
     const result = await runPipeline(broadcast, deps);
     expect(result.state).toBe("failed");
     expect(deps.ledger.get(broadcast.streamKey)?.fails).toBe(1);
-    expect(deps.uploadPlain).not.toHaveBeenCalled();
+    expect((deps as unknown as TestDeps).uploadPlain).not.toHaveBeenCalled();
 
     warnSpy.mockRestore();
     deps.ledger.close();
@@ -1068,8 +1071,8 @@ describe("runPipeline", () => {
     expect(shCalls.some((c) => c.includes("--style danmu"))).toBe(false);   // 没烧 danmu
     expect(shCalls.some((c) => c.includes("--style livechat"))).toBe(true); // 烧了 livechat
     // danmu 组空 → 不 append;只 livechat 一条 append
-    expect(deps.appendGroup).toHaveBeenCalledTimes(1);
-    expect((deps.appendGroup as Mock).mock.calls[0][0].files[0]).toContain("_livechat");
+    expect((deps as unknown as TestDeps).appendGroup).toHaveBeenCalledTimes(1);
+    expect(((deps as unknown as TestDeps).appendGroup as Mock).mock.calls[0][0].files[0]).toContain("_livechat");
     deps.ledger.close();
   });
 
@@ -1112,7 +1115,7 @@ describe("runPipeline", () => {
       const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
       const deps = makeDeps();
       let releaseDanmuAppend: () => void = () => {};
-      deps.appendGroup.mockImplementation(async (o: { files: string[] }) => {
+      (deps as unknown as TestDeps).appendGroup.mockImplementation(async (o: { files: string[] }) => {
         if (o.files[0].includes("_danmu")) {
           return new Promise<void>((resolve) => { releaseDanmuAppend = resolve; });
         }
@@ -1121,15 +1124,15 @@ describe("runPipeline", () => {
       deps.ledger.upsertPending(broadcast.streamKey);
       const runPromise = runPipeline(broadcast, deps);
       await vi.waitFor(() => {
-        expect(deps.appendGroup).toHaveBeenCalledTimes(1);
-        expect((deps.appendGroup as Mock).mock.calls[0][0].files[0]).toContain("_danmu");
+        expect((deps as unknown as TestDeps).appendGroup).toHaveBeenCalledTimes(1);
+        expect(((deps as unknown as TestDeps).appendGroup as Mock).mock.calls[0][0].files[0]).toContain("_danmu");
       });
       // danmu append 挂起中 → livechat 不得并发发起
-      expect(deps.appendGroup).toHaveBeenCalledTimes(1);
+      expect((deps as unknown as TestDeps).appendGroup).toHaveBeenCalledTimes(1);
       releaseDanmuAppend();
       const r = await runPromise;
       expect(r.state).toBe("done");
-      const appended = (deps.appendGroup as Mock).mock.calls.map((c) => c[0].files.join(","));
+      const appended = ((deps as unknown as TestDeps).appendGroup as Mock).mock.calls.map((c) => c[0].files.join(","));
       expect(appended[0]).toContain("_danmu");
       expect(appended[1]).toContain("_livechat");
       deps.ledger.close();
@@ -1138,14 +1141,14 @@ describe("runPipeline", () => {
     it("P1 上传失败 → 双轨跳过 append,不悬挂,收口 failed", async () => {
       const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
       const deps = makeDeps();
-      deps.uploadPlain.mockRejectedValue(new Error("network down"));
+      (deps as unknown as TestDeps).uploadPlain.mockRejectedValue(new Error("network down"));
       deps.ledger.upsertPending(broadcast.streamKey);
       const r = await Promise.race([
         runPipeline(broadcast, deps),
         new Promise<never>((_, reject) => setTimeout(() => reject(new Error("deadlock timeout")), 3000)),
       ]);
       expect(r.state).toBe("failed");
-      expect(deps.appendGroup).not.toHaveBeenCalled();
+      expect((deps as unknown as TestDeps).appendGroup).not.toHaveBeenCalled();
       expect(deps.ledger.get(broadcast.streamKey)?.state).toBe("failed");
       expect(deps.ledger.get(broadcast.streamKey)?.fails).toBe(1);
       deps.ledger.close();
@@ -1305,7 +1308,7 @@ describe("runPipeline", () => {
   describe("上传重试(主路径)", () => {
     it("P1 上传成功后立即 setBv 落库(append 之前 job.bv 已存在)", async () => {
       const deps = makeDeps();
-      deps.appendGroup.mockImplementation(async () => {
+      (deps as unknown as TestDeps).appendGroup.mockImplementation(async () => {
         expect(deps.ledger.get(STREAM_KEY)?.bv).toBe("BV123"); // append 时 bv 已落库
       });
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
@@ -1317,14 +1320,14 @@ describe("runPipeline", () => {
 
     it("appendGroup 单文件组瞬时失败 → 就地重试后成功(不重传 P1)", async () => {
       const deps = makeDeps({ sleep: async () => {} }); // 注入 noop sleep,免真等退避
-      deps.appendGroup
+      (deps as unknown as TestDeps).appendGroup
         .mockRejectedValueOnce(new Error("Connection timed out"))
         .mockResolvedValue(undefined);
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
       deps.ledger.upsertPending(b.streamKey);
       const r = await runPipeline(b, deps);
-      expect(deps.uploadPlain).toHaveBeenCalledTimes(1);                    // 绝不重传 P1
-      expect(deps.appendGroup.mock.calls.length).toBeGreaterThanOrEqual(2); // 至少重试一次
+      expect((deps as unknown as TestDeps).uploadPlain).toHaveBeenCalledTimes(1);                    // 绝不重传 P1
+      expect((deps as unknown as TestDeps).appendGroup.mock.calls.length).toBeGreaterThanOrEqual(2); // 至少重试一次
       expect(r.state).toBe("done");
       deps.ledger.close();
     });
@@ -1334,12 +1337,12 @@ describe("runPipeline", () => {
       const deps = makeDeps({ sleep: async () => {}, splitForUpload: async (mp4: string) => [mp4, mp4 + ".part2"] });
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
       deps.ledger.upsertPending(b.streamKey);
-      deps.appendGroup.mockRejectedValue(new Error("Connection timed out"));
+      (deps as unknown as TestDeps).appendGroup.mockRejectedValue(new Error("Connection timed out"));
 
       const r = await runPipeline(b, deps);
 
       expect(r.state).toBe("failed");
-      expect(deps.appendGroup).toHaveBeenCalledTimes(1); // 撤修复:3 次
+      expect((deps as unknown as TestDeps).appendGroup).toHaveBeenCalledTimes(1); // 撤修复:3 次
       deps.ledger.close();
     });
 
@@ -1349,7 +1352,7 @@ describe("runPipeline", () => {
       deps.ledger.upsertPending(b.streamKey);
       deps.ledger.syncNodeState(b.streamKey, "append_danmu", "done"); // 预置 danmu 已完成
       await runPipeline(b, deps);
-      const appended = deps.appendGroup.mock.calls.map((c) => c[0].files.join(",")).join("|");
+      const appended = (deps as unknown as TestDeps).appendGroup.mock.calls.map((c) => c[0].files.join(",")).join("|");
       expect(appended).not.toContain("_danmu.mp4"); // 已 done → 跳过
       expect(appended).toContain("_livechat.mp4");  // 只补 livechat
       deps.ledger.close();
@@ -1378,12 +1381,12 @@ describe("runPipeline", () => {
 
       const r = await runPipeline(b, deps);
 
-      expect(deps.uploadPlain).not.toHaveBeenCalled();  // 绝不重传 P1(防重核心)
+      expect((deps as unknown as TestDeps).uploadPlain).not.toHaveBeenCalled();  // 绝不重传 P1(防重核心)
       expect(deps.sh).not.toHaveBeenCalled();           // 不 merge/burn
-      const appended = deps.appendGroup.mock.calls.map((c) => c[0].files.join(",")).join("|");
+      const appended = (deps as unknown as TestDeps).appendGroup.mock.calls.map((c) => c[0].files.join(",")).join("|");
       expect(appended).not.toContain("_danmu.mp4");     // danmu 已 done,跳过
       expect(appended).toContain("_livechat.mp4");      // 只补 livechat
-      expect(deps.appendGroup.mock.calls.every((c) => c[0].bv === "BVexisting")).toBe(true);
+      expect((deps as unknown as TestDeps).appendGroup.mock.calls.every((c) => c[0].bv === "BVexisting")).toBe(true);
       expect(r).toEqual({ state: "done", bv: "BVexisting" });
       expect(deps.ledger.get(b.streamKey)?.state).toBe("done");
       deps.ledger.close();
@@ -1401,11 +1404,11 @@ describe("runPipeline", () => {
       const sub = join(stageDir, "douyin_test-room_2026-06-27");
       mkdirSync(sub, { recursive: true });
       for (const suf of [".mp4", "_danmu.mp4", "_livechat.mp4", ".xml"]) writeFileSync(join(sub, "主播名_2026-06-27" + suf), "x");
-      deps.appendGroup.mockRejectedValue(new Error(APPEND_AMBIGUOUS_MARKER + " append 结果无法确认"));
+      (deps as unknown as TestDeps).appendGroup.mockRejectedValue(new Error(APPEND_AMBIGUOUS_MARKER + " append 结果无法确认"));
 
       await expect(runPipeline(b, deps)).rejects.toThrow(APPEND_AMBIGUOUS_MARKER);
 
-      expect(deps.appendGroup).toHaveBeenCalledTimes(1); // 撤修复:单文件组固定 5 次
+      expect((deps as unknown as TestDeps).appendGroup).toHaveBeenCalledTimes(1); // 撤修复:单文件组固定 5 次
       expect(deps.ledger.get(b.streamKey)?.bv).toBe("BV" + "existing");
       deps.ledger.close();
     });
@@ -1426,11 +1429,11 @@ describe("runPipeline", () => {
       const sub = join(stageDir, "douyin_test-room_2026-06-27");
       mkdirSync(sub, { recursive: true });
       for (const suf of [".mp4", "_danmu.mp4", "_livechat.mp4", ".xml"]) writeFileSync(join(sub, "主播名_2026-06-27" + suf), "x");
-      deps.appendGroup.mockRejectedValueOnce(new Error("code: 601 您上传视频过快")).mockResolvedValue(undefined);
+      (deps as unknown as TestDeps).appendGroup.mockRejectedValueOnce(new Error("code: 601 您上传视频过快")).mockResolvedValue(undefined);
 
       const r = await runPipeline(b, deps);
 
-      expect(deps.appendGroup).toHaveBeenCalledTimes(2); // 限流 → 重试一次后成功
+      expect((deps as unknown as TestDeps).appendGroup).toHaveBeenCalledTimes(2); // 限流 → 重试一次后成功
       expect(r).toEqual({ state: "done", bv: "BV" + "existing" });
       deps.ledger.close();
     });
@@ -1466,8 +1469,8 @@ describe("runPipeline", () => {
         expect(deps.ledger.get(b.streamKey)?.state).toBe("needs_manual");
         expect(deps.ledger.get(b.streamKey)?.error).toContain("无稿件号");
         expect(deps.notify).toHaveBeenCalledWith(expect.objectContaining({ kind: "error", message: expect.stringContaining("无稿件号") }));
-        expect(deps.uploadPlain).not.toHaveBeenCalled();
-        expect(deps.appendGroup).not.toHaveBeenCalled();
+        expect((deps as unknown as TestDeps).uploadPlain).not.toHaveBeenCalled();
+        expect((deps as unknown as TestDeps).appendGroup).not.toHaveBeenCalled();
         expect(deps.sh).not.toHaveBeenCalled();
         expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
         expect(deps.transports.get("node-2")!.cleanup).not.toHaveBeenCalled();
@@ -1478,8 +1481,8 @@ describe("runPipeline", () => {
         const { r, deps, b } = await resumeWith({ rolling: { confirmed: [] } });
         expect(r).toEqual({ state: "done", bv: EXISTING_BV });
         expect(deps.ledger.get(b.streamKey)?.state).toBe("done");
-        expect(deps.uploadPlain).not.toHaveBeenCalled();
-        expect(deps.appendGroup).toHaveBeenCalled();
+        expect((deps as unknown as TestDeps).uploadPlain).not.toHaveBeenCalled();
+        expect((deps as unknown as TestDeps).appendGroup).toHaveBeenCalled();
         deps.ledger.close();
       });
     });
@@ -1523,8 +1526,9 @@ describe("runPipeline", () => {
 
       const r = await runPipeline(b, deps);
 
-      expect(deps.uploadPlain).not.toHaveBeenCalled();
-      expect(deps.appendGroup).not.toHaveBeenCalled();
+      // 契约只有 upload;两个旧 mock 挂在 fake target 上,「一次都没调」仍可断言。
+      expect((deps as unknown as TestDeps).uploadPlain).not.toHaveBeenCalled();
+      expect((deps as unknown as TestDeps).appendGroup).not.toHaveBeenCalled();
       expect(r.state).toBe("needs_manual");
       expect(deps.ledger.get(b.streamKey)?.state).toBe("needs_manual");
       expect(deps.notify).toHaveBeenCalledWith(expect.objectContaining({ kind: "error" }));
@@ -1545,9 +1549,9 @@ describe("runPipeline", () => {
       expect(deps.ledger.get(b.streamKey)?.fails).toBe(1);
       expect(deps.ledger.get(b.streamKey)?.bv).toBe("BV123"); // P1 成功即落库(即使随后 burn 失败)
       // 模拟 reconciler 重试:同 ledger 再跑 → 有 bv → 续跑分支,绝不重传 P1
-      deps.uploadPlain.mockClear();
+      (deps as unknown as TestDeps).uploadPlain.mockClear();
       const r2 = await runPipeline(b, deps);
-      expect(deps.uploadPlain).not.toHaveBeenCalled(); // 防重复稿:绝不再传 P1
+      expect((deps as unknown as TestDeps).uploadPlain).not.toHaveBeenCalled(); // 防重复稿:绝不再传 P1
       expect(r2.state).toBe("needs_manual");            // stage 无真产物 → 安全阀
       deps.ledger.close();
     });
@@ -1570,7 +1574,7 @@ describe("runPipeline", () => {
       const r = await runPipeline(b, deps);
 
       expect(r.state).toBe("needs_manual");
-      expect(deps.appendGroup).not.toHaveBeenCalled(); // 绝不盲目重传多段组
+      expect((deps as unknown as TestDeps).appendGroup).not.toHaveBeenCalled(); // 绝不盲目重传多段组
       expect(deps.notify).toHaveBeenCalledWith(expect.objectContaining({ kind: "error" }));
       deps.ledger.close();
     });
@@ -1600,8 +1604,9 @@ describe("runPipeline", () => {
     const noRedo = (deps: PipelineDeps, b: Broadcast): void => {
       expect(deps.ledger.get(b.streamKey)?.state).toBe("done");
       expect(deps.ledger.get(b.streamKey)?.bv).toBe("BVdone");
-      expect(deps.uploadPlain).not.toHaveBeenCalled();
-      expect(deps.appendGroup).not.toHaveBeenCalled();
+      // 契约只有 upload;两个旧 mock 挂在 fake target 上,「一次都没调」仍可断言。
+      expect((deps as unknown as TestDeps).uploadPlain).not.toHaveBeenCalled();
+      expect((deps as unknown as TestDeps).appendGroup).not.toHaveBeenCalled();
       expect((deps.notify as Mock).mock.calls.filter((c) => /删稿重来|产物缺失|多段组/.test(String((c[0] as { message?: string }).message)))).toEqual([]);
     };
 
@@ -1763,7 +1768,7 @@ describe("runPipeline", () => {
         expect(deps.ledger.get(b.streamKey)?.state).toBe("done");
         expect(nodePipeline).not.toHaveBeenCalled();
         expect(t.pull).not.toHaveBeenCalled();
-        expect(deps.uploadPlain).not.toHaveBeenCalled();
+        expect((deps as unknown as TestDeps).uploadPlain).not.toHaveBeenCalled();
         expect(deps.notify.mock.calls.filter((c) => c[0].kind === "error")).toEqual([]);
         expect(t.cleanup).toHaveBeenCalled(); // 收尾删源仍执行
         deps.ledger.close();
@@ -2210,7 +2215,7 @@ describe("runPipeline", () => {
       expect(deps.ledger.get(b.streamKey)?.state).toBe("done");
       // 补清理真的跑了。
       expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
-      expect(deps.uploadPlain).not.toHaveBeenCalled();   // 绝不重复投稿
+      expect((deps as unknown as TestDeps).uploadPlain).not.toHaveBeenCalled();   // 绝不重复投稿
     });
 
     it("issue #335: the cleanup-only re-run removes a stage dir once its leftovers are gone, and never uploads", async () => {
@@ -2224,7 +2229,7 @@ describe("runPipeline", () => {
       writeFileSync(join(stageSubOf(deps), "leftover.ts"), "x"); // a video leftover the first run missed
       expect((await runPipeline(b, deps)).state).toBe("done");
       expect(existsSync(stageSubOf(deps))).toBe(false);
-      expect(deps.uploadPlain).not.toHaveBeenCalled();
+      expect((deps as unknown as TestDeps).uploadPlain).not.toHaveBeenCalled();
       deps.ledger.close();
     });
 
@@ -2254,7 +2259,7 @@ describe("runPipeline — 边录边传识别短路", () => {
     const r = await runPipeline(broadcast, deps);
     expect(r.state).toBe("done");
     expect(r.bv).toBe("BV1rolling");
-    expect(deps.uploadPlain).not.toHaveBeenCalled(); // 绝不重复建稿
+    expect((deps as unknown as TestDeps).uploadPlain).not.toHaveBeenCalled(); // 绝不重复建稿
     expect(deps.sh).not.toHaveBeenCalled();          // 也不该走 merge/burn
   });
 
@@ -2267,7 +2272,7 @@ describe("runPipeline — 边录边传识别短路", () => {
 
     const r = await runPipeline(broadcast, deps);
     expect(r.state).toBe("needs_manual");
-    expect(deps.uploadPlain).not.toHaveBeenCalled();
+    expect((deps as unknown as TestDeps).uploadPlain).not.toHaveBeenCalled();
   });
 
   it("rolling.bv 但磁盘仍剩未确认分段 → needs_manual(不静默 done,防丢片)", async () => {
@@ -2279,7 +2284,7 @@ describe("runPipeline — 边录边传识别短路", () => {
     deps.ledger.upsertPending(broadcast.streamKey);
     const r = await runPipeline(broadcast, deps);
     expect(r.state).toBe("needs_manual");
-    expect(deps.uploadPlain).not.toHaveBeenCalled();
+    expect((deps as unknown as TestDeps).uploadPlain).not.toHaveBeenCalled();
   });
 
   it("多节点各建稿(BV 不一致)→ needs_manual(防重复稿隐患)", async () => {
@@ -2296,7 +2301,7 @@ describe("runPipeline — 边录边传识别短路", () => {
 
     const r = await runPipeline(broadcast, deps);
     expect(r.state).toBe("needs_manual");
-    expect(deps.uploadPlain).not.toHaveBeenCalled();
+    expect((deps as unknown as TestDeps).uploadPlain).not.toHaveBeenCalled();
   });
 
   // Issue #148: reconnect sessions of one broadcast share a BV; the master must see one submission.
@@ -2317,7 +2322,7 @@ describe("runPipeline — 边录边传识别短路", () => {
     const r = await runPipeline(broadcast, deps);
     expect(r.state).toBe("done");
     expect(r.bv).toBe("BV1shared");
-    expect(deps.uploadPlain).not.toHaveBeenCalled();
+    expect((deps as unknown as TestDeps).uploadPlain).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(countParts).toHaveBeenCalledWith("BV1shared"));
     const readJobLogs = (): string => readdirSync(deps.cfg.stageDir, { recursive: true, encoding: "utf-8" })
       .filter((f) => f.endsWith("job.log"))
@@ -2342,7 +2347,7 @@ describe("runPipeline — 边录边传识别短路", () => {
 
     const r = await runPipeline(broadcast, deps);
     expect(r.state).toBe("needs_manual");
-    expect(deps.uploadPlain).not.toHaveBeenCalled();
+    expect((deps as unknown as TestDeps).uploadPlain).not.toHaveBeenCalled();
   });
 
   it("无 rolling.bv → 走常规路径(边录边传未启用,行为不变)", async () => {
@@ -2359,7 +2364,7 @@ describe("runPipeline — 边录边传识别短路", () => {
     deps.ledger.upsertPending(broadcast.streamKey);
     const r = await runPipeline(broadcast, deps);
     // 常规路径:uploadPlain 被调用(建稿),未触发 rolling 短路。
-    expect(deps.uploadPlain).toHaveBeenCalled();
+    expect((deps as unknown as TestDeps).uploadPlain).toHaveBeenCalled();
     expect(r.state).toBe("done");
   });
 
@@ -2408,7 +2413,7 @@ describe("runPipeline — 边录边传识别短路", () => {
       const r = await runPipeline(broadcast, deps);
       expect(r.state).toBe("needs_manual");
       expect(deps.sh.mock.calls.some((c) => String(c[0]).includes(" merge "))).toBe(false);
-      expect(deps.uploadPlain).not.toHaveBeenCalled();
+      expect((deps as unknown as TestDeps).uploadPlain).not.toHaveBeenCalled();
       expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
       const err = deps.notify.mock.calls.map((c) => c[0] as { kind: string; message?: string }).find((e) => e.kind === "error");
       expect(err?.message).toContain("1 个");
@@ -2433,7 +2438,7 @@ describe("runPipeline — 边录边传识别短路", () => {
       expect(deps.ledger.get(first.streamKey)?.state).toBe("pending"); // 仍在 RETRYABLE,不卡在 syncing
       expect(deps.ledger.get(first.streamKey)?.state).not.toBe("failed");
       expect(deps.notify.mock.calls.some((c) => (c[0] as { kind: string }).kind === "error")).toBe(false);
-      expect(deps.uploadPlain).not.toHaveBeenCalled();
+      expect((deps as unknown as TestDeps).uploadPlain).not.toHaveBeenCalled();
       expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
       // 下一轮:重扫后本场不再声明边车,分段是原生 .ts → 照常合并上传收口。
       const second = makeBroadcast([{ workerId: "node-1", rec: makeRec({ sessionBase: B, tsFiles: [`/remote/${B}.ts`], xmlPath: undefined }) }]);
@@ -2476,7 +2481,7 @@ describe("runPipeline — 边录边传识别短路", () => {
       expect(errs[0].message).toContain("连续 3 轮");
       expect(deps.transports.get("node-1")!.pull).not.toHaveBeenCalled();
       expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
-      expect(deps.uploadPlain).not.toHaveBeenCalled();
+      expect((deps as unknown as TestDeps).uploadPlain).not.toHaveBeenCalled();
       deps.ledger.close();
     });
 
@@ -2888,7 +2893,7 @@ describe("empty stage dir removal after stageAfterDone (issue #335)", () => {
   it("no BV: the job never reaches done and the directory and its files are untouched", async () => {
     const base = makeDeps();
     const deps = makeDeps({ cfg: cleanupCfg(base) });
-    deps.uploadPlain.mockResolvedValue("");
+    (deps as unknown as TestDeps).uploadPlain.mockResolvedValue("");
     seedStage(deps);
     const b = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
     deps.ledger.upsertPending(b.streamKey);

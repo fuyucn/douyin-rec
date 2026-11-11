@@ -13,6 +13,7 @@ import { SyncLedger } from "../../packages/orchestrator/src/ledger.js";
 import { deriveSegmentPlan, deriveStageProducts, segWorkPath, withOutputStem } from "../../packages/orchestrator/src/session-plan.js";
 import type { Broadcast } from "../../packages/orchestrator/src/identity.js";
 import type { NodeRecording, Transport } from "../../packages/orchestrator/src/transport.js";
+import { fakeUploadTarget } from "../../packages/orchestrator/src/test-target.js";
 
 const STREAM_KEY = "douyin:test-room:2026-06-27";
 const SUB = "douyin_test-room_2026-06-27";
@@ -63,8 +64,10 @@ function makeDeps(cfgOver: Partial<PipelineCfg>) {
     transports: new Map([["node-1", transport()]]),
     ledger: new SyncLedger(join(mkdtempSync(join(tmpdir(), "of-ledger-")), "t.db")),
     sh,
-    uploadPlain: vi.fn<(o: { video?: string }) => Promise<string>>().mockResolvedValue("BV1"),
-    appendGroup: vi.fn().mockResolvedValue(undefined),
+    upload: fakeUploadTarget({
+      uploadPlain: vi.fn<(o: { video?: string }) => Promise<string>>().mockResolvedValue("BV1"),
+      appendGroup: vi.fn().mockResolvedValue(undefined),
+    }),
     pool: new ResourcePool({ minBurnFreeMemMB: 0, maxCpuParallel: 1, maxNetParallel: 1, uploadRateLimit: 0 }),
     splitForUpload: async (p: string) => [p],
     notify: vi.fn<(e: NotifyEvent) => void>(),
@@ -119,9 +122,9 @@ describe("合并路径产物容器", () => {
     const r = await runPipeline(b, deps);
     expect(r.state).toBe("done");
     expect(cmds().find((c) => c.includes(" merge "))).not.toContain("--format");
-    const video = (deps.uploadPlain.mock.calls[0]![0] as { video: string }).video;
+    const video = ((deps as unknown as never).uploadPlain.mock.calls[0]![0] as { video: string }).video;
     expect(video.endsWith(".mp4")).toBe(true);
-    for (const c of (deps.appendGroup.mock.calls as Array<[{ files: string[] }]>).flatMap((x) => x[0].files)) {
+    for (const c of ((deps as unknown as { appendGroup: { mock: { calls: Array<[{ files: string[] }]> } } }).appendGroup.mock.calls as Array<[{ files: string[] }]>).flatMap((x) => x[0].files)) {
       expect(c.endsWith(".mp4")).toBe(true);
     }
     deps.ledger.close();
@@ -175,7 +178,8 @@ describe("分段路径产物容器(mergeSegments=false,存档)", () => {
     const r = await runPipeline(SEG_BC(), h.deps);
     expect(r.state).toBe("done");
     expect(h.remuxOuts.every((p) => p.endsWith(".mp4"))).toBe(true);
-    expect(((h.deps.uploadPlain.mock.calls[0]![0] as { video: string }).video).endsWith(".mp4")).toBe(true);
+    const uploaded = (h.deps as unknown as { upload: { uploadPlain: Mock } }).upload.uploadPlain.mock.calls[0]![0] as { videos: string[] };
+    expect(uploaded.videos[0]!.endsWith(".mp4")).toBe(true);
     h.deps.ledger.close();
   });
 });

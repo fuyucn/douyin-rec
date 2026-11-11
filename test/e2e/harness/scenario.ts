@@ -21,6 +21,7 @@ import {
 import { ResourcePool } from "../../../packages/orchestrator/src/workflow.js";
 import { FakeBiliup, type RealBiliup } from "./fake-biliup.js";
 import { fakeFfprobe, writeRecording, type RecordingSpec, type WrittenSession } from "./fake-recordings.js";
+import { fakeUploadTarget } from "../../../packages/orchestrator/src/test-target.js";
 
 /** 取真实 biliup 包装(`vi.importActual`:即使该模块在本文件被 `vi.mock` 也拿得到真身)。 */
 export async function loadRealBiliup(): Promise<RealBiliup & { countVideoParts: unknown }> {
@@ -193,9 +194,12 @@ export class Scenario {
       ledger: this.ledger,
       pool: new ResourcePool({ minBurnFreeMemMB: 0, maxCpuParallel: 1, maxNetParallel: 1, uploadRateLimit: 0 }),
       sh,
-      uploadPlain: (plain) => fake.uploadPlain(plain),
-      // 与 cli.ts master 路径一致:countParts 由装配方注入(失败后查分P数做幂等判定)。
-      appendGroup: (o) => fake.appendGroup({ ...o, countParts: () => fake.countVideoParts(o.bv) }),
+      // 阶段 1b:装配面只有 upload target。这里的 fake 封装与 cli.ts 一样把「分 P 数回读」
+      // 交给 target 侧(失败后查分P数做幂等判定),所以 countParts 在这里一并挂上。
+      upload: fakeUploadTarget({
+        uploadPlain: (plain) => fake.uploadPlain(plain),
+        appendGroup: (o) => fake.appendGroup({ ...o, countParts: () => fake.countVideoParts(o.bv) }),
+      }),
       countParts: (bv) => fake.countVideoParts(bv),
       splitForUpload: async (mp4) => [mp4],
       remuxSegment: async (src, out) => writeMp4(out, src),

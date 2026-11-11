@@ -17,6 +17,7 @@ import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PipelineDeps, PipelineCfg } from "./pipeline.js";
+import { fakeUploadTarget } from "./test-target.js";
 
 /** 直接调私有方法(它承载判定逻辑;绕开 reconcileAll 的编排,单测只验判定)。 */
 function due(ledger: SyncLedger, segmentMode = false): string | null {
@@ -95,8 +96,8 @@ describe("删最后一份源之前的延后回读闸门(issue #327,取代 #92 �
     return {
       ledger,
       sh: async () => {},
-      uploadPlain: async () => "BV1",
-      appendGroup: async () => {},
+      upload: fakeUploadTarget({ uploadPlain: async () => "BV1" }),
+
       splitForUpload: async (m: string) => [m],
       notify: () => {},
       cfg,

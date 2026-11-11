@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { freemem } from "node:os";
 import type { SyncLedger, StepName } from "./ledger.js";
 import type { PipelineCfg, PipelineDeps } from "./pipeline.js";
+import { appendArchive, createArchive } from "./upload-call.js";
 import { humanBytes } from "./format.js";
 import { addArchiveToSeasonIfConfigured, seasonCheckpointState, effectiveStageFormat, isAppendAmbiguous, isJobAbort, isUploadRateLimited, throwIfAborted, USER_STOP, UPLOAD_FAIL_CLOSED_MS } from "@drec/core";
 import { retry } from "./retry.js";
@@ -226,7 +227,7 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
       outputs: [{ name: "bv", kind: "ref", required: true }],
       resource: "upload",
       run: async (c: NodeRunContext): Promise<void> => {
-        const bv = await deps.uploadPlain({
+        const bv = await createArchive(deps.upload, {
           video: prepareUploadAlias(stageSub, "plain", products.plain, products.partTitles?.plain),
           cookies: cfg.cookies,
           // 投稿标题用宽松渲染(含空格/标点);stage 文件名 stem 仍是严格的 dateName。
@@ -345,7 +346,7 @@ async function appendGroupSafe(o: {
   // 多文件组没有 per-part checkpoint:任何失败(含 601)都可能已提交部分段,重试会重复分 P,
   // 因此只提交一次(与 segment-pipeline 的多文件 batch 同口径),失败交给上传类失败门禁转人工。
   const tries = o.files.length === 1 ? 5 : 1;
-  const fn = (): Promise<void> => o.deps.appendGroup({
+  const fn = (): Promise<void> => appendArchive(o.deps.upload, {
     bv: o.bv, files: o.files, cookies: o.deps.cfg.cookies, public: o.isPublic,
   });
   await (o.retry ?? retry)(fn, {
