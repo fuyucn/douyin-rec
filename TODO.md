@@ -34,6 +34,11 @@
   **为什么**: 续跑是唯一漏掉 `shouldRetry` 的 append 路径；ambiguous 后重试 5 次，服务端可能已追加成功 → 重复分 P，且后续按数量核验发现不了。
   **验收**: 撤修复时 appendGroup 被调 5 次且用例红、复原后 1 次；全量 test/typecheck/bundle 绿；reconciler 对 append 类失败转 needs_manual，不再自动重入。
   **现状（2026-11-10）**: PR #593 已开，pr-gate PASS；审计文档随本 PR 入库；待独立 review。
+- [~] **T-177 直传限流码 601 的 JSON 形态匹配不上，文案一变即永久失败（issue [#592](https://github.com/fuyucn/douyin-rec/issues/592) → PR [#595](https://github.com/fuyucn/douyin-rec/pull/595)，2026-11-10）**
+  — **做什么**: `isUploadRateLimited` 放行 JSON 引号键（`"code":601` / `'code':21566` / 键值间空格），中文文案保留为兜底；补四种码的单测；live-pump 的 21540 用例改成只返回数字码。
+  **为什么**: 直传把 `JSON.stringify(raw)` 交给判定，旧正则只认裸 `code:`；B 站一改文案，601/21540/21566/21186 就被当永久失败，分 P 头阻塞。
+  **验收**: 撤修复时 JSON 单测与 21540 用例双红、复原双绿；全量 test/typecheck/bundle 绿；直传撞 21540 仍冷却重试。
+  **现状（2026-11-10）**: PR #595 已开，pr-gate PASS；待独立 review。
 - [~] **T-173 直播直传 full 模式「当前分 P」崩溃后不进 WAL、被当孤儿清扫（issue [#581](https://github.com/fuyucn/douyin-rec/issues/581)，2026-11-10）**
   — **做什么**: 按独立只读 review 的 F12 最小修法——仅 `spoolMode==="full" && submit!==false` 时在 `openPart` 同步写一条 `confirmed:false` 的 `parts` 行（`noteUnconfirmedPart`，bytes/durationSec 先给 0，可选 `sealed:false` 兼容老 state）；不升 `schemaVersion`（保持 1）、不改 spool 文件名、不动 `pending` WAL / `rolloverStaleState` / `spoolSweepSafe` / CLI 命名。配套 4 项：`discard()`/discardedTail/negligibleTail 要 `dropPart`；`resubmitUnconfirmedPart` 对 0 字节/仅 PAT-PMT 孤儿 `dropPart` 不 fail；写失败时同步把 `spoolIncomplete` 刷进该行（守 #579）；核对 `keepOrLose` 不再因行已存在漏写 probe 后 duration。启动 `dropUnrecoverableUnsealed()` 作 F7 安全网。
   **为什么**: SIGKILL/OOM/断电/未捕获 exit 绕过 JS handler，当前正在录的分 P 在封口前从未进 state；`openSession()` 的 `session.recover()`+`resubmitAllUnconfirmed()` 无目录扫描→不收养；孤儿清扫在下次启动且 mtime>10min 时删→稿件永远缺这一 P（plans/039 B14 实测自证）。SIGTERM/SIGINT/SIGUSR2 会封口写行，正常停止不丢。

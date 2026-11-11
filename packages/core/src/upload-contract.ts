@@ -38,7 +38,7 @@ export function isAppendAmbiguous(err: unknown): boolean {
 }
 
 /**
- * B 站**投稿频率限制**错误。三种已知码:
+ * B 站**投稿频率限制**错误。四种已知码:
  *   - `601`「您上传视频过快,请您稍作休息后再继续」(按提交次数限流)。
  *   - `21566`「投稿过于频繁,建议将APP升级至最新版本后再试」(app 提交接口更易触发,见
  *     biliup#1609 / social-auto-upload#210;biliup 自己的 server 端因此默认改走 web 接口)。
@@ -59,7 +59,7 @@ export function isAppendAmbiguous(err: unknown): boolean {
  */
 export function isUploadRateLimited(err: unknown): boolean {
   const s = String((err as Error)?.message ?? err);
-  return /upload rate limit|code:\s*601|code:\s*21566|code:\s*21540|code:\s*21186|上传视频过快|上传过快|投稿过于频繁|投稿的频率过快|请求过于频繁/i.test(s);
+  return /upload rate limit|code["']?\s*:\s*(?:601|21566|21540|21186)|上传视频过快|上传过快|投稿过于频繁|投稿的频率过快|请求过于频繁/i.test(s);
 }
 
 /**
