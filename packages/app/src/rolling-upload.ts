@@ -67,7 +67,8 @@ import {
   type RollingSegment,
   type UploadOwner,
 } from "@drec/core";
-import { appendGroup, countVideoParts, uploadPlain, type BiliupHooks } from "./upload/biliup.js";
+import { appendArchive, createArchive, type UploadTarget } from "@drec/core";
+import { countVideoParts, createBiliupFileTarget, type BiliupHooks } from "./upload/biliup.js";
 import { readTcpAckedAsync, type AckSample } from "@drec/bilibili-upload";
 import { rootBiliupCookies } from "./paths.js";
 import { openNodeUploadGate, openNodeUploadSlot, resolveUploadAccountKey } from "./node-pipeline.js";
@@ -324,9 +325,8 @@ export interface RollingUploaderOpts {
   /** 槽等待上限;超过则本段本轮放弃(保留源,下轮重试)。默认 30 分钟。 */
   slotWaitMs?: number;
   log?: (msg: string) => void;
-  /** 上传接缝(测试注入)。 */
-  uploadPlainRaw?: typeof uploadPlain;
-  appendGroupRaw?: typeof appendGroup;
+  /** 上传目标(阶段 1b-3)。缺省 → biliup target;测试可注入假 target。 */
+  upload?: UploadTarget;
   /** Per-socket TCP acked reader for the biliup child (test seam); default async `ss`. */
   readAcked?: (pid: number) => AckSample | Promise<AckSample>;
   /** Whether sampling is worth doing now (test seam); default: the recorder is in the finalizing phase. */
@@ -412,6 +412,8 @@ export class RollingUploader {
   private seasonTail: Promise<void> = Promise.resolve();
   private seasonWriteFails = false;
   private readonly o: RollingUploaderOpts;
+  /** 上传目标:显式注入优先,否则用本包默认的 biliup target。 */
+  private get uploadTarget(): UploadTarget { return this.o.upload ?? createBiliupFileTarget(); }
   private readonly log: (m: string) => void;
   private readonly gate: UploadGate | null;
   private readonly slot: UploadSlot | null;
@@ -1352,10 +1354,11 @@ export class RollingUploader {
       });
       // WAL:先落「建稿中」意图,再真正建稿。崩溃后据此转人工,绝不自动重建稿(重复投稿不可逆)。
       // Issue #309: written only once the slot and the gate let biliup start, so a wait never leaves an intent.
-      const up = this.o.uploadPlainRaw ?? uploadPlain;
+      const target = this.uploadTarget;
       const bv = await this.withUploadProgress((hooks) => this.withSlot(() => this.gate!.run(this.accountKey, () => {
         this.writeIntent(seg.index, "create");
-        return up({ plain: { ...meta, video: seg.path, title }, hooks });
+        // 建稿走 target(内部就是旧链:逐线路重试 + parseBV);hooks 透传 biliup 子进程进度。
+        return createArchive(target, { ...meta, video: seg.path, title }, hooks);
       })));
       // 把「当段已确认」并入同一次写:建稿成功即确认段 0,防止 bv 与 confirmed 分两次写之间崩溃。
       confirmed.add(seg.index);
@@ -1374,17 +1377,11 @@ export class RollingUploader {
     const bv = this.state.bv;
     // WAL:先落「追加第 index 段中」意图。崩溃后凭分 P 数核对是否已提交(见 recoverDanglingUpload)。
     // Written right before biliup starts (issue #309), same as the create intent.
-    const ap = this.o.appendGroupRaw ?? appendGroup;
+    const target = this.uploadTarget;
     await this.withUploadProgress((hooks) => this.withSlot(() => this.gate!.run(this.accountKey, () => {
       this.writeIntent(seg.index, "append");
-      return ap({
-        ...meta,
-        bv,
-        files: [seg.path],
-        // 幂等核对:失败后重查分 P 数,变多 = 其实已成功;查不到 → 抛 ambiguous 标记转人工。
-        countParts: () => this.countPartsInner(bv, cookies),
-        hooks,
-      });
+      // 分 P 数回读由 target 内部做(失败后重查);查不到 → proof unknown → 这里抛 ambiguous 转人工。
+      return appendArchive(target, { bv, files: [seg.path], cookies, public: this.o.uploadPrivate === false, countParts: () => this.countPartsInner(bv, cookies) }, hooks);
     })));
     // 与建稿同口径:确认并入同一次写,防止 append 成功后、补 confirmed 前崩溃导致重复 append。
     confirmed.add(seg.index);
@@ -1915,8 +1912,7 @@ export function makeRollingUploadHookFactory(o: {
   log?: (msg: string) => void;
   /** Alert sink for cases needing a human (wired to the recorder's notifier in the CLI). */
   notify?: (message: string) => void;
-  uploadPlainRaw?: typeof uploadPlain;
-  appendGroupRaw?: typeof appendGroup;
+  upload?: UploadTarget;
   countPartsRaw?: (bv: string, cookies: string) => Promise<number | null>;
   removeFile?: (p: string) => boolean;
   now?: () => number;
@@ -1942,8 +1938,7 @@ export function makeRollingUploadHookFactory(o: {
       minSegmentSec: o.minSegmentSec,
       log: o.log,
       notify: o.notify,
-      uploadPlainRaw: o.uploadPlainRaw,
-      appendGroupRaw: o.appendGroupRaw,
+      upload: o.upload,
       countPartsRaw: o.countPartsRaw,
       removeFile: o.removeFile,
       now: o.now,

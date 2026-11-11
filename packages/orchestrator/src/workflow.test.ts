@@ -15,7 +15,7 @@ import {
 import { SyncLedger } from "./ledger.js";
 import { JobDispatcher } from "./job-dispatcher.js";
 import type { PipelineDeps } from "./pipeline.js";
-import { fakeUploadTarget } from "./test-target.js";
+import { fakeUploadTarget } from "@drec/core";
 import type { UploadTarget } from "@drec/core";
 
 vi.mock("@drec/core", async (orig) => {

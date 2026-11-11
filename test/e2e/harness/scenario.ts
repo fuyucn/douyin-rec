@@ -21,7 +21,7 @@ import {
 import { ResourcePool } from "../../../packages/orchestrator/src/workflow.js";
 import { FakeBiliup, type RealBiliup } from "./fake-biliup.js";
 import { fakeFfprobe, writeRecording, type RecordingSpec, type WrittenSession } from "./fake-recordings.js";
-import { fakeUploadTarget } from "../../../packages/orchestrator/src/test-target.js";
+import { fakeUploadTarget } from "@drec/core";
 
 /** 取真实 biliup 包装(`vi.importActual`:即使该模块在本文件被 `vi.mock` 也拿得到真身)。 */
 export async function loadRealBiliup(): Promise<RealBiliup & { countVideoParts: unknown }> {

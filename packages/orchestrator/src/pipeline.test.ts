@@ -9,7 +9,7 @@ import { addArchiveToSeasonIfConfigured, APPEND_AMBIGUOUS_MARKER, closeStageRead
 import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { NotifyEvent } from "@drec/core";
-import { fakeUploadTarget } from "./test-target.js";
+import { fakeUploadTarget } from "@drec/core";
 import type { UploadTarget } from "@drec/core";
 // 稿件号按拼接生成(隐私闸门禁止字面量):仅测试用的假号。
 const BV_EXISTING = "BV" + "existing";

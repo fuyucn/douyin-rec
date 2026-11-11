@@ -6,8 +6,10 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const ROOT = join(import.meta.dirname, "..", "..");
-const DIRS = [join(ROOT, "packages", "orchestrator", "src"), join(ROOT, "packages", "cli", "src")];
-const BANNED = /\bdeps\.(uploadPlain|appendGroup)\b/;
+const DIRS = [join(ROOT, "packages", "orchestrator", "src"), join(ROOT, "packages", "cli", "src"), join(ROOT, "packages", "app", "src")];
+// 编排层是 `deps.*`;录制端是 `this.o.*Raw` —— 两种旧字段都拦,
+// 否则「绕着 target 调旧函数」的回归只会在其中一处被发现。
+const BANNED = /\b(deps\.(uploadPlain|appendGroup)|this\.o\.(uploadPlainRaw|appendGroupRaw))\b/;
 
 describe("编排层不得直接调用旧上传字段(#631)", () => {
   it("packages/orchestrator/src 与 packages/cli/src 里没有 deps.uploadPlain / deps.appendGroup", () => {

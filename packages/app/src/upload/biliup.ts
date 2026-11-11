@@ -3,6 +3,7 @@ import { rootBiliupCookies } from "../paths.js";
 import { readBiliupCookieHeader as readHeader } from "@drec/bilibili-upload";
 
 export type { UploadLine, UploadOpts, UploadSubmit, BiliupHooks } from "@drec/bilibili-upload";
+export { createBiliupFileTarget } from "@drec/bilibili-upload";
 export {
   biliupCookieHeader, DEFAULT_UPLOAD_LINES, uploadSubmit, uploadLineCandidates,
   buildUploadArgs, parseBV, checkBiliup, isAllFilesUploadedLine, runBiliup,

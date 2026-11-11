@@ -159,7 +159,7 @@ export function createBiliupFileTarget(deps: BiliupTargetDeps = {}): UploadTarge
           public: input.policy.visibility === "public",
           run,
           ...(input.hooks ? { hooks: input.hooks } : {}),
-          countParts: () => countParts(input.ref.id, credPath(input.cred)),
+          ...(input.countParts ? { countParts: input.countParts } : { countParts: () => countParts(input.ref.id, credPath(input.cred)) }),
           sleep,
         });
         return { proof: "observed" };

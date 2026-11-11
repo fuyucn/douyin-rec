@@ -13,7 +13,7 @@ import { SyncLedger } from "../../packages/orchestrator/src/ledger.js";
 import { _resetFinalizeFormatState, parseFollowups } from "../../packages/orchestrator/src/finalize-format.js";
 import type { Broadcast } from "../../packages/orchestrator/src/identity.js";
 import type { NodeRecording, Transport } from "../../packages/orchestrator/src/transport.js";
-import { fakeUploadTarget } from "../../packages/orchestrator/src/test-target.js";
+import { fakeUploadTarget } from "@drec/core";
 
 const STREAM_KEY = "douyin:test-room:2026-06-27";
 const SUB = "douyin_test-room_2026-06-27";

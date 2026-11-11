@@ -11,7 +11,7 @@ import { zeroDiskStreamKey } from "@drec/core";
 import type { JobState } from "./ledger.js";
 import { processTimeZone, zonedStamp, JobAbortedError, USER_STOP, _resetJobAbort, beginJob, endJob, isJobLive } from "@drec/core";
 import type { NotifyEvent } from "@drec/core";
-import { fakeUploadTarget } from "./test-target.js";
+import { fakeUploadTarget } from "@drec/core";
 
 function freshLedger(): SyncLedger {
   return new SyncLedger(join(mkdtempSync(join(tmpdir(), "rec-test-")), "test.db"));

@@ -99,6 +99,8 @@ export interface CreateArchiveResult {
 export interface AppendPartsInput {
   cred: CredentialRef;
   hooks?: UploadChildHooks;
+  /** 幂等核对用的分 P 数回读;缺省由目标自己实现。编排层有更严的读法时要显式传。 */
+  countParts?: () => Promise<number | null>;
   ref: ArchiveRef;
   files: UploadFile[];
   policy: UploadPolicy;

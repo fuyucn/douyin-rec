@@ -6,7 +6,7 @@ import { pastStartMs } from "./harness/fake-recordings.js";
 import { expectHealthyDone } from "./harness/invariants.js";
 import { segWorkPath } from "../../packages/orchestrator/src/session-plan.js";
 import { addArchiveToSeasonIfConfigured } from "@drec/core";
-import { fakeUploadTarget } from "../../packages/orchestrator/src/test-target.js";
+import { fakeUploadTarget } from "@drec/core";
 
 vi.mock("@drec/core", async (orig) => {
   const m = await orig<typeof import("@drec/core")>();

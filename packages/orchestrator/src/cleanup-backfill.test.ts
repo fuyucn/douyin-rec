@@ -17,7 +17,7 @@ import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PipelineDeps, PipelineCfg } from "./pipeline.js";
-import { fakeUploadTarget } from "./test-target.js";
+import { fakeUploadTarget } from "@drec/core";
 
 /** 直接调私有方法(它承载判定逻辑;绕开 reconcileAll 的编排,单测只验判定)。 */
 function due(ledger: SyncLedger, segmentMode = false): string | null {

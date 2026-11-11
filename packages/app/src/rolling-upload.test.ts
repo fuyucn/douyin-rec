@@ -8,8 +8,7 @@ import {
 } from "./rolling-upload.js";
 import {
   UploadGate, RecorderStateWriter, parseRecorderState, recorderActivity, recorderStatePath, rollingUploadSingleNode,
-  type ProcProbe, type RecorderActivity, type SeasonAddOutcome,
-} from "@drec/core";
+  type ProcProbe, type RecorderActivity, type SeasonAddOutcome, fakeUploadTarget } from "@drec/core";
 import type { AckSample } from "@drec/bilibili-upload";
 
 const seasonHook = vi.hoisted(() => ({
@@ -101,7 +100,7 @@ describe("RollingUploader — 边录边传录制端执行", () => {
       const u = new RollingUploader({
         room,
         uploadMeta: { ...uploadMeta, seasonSectionId: 456 },
-        gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0,
+        gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: noopAppend }), removeFile: noRemove, now: futureNow, minSegmentSec: 0,
       });
       u.noteSegment(paths[0]);
       await u.flush({ recordingActive: false });
@@ -120,7 +119,7 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     const u = new RollingUploader({
       room,
       uploadMeta: { ...uploadMeta, seasonSectionId: 456 },
-      gate: new FakeGate(), uploadPlainRaw: async () => FAKE_BV, appendGroupRaw: noopAppend,
+      gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: async () => FAKE_BV, appendGroup: noopAppend }),
       removeFile: noRemove, now: futureNow, minSegmentSec: 0,
     });
     u.failSeasonWriteOnce();
@@ -144,7 +143,7 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     const u = new RollingUploader({
       room,
       uploadMeta: { ...uploadMeta, seasonSectionId: 456 },
-      gate: new FakeGate(), uploadPlainRaw: async () => FAKE_BV, appendGroupRaw: noopAppend,
+      gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: async () => FAKE_BV, appendGroup: noopAppend }),
       removeFile: noRemove, now: futureNow, minSegmentSec: 0,
     });
     u.noteSegment(paths[0]);
@@ -159,9 +158,9 @@ describe("RollingUploader — 边录边传录制端执行", () => {
 
   it("只处理封口段:有后继段的旧段上传+删,正在写的最近段不动", async () => {
     const { paths } = mkSession(segNames(3));
-    const up = vi.fn(async () => "BV1aaaaaaaaa");
+    const up = vi.fn(async () => ("BV" + "1aaaaaaaaa"));
     const remove = vi.fn(noRemove);
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: remove, now: futureNow, minSegmentSec: 0 });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: noopAppend }), removeFile: remove, now: futureNow, minSegmentSec: 0 });
     for (const p of paths) u.noteSegment(p);
     const r = await u.flush({ recordingActive: true });
     // 段 0/1 有后继 → 封口;段 2(正在写)不封口。
@@ -170,7 +169,7 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     expect(remove).toHaveBeenCalledWith(paths[0]);
     expect(remove).toHaveBeenCalledWith(paths[1]);
     expect(remove).not.toHaveBeenCalledWith(paths[2]);
-    expect(u.bv).toBe("BV1aaaaaaaaa");
+    expect(u.bv).toBe(("BV" + "1aaaaaaaaa"));
   });
 
   // 回归(实测 e2e 复现):生产路径**不传** now / 不传封口宽限,收尾那一轮必须上传并删掉末段。
@@ -178,23 +177,23 @@ describe("RollingUploader — 边录边传录制端执行", () => {
   // → 末段永不上传、源永残留(master 见「有 rolling.bv 但仍有 ts」→ 整场转人工)。
   it("默认路径收尾 flush:末段(刚写完)必须上传并删源 —— 不依赖任何宽限等待", async () => {
     const { paths } = mkSession(segNames(1));
-    const up = vi.fn(async () => "BV1greaceregr");
+    const up = vi.fn(async () => ("BV" + "1greaceregr"));
     const remove = vi.fn(() => true);
     // 不传 now(走默认 Date.now,由假时钟钉死;末段 mtime = 当前时刻,即「刚写完」)/ 不传任何宽限。
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date(BASE_MS + 120_000));
     utimesSync(paths[0], new Date(BASE_MS + 120_000), new Date(BASE_MS + 120_000)); // 与「当前」同刻:刚写完
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: remove, minSegmentSec: 0 });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: noopAppend }), removeFile: remove, minSegmentSec: 0 });
     u.noteSegment(paths[0]);
     const r = await u.flush({ recordingActive: false });
     expect(r.uploaded).toEqual([0]);
-    expect(u.bv).toBe("BV1greaceregr");
+    expect(u.bv).toBe(("BV" + "1greaceregr"));
     expect(remove).toHaveBeenCalledWith(paths[0]); // 末段源必须被清掉,不留残段
     // 收尾后的第二段也要跟上(多段流:最后一轮把尾段也传完)。
     const s2 = mkSession(segNames(2));
     const ap = vi.fn(async () => {});
     const remove2 = vi.fn(() => true);
-    const u2 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: ap, removeFile: remove2, minSegmentSec: 0 });
+    const u2 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: ap }), removeFile: remove2, minSegmentSec: 0 });
     for (const p of s2.paths) u2.noteSegment(p);
     const r2 = await u2.flush({ recordingActive: false });
     expect(r2.uploaded).toEqual([0, 1]);
@@ -203,15 +202,15 @@ describe("RollingUploader — 边录边传录制端执行", () => {
 
   it("单段 + 已收尾 → 最后一个封口段也上传;重启读 sidecar 不重复建稿", async () => {
     const { paths } = mkSession(segNames(1));
-    const up = vi.fn(async () => "BV1bbbbbbbbb");
-    const u1 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
+    const up = vi.fn(async () => ("BV" + "1bbbbbbbbb"));
+    const u1 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: noopAppend }), removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
     u1.noteSegment(paths[0]);
     const r1 = await u1.flush({ recordingActive: false });
     expect(r1.uploaded).toEqual([0]);
     expect(up).toHaveBeenCalledTimes(1);
 
     // 新实例 = 进程重启:sidecar 已记录确认,绝不再建稿。
-    const u2 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
+    const u2 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: noopAppend }), removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
     u2.noteSegment(paths[0]);
     const r2 = await u2.flush({ recordingActive: false });
     expect(r2.uploaded).toEqual([]);
@@ -220,10 +219,10 @@ describe("RollingUploader — 边录边传录制端执行", () => {
 
   it("append 失败 → 记 ambiguous、保留源,后续轮不自动重传", async () => {
     const { paths } = mkSession(segNames(2));
-    const up = vi.fn(async () => "BV1ccccccccccc");
+    const up = vi.fn(async () => ("BV" + "1ccccccccccc"));
     const ap = vi.fn(async () => { throw new Error("network down"); });
     const remove = vi.fn(noRemove);
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: ap, removeFile: remove, now: futureNow, minSegmentSec: 0 });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: ap }), removeFile: remove, now: futureNow, minSegmentSec: 0 });
     for (const p of paths) u.noteSegment(p);
     const r = await u.flush({ recordingActive: false });
     expect(r.uploaded).toEqual([0]);   // 段 0 建稿成功
@@ -237,16 +236,16 @@ describe("RollingUploader — 边录边传录制端执行", () => {
 
   it("重启后新段从 max+1 续号(不复用已确认段号 → 不漏传新段)", async () => {
     const { paths } = mkSession(segNames(2));
-    const up = vi.fn(async () => "BV1dddddddddd");
+    const up = vi.fn(async () => ("BV" + "1dddddddddd"));
     const ap = vi.fn(async () => {});
     // 第一轮:段 0 建稿并确认(段 1 是"最新"→ 未封口,不上传)。
-    const u1 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: ap, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
+    const u1 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: ap }), removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
     u1.noteSegment(paths[0]);
     await u1.flush({ recordingActive: false });
     expect(u1.confirmedIndices).toEqual([0]);
 
     // 重启(新实例,读 sidecar):新段 s_001 必须分到段号 1 并 append(而不是复用 0 被跳过)。
-    const u2 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: ap, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
+    const u2 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: ap }), removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
     u2.noteSegment(paths[1]);
     const r2 = await u2.flush({ recordingActive: false });
     expect(r2.uploaded).toEqual([1]);
@@ -256,9 +255,9 @@ describe("RollingUploader — 边录边传录制端执行", () => {
 
   it("头阻塞:中间段失败后,其后的段不再上传(不可逆空洞防线)", async () => {
     const { paths } = mkSession(segNames(3));
-    const up = vi.fn(async () => "BV1hhhhhhhhhh");
+    const up = vi.fn(async () => ("BV" + "1hhhhhhhhhh"));
     const ap = vi.fn(async () => { throw new Error("network down"); });
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: ap, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: ap }), removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
     for (const p of paths) u.noteSegment(p);
     const r = await u.flush({ recordingActive: false });
     // 段 0 建稿成功;段 1 失败 → 段 2 必须被挡回(否则 P2 后的 P3 会留下不可补的空洞)。
@@ -277,10 +276,10 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     utimesSync(paths[0], new Date(t0), new Date(t0));
     utimesSync(paths[1], new Date(t0 + 1_000), new Date(t0 + 1_000)); // 距上段 1s < 5s → 碎片
     utimesSync(paths[2], new Date(t0 + 21_000), new Date(t0 + 21_000)); // 距上段 20s → 正常
-    const up = vi.fn(async () => "BV1ffffffffff");
+    const up = vi.fn(async () => ("BV" + "1ffffffffff"));
     const ap = vi.fn(async () => {});
     const remove = vi.fn(noRemove);
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: ap, removeFile: remove, now: futureNow, minSegmentSec: 5 });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: ap }), removeFile: remove, now: futureNow, minSegmentSec: 5 });
     for (const p of paths) u.noteSegment(p);
     const r = await u.flush({ recordingActive: false });
     expect(r.uploaded).toEqual([0, 2]); // 段 1 碎片跳过
@@ -298,7 +297,7 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     const ap = vi.fn(async () => {});
     const remove = vi.fn(noRemove);
     const log = vi.fn();
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: ap, removeFile: remove, now: futureNow, minSegmentSec: 0, log });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: ap }), removeFile: remove, now: futureNow, minSegmentSec: 0, log });
     for (const p of paths) u.noteSegment(p);
     const r = await u.flush({ recordingActive: false });
     expect(r.uploaded).toEqual([0, 2]);
@@ -314,7 +313,7 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     writeFileSync(paths[1], "");
     const up = vi.fn(async () => FAKE_BV + "yyyy");
     const ap = vi.fn(async () => {});
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: ap, removeFile: noRemove, now: futureNow, minSegmentSec: 5 });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: ap }), removeFile: noRemove, now: futureNow, minSegmentSec: 5 });
     for (const p of paths) u.noteSegment(p);
     const r = await u.flush({ recordingActive: false });
     expect(r.uploaded).toEqual([2]); // only the non-empty segment; the 0-byte one is never sent
@@ -323,26 +322,26 @@ describe("RollingUploader — 边录边传录制端执行", () => {
 
   it("可见性:默认「仅自己可见」,唯一 override = uploadPrivate:false", async () => {
     const { paths } = mkSession(segNames(1));
-    const up = vi.fn(async (_o: { plain: { public?: boolean } }) => "BV1pppppppppp");
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
+    const up = vi.fn(async (_o: { public?: boolean }) => ("BV" + "1pppppppppp"));
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: noopAppend }), removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
     u.noteSegment(paths[0]);
     await u.flush({ recordingActive: false });
-    expect(up.mock.calls[0]?.[0].plain.public).toBe(false); // 默认 → 私密(public=false → --is-only-self)
+    expect(up.mock.calls[0]?.[0].public).toBe(false); // 默认 → 私密(public=false → --is-only-self)
 
     // 独立会话(另一 sidecar),避免读到上一实例的已确认状态而走 append(不建稿)。
     const { paths: paths2 } = mkSession(segNames(1));
-    const up2 = vi.fn(async (_o: { plain: { public?: boolean } }) => "BV1qqqqqqqqqq");
-    const u2 = new RollingUploader({ room, uploadMeta, uploadPrivate: false, gate: new FakeGate(), uploadPlainRaw: up2, appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
+    const up2 = vi.fn(async (_o: { public?: boolean }) => ("BV" + "1qqqqqqqqqq"));
+    const u2 = new RollingUploader({ room, uploadMeta, uploadPrivate: false, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up2, appendGroup: noopAppend }), removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
     u2.noteSegment(paths2[0]);
     await u2.flush({ recordingActive: false });
-    expect(up2.mock.calls[0]?.[0].plain.public).toBe(true); // 显式公开
+    expect(up2.mock.calls[0]?.[0].public).toBe(true); // 显式公开
   });
 
   it("崩溃恢复:create 中断(BV 未知)→ 转人工,绝不自动重建稿", async () => {
     const { dir, paths } = mkSession(segNames(1));
     writeSidecar(dir, { segments: [{ index: 0, path: paths[0] }], uploading: { index: 0, kind: "create" } });
-    const up = vi.fn(async () => "BV1zzzzzzzzzz");
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
+    const up = vi.fn(async () => ("BV" + "1zzzzzzzzzz"));
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: noopAppend }), removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
     u.noteSegment(paths[0]);
     const r = await u.flush({ recordingActive: false });
     expect(u.ambiguousIndices).toContain(0);
@@ -355,11 +354,11 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     writeSidecar(dir, {
       segments: [{ index: 0, path: paths[0] }, { index: 1, path: paths[1] }],
       confirmed: [0],
-      bv: "BV1rrrrrrrrrr",
+      bv: ("BV" + "1rrrrrrrrrr"),
       uploading: { index: 1, kind: "append" },
     });
     const ap = vi.fn(async () => {});
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: async () => "BV1rrrrrrrrrr", appendGroupRaw: ap, countPartsRaw: async () => 2, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: async () => ("BV" + "1rrrrrrrrrr"), appendGroup: ap }), countPartsRaw: async () => 2, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
     u.noteSegment(paths[0]);
     const r = await u.flush({ recordingActive: false });
     expect(u.confirmedIndices).toEqual([0, 1]); // 补确认
@@ -372,11 +371,11 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     writeSidecar(dir, {
       segments: [{ index: 0, path: paths[0] }, { index: 1, path: paths[1] }],
       confirmed: [0],
-      bv: "BV1ssssssssss",
+      bv: ("BV" + "1ssssssssss"),
       uploading: { index: 1, kind: "append" },
     });
     const ap = vi.fn(async () => {});
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: async () => "BV1ssssssssss", appendGroupRaw: ap, countPartsRaw: async () => 1, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: async () => ("BV" + "1ssssssssss"), appendGroup: ap }), countPartsRaw: async () => 1, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
     u.noteSegment(paths[0]);
     const r = await u.flush({ recordingActive: false });
     expect(ap).toHaveBeenCalledTimes(1); // 未提交 → 正常重试
@@ -396,11 +395,11 @@ describe("RollingUploader — 边录边传录制端执行", () => {
       // 段 1 曾是碎片段(未上传);已确认 = 0,2;段 3 的 append 结果未知(进程被杀)。
       segments: paths.map((p, i) => ({ index: i, path: p })),
       confirmed: [0, 2],
-      bv: "BV1ffffragment",
+      bv: ("BV" + "1ffffragment"),
       uploading: { index: 3, kind: "append" },
     });
     const ap = vi.fn(async () => {});
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: async () => "BV1ffffragment", appendGroupRaw: ap, countPartsRaw: async () => 3, removeFile: noRemove, now: futureNow, minSegmentSec: 5 });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: async () => ("BV" + "1ffffragment"), appendGroup: ap }), countPartsRaw: async () => 3, removeFile: noRemove, now: futureNow, minSegmentSec: 5 });
     u.noteSegment(paths[0]);
     await u.flush({ recordingActive: false });
     expect(u.confirmedIndices).toEqual([0, 2, 3]); // 分P数=3=已确认数+1 → 段 3 其实已提交
@@ -413,11 +412,11 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     writeSidecar(dir, {
       segments: [{ index: 0, path: paths[0] }, { index: 1, path: paths[1] }],
       confirmed: [0],
-      bv: "BV1tttttttttt",
+      bv: ("BV" + "1tttttttttt"),
       uploading: { index: 1, kind: "append" },
     });
     const ap = vi.fn(async () => {});
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: async () => "BV1tttttttttt", appendGroupRaw: ap, countPartsRaw: async () => 5, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: async () => ("BV" + "1tttttttttt"), appendGroup: ap }), countPartsRaw: async () => 5, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
     u.noteSegment(paths[0]);
     const r = await u.flush({ recordingActive: false });
     expect(u.ambiguousIndices).toContain(1);
@@ -432,11 +431,11 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     writeSidecar(dir, {
       segments: [{ index: 0, path: paths[0] }, { index: 1, path: paths[1] }],
       confirmed: [0],
-      bv: "BV1nnnnnnnnnn",
+      bv: ("BV" + "1nnnnnnnnnn"),
       uploading: { index: 1, kind: "append" },
     });
     const ap = vi.fn(async () => {});
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: async () => "BV1nnnnnnnnnn", appendGroupRaw: ap, countPartsRaw: async () => null, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: async () => ("BV" + "1nnnnnnnnnn"), appendGroup: ap }), countPartsRaw: async () => null, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
     u.noteSegment(paths[0]);
     const r = await u.flush({ recordingActive: false });
     expect(u.ambiguousIndices).toContain(1);
@@ -451,13 +450,13 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     writeSidecar(dir, {
       segments: [{ index: 0, path: paths[0] }, { index: 1, path: paths[1] }],
       confirmed: [0, 1],
-      bv: "BV1cccccccccc",
+      bv: ("BV" + "1cccccccccc"),
       uploading: { index: 1, kind: "append" }, // 确认后、销标记前被杀
     });
-    const up = vi.fn(async () => "BV1cccccccccc");
+    const up = vi.fn(async () => ("BV" + "1cccccccccc"));
     const ap = vi.fn(async () => {});
     const remove = vi.fn(() => true);
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: ap, removeFile: remove, now: futureNow, minSegmentSec: 0 });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: ap }), removeFile: remove, now: futureNow, minSegmentSec: 0 });
     u.noteSegment(paths[0]);
     const r = await u.flush({ recordingActive: false });
     expect(u.confirmedIndices).toEqual([0, 1]); // 不重复确认
@@ -474,14 +473,14 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     const t0 = BASE_MS;
     utimesSync(paths[0], new Date(t0), new Date(t0));
     utimesSync(paths[1], new Date(t0 + 60_000), new Date(t0 + 60_000));
-    const up = vi.fn(async () => "BV1aaaaaaaaaa");
+    const up = vi.fn(async () => ("BV" + "1aaaaaaaaaa"));
     // 实例 1:只有段 0 且仍在录(不封口 → 不建稿),但 startMs 已随段号落盘。
-    const u1 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
+    const u1 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: noopAppend }), removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
     u1.noteSegment(paths[0]);
     await u1.flush({ recordingActive: true });
     expect(up).not.toHaveBeenCalled();
     // 实例 2 = 重启:**先**上报尾段(它的 mtime 晚 60s)→ 读回 sidecar 的 startMs,仍锚定首段时刻。
-    const u2 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
+    const u2 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: noopAppend }), removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
     u2.noteSegment(paths[1]);
     await u2.flush({ recordingActive: false });
     expect(up).toHaveBeenCalledTimes(1); // 建稿发生在段 0 上,时刻 = 会话首段
@@ -494,11 +493,11 @@ describe("RollingUploader — 边录边传录制端执行", () => {
   // 用真实的目录权限故障注入(把分段目录设为只读 → WAL 临时文件 openSync 必失败),不靠假接缝。
   it("sidecar 写失败 → 状态不可信:不建稿、不 append、不删源,并明示转人工", async () => {
     const { dir, paths } = mkSession(segNames(1));
-    const up = vi.fn(async () => "BV1uuuuuuuuuu");
+    const up = vi.fn(async () => ("BV" + "1uuuuuuuuuu"));
     const ap = vi.fn(async () => {});
     const remove = vi.fn(noRemove);
     const logs: string[] = [];
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: ap, removeFile: remove, now: futureNow, minSegmentSec: 0, log: (m) => logs.push(m) });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: ap }), removeFile: remove, now: futureNow, minSegmentSec: 0, log: (m) => logs.push(m) });
     u.noteSegment(paths[0]); // 此时目录仍可写:正常落 sidecar
     const recDir = path.join(dir, "rec");
     chmodSync(recDir, 0o500); // 只读 → 之后的原子写必然失败
@@ -523,7 +522,7 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     const remove = vi.fn(noRemove);
     const skipped: number[] = [];
     const u = new RollingUploader({
-      room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: ap, removeFile: remove,
+      room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: ap }), removeFile: remove,
       now: futureNow, minSegmentSec: 0,
       uploadOwner: () => "master",
       enqueueHubSkipped: (info) => { skipped.push(info.index); },
@@ -545,7 +544,7 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     const up = vi.fn(async () => "BAD2");
     const skipped: number[] = [];
     const u = new RollingUploader({
-      room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove,
+      room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: noopAppend }), removeFile: noRemove,
       now: futureNow, minSegmentSec: 0, uploadOwner: () => owner,
       enqueueHubSkipped: (info) => { skipped.push(info.index); },
     });
@@ -581,7 +580,7 @@ describe("RollingUploader — 同一场断流重连续用稿件(#148)", () => {
     });
     const plain = opts.plain ?? vi.fn(async () => FAKE_BV);
     const append = opts.append ?? vi.fn(async () => {});
-    const u = new RollingUploader({ room, uploadMeta: { ...uploadMeta, seasonSectionId: 456 }, gate: new FakeGate(), uploadPlainRaw: plain, appendGroupRaw: append, countPartsRaw: async () => 2, removeFile: noRemove, now: () => A_LAST_MS, minSegmentSec: 0 });
+    const u = new RollingUploader({ room, uploadMeta: { ...uploadMeta, seasonSectionId: 456 }, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: plain, appendGroup: append }), countPartsRaw: async () => 2, removeFile: noRemove, now: () => A_LAST_MS, minSegmentSec: 0 });
     a.forEach((p) => u.noteSegment(p));
     await u.flush({ recordingActive: false });
     return { dir, plain, append };
@@ -600,7 +599,7 @@ describe("RollingUploader — 同一场断流重连续用稿件(#148)", () => {
   }
 
   const uploaderB = (plain: unknown, append: unknown, startMs: number, count = async (): Promise<number | null> => 2): RollingUploader =>
-    new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: plain as never, appendGroupRaw: append as never, countPartsRaw: count, removeFile: noRemove, now: () => startMs + 3_600_000, minSegmentSec: 0 });
+    new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: plain as never, appendGroup: append as never }), countPartsRaw: count, removeFile: noRemove, now: () => startMs + 3_600_000, minSegmentSec: 0 });
 
   it("gap <= 30 min: B appends to A's BV (one submission, parts A then B); link is persisted", async () => {
     const { dir, plain, append } = await runSessionA();
@@ -678,7 +677,7 @@ describe("RollingUploader — 同一场断流重连续用稿件(#148)", () => {
     const plainB = vi.fn(async () => FAKE_BV);
     const appendB = vi.fn(async () => {});
     const logs: string[] = [];
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: plainB, appendGroupRaw: appendB, countPartsRaw: async () => 2, removeFile: noRemove, now: () => b.startMs + 3_600_000, minSegmentSec: 0, log: (m) => logs.push(m) });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: plainB, appendGroup: appendB }), countPartsRaw: async () => 2, removeFile: noRemove, now: () => b.startMs + 3_600_000, minSegmentSec: 0, log: (m) => logs.push(m) });
     b.paths.forEach((p) => u.noteSegment(p));
     const r = await u.flush({ recordingActive: false });
     expect(plainB).not.toHaveBeenCalled();
@@ -788,10 +787,9 @@ describe("RollingUploader 标题日期按设置时区(issue #155)", () => {
     const { paths } = mkSession(["主播_000.ts", "主播_001.ts"]);
     utimesSync(paths[0], instant, instant);
     const titles: string[] = [];
-    const up = vi.fn(async (a: { plain: { title: string } }) => { titles.push(a.plain.title); return FAKE_BV; });
+    const up = vi.fn(async (a: { title: string }) => { titles.push(a.title); return FAKE_BV; });
     const u = new RollingUploader({
-      room, uploadMeta, timeZone, gate: new FakeGate(), uploadPlainRaw: up as never,
-      appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0,
+      room, uploadMeta, timeZone, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up as never, appendGroup: noopAppend }), removeFile: noRemove, now: futureNow, minSegmentSec: 0,
     });
     for (const p of paths) u.noteSegment(p);
     await u.flush({ recordingActive: true });
@@ -833,7 +831,7 @@ describe("RollingUploader × 节点上传槽 (plan 038 PR4)", () => {
     const held: boolean[] = [];
     const up = vi.fn(async () => { held.push(busy.v); return FAKE_BV; });
     const ap = vi.fn(async () => { held.push(busy.v); });
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: ap, removeFile: noRemove, now: futureNow, minSegmentSec: 0, slot: slot as never });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: ap }), removeFile: noRemove, now: futureNow, minSegmentSec: 0, slot: slot as never });
     for (const p of paths) u.noteSegment(p);
     const r = await u.flush({ recordingActive: true });
     expect(r.uploaded.sort()).toEqual([0, 1]); // 段 0 建稿、段 1 append;段 2 正在写
@@ -846,7 +844,7 @@ describe("RollingUploader × 节点上传槽 (plan 038 PR4)", () => {
     const { paths } = mkSession(segNames(2));
     const up = vi.fn(async () => FAKE_BV);
     const { slot } = fakeSlot({ v: true }, { failAcquire: true });
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0, slot: slot as never });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: noopAppend }), removeFile: noRemove, now: futureNow, minSegmentSec: 0, slot: slot as never });
     for (const p of paths) u.noteSegment(p);
     const r = await u.flush({ recordingActive: true });
     expect(r.uploaded).toEqual([]);
@@ -858,7 +856,7 @@ describe("RollingUploader × 节点上传槽 (plan 038 PR4)", () => {
     const { dir, paths } = mkSession(segNames(2));
     const busy = fakeSlot({ v: true }, { failAcquire: true });
     const up = vi.fn(async () => FAKE_BV);
-    const u1 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0, slot: busy.slot as never });
+    const u1 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: noopAppend }), removeFile: noRemove, now: futureNow, minSegmentSec: 0, slot: busy.slot as never });
     for (const p of paths) u1.noteSegment(p);
     await u1.flush({ recordingActive: true });
     expect(up).not.toHaveBeenCalled();
@@ -866,7 +864,7 @@ describe("RollingUploader × 节点上传槽 (plan 038 PR4)", () => {
 
     // Next process reads the sidecar: no dangling intent, so nothing is marked ambiguous and the create goes out.
     const free = fakeSlot({ v: false });
-    const u2 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0, slot: free.slot as never });
+    const u2 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: noopAppend }), removeFile: noRemove, now: futureNow, minSegmentSec: 0, slot: free.slot as never });
     for (const p of paths) u2.noteSegment(p);
     const r = await u2.flush({ recordingActive: true });
     expect(r.ambiguous).toEqual([]);
@@ -886,7 +884,7 @@ describe("RollingUploader × 节点上传槽 (plan 038 PR4)", () => {
     };
     const up = vi.fn(async () => { denyNext = true; return FAKE_BV; }); // slot goes busy right after the create
     const ap = vi.fn(async () => {});
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: ap, removeFile: noRemove, now: futureNow, minSegmentSec: 0, slot: slot as never });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: ap }), removeFile: noRemove, now: futureNow, minSegmentSec: 0, slot: slot as never });
     for (const p of paths) u.noteSegment(p);
     const r = await u.flush({ recordingActive: true });
     expect(r.uploaded).toEqual([0]);
@@ -899,7 +897,7 @@ describe("RollingUploader × 节点上传槽 (plan 038 PR4)", () => {
   it("issue #309: markClosed stamps closedAt after the session-end flush; a busy slot keeps the session open until then", async () => {
     const { dir, paths } = mkSession(segNames(1));
     const busy = fakeSlot({ v: true }, { failAcquire: true });
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: vi.fn(async () => FAKE_BV), appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0, slot: busy.slot as never });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: vi.fn(async () => FAKE_BV), appendGroup: noopAppend }), removeFile: noRemove, now: futureNow, minSegmentSec: 0, slot: busy.slot as never });
     u.noteSegment(paths[0]!);
     await u.flush({ recordingActive: false });
     expect(JSON.parse(readFileSync(sidecarPath(dir), "utf-8")).closedAt).toBeUndefined();
@@ -912,7 +910,7 @@ describe("RollingUploader × 节点上传槽 (plan 038 PR4)", () => {
   it("不注入槽时不加锁(旧行为不变)", async () => {
     const { paths } = mkSession(segNames(1));
     const up = vi.fn(async () => FAKE_BV);
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0, slot: null });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), upload: fakeUploadTarget({ uploadPlain: up, appendGroup: noopAppend }), removeFile: noRemove, now: futureNow, minSegmentSec: 0, slot: null });
     u.noteSegment(paths[0]!);
     const r = await u.flush({ recordingActive: false });
     expect(r.uploaded).toEqual([0]);
@@ -925,7 +923,7 @@ describe("session-end hook closes the session (issue #309)", () => {
     const { dir, paths } = mkSession(segNames(1));
     const hook = makeRollingUploadHookFactory({
       enabled: true, platform: "douyin", roomSlug: "123", gate: new FakeGate(), now: futureNow, minSegmentSec: 0,
-      removeFile: noRemove, uploadPlainRaw: vi.fn(async () => FAKE_BV) as never, appendGroupRaw: noopAppend as never,
+      removeFile: noRemove, upload: fakeUploadTarget({ uploadPlain: vi.fn(async () => FAKE_BV) as never, appendGroup: noopAppend as never }),
       slot: { index: null, acquire: async () => false, release: () => {}, touch: () => {}, close: () => {} } as never,
     })!();
     hook.onSegment(paths[0]!);
@@ -1183,8 +1181,7 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
   function uploaderB(f: Fixture, o: { append: unknown; plain?: unknown; count?: () => Promise<number | null>; alive?: (pid: number) => boolean; now?: () => number; logs?: string[] }): RollingUploader {
     return new RollingUploader({
       room, uploadMeta, gate: new FakeGate(), pid: B_PID, stableCheckMs: 0, minSegmentSec: 0, removeFile: noRemove,
-      uploadPlainRaw: (o.plain ?? vi.fn(async () => FAKE_BV + "unexpected")) as never,
-      appendGroupRaw: o.append as never,
+      upload: fakeUploadTarget({ uploadPlain: (o.plain ?? vi.fn(async () => FAKE_BV + "unexpected")) as never, appendGroup: o.append as never }),
       countPartsRaw: o.count ?? (async () => 1),
       isPidAlive: o.alive ?? (() => false),
       now: o.now ?? (() => f.bStartMs + 3_600_000),
@@ -1200,7 +1197,7 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
     new RollingUploader({
       room, uploadMeta: { ...uploadMeta, seasonSectionId: 456 }, gate: new FakeGate(), pid: B_PID,
       stableCheckMs: 0, minSegmentSec: 0, removeFile: noRemove, isPidAlive: () => false,
-      uploadPlainRaw: vi.fn() as never, appendGroupRaw: append as never, countPartsRaw: async () => 1,
+      upload: fakeUploadTarget({ uploadPlain: vi.fn() as never, appendGroup: append as never }), countPartsRaw: async () => 1,
       now: () => f.bStartMs + 3_600_000,
     });
 
@@ -1275,7 +1272,7 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
     const append = vi.fn(async (o: { files: string[] }) => { events.push(`append ${path.basename(o.files[0]!)}`); });
     const u = new RollingUploader({
       room, uploadMeta, gate: new FakeGate(), pid: B_PID, stableCheckMs: 0, minSegmentSec: 0, isPidAlive: () => false,
-      uploadPlainRaw: vi.fn() as never, appendGroupRaw: append as never, countPartsRaw: async () => 1,
+      upload: fakeUploadTarget({ uploadPlain: vi.fn() as never, appendGroup: append as never }), countPartsRaw: async () => 1,
       removeFile: (p) => { events.push(`remove ${path.basename(p)}`); return true; }, now: () => f.bStartMs + 3_600_000,
     });
     f.bPaths.forEach((p) => u.noteSegment(p));
@@ -1370,7 +1367,7 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
     const append = vi.fn(async () => {});
     const u = new RollingUploader({
       room, uploadMeta, gate: new FakeGate(), pid: B_PID, stableCheckMs: 40, minSegmentSec: 0, removeFile: noRemove, isPidAlive: () => false,
-      uploadPlainRaw: vi.fn() as never, appendGroupRaw: append as never, countPartsRaw: async () => 1, now: () => f.bStartMs + 3_600_000,
+      upload: fakeUploadTarget({ uploadPlain: vi.fn() as never, appendGroup: append as never }), countPartsRaw: async () => 1, now: () => f.bStartMs + 3_600_000,
     });
     f.bPaths.forEach((p) => u.noteSegment(p));
     const run = u.flush({ recordingActive: false });
@@ -1453,7 +1450,7 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
     f.bPaths.forEach((p) => u.noteSegment(p));
     await u.flush({ recordingActive: false });
     // B creates only its own content; A's segments are left for the master's normal pipeline.
-    expect((plain.mock.calls as unknown as Array<[{ plain: { video: string } }]>).map((c) => path.basename(c[0].plain.video))).toEqual([`${B_BASE}_000.ts`]);
+    expect((plain.mock.calls as unknown as Array<[{ video: string }]>).map((c) => path.basename(c[0].video))).toEqual([`${B_BASE}_000.ts`]);
     expect(append).not.toHaveBeenCalled();
     expect(readA(f).bv).toBeUndefined();
   });
@@ -1468,7 +1465,7 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
       const u = uploaderB(f, { append: vi.fn(async () => {}), plain });
       f.bPaths.forEach((p) => u.noteSegment(p));
       await u.flush({ recordingActive: false });
-      expect((plain.mock.calls as unknown as Array<[{ plain: { video: string } }]>).map((c) => path.basename(c[0].plain.video)), `gap ${gap}`).toEqual([`${B_BASE}_000.ts`]);
+      expect((plain.mock.calls as unknown as Array<[{ video: string }]>).map((c) => path.basename(c[0].video)), `gap ${gap}`).toEqual([`${B_BASE}_000.ts`]);
       expect(readA(f).bv).toBeUndefined();
     }
   });
@@ -1479,7 +1476,7 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
     const append = vi.fn(async () => { throw busy; });
     const u = new RollingUploader({
       room, uploadMeta, gate: new FakeGate(), pid: B_PID, stableCheckMs: 0, minSegmentSec: 0, removeFile: noRemove, isPidAlive: () => false,
-      uploadPlainRaw: vi.fn() as never, appendGroupRaw: append as never, countPartsRaw: async () => 1, now: () => f.bStartMs + 3_600_000,
+      upload: fakeUploadTarget({ uploadPlain: vi.fn() as never, appendGroup: append as never }), countPartsRaw: async () => 1, now: () => f.bStartMs + 3_600_000,
       slot: { acquire: async () => false, release: () => {} } as never, slotWaitMs: 1,
     });
     f.bPaths.forEach((p) => u.noteSegment(p));
@@ -1495,7 +1492,7 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
     // Default liveness (kill(pid,0)) on our own pid succeeds; only the cmdline identity check says "not a recorder".
     const u = new RollingUploader({
       room, uploadMeta, gate: new FakeGate(), pid: B_PID, stableCheckMs: 0, minSegmentSec: 0, removeFile: noRemove,
-      uploadPlainRaw: vi.fn() as never, appendGroupRaw: append as never, countPartsRaw: async () => 1,
+      upload: fakeUploadTarget({ uploadPlain: vi.fn() as never, appendGroup: append as never }), countPartsRaw: async () => 1,
       now: () => f.bStartMs + 3_600_000,
       procCmdline: () => ["/usr/sbin/nginx", "-g", "daemon off;"],
     });
@@ -1511,7 +1508,7 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
     const append = vi.fn(async () => {});
     const u = new RollingUploader({
       room, uploadMeta, gate: new FakeGate(), pid: B_PID, stableCheckMs: 0, minSegmentSec: 0, removeFile: noRemove,
-      uploadPlainRaw: vi.fn() as never, appendGroupRaw: append as never, countPartsRaw: async () => 1,
+      upload: fakeUploadTarget({ uploadPlain: vi.fn() as never, appendGroup: append as never }), countPartsRaw: async () => 1,
       now: () => f.bStartMs + 3_600_000,
       procCmdline: () => ["node", "/app/dist/douyin-rec.mjs", "record", "--room", "https://live.example/123"],
     });
@@ -1526,7 +1523,7 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
     const append = vi.fn(async () => {});
     const u = new RollingUploader({
       room, uploadMeta, gate: new FakeGate(), pid: B_PID, stableCheckMs: 0, minSegmentSec: 0, removeFile: noRemove,
-      uploadPlainRaw: vi.fn() as never, appendGroupRaw: append as never, countPartsRaw: async () => 1,
+      upload: fakeUploadTarget({ uploadPlain: vi.fn() as never, appendGroup: append as never }), countPartsRaw: async () => 1,
       now: () => f.bStartMs + 3_600_000, procCmdline: () => undefined,
     });
     writeFileSync(path.join(f.dir, `${A_BASE}.rolling.json`), JSON.stringify({ ...readA(f), ownerPid: process.pid }));
@@ -1549,7 +1546,7 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
     let t = f.bStartMs + 3_600_000;
     const u = new RollingUploader({
       room, uploadMeta, gate: new FakeGate(), pid: B_PID, stableCheckMs: 0, minSegmentSec: 0, removeFile: noRemove,
-      uploadPlainRaw: plain as never, appendGroupRaw: append as never, countPartsRaw: async () => 1,
+      upload: fakeUploadTarget({ uploadPlain: plain as never, appendGroup: append as never }), countPartsRaw: async () => 1,
       isPidAlive: () => true, now: () => t, ownerWaitMs: 30 * 60_000, notify: (m) => alerts.push(m),
     });
     f.bPaths.forEach((p) => u.noteSegment(p));
@@ -1604,15 +1601,15 @@ describe("RollingUploader finalizing progress from the biliup child (plans/044)"
       const u = new RollingUploader({
         room, uploadMeta, gate: opts.block === "gate" ? new BlockedGate() : new FakeGate(),
         ...(opts.block === "slot" ? { slot: blockedSlot } : {}),
-        appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0,
+        removeFile: noRemove, now: futureNow, minSegmentSec: 0,
         readAcked: opts.readAcked, noteProgress: () => w.noteProgress(), shouldSample: () => true, progressIntervalMs: STEP,
-        uploadPlainRaw: async (o) => {
+        upload: fakeUploadTarget({ appendGroup: noopAppend, uploadPlain: async (o) => {
           for (let i = 0; i < spawns - 1; i++) { o.hooks?.onSpawn?.(4242 + i); o.hooks?.onClose?.(); } // retried lines: children that died
           o.hooks?.onSpawn?.(9999); // the last child hangs
           if (!opts.block) await gateOpen;
           o.hooks?.onClose?.();
           return FAKE_BV;
-        },
+        } }),
       });
       u.noteSegment(paths[0]);
       const done = u.flush({ recordingActive: false });
@@ -1675,9 +1672,9 @@ describe("RollingUploader finalizing progress from the biliup child (plans/044)"
     let release: () => void = () => {};
     const gateOpen = new Promise<void>((r) => { release = r; });
     const u = new RollingUploader({
-      room, uploadMeta, gate: new FakeGate(), appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0,
+      room, uploadMeta, gate: new FakeGate(), removeFile: noRemove, now: futureNow, minSegmentSec: 0,
       readAcked: read, noteProgress: () => {}, shouldSample: () => false, progressIntervalMs: STEP,
-      uploadPlainRaw: async (o) => { o.hooks?.onSpawn?.(9999); await gateOpen; o.hooks?.onClose?.(); return FAKE_BV; },
+      upload: fakeUploadTarget({ appendGroup: noopAppend, uploadPlain: async (o) => { o.hooks?.onSpawn?.(9999); await gateOpen; o.hooks?.onClose?.(); return FAKE_BV; } }),
     });
     u.noteSegment(paths[0]);
     const done = u.flush({ recordingActive: false });
