@@ -258,6 +258,16 @@ let probeSegment: ((file: string) => Promise<{ durationMs: number; endMs: number
 /** Local serve API used by commands that need state only the serve process holds. */
 const serveApiBase = (): string => process.env.DREC_SERVE_API ?? "http://localhost:7860"; // loopback; Node 24 fetch tries both IPv6 and IPv4 loopback
 
+/**
+ * Authorization for the node-local serve: this node's own Web credential (env first, then the
+ * generated key file), never a shared fleet token. Credential-free legacy services get no header.
+ */
+async function internalAuthHeaders(dataRoot: string): Promise<Record<string, string>> {
+  const { readWebToken } = await import("@drec/app");
+  const token = readWebToken(dataRoot);
+  return token ? { authorization: `Bearer ${token}` } : {};
+}
+
 export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freeze({
   // "true" once nothing is recording or finalizing for this room (master settle polls this).
   // Only this room counts: a global ffmpeg count made other rooms' recordings stall this room's settle.
@@ -360,6 +370,9 @@ export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freez
           .filter((s) => s.enabled === false && s.drain === true)
           .map((s) => `${s.platform}:${s.roomSlug}`),
       );
+      // The master push arrives over ssh, but the stop/drain/log calls below hit the node's own serve:
+      // authenticate them with the node-local credential so enabling Web auth needs no manual step.
+      const authHeaders = await internalAuthHeaders(dataRoot);
       for (const key of result.pending) {
         const task = byKey.get(key);
         if (!task) continue;
@@ -369,6 +382,7 @@ export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freez
           // 排空任务即使这轮没送达也不会被硬停(下一个 daemon tick 仍按 enabled=false 优雅收播)。
           const res = await fetch(`${serveApiBase()}/api/tasks/${task.id}/${drain ? "drain" : "stop"}?internal=1`, {
             method: "POST",
+            headers: authHeaders,
             // Bounded: inside the resident serve a hung loopback call must not pin the request.
             signal: AbortSignal.timeout(10_000),
           });
@@ -389,6 +403,7 @@ export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freez
           try {
             await fetch(`${serveApiBase()}/api/tasks/${t.id}/refresh-anchor`, {
               method: "POST",
+              headers: authHeaders,
               signal: AbortSignal.timeout(3000),
             });
           } catch {
@@ -402,7 +417,7 @@ export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freez
 
   // Tail of one task's recording log (F3). Logs live in the serve's in-memory ring buffer, so ask it.
   // Read-only: serve down / unknown task → {lines:[], error} with exit 0; observability must not break callers.
-  "task-logs": async (_dataRoot, [taskIdRaw, linesRaw]) => {
+  "task-logs": async (dataRoot, [taskIdRaw, linesRaw]) => {
     const taskId = Number(taskIdRaw);
     // Clamp so one call can't drag thousands of lines over the wire. Default 200, max 1000.
     const asked = Number(linesRaw);
@@ -411,7 +426,9 @@ export const NODE_COMMANDS: Readonly<Record<string, NodeCommand>> = Object.freez
       return json({ lines: [], error: `taskId 非法: ${taskIdRaw}` });
     }
     try {
-      const res = await fetch(`${serveApiBase()}/api/tasks/${taskId}/logs`, { signal: AbortSignal.timeout(5000) });
+      // Logs live in the serve's memory and may require Web auth; send this node's own credential.
+      const authHeaders = await internalAuthHeaders(dataRoot);
+      const res = await fetch(`${serveApiBase()}/api/tasks/${taskId}/logs`, { headers: authHeaders, signal: AbortSignal.timeout(5000) });
       if (!res.ok) return json({ lines: [], error: `serve HTTP ${res.status}` });
       const body = (await res.json()) as { lines?: unknown };
       const all = Array.isArray(body.lines) ? body.lines.filter((x): x is string => typeof x === "string") : [];

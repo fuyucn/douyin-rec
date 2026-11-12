@@ -46,6 +46,8 @@ export type { CookieStore } from "./apply-cookies.js";
 export { applyTimezone, applyTimezoneFromDb, dbPathForDataRoot, syncDbPathFor, effectiveTimezone, isValidTimezone, DEFAULT_TIMEZONE } from "./timezone.js";
 /** 应用版本号({root package.json version}-{commit6},由 pnpm bundle 注入;非打包环境回落 dev)。 */
 export { APP_VERSION } from "./version.js";
+// Node-local Web credential for internal calls (issue #641). Never generates; undefined when absent.
+export { readWebToken } from "./web/auth.js";
 export { makeNewBroadcastGate, checkNewBroadcastAdmission, volumeFreeBytes, effectiveHubConfig, effectiveHubConfigPath, makeManualStartAdmit } from "./disk-gate.js";
 export type { NewBroadcastGateOpts } from "./disk-gate.js";
 export { makeNotifier, NullNotifier, formatMessage } from "@drec/observability";
