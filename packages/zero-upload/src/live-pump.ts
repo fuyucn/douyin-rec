@@ -425,6 +425,34 @@ export function writeLivePumpState(path: string, state: LivePumpState): void {
 const ARCHIVED_SUFFIX = ".archived-";
 
 /**
+ * Progress marker beside the room state (issue #642). It records real data-plane progress — recovery
+ * chunks reaching the archive — that a durable state write would not otherwise capture. Touched only
+ * on confirmed chunk progress, never on retries or timer ticks, so a permanently stuck loop still
+ * looks idle to the same-broadcast rule.
+ */
+const ACTIVITY_SUFFIX = ".activity";
+
+function activityPathOf(statePath: string): string {
+  return `${statePath}${ACTIVITY_SUFFIX}`;
+}
+
+function markActivity(statePath: string, now: number): void {
+  try {
+    writeFileSync(activityPathOf(statePath), String(now) + "\n", { mode: 0o600 });
+  } catch {
+    // Best effort: a failed marker only loses this interval's evidence.
+  }
+}
+
+function readActivityMs(statePath: string): number | undefined {
+  try {
+    return statSync(activityPathOf(statePath)).mtimeMs;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Same-broadcast rule for the room-keyed state file (issue #293).
  *
  * The state is keyed by room only, so without this a later broadcast of the same room would append
@@ -449,6 +477,7 @@ function rolloverStaleState(path: string, room: string, nowMs: number, log: (msg
     let archived = `${path}${ARCHIVED_SUFFIX}${nowMs}`;
     for (let n = 1; existsSync(archived); n++) archived = `${path}${ARCHIVED_SUFFIX}${nowMs}-${n}`; // rename would overwrite
     renameSync(path, archived);
+    try { unlinkSync(activityPathOf(path)); } catch { /* marker is disposable */ }
     const msg = `直播直传旧状态${reason},已原样归档到 ${archived}(含未确认分 P 与暂存文件),本场开新稿件继续录制,需人工核对旧稿件`;
     log(`[直播直传] ${reason}; archived old state to ${archived}, starting a new submission`);
     return alert ? msg : "";
@@ -462,6 +491,14 @@ function rolloverStaleState(path: string, room: string, nowMs: number, log: (msg
     if (unconfirmed) return archive("缺少最后活动时间且有未确认分 P,无法判断是否同一场", true) || undefined;
     try { lastActivity = statSync(path).mtimeMs; } catch { return archive("无法读取文件时间", true) || undefined; }
   }
+  // Data-plane activity outranks the last durable state write (issue #642): an unconfirmed part's
+  // spool is appended while recording, and a slow whole-file recovery leaves the marker. Without
+  // this, a long active part or a multi-minute recovery looks like a finished broadcast on restart.
+  for (const p of state.parts) {
+    try { lastActivity = Math.max(lastActivity, statSync(p.spoolPath).mtimeMs); } catch { /* missing spool is recovery's problem */ }
+  }
+  const progressAt = readActivityMs(path);
+  if (progressAt !== undefined && Number.isFinite(progressAt)) lastActivity = Math.max(lastActivity, progressAt);
   if (isSameBroadcastGap(nowMs - lastActivity)) return undefined;
   const reason = `距最后活动 ${Math.round((nowMs - lastActivity) / 60_000)} 分钟,超过同场间隔`;
   return archive(reason, unconfirmed) || undefined;
@@ -596,6 +633,8 @@ export class LivePumpSession {
   private seasonTail: Promise<void> = Promise.resolve();
   private seasonWriteFails = false;
   private readonly resumed: boolean;
+  /** Last activity-marker write; recovery progress is throttled to one write per minute. */
+  private lastActivityMarkMs = 0;
 
   constructor(private readonly o: LivePumpSessionOpts) {
     mkdirSync(o.spoolDir, { recursive: true });
@@ -682,6 +721,8 @@ export class LivePumpSession {
     let last: { ok: boolean; bvid?: string; aid?: number; error?: string } = { ok: true, bvid: this.state.bvid, aid: this.state.aid };
     const held: number[] = [];
     while (this.lowestUnconfirmed()) {
+      // Hard stop (SIGTERM/manual): never start another part or a new irreversible request.
+      if (signal?.aborted) return { ok: false, bvid: this.state.bvid, aid: this.state.aid, error: "resubmit aborted" };
       const before = this.lowestUnconfirmed()!.index;
       const r = await this.resubmitUnconfirmedPart(signal);
       if (r.held) { held.push(before); continue; }
@@ -792,13 +833,22 @@ export class LivePumpSession {
       return { ok: false, held: true, error: msg };
     }
     this.log(`[直播直传] 分 P ${target.index} 未确认,按整文件重传补齐(${target.spoolPath})`);
+    let recoveredPct = 0;
     const fb = await reuploadSpoolFile({
       cookiesPath: this.o.cookiesPath,
       fileName: target.filename,
       spoolPath: target.spoolPath,
       line: this.o.line ?? "txa",
       fetchImpl: doFetch,
-      onChunk: this.o.onChunk,
+      onChunk: (uploaded, chunks) => {
+        this.noteActivity();
+        const pct = Math.min(100, Math.floor((uploaded / Math.max(1, bytes)) * 10) * 10);
+        if (pct > recoveredPct) {
+          recoveredPct = pct;
+          this.log(`[直播直传] 分 P ${target.index} 重传进度 ${pct}% (${uploaded}/${bytes} B)`);
+        }
+        try { this.o.onChunk?.(uploaded, chunks); } catch { /* display-only */ }
+      },
       log: this.log,
       ...(this.o.sleep ? { sleep: this.o.sleep } : {}),
       ...(signal ? { signal } : {}),
@@ -924,6 +974,17 @@ export class LivePumpSession {
       if (!opts?.seasonOnly) this.stateUntrusted = true;
       throw e;
     }
+  }
+
+  /**
+   * Record real upload progress for the same-broadcast rule (issue #642). Recovery of a large spool
+   * can run for tens of minutes without any durable state write; only confirmed chunk progress calls
+   * this, never a retry attempt, so a stuck loop still ages out and archives normally.
+   */
+  private noteActivity(now = Date.now()): void {
+    if (now - this.lastActivityMarkMs < 60_000) return;
+    this.lastActivityMarkMs = now;
+    markActivity(this.statePath, now);
   }
 
   /**
@@ -3017,7 +3078,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         // append them in index order. A missing spool means a real gap, so stop for a human.
         if (pending.length >= 1 && pending.every((p) => existsSync(p.spoolPath) || existsSync(heldGapPath(p.spoolPath)))) {
           log(`[直播直传] 有 ${pending.length} 个未确认分 P(索引 ${pending.map((p) => p.index).join(",")}),按整文件重传补齐`);
-          const fixed = await session.resubmitAllUnconfirmed();
+          const fixed = await session.resubmitAllUnconfirmed(o.signal);
           if (fixed.held?.length) log(`[直播直传] ⚠️ 恢复时有 ${fixed.held.length} 个分 P 因时间戳跳变被扣留(索引 ${fixed.held.join(",")}),稿件缺这几 P,需人工处理`);
           if (!fixed.ok) {
             return { fail: {
