@@ -404,11 +404,18 @@ export function resolvePartAliasStem(
   title: string | null | undefined,
   index: number,
   used: Set<string>,
+  maxLen = 60,
 ): PartAliasStem | null {
   const base = partTitleToFilename(title);
   if (!base) return null;
   let stem = base;
-  for (let n = 0; used.has(stem); n++) stem = `${base}-P${index}${n > 0 ? `-${n}` : ""}`;
+  // Reserve room for the collision suffix inside maxLen: appending `-P{index}` to a
+  // already-truncated 60-char stem would let the next sanitize pass strip it again.
+  for (let n = 0; used.has(stem); n++) {
+    const suffix = `-P${index}${n > 0 ? `-${n}` : ""}`;
+    const shorter = partTitleToFilename(title, Math.max(1, maxLen - suffix.length)) ?? base;
+    stem = `${shorter}${suffix}`;
+  }
   used.add(stem);
   return { stem, base, renamed: stem !== base };
 }

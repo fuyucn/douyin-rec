@@ -311,6 +311,17 @@ describe("分 P 标题(与稿件名分开)", () => {
     expect(used.size).toBe(0);
   });
 
+  it("resolvePartAliasStem: collision suffix stays inside the 60-char budget", () => {
+    const used = new Set<string>();
+    const first = resolvePartAliasStem("a".repeat(70) + "/x", 1, used)!;
+    const second = resolvePartAliasStem("a".repeat(70) + ":x", 2, used)!;
+    expect(first.stem).toHaveLength(60);
+    expect(second.stem.endsWith("-P2")).toBe(true);
+    // A later sanitize pass must not trim the collision suffix away.
+    expect(partTitleToFilename(second.stem)).toBe(second.stem);
+    expect(second.stem.length).toBeLessThanOrEqual(60);
+  });
+
   it("partTitleToFilename: 超长截断且不留尾部分隔符", () => {
     const out = partTitleToFilename("a".repeat(80))!;
     expect(out.length).toBe(60);

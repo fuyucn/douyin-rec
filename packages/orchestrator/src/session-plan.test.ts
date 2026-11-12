@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync, writeFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { resolvePartAliasStem } from "@drec/core";
 import { deriveSegmentPlan, deriveStageProducts, prepareUploadAlias, segmentStem, sessionBaseOfFile, sessionBasesOfFiles, UPLOAD_ALIAS_DIR } from "./session-plan.js";
 
 describe("sessionBaseOfFile", () => {
@@ -198,5 +199,19 @@ describe("prepareUploadAlias(分P标题 → 文件名)", () => {
     const out = prepareUploadAlias(dir, "plain", canonical, "主播/第1场:part");
     expect(existsSync(out)).toBe(true);
     expect(out).toContain("主播-第1场-part");
+  });
+
+  it("清洗后同名的长标题仍拿到不同别名(后缀不会被二次截断)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "alias-"));
+    const canonical = join(dir, "a.mp4");
+    writeFileSync(canonical, "x");
+    const used = new Set<string>();
+    const first = resolvePartAliasStem("a".repeat(70) + "/x", 1, used)!;
+    const second = resolvePartAliasStem("a".repeat(70) + ":x", 2, used)!;
+    const out1 = prepareUploadAlias(dir, "plain", canonical, first.stem);
+    const out2 = prepareUploadAlias(dir, "plain", canonical, second.stem);
+    expect(out1).not.toBe(out2);
+    expect(out2.split("/").pop()!.length).toBeLessThanOrEqual(64); // 60-char stem + ".mp4"
+    expect(out2.endsWith("-P2.mp4")).toBe(true);
   });
 });
