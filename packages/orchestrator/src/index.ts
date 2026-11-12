@@ -11,6 +11,7 @@ export type { CapabilityRejection } from "@drec/core";
 export { EndDebouncer } from "./trigger.js";
 export { SyncLedger } from "./ledger.js";
 export { recordStreamUpload, recordZeroDiskReceipt } from "./stream-upload-ledger.js";
+export { deleteHubHistory, roomKeyToStreamPrefix, type DeleteHubHistoryOptions, type DeleteHubHistoryResult } from "./ledger-history.js";
 export { ZeroDiskFleet, blockedKey, UNSUPPORTED_REASON, type ZeroDiskWorker, type ZeroDiskTarget, type ZeroDiskSupport } from "./zero-disk-fleet.js";
 export type { RecordStreamUploadOpts, RecordStreamUploadResult } from "./stream-upload-ledger.js";
 export {

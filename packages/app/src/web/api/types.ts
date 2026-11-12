@@ -86,6 +86,12 @@ export interface ApiDeps {
   hubEnabled?: boolean;
   /** hub 台账 sqlite(<db>-sync.db)路径;省略=hub 任务端点返回空列表(slave 属正常)。 */
   syncDbPath?: string;
+  /**
+   * Deletes one room's hub history (ledger rows + job logs). Injected by the entry point because the
+   * ledger schema belongs to @drec/orchestrator, which app cannot import (upward dependency).
+   * Omitted → history deletion is skipped and the response reports 0.
+   */
+  deleteHubHistory?: (syncDbPath: string, roomKey: string) => { deleted: number; streamKeys: string[] };
   /** hub.config.json 路径;省略回落 rootHubConfig()。 */
   hubConfigPath?: string;
   /**

@@ -18,6 +18,8 @@ import { rollbackKeys } from "../../packages/app/src/web/api/rooms.js";
 import { MergeJobStore } from "../../packages/app/src/merge-jobs.js";
 import { EventCenter } from "../../packages/observability/src/bus.js";
 import { listHubJobs } from "../../packages/app/src/hub-jobs.js";
+// Ledger deletion is injected by the entry point in production; tests inject the real owner.
+import { deleteHubHistory } from "../../packages/orchestrator/src/index.js";
 import { upsertHubRule } from "../../packages/app/src/hub-store.js";
 import {
   makeApi,
@@ -197,7 +199,14 @@ function hubDeps(prefix: string, extra: Partial<ApiDeps> = {}): Partial<ApiDeps>
       { id: "vps2", name: "VPS", kind: "ssh", host: "1.2.3.4", dataRoot: "/drec" },
     ],
   }, null, 2));
-  return { hubDir, hubConfigPath, hubEnabled: true, ...extra };
+  return {
+    hubDir,
+    hubConfigPath,
+    hubEnabled: true,
+    deleteHubHistory: (syncDbPath: string, roomKey: string) =>
+      deleteHubHistory({ syncDbPath, roomKey, stageDir: hubDir, logsDir: hubDir }),
+    ...extra,
+  };
 }
 
 describe("createTask → resolveAnchor 创建即抓主播名", () => {
@@ -1880,7 +1889,11 @@ describe("删除 hub 规则同时清理该直播间历史 run", () => {
     const syncDbPath = makeSyncDb();
     const hubDir = mkdtempSync(join(tmpdir(), "hubdel-rule-"));
     const requestSyncTasks = vi.fn();
-    const a = makeApi({ store, manager, hubDir, syncDbPath, requestSyncTasks });
+    const a = makeApi({
+      store, manager, hubDir, syncDbPath, requestSyncTasks,
+      deleteHubHistory: (dbPath: string, roomKey: string) =>
+        deleteHubHistory({ syncDbPath: dbPath, roomKey, stageDir: hubDir, logsDir: hubDir }),
+    });
     const t = a.createTask({ room: "123456" }).body as { id: number };
     a.createHubRule({ recording: { sourceTaskId: t.id } });
 

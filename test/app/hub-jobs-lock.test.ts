@@ -1,5 +1,5 @@
 /**
- * issue #428 复审:deleteHubJobHistory 写连接等锁用例。
+ * issue #428 复审: ledger history deletion waits for the writers' lock.
  *
  * 原本长在 packages/app/src/hub-jobs.test.ts,但并发测试要 import 根 test/sqlite-lock-holder
  * (worker 线程持写事务,见该文件头注释)—— 包内测试引用包外的根 test/ 不合分层;挪到
@@ -12,7 +12,9 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { holdWriteLock } from "../sqlite-lock-holder.js";
-import { activeHubJobKeys, deleteHubJobHistory } from "../../packages/app/src/hub-jobs.js";
+import { activeHubJobKeys } from "../../packages/app/src/hub-jobs.js";
+// The delete path is owned by orchestrator (ledger schema owner); app only reads.
+import { deleteHubHistory } from "../../packages/orchestrator/src/index.js";
 
 function makeSyncDb(): { dbPath: string; db: DatabaseSync } {
   const dir = mkdtempSync(join(tmpdir(), "hubjobs-lock-"));
@@ -43,7 +45,7 @@ function seedJob(db: DatabaseSync, key: string, states: Array<[string, number]>,
     VALUES(?,?,1,?,0,0,0,1,?)`).run(key, "local", durationSec, lastAt);
 }
 
-describe("deleteHubJobHistory 写连接等锁(issue #428)", () => {
+describe("deleteHubHistory 写连接等锁(issue #428)", () => {
   it("写连接设 busy_timeout:他人持写事务时等锁,不立刻 BUSY(issue #428)", async () => {
     const { dbPath, db } = makeSyncDb();
     seedJob(db, "douyin:100:2026-07-01", [["done", T0]], 100, { bv: "A1" });
@@ -51,7 +53,8 @@ describe("deleteHubJobHistory 写连接等锁(issue #428)", () => {
     const { locked, released } = holdWriteLock(dbPath, 200);
     await locked; // 另一线程 BEGIN IMMEDIATE 持有写锁
     const t0 = Date.now();
-    const r = deleteHubJobHistory(dbPath, "douyin.100"); // 修复前:BEGIN IMMEDIATE 立刻 SQLITE_BUSY 抛错
+    const logDir = mkdtempSync(join(tmpdir(), "hubdelete-lock-"));
+    const r = deleteHubHistory({ syncDbPath: dbPath, roomKey: "douyin.100", stageDir: logDir, logsDir: logDir }); // 修复前:BEGIN IMMEDIATE 立刻 SQLITE_BUSY 抛错
     expect(Date.now() - t0).toBeGreaterThanOrEqual(120); // 真的等过锁
     await released;
     expect(r.deleted).toBe(1);

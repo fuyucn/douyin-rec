@@ -27,6 +27,11 @@
   **现状（2026-11-12）**: PR [#647](https://github.com/fuyucn/douyin-rec/pull/647) 已合并；全量 5231 passed；三节点均已部署 0.0.366。
 
 [x] **T-201 抽出 hub 组装层 @drec/hub-compose（audit 2026-11-10 C / plans/045 P1-3，第一刀，2026-11-12）**
+[~] **T-202 台账历史删除改由 orchestrator 拥有（audit 2026-11-10 C / P1-3 第二刀，2026-11-12）**
+  — **做什么**: 把 deleteHubJobHistory 从 packages/app/src/hub-jobs.ts（写连接删五表 + job.log）搬到 @drec/orchestrator 的 ledger-history.ts；web 侧改由 deps.deleteHubHistory(syncDbPath, roomKey) 注入调用，serve 与 cli 负责接线；app 只保留只读访问。
+  **为什么**: 台账 schema 属 orchestrator（SyncLedger 写），app 另开一条可写连接删表 = 一份 schema 两个所有者（audit 明确点名的分层缺陷）。
+  **验收**: 事务与等锁语义逐行等价（BEGIN IMMEDIATE + busy_timeout=3000 + 缺表跳过）；删除用例（五表 + 双位置日志 + 回滚触发）全绿；全量 pnpm test / typecheck / bundle；部署后线上删房间/删规则实跑一次。
+  **现状（2026-11-12）**: 代码完成、类型检查与定向用例通过；全量回归与 PR 进行中。
   — **做什么**: 新建 `@drec/hub-compose`（rank 4.75，介于 orchestrator 4.5 与 cli 5）；把 `cli.ts` 里 web 读 hub 状态的访问器（录制/零落盘/滚动/资源池快照）与 hub 动作代理（retry/stop/ack/runNow/排空探测/日志代查/发件箱）、`SyncGate` 一起搬进去，改由具名 setter 注入；`cli.ts` 只保留 hubStarter 本体与接线（2778 → 2600 行）。
   **为什么**: `cli.ts` 承担了本该属于组装层的跨包接线（web ↔ orchestrator ↔ app），web 只能读 cli 内部变量拿 hub 状态；这是 045 P1-3 的第一刀，为把 `hubStarter`（约 1060 行）整体下沉做容器。
   **验收**: 纯搬迁、行为不变——`pnpm typecheck` 0 错、全量 `pnpm test` 343 文件全绿、`arch:check` 通过（README 包数/AGENTS 目录树/RANKS/架构文档同步）、`pnpm bundle` 生成 0.0.367。

@@ -10,7 +10,7 @@ import type { HubRulePayload, HubPipelineConfig, HubRecordingConfig } from "@dre
 import { platformForRoom } from "@drec/core";
 import * as hubStore from "../../hub-store.js";
 import { refreshLocalRollingEffective } from "../../rolling-effective.js";
-import { activeHubJobKeys, deleteHubJobHistory } from "../../hub-jobs.js";
+import { activeHubJobKeys } from "../../hub-jobs.js";
 
 export function buildHubRules(ctx: ApiCtx) {
   const { deps, store, manager, hubDir, hubConfigPath,
@@ -159,7 +159,9 @@ export function buildHubRules(ctx: ApiCtx) {
           return err(409, `该直播间有进行中的 hub 任务(${active[0]}),请先等它结束或停止后再删除规则`);
         }
       }
-      const history = deps.syncDbPath ? deleteHubJobHistory(deps.syncDbPath, key) : { deleted: 0, streamKeys: [] };
+      const history = deps.syncDbPath && deps.deleteHubHistory
+        ? deps.deleteHubHistory(deps.syncDbPath, key)
+        : { deleted: 0, streamKeys: [] };
       const ok = hubStore.removeHubRule(hubDir, key);
       if (!ok) return err(404, `未找到 hub 规则 key=${key}`);
       refreshLocalRollingEffective(store, hubDir); // 规则已删:本机源任务派生值回落,不再边传

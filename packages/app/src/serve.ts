@@ -61,6 +61,11 @@ export interface ServeOpts {
 export interface ServeDeps {
   /** 全局 webhook 解析(program --discord-webhook / env)。 */
   getWebhook: () => string | undefined;
+  /**
+   * Deletes one room's hub history (ledger rows + job logs). Injected by the CLI because the ledger
+   * schema belongs to @drec/orchestrator, which app cannot import. Omitted → deletion is skipped.
+   */
+  deleteHubHistory?: (syncDbPath: string, roomKey: string) => { deleted: number; streamKeys: string[] };
   /** 多节点 hub 编排实现(由 cli 注入,app 不依赖 orchestrator)。 */
   hubStarter?: HubStarter;
   /**
@@ -318,6 +323,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
       procActive: procRunnerRef ? () => procRunnerRef.active() : undefined,
       procPurge: procStoreRef ? (o) => ({ deleted: procStoreRef.gc({ purgeFailed: o.purgeFailed }) }) : undefined,
       store, manager, login, events, hubEnabled, syncDbPath, hubConfigPath: rootHubConfig(),
+      deleteHubHistory: deps.deleteHubHistory,
       // T15:告诉 API「master 实际在用哪份 hub 配置」—— UI 改 resources 必须写回那一份,
       // 而不是盲目写 rootHubConfig()(用户用 --hub-config / settings 时那是另一份文件)。
       // 用**函数**而非快照:配置来源不随运行变,但保持与 resolveHubConfig 同一口径、不缓存。
