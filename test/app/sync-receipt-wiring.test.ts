@@ -16,6 +16,8 @@ const hubStarter = readFileSync(join(root, "packages/hub-compose/src/hub-starter
 const cookieSync = readFileSync(join(root, "packages/hub-compose/src/cookie-sync.ts"), "utf-8");
 // The task reconcile loop has its own module (plan 050.3).
 const taskSync = readFileSync(join(root, "packages/hub-compose/src/task-sync.ts"), "utf-8");
+// The operator actions (retry / stop / ack / run-now) have their own module (plan 050.5).
+const hubActions = readFileSync(join(root, "packages/hub-compose/src/hub-actions.ts"), "utf-8");
 const cli = readFileSync(join(root, "packages/cli/src/cli.ts"), "utf-8")
   + "\n" + hubStarter + "\n" + cookieSync + "\n" + taskSync;
 // Node-side command bodies live in the shared registry (plans/042 Task 1).
@@ -78,6 +80,22 @@ describe("T16 sync receipt wiring", () => {
     const applyAt = taskSync.indexOf("await t.applyTasks(");
     expect(pushAt).toBeGreaterThan(-1);
     expect(applyAt).toBeGreaterThan(pushAt);
+  });
+
+  // Plan 050.5: a move that forgets to re-bind would make every /retry and /stop answer "hub 未启动",
+  // which staring at the starter alone would not reveal.
+  it("hub starter binds the operator actions and unbinds them on stop", () => {
+    expect(hubStarter).toContain("createHubActions({");
+    expect(hubStarter).toContain("hubActions.install(reconciler);");
+    expect(hubActions).toContain("setRetryNode(");
+    expect(hubActions).toContain("setProbeDrainSupport(probeDrainSupport);");
+    const unbindAt = hubStarter.indexOf("hubSyncGate.unbind()");
+    const clearAt = hubStarter.indexOf("hubActions.uninstall();");
+    expect(unbindAt).toBeGreaterThan(-1);
+    expect(clearAt).toBeGreaterThan(unbindAt);
+    // The verdict text lives in hub-actions only: a copy left behind in the starter means a second
+    // retry implementation still exists.
+    expect(hubStarter).not.toContain("不可重跑的节点");
   });
 
   it("node applies the credential push through the single write path", () => {
