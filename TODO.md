@@ -14,6 +14,11 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-197 内部节点命令自动带节点本地 Web 凭据（issue [#641](https://github.com/fuyucn/douyin-rec/issues/641)，2026-11-12）**
+  — **做什么**: `web/auth.ts` 新增 `readWebToken(root)`（环境变量优先、其次 `<root>/config/web-token`；从不生成、读失败按无凭据处理）；`node-commands.ts` 的 apply-tasks 硬停/排空、anchor 刷新、`task-logs` 统一加 `Authorization: Bearer`；无凭据时零 header（旧服务行为不变）。关联/配对沿用现有自动流程，不再需要人工复制 token。
+  **为什么**: 启用 Web 鉴权后 master 读节点日志返回 `serve HTTP 401`，节点 apply-tasks 的 stop/drain 也被拒——这些内部回环调用原来完全不带头。
+  **验收**: 新增 4 条用例（key file、环境变量优先、无凭据零 header、stop/drain/anchor 全覆盖）；撤修复 4 条全红；全量 `pnpm test` + `pnpm typecheck` + `pnpm bundle`；版本 0.0.363→0.0.364。
+
 - [~] **T-173 直播直传 full 模式「当前分 P」崩溃后不进 WAL、被当孤儿清扫（issue [#581](https://github.com/fuyucn/douyin-rec/issues/581)，2026-11-10）**
   — **做什么**: 按独立只读 review 的 F12 最小修法——仅 `spoolMode==="full" && submit!==false` 时在 `openPart` 同步写一条 `confirmed:false` 的 `parts` 行（`noteUnconfirmedPart`，bytes/durationSec 先给 0，可选 `sealed:false` 兼容老 state）；不升 `schemaVersion`（保持 1）、不改 spool 文件名、不动 `pending` WAL / `rolloverStaleState` / `spoolSweepSafe` / CLI 命名。配套 4 项：`discard()`/discardedTail/negligibleTail 要 `dropPart`；`resubmitUnconfirmedPart` 对 0 字节/仅 PAT-PMT 孤儿 `dropPart` 不 fail；写失败时同步把 `spoolIncomplete` 刷进该行（守 #579）；核对 `keepOrLose` 不再因行已存在漏写 probe 后 duration。启动 `dropUnrecoverableUnsealed()` 作 F7 安全网。
   **为什么**: SIGKILL/OOM/断电/未捕获 exit 绕过 JS handler，当前正在录的分 P 在封口前从未进 state；`openSession()` 的 `session.recover()`+`resubmitAllUnconfirmed()` 无目录扫描→不收养；孤儿清扫在下次启动且 mtime>10min 时删→稿件永远缺这一 P（plans/039 B14 实测自证）。SIGTERM/SIGINT/SIGUSR2 会封口写行，正常停止不丢。
@@ -62,6 +67,10 @@
   **残余**:Stats 页 OUTPUT FORMAT 条留白与 Node load 表格留待后续;两台录制节点仍 0.0.321(UI 改动不急)。
 
 - [~] **T-126 worker 按 Release 部署:main 为 stable,开发分支按需 prerelease（issue [#392](https://github.com/fuyucn/douyin-rec/issues/392)）**（2026-10-29）
+  - 2026-11-11 20:34 PST: The owner ended regression recording and requested test-video cleanup. Master test tasks 104-107 and their worker copies are disabled; all six test-room recording/stage directories are now free of video files across the three nodes. This turn additionally deleted 41 older test videos (1,431,101,252 bytes, permanent deletion); retained companion files passed before/after SHA256 checks. Danmaku, state, receipts and diagnostic logs remain. No production recording was stopped, no deployment/rollback was performed, and no Bilibili test draft was touched (the owner will delete drafts). Three test jobs remain parked in needs_manual; cleanup is complete but deployment-test sign-off remains withheld.
+  - Verification resumed on 2026-11-11: The owner unlocked the computer and the existing Hub browser page is now signed in. Configure temporary rooms through the UI and collect new-worker execution/upload evidence before sign-off.
+  - 2026-11-11 18:51 PST: Auth-fix candidate 0.0.364-25dfe1 is running on the master and both workers; all three Hub health checks pass. Live-resume verification did not pass: an unconfirmed P3 remains in an archived WAL and its 1,077,559,036-byte spool still exists. Rollback has NOT occurred. The verified 0.0.348-fdc55d image and worker archive are ready, but worker 1 has two production recordings (tasks 35 and 56); do not interrupt them without the owner's explicit confirmation. No deployment sign-off; preserve current data and state rather than restoring an older database snapshot.
+  - 2026-11-11: All three nodes now run 0.0.363-25dfe1. Both workers passed installer prechecks, runtime/Web SHA256 comparisons against the running master, and post-upgrade service/Hub health checks. Original worker environment/unit files are byte-preserved; 0.0.348-fdc55d runtime/database/config rollback snapshots are retained. One deployment-script validation failure automatically rolled back before a corrected retry passed. Real-live path verification is pending the owner's Hub access-key sign-in; no new temporary test rooms/rules were created. Configure tests only through the Hub UI and do not sign off until the new worker paths have real execution evidence.
   — worker 升级靠手动换文件,流程不在仓库里;已有安装脚本和发布流程但从未发过 Release。
   **做什么**: 发布流程按 tag 所指提交是否在 main 区分正式版/prerelease,且不覆盖已有 Release;安装脚本升级前检查无录制/上传、升级后核对版本;文档与 AGENTS 写明流程。
   **验收**: 忙时拒绝、空闲放行、API 不可达视为空闲、答复不可读按忙;版本不一致非 0 退出;全量测试通过;空闲时在一台现有 worker 上 dry-run 与升级各验证一次。
