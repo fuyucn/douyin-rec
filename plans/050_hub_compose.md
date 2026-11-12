@@ -30,7 +30,7 @@
 ### 050.2 cookie 同步拆成 `cookie-sync.ts`
 
 - 现状：约 200 行闭包，含 `warnedCookieUnsupported` / `cookieWarnSeen` 去重、`shouldPushCookies` 闸门、`recordCookiesApplied`；
-- 拆成 `createCookieSync({ store, warn, log, transport })`；去重集合随实例走（stop 时清空，语义同现在）。
+- 拆成 `createCookieSync({ store, warn, log })`；去重集合随实例走（现状没有任何 clear/重置，保持同一生命周期）。
 
 ### 050.3 任务同步拆成 `task-sync.ts`
 

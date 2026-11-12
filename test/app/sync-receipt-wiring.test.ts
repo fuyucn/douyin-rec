@@ -11,8 +11,11 @@ import { describe, expect, it } from "vitest";
 const root = join(import.meta.dirname, "..", "..");
 // The hub starter body moved to @drec/hub-compose (plan 050.1): guards read the CLI assembly,
 // so they follow the code there instead of breaking on the move.
+const hubStarter = readFileSync(join(root, "packages/hub-compose/src/hub-starter.ts"), "utf-8");
+// The platform credential push has its own module (plan 050.2).
+const cookieSync = readFileSync(join(root, "packages/hub-compose/src/cookie-sync.ts"), "utf-8");
 const cli = readFileSync(join(root, "packages/cli/src/cli.ts"), "utf-8")
-  + "\n" + readFileSync(join(root, "packages/hub-compose/src/hub-starter.ts"), "utf-8");
+  + "\n" + hubStarter + "\n" + cookieSync;
 // Node-side command bodies live in the shared registry (plans/042 Task 1).
 const nodeCommands = readFileSync(join(root, "packages/cli/src/node-commands.ts"), "utf-8");
 
@@ -45,15 +48,22 @@ describe("T16 sync receipt wiring", () => {
   // Issue #563: the push decision is the silent-failure guard (record the fingerprint only when the node
   // really applied everything). Pin the call sites so a refactor cannot quietly drop it.
   it("master records the credential fingerprint only behind verdict/share gate", () => {
-    expect(cli).toContain("shouldPushCookies(readCookiesApplied(opts.store, w.id)");
-    expect(cli).toContain("cookiesPushVerdict(cookiesPayload, r)");
+    expect(cookieSync).toContain("shouldPushCookies(readCookiesApplied(deps.store, id)");
+    expect(cookieSync).toContain("cookiesPushVerdict(round.payload, r)");
     // Record must live in the **success branch**: the `!verdict.ok` branch may only warn/retry.
-    const verdictAt = cli.indexOf("cookiesPushVerdict(cookiesPayload, r)");
-    const elseAt = cli.indexOf("} else {", verdictAt);
+    const verdictAt = cookieSync.indexOf("cookiesPushVerdict(round.payload, r)");
+    const elseAt = cookieSync.indexOf("} else {", verdictAt);
     expect(verdictAt).toBeGreaterThan(-1);
     expect(elseAt).toBeGreaterThan(verdictAt);
-    expect(cli.slice(verdictAt, elseAt)).not.toContain("recordCookiesApplied");
-    expect(cli.slice(elseAt, elseAt + 400)).toContain("recordCookiesApplied");
+    expect(cookieSync.slice(verdictAt, elseAt)).not.toContain("recordCookiesApplied");
+    expect(cookieSync.slice(elseAt, elseAt + 400)).toContain("recordCookiesApplied");
+  });
+
+  // The hub tick is not importable from vitest, so the cross-module call itself is pinned here: a move
+  // that leaves the extracted module unreferenced would otherwise look like a clean refactor.
+  it("hub sync tick still drives the credential push (round + per worker call)", () => {
+    expect(hubStarter).toContain("cookieSync.beginRound()");
+    expect(hubStarter).toContain("await cookieSync.pushTo({ id: w.id, kind: w.kind }, t, cookiesRound)");
   });
 
   it("node applies the credential push through the single write path", () => {

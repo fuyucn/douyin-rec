@@ -3,3 +3,4 @@
 export * from "./hub-runtime.js";
 export { SyncGate } from "./sync-gate.js";
 export * from "./hub-starter.js";
+export * from "./cookie-sync.js";

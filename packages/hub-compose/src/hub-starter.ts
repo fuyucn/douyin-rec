@@ -12,7 +12,7 @@ import {
   resolveHubConfig, rootStatsDbPath,
 } from "@drec/app";
 import type { HubStarter } from "@drec/app";
-import { CookieSyncUnsupported, recordZeroDiskReceipt } from "@drec/orchestrator";
+import { recordZeroDiskReceipt } from "@drec/orchestrator";
 import type { PipelineCfg, WorkflowNodeKey } from "@drec/orchestrator";
 import { createBiliupFileTarget } from "@drec/bilibili-upload";
 import {
@@ -32,6 +32,8 @@ import {
   setSyncTasks, setZeroDiskLive, setZeroDiskSnapshot, setReceiptSettings, stopFleet,
   warnRuleIdentityMismatch,
 } from "./hub-runtime.js";
+import { createCookieSync } from "./cookie-sync.js";
+
 export interface LocalRoomProbeFallback {
   isRoomRecording(roomSlug: string): boolean;
   activeRecordingRooms(): Array<{ platform: string; roomSlug: string }>;
@@ -50,10 +52,6 @@ export interface HubStarterDeps {
 export function createHubStarter(deps: HubStarterDeps): HubStarter {
   // Warning dedupe sets live with the instance: one line per distinct reason / worker, same as before.
   const warnedSkipReasons = new Set<string>();
-  const warnedCookieUnsupported = new Set<string>();
-  const cookieWarnSeen = new Map<string, string>();
-  const cookieUnsupportedSeen = new Set<string>();
-  let cookieReadWarn = "";
   const hubStarter: HubStarter = {
     fleetUpgrade: (req, socket, head) => fleetUpgrade(req, socket, head),
     requestSyncTasks: requestHubSync,
@@ -83,7 +81,10 @@ export function createHubStarter(deps: HubStarterDeps): HubStarter {
       const { statSync } = await import("node:fs");
       const { countVideoParts, hubStore, resolveRuleSyncRoom, desiredSpecsForWorker, workerStore, rootHubDir, rootHubConfig, rootConfigDir, rootStageDir, rootLogsDir, drecRoot, listNodeTasks, applyRemoteTasks, recordRoomSessions } = await import("@drec/app");
       const { FileLogger } = await import("@drec/observability");
-      const { recordExpectedVersion, recordSyncError, cookiesFingerprint, readCookiesApplied, recordCookiesApplied, shouldPushCookies, cookiesPushVerdict, collectPlatformCookies } = await import("@drec/app");
+      const { recordExpectedVersion, recordSyncError } = await import("@drec/app");
+      // Platform login push (issue #563): one instance per start(), so its dedupe sets live as
+      // long as this hub does. It has to run before task sync - see cookie-sync.ts.
+      const cookieSync = createCookieSync({ store: opts.store, warn: opts.warn, log: opts.log });
 
       const hubCfg = JSON.parse(opts.hubConfigJson ?? "null") as null | {
         platform?: string;
@@ -640,65 +641,13 @@ export function createHubStarter(deps: HubStarterDeps): HubStarter {
           }
           // Issue #563:平台登录态单向下发(master = 唯一登录源)。**必须先于任务下发** ——
           // 任务侧会清掉节点上残留的陈旧任务级串(回落到平台串),所以平台串得先就位。
-          // 读设置可能因 SQLITE_BUSY / 坏值抛错,而 tick 的 promise 是 void 掉的:这里必须自己兜住,
-          // 否则一次读失败 = 整轮同步 reject(unhandled)。
-          let cookiesPayload = { platformCookies: {} as Record<string, string> };
-          try {
-            cookiesPayload = collectPlatformCookies(opts.store);
-          } catch (e) {
-            const msg = `[hub] 读取平台登录态失败(本轮不下发): ${(e as Error).message}`;
-            if (cookieReadWarn !== msg) opts.warn(msg);
-            cookieReadWarn = msg;
-          }
-          const cookiesFp = cookiesFingerprint(cookiesPayload);
-          const hasCookies = Object.keys(cookiesPayload.platformCookies).length > 0;
+          // 读取失败与单节点下发细节都在 cookie-sync.ts 内(每个实例自带告警去重)。
+          const cookiesRound = cookieSync.beginRound();
           for (const w of loadWorkers()) {
             const t = buildTransports().get(w.id);
             if (!t?.applyTasks) continue; // 该 transport 不支持任务同步 → 跳过(下轮再试)
-            // 本机 = master 自己:store 就是源头,没有任何东西可下发。
-            if (w.kind !== "local" && hasCookies) {
-              try {
-                if (!shouldPushCookies(readCookiesApplied(opts.store, w.id), cookiesFp, Date.now())) {
-                  // 同一内容且在复核窗口内：本轮不推。
-                } else if (!t.applyCookies) {
-                  throw new CookieSyncUnsupported("transport 未注入登录态下发");
-                } else {
-                  const r = await t.applyCookies(cookiesPayload);
-                  // 判定见 `cookiesPushVerdict`：applied ∪ unchanged ∪ unsupported 算「有交代」；
-                  // rejected / missing 不算 —— 后者若记指纹就再也不会补发（静默失败）。
-                  const verdict = cookiesPushVerdict(cookiesPayload, r);
-                  for (const p of verdict.unsupported) {
-                    const key = `${w.id}|${p}`;
-                    if (!cookieUnsupportedSeen.has(key)) {
-                      cookieUnsupportedSeen.add(key);
-                      opts.warn(`[hub] 节点 ${w.id} 没有平台 ${p}(旧 bundle),该平台不对它下发`);
-                    }
-                  }
-                  if (!verdict.ok) {
-                    const msg = `[hub] 登录态下发 ${w.id} 未完全应用(missing=${verdict.missing.join(",") || "-"} rejected=${verdict.rejected.join(",") || "-"}),下轮重试`;
-                    if (cookieWarnSeen.get(w.id) !== msg) opts.warn(msg);
-                    cookieWarnSeen.set(w.id, msg);
-                  } else {
-                    recordCookiesApplied(opts.store, w.id, cookiesFp);
-                    cookieWarnSeen.delete(w.id);
-                    if (r.applied.length > 0) opts.log(`[hub] 登录态下发 ${w.id}: applied=${r.applied.join(",")}`);
-                  }
-                }
-              } catch (e) {
-                // 「旧 bundle 不支持」与「这次没送到」必须分开:前者不记已应用(升级后下一轮自动补发),
-                // 否则节点升级完也要等到 master 下次改登录才补。
-                if (e instanceof CookieSyncUnsupported) {
-                  if (!warnedCookieUnsupported.has(w.id)) {
-                    warnedCookieUnsupported.add(w.id);
-                    opts.warn(`[hub] 节点 ${w.id} 不支持登录态下发(旧 bundle),升级后自动补发`);
-                  }
-                } else {
-                  const msg = `[hub] 登录态下发 ${w.id} 失败(下轮重试): ${(e as Error).message}`;
-                  if (cookieWarnSeen.get(w.id) !== msg) opts.warn(msg);
-                  cookieWarnSeen.set(w.id, msg);
-                }
-              }
-            }
+            // 本机 = master 自己:store 就是源头,没有任何东西可下发(cookie-sync 内判定)。
+            await cookieSync.pushTo({ id: w.id, kind: w.kind }, t, cookiesRound);
             try {
               const desired = desiredFor(w.id);
               // T16:版本由内容派生;周期 tick 内容不变时复用同一版,避免假的 syncLag。
