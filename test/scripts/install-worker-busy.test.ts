@@ -70,6 +70,10 @@ describe("install-worker --check-busy", () => {
     expect(r.code).toBe(1);
     expect(r.out).toContain("upload");
   });
+  it("a running remux job → busy (restart would orphan the part chain)", async () => {
+    const port = await serve(JSON.stringify([{ id: 1, recording: false }]), JSON.stringify({ running: { remux: 1 } }));
+    expect((await check(port)).code).toBe(1);
+  });
   it("old node without the queue endpoint is judged by recording only", async () => {
     const port = await serve(JSON.stringify([{ id: 1, recording: false }]), "not json", 200, 404);
     expect(await check(port)).toMatchObject({ code: 0 });

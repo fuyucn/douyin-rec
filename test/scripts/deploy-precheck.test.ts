@@ -26,7 +26,7 @@ function guard(c: Case): { code: number | null; out: string } {
   writeFileSync(tasks, c.tasks === undefined ? "" : JSON.stringify(c.tasks));
   writeFileSync(proc, c.proc === undefined ? "" : typeof c.proc === "string" ? c.proc : JSON.stringify(c.proc));
   const r = spawnSync("python3", ["-I", PY, "--label", "n", "--tasks", tasks, "--proc-status", String(c.procStatus ?? 0),
-    "--proc", proc, "--uploading", c.uploading ?? "unknown"], { encoding: "utf-8" });
+    "--proc", proc, "--uploading", c.uploading ?? "0"], { encoding: "utf-8" });
   return { code: r.status, out: r.stdout };
 }
 const idle = [{ id: 1, running: true, recording: false }];
@@ -39,10 +39,19 @@ d("deploy-precheck.py", () => {
   it("running.biliup > 0 blocks", () => {
     const r = guard({ tasks: idle, procStatus: 200, proc: active(1) });
     expect(r.code).toBe(1);
-    expect(r.out).toMatch(/biliup job/);
+    expect(r.out).toMatch(/upload job/);
   });
   it("running.biliup = 0 proceeds", () => {
     expect(guard({ tasks: idle, procStatus: 200, proc: active(0) }).code).toBe(0);
+  });
+  it("the part chain counts as an upload: upload-part / upload-prep / reconcile-part / remux block", () => {
+    for (const kind of ["upload-part", "upload-prep", "reconcile-part", "remux"]) {
+      const r = guard({ tasks: idle, procStatus: 200, proc: { running: { biliup: 0, [kind]: 1 } } });
+      expect(r.code, kind).toBe(1);
+    }
+  });
+  it("a fresh phase=uploading result file blocks even when the queue answers 200", () => {
+    expect(guard({ tasks: idle, procStatus: 200, proc: active(0), uploading: "1" }).code).toBe(1);
   });
   it("a 200 with a body we do not understand is unknown, not ok", () => {
     expect(guard({ tasks: idle, procStatus: 200, proc: { nope: 1 } }).code).toBe(2);
@@ -124,6 +133,9 @@ esac`);
   });
   it("running.biliup > 0 blocks with exit 1", () => {
     expect(runSh('{"host":true,"running":{"biliup":2}}\\n200').code).toBe(1);
+  });
+  it("fresh phase=uploading blocks even when the queue answers 200", () => {
+    expect(runSh('{"host":true,"running":{"biliup":0}}\\n200', { root: dataRoot(Date.now()) }).code).toBe(1);
   });
   it("503 waits with exit 2", () => {
     expect(runSh('{}\\n503').code).toBe(2);

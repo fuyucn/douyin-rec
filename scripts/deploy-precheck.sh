@@ -13,6 +13,15 @@ LOCAL_API="${LOCAL_API:-http://127.0.0.1:7860}"
 VPS_HOST="${VPS_HOST:-ubuntu@100.97.21.80}"
 PY="$(dirname "$0")/deploy-precheck.py"
 
+# --node local|vps1|vps2 checks one node only (auto-deploy.sh polls per node while waiting).
+NODE_ONLY=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --node) NODE_ONLY="${2:-}"; shift 2 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
 UPLOADING_STALE_MS="${UPLOADING_STALE_MS:-21600000}"   # a phase=uploading result older than this (6h) no longer counts
 LOCAL_DATA_ROOT="${LOCAL_DATA_ROOT:-$(dirname "$0")/../docker-data}"
 VPS_DATA_ROOT="${VPS_DATA_ROOT:-\$HOME/drec}"             # expanded on the node
@@ -85,14 +94,12 @@ check_node() {
   code="$(fetch_proc "$kind" "$target" "$token")"
   # Node-result files cover the blocking path (`_node-pipeline`) even when the queue endpoint
   # answers 200: a fresh phase=uploading row means an irreversible submit may be in flight.
-  if true; then
-    if [ "$kind" = local ]; then
-      up="$(python3 -c "$UPLOADING_PY" "$root/stage" "$UPLOADING_STALE_MS" 2>/dev/null)" || up=unknown
-    else
-      up="$(printf '%s' "$UPLOADING_PY" | ssh -o ConnectTimeout=10 -o BatchMode=yes "$target" "python3 - \"$root/stage\" $UPLOADING_STALE_MS" 2>/dev/null)" || up=unknown
-    fi
-    [ -n "$up" ] || up=unknown
+  if [ "$kind" = local ]; then
+    up="$(python3 -c "$UPLOADING_PY" "$root/stage" "$UPLOADING_STALE_MS" 2>/dev/null)" || up=unknown
+  else
+    up="$(printf '%s' "$UPLOADING_PY" | ssh -o ConnectTimeout=10 -o BatchMode=yes "$target" "python3 - \"$root/stage\" $UPLOADING_STALE_MS" 2>/dev/null)" || up=unknown
   fi
+  [ -n "$up" ] || up=unknown
   python3 "$PY" --label "$label" --tasks "$TMP/tasks.json" --proc-status "$code" --proc "$TMP/proc.json" --uploading "$up"
 }
 
@@ -136,9 +143,17 @@ rc=0
 worst() { # BLOCK(1) beats UNKNOWN(2) beats OK(0)
   if [ "$1" -eq 1 ] || [ "$2" -eq 1 ]; then echo 1; elif [ "$1" -gt "$2" ]; then echo "$1"; else echo "$2"; fi
 }
-nrc=0; check_node "master(本机)" local "$LOCAL_API" "$LOCAL_DATA_ROOT" || nrc=$?; rc="$(worst "$rc" "$nrc")"
-nrc=0; check_node "VPS1($VPS_HOST)" ssh "$VPS_HOST" "$VPS_DATA_ROOT" || nrc=$?; rc="$(worst "$rc" "$nrc")"
-nrc=0; check_node "VPS2(${VPS2_HOST:-video-rec-2})" ssh "${VPS2_HOST:-video-rec-2}" "$VPS_DATA_ROOT" || nrc=$?; rc="$(worst "$rc" "$nrc")"
+check_and_merge() { local nrc=0; check_node "$@" || nrc=$?; rc="$(worst "$rc" "$nrc")"; }
+case "$NODE_ONLY" in
+  local) check_and_merge "master(本机)" local "$LOCAL_API" "$LOCAL_DATA_ROOT" ;;
+  vps1)  check_and_merge "VPS1($VPS_HOST)" ssh "$VPS_HOST" "$VPS_DATA_ROOT" ;;
+  vps2)  check_and_merge "VPS2(${VPS2_HOST:-video-rec-2})" ssh "${VPS2_HOST:-video-rec-2}" "$VPS_DATA_ROOT" ;;
+  "")
+    check_and_merge "master(本机)" local "$LOCAL_API" "$LOCAL_DATA_ROOT"
+    check_and_merge "VPS1($VPS_HOST)" ssh "$VPS_HOST" "$VPS_DATA_ROOT"
+    check_and_merge "VPS2(${VPS2_HOST:-video-rec-2})" ssh "${VPS2_HOST:-video-rec-2}" "$VPS_DATA_ROOT" ;;
+  *) echo "unknown node: $NODE_ONLY (local|vps1|vps2)" >&2; exit 2 ;;
+esac
 
 echo
 case "$rc" in

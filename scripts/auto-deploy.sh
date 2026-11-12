@@ -40,47 +40,14 @@ LOG=/tmp/auto-deploy.log
 ts() { date '+%H:%M:%S'; }
 say() { echo "[$(ts)] $*" | tee -a "$LOG"; }
 
-# ── 录制状态查询(任一失败按「在录」保守处理) ────────────────────────────────
-# Web API 启用共享密钥(issue #600)后,不带 Authorization 的请求一律 401 → 守卫会永远
-# 读不到状态并一直等待。内部回环调用同样要带凭据(issue #641 的同一原则)。
-tasks_json() {  # $1=local|vps1|vps2 → 输出 /api/tasks 的 JSON(无凭据则不打 header)
-  case "$1" in
-    local)
-      docker exec -e DREC_TOKEN="$(cat docker-data/config/web-token 2>/dev/null)" douyin-rec \
-        sh -c 'curl -sS --max-time 6 ${DREC_TOKEN:+-H "Authorization: Bearer $DREC_TOKEN"} http://127.0.0.1:7860/api/tasks' 2>/dev/null ;;
-    vps1)
-      ssh -o ConnectTimeout=6 vps 'T=$(cat "$(systemctl show -p WorkingDirectory --value video-screenshot)/config/web-token" 2>/dev/null); curl -sS --max-time 6 ${T:+-H "Authorization: Bearer $T"} http://127.0.0.1:7860/api/tasks' 2>/dev/null ;;
-    vps2)
-      ssh -o ConnectTimeout=6 video-rec-2 'T=$(cat "$(systemctl show -p WorkingDirectory --value video-screenshot)/config/web-token" 2>/dev/null); curl -sS --max-time 6 ${T:+-H "Authorization: Bearer $T"} http://127.0.0.1:7860/api/tasks' 2>/dev/null ;;
-  esac
-}
-
-recording_of() {  # $1=local|vps1|vps2 → 输出 在录任务描述(空=空闲)
-  tasks_json "$1" | python3 -c "$(cat <<'PY'
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    out = []
-    for t in data:
-        if t.get("recording"):
-            out.append("%s:%s" % (t.get("id"), t.get("anchorName") or t.get("room")))
-    print("|".join(out))
-except Exception:
-    print("UNKNOWN")   # 查不到 → 视为不可安全部署
-PY
-)"
-}
-
 wait_idle() { # $1=节点名 $2=最长等待秒 ; 空闲返回0
-  local node="$1" maxs="$2" waited=0 r
+  local node="$1" maxs="$2" waited=0 r rc
   while [[ $waited -lt $maxs ]]; do
-    r=$(recording_of "$node")
-    if [[ -z "$r" ]]; then return 0; fi
-    if [[ "$r" == "UNKNOWN" ]]; then
-      say "  [$node] 状态查询失败 → 保守等待重试"
-    else
-      say "  [$node] 仍在录: $r → 等待"
-    fi
+    r=$(scripts/deploy-precheck.sh --node "$node" 2>&1); rc=$?
+    if [[ $rc -eq 0 ]]; then return 0; fi
+    # deploy-precheck also treats in-flight uploads (biliup / part chain / phase=uploading)
+    # as busy, which restarting here would turn into an irreversible duplicate submit.
+    say "  [$node] 仍在录/在上传/状态未知 → 等待:$(printf '%s' "$r" | grep -m1 'BLOCK\|WARN' | sed 's/^  //')"
     sleep "$POLL"; waited=$((waited+POLL))
   done
   return 1

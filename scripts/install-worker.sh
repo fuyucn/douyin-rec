@@ -306,7 +306,7 @@ node_busy_reason() {
     const timeoutMs = Number(process.env.DREC_BUSY_TIMEOUT_MS) || 10000;
     const token = process.env.DREC_WEB_TOKEN || "";
     const headers = token ? { Authorization: "Bearer " + token } : {};
-    const uploadKinds = ["biliup", "upload-part", "upload-prep", "reconcile-part"];
+    const uploadKinds = ["biliup", "upload-part", "upload-prep", "reconcile-part", "remux"];
     const request = (path) => new Promise((resolve) => {
       const req = http.get(api + path, { timeout: timeoutMs, headers }, (res) => {
         let body = "";
