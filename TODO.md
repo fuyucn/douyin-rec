@@ -67,6 +67,12 @@
   **验收**: 逐行等价搬迁（白名单与 force 闸门、非法 streamKey、live job / 流锁 409、P1-after-BV 409、在途重跑 409、retrying→done/failed/needs_manual 迁移、USER_STOP、探测跳过 local 与幽灵 worker、旧 bundle 与不可达判失败、发布与清理顺序全部不变）；新增 11 条用例；撤两处（去掉 `install(reconciler)`、去掉 live/流锁判定）分别变红；接线守护与 `closeStageReady` 调用点守护改口径；`pnpm typecheck` 0 错、全量 `pnpm test` 348 文件 5258 passed、`arch:check` 通过、`pnpm bundle` 可运行；版本 0.0.373→0.0.374。
   **现状（2026-11-12）**: issue [#662](https://github.com/fuyucn/douyin-rec/issues/662) → PR [#663](https://github.com/fuyucn/douyin-rec/pull/663) 已合并（merge c0c0b4d5，0.0.374）；master 与 vps2 已 0.0.374-57df7e（fleet 重连、任务同步 applied=4/8/15、零落盘回执照常、`/api/hub/queue` 的 pool 读数正常），vps1 仍为 0.0.370-8431d9（任务 #34 一直在录，`--stage vps1` 等满 6 分钟后按 guard 跳过，退出码 1 只表示该步未执行）。独立 review 无响应，本轮以逐行比对 + 两处变异验证 + CI 兜底。plans/050 五步至此全部落地。
 
+[x] **T-208 proc-queue 存不透明目标状态（plans/049 阶段 3，2026-11-12）**
+  — **做什么**: `proc_jobs` 增加加列式 `targetState`（schema v5→v6，JSON 形如 `{"targetId":"bilibili","archiveId":"<id>","parts":2,"season":"pending"}`）；`setBv` / `setBvAndSeasonState` / `setSeasonState` 双写 `bv` / `seasonState`，读取优先 checkpoint、缺失或损坏回退旧列；`importConfirmedPart` 也写 checkpoint。
+  **为什么**: 队列是「上传轴」的持久层，旧实现把 B 站字段（`bv` / `seasonState`）写死在行里；先加不可变 checkpoint 列并保留一发布周期的旧列，才能在不破坏旧 bundle 的前提下把目标状态变成不透明载荷（回滚只需退回旧 bundle）。
+  **验收**: `ALTER` 失败只告警不阻塞（`user_version` 停在 5，下次开库重试，`migrate` 可注入以便测试）；新建 `test/proc-queue/target-state.test.ts` 8 条（新库版本/列、双写一致、parts 跨 season 更新保留、无稿件时 season 只落旧列、坏 JSON 与空 targetId 回退不抛、v5 库就地升级可读、迁移失败告警且旧列可写、回滚演练）；三处撤改分别变红（强制旧列分支、记录里 targetState 恒空、去掉空 targetId 守卫）；`pnpm typecheck` 0 错、全量 `pnpm test` 349 文件 5266 passed、`arch:check` 通过、`pnpm bundle` 可运行；版本 0.0.374→0.0.375。
+  **现状（2026-11-12）**: issue [#664](https://github.com/fuyucn/douyin-rec/issues/664) → PR [#665](https://github.com/fuyucn/douyin-rec/pull/665) 已合并（merge 3542759c，0.0.375）；三端全部 0.0.375-1755b9（vps1 在任务 #34 收播后补上），master / vps2 / vps1 的 `proc-queue.db` 均已 `user_version=6` 且含 `targetState` 列（行数 1 / 43 / 10），fleet 三节点重连、任务同步 applied=4/8/15、vps1 的零落盘回执（`room=347071634383 parts=3`）照常入库。独立 review 仍无响应，本轮以逐行比对 + 三处变异验证 + CI 兜底。
+
 
 [~] **T-198 直播直传同场判定以真实进度为准（issue [#642](https://github.com/fuyucn/douyin-rec/issues/642)，2026-11-12）**
   — **做什么**: `rolloverStaleState` 的最后活动取 `max(state.updatedAt, 未确认分 P 的 spool mtime, 恢复进度标记)`；新增 `<state>.activity` 标记，只在恢复重传的**真实块进度**上写（每分钟节流，重试/定时心跳不写）；启动恢复把 `o.signal` 传入 `resubmitAllUnconfirmed`，取消后不再发起新的不可逆请求；重传按 10% 输出进度日志；归档时删掉标记。

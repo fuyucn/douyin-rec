@@ -368,6 +368,11 @@ verify
 | 1b-4（计划外） | #637 / PR #638 | 计划里漏掉的**第六条生产路径**：`app/node-pipeline.ts`（`_node-pipeline` 执行体）自己拼 argv、自己写重试判定 |
 | 1b-5 | 部分 | 调用归零已由守护测试钉住；`test-target.ts`（测试双）**保留**——它被 95 处测试引用，删它等于重写全部测试注入，与等价性无关，按需再决定 |
 
+**阶段 3 落地（2026-11-12）**：issue #664 → PR #665（merge 3542759c，0.0.375）。proc_queue 新增
+`targetState`（schema v5→v6，加列式迁移）；`setBv` / `setBvAndSeasonState` / `setSeasonState` 双写
+`bv` / `seasonState`，读取优先 checkpoint、缺失或损坏回退旧列；`ALTER` 失败只告警不阻塞队列（
+`user_version` 停在 5，下次开库重试）。回滚演练与新库升级写在 `test/proc-queue/target-state.test.ts`。
+
 教训（写给下一个改这里的人）：**「调用点数量 / 文件数」必须 grep 实测，不能凭结构推断。** 我在 1b 里
 三次数错——1b-1 前以为「只有两处」，实测五条路径；测试面以为「10 个文件」，实测 32 个；1b-3 之后以为
 「最后一条」，实测还有 `node-pipeline`。这三个错误都会让「上传轴已接完」的结论提前成立。
@@ -377,7 +382,7 @@ verify
 - [ ] 新增假上传目标 + 假平台：一个包 + 一行注册；app/web/orchestrator 零改动；
 - [ ] core 里 `bili|biliup|upos` 只剩注释（阶段 4 后）；
 - [ ] 三种管线模式共用一份「建稿→append→重试→幂等」驱动；
-- [ ] `proc-queue` 只存不透明目标状态（阶段 3 后）；
+- [x] `proc-queue` 存不透明目标状态（阶段 3：`targetState` 双写，旧列保留一个发布周期）；
 - [ ] 手动上传与生产共用 `UploadGate` + 槽位（#596）；
 - [ ] 全量 `pnpm test` / `pnpm typecheck` / `pnpm arch:check` 绿；纯搬迁 PR 有对拍。
 
