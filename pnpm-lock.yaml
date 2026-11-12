@@ -202,12 +202,21 @@ importers:
       '@drec/app':
         specifier: workspace:*
         version: link:../app
+      '@drec/bilibili-upload':
+        specifier: workspace:*
+        version: link:../bilibili-upload
       '@drec/core':
         specifier: workspace:*
         version: link:../core
+      '@drec/observability':
+        specifier: workspace:*
+        version: link:../observability
       '@drec/orchestrator':
         specifier: workspace:*
         version: link:../orchestrator
+      '@drec/post-process':
+        specifier: workspace:*
+        version: link:../post-process
 
   packages/kuaishou-live:
     dependencies:

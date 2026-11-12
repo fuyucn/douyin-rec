@@ -62,7 +62,9 @@ describe("output path resolver is the only path builder (issue #333)", () => {
   });
 
   it("the hub run logger is wired to the logs dir (issue #334), not into stage", () => {
-    const cli = readFileSync(join(ROOT, "packages/cli/src/cli.ts"), "utf-8");
+    // The hub starter body moved to @drec/hub-compose (plan 050.1); guards read both halves.
+    const cli = readFileSync(join(ROOT, "packages/cli/src/cli.ts"), "utf-8")
+      + "\n" + readFileSync(join(ROOT, "packages/hub-compose/src/hub-starter.ts"), "utf-8");
     const m = /makeRunLogger:[\s\S]{0,400}?resolveJobLogPath\(([^;]*)\)\),/.exec(cli);
     expect(m, "makeRunLogger must build its path via resolveJobLogPath").not.toBeNull();
     expect(m![1]).toMatch(/layout:\s*"room"/);
@@ -81,7 +83,9 @@ describe("node-side stage is never removed as a whole directory (issue #335)", (
 
 describe("the layout switch reaches every writer (issue #336)", () => {
   it("cli passes the node-local switch to the recorder and to the hub pipeline", () => {
-    const cli = readFileSync(join(ROOT, "packages/cli/src/cli.ts"), "utf-8");
+    // The hub starter body moved to @drec/hub-compose (plan 050.1); guards read both halves.
+    const cli = readFileSync(join(ROOT, "packages/cli/src/cli.ts"), "utf-8")
+      + "\n" + readFileSync(join(ROOT, "packages/hub-compose/src/hub-starter.ts"), "utf-8");
     expect(cli).toMatch(/outputLayout:\s*readOutputLayout\(\)/);
     expect(cli).toMatch(/stageLayout:\s*\(\)\s*=>\s*readOutputLayout\(\)/);
   });

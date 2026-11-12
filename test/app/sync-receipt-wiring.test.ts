@@ -9,7 +9,10 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const root = join(import.meta.dirname, "..", "..");
-const cli = readFileSync(join(root, "packages/cli/src/cli.ts"), "utf-8");
+// The hub starter body moved to @drec/hub-compose (plan 050.1): guards read the CLI assembly,
+// so they follow the code there instead of breaking on the move.
+const cli = readFileSync(join(root, "packages/cli/src/cli.ts"), "utf-8")
+  + "\n" + readFileSync(join(root, "packages/hub-compose/src/hub-starter.ts"), "utf-8");
 // Node-side command bodies live in the shared registry (plans/042 Task 1).
 const nodeCommands = readFileSync(join(root, "packages/cli/src/node-commands.ts"), "utf-8");
 
