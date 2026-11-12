@@ -61,6 +61,12 @@
   **验收**: 逐行等价搬迁（fleet 选项与 TTL、目标清单规则、blocked 重置与 last-good 清理、告警文案、stop 清快照全部不变）；新增 3 条用例（目标清单只认「源任务开零落盘 + 节点被勾选」、门控只探测目标节点并驱动 `allowsPush`、被拦房间在轮末快照里可见）；撤修复两处（去掉 streamUpload 过滤、快照不带 blocked）分别变红；接线与顺序守护改用跨模块断言；`pnpm typecheck` 0 错、全量 `pnpm test` 347 文件 5246 passed、`arch:check` 通过、`pnpm bundle` 可运行；版本 0.0.372→0.0.373。
   **现状（2026-11-12）**: issue [#660](https://github.com/fuyucn/douyin-rec/issues/660) → PR [#661](https://github.com/fuyucn/douyin-rec/pull/661) 已合并（merge 85d09071，0.0.373）；master 与 vps2 已 0.0.373-d6806f（fleet 重连、任务同步 applied=4/8/15、零落盘回执照常），vps1 仍为 0.0.370-8431d9（任务 #34 一直在录，`--stage vps1` 按 guard 跳过）。独立 review 依旧无响应，本轮以逐行比对 + 两处变异验证 + CI 兜底。
 
+[x] **T-207 动作代理拆成 hub-actions（plans/050 第 5 步，2026-11-12）**
+  — **做什么**: 把「单节点重跑、stop/ack/runNow 接线、远端排空探测、队列池 provider」四块从 `createHubStarter.start` 搬进 `packages/hub-compose/src/hub-actions.ts`，导出 `createHubActions(deps)`：`retryNode` / `probeDrainSupport` / `install(reconciler)` / `uninstall()`；starter 只装配并调用 `install`，`stop` 走 `uninstall` 清空全部注入。
+  **为什么**: 这四块是 web API 直接调用的判定点（400/409 文案、流锁、P1 重复投稿、旧 bundle 排空），混在启动编排里既没法单测，也最容易在搬迁中被顺手改掉；独立后 hub-starter 只剩装配（893→762 行）。
+  **验收**: 逐行等价搬迁（白名单与 force 闸门、非法 streamKey、live job / 流锁 409、P1-after-BV 409、在途重跑 409、retrying→done/failed/needs_manual 迁移、USER_STOP、探测跳过 local 与幽灵 worker、旧 bundle 与不可达判失败、发布与清理顺序全部不变）；新增 11 条用例；撤两处（去掉 `install(reconciler)`、去掉 live/流锁判定）分别变红；接线守护与 `closeStageReady` 调用点守护改口径；`pnpm typecheck` 0 错、全量 `pnpm test` 348 文件 5258 passed、`arch:check` 通过、`pnpm bundle` 可运行；版本 0.0.373→0.0.374。
+  **现状（2026-11-12）**: issue [#662](https://github.com/fuyucn/douyin-rec/issues/662) → PR [#663](https://github.com/fuyucn/douyin-rec/pull/663) 已合并（merge c0c0b4d5，0.0.374）；master 与 vps2 已 0.0.374-57df7e（fleet 重连、任务同步 applied=4/8/15、零落盘回执照常、`/api/hub/queue` 的 pool 读数正常），vps1 仍为 0.0.370-8431d9（任务 #34 一直在录，`--stage vps1` 等满 6 分钟后按 guard 跳过，退出码 1 只表示该步未执行）。独立 review 无响应，本轮以逐行比对 + 两处变异验证 + CI 兜底。plans/050 五步至此全部落地。
+
 
 [~] **T-198 直播直传同场判定以真实进度为准（issue [#642](https://github.com/fuyucn/douyin-rec/issues/642)，2026-11-12）**
   — **做什么**: `rolloverStaleState` 的最后活动取 `max(state.updatedAt, 未确认分 P 的 spool mtime, 恢复进度标记)`；新增 `<state>.activity` 标记，只在恢复重传的**真实块进度**上写（每分钟节流，重试/定时心跳不写）；启动恢复把 `o.signal` 传入 `resubmitAllUnconfirmed`，取消后不再发起新的不可逆请求；重传按 10% 输出进度日志；归档时删掉标记。
