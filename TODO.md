@@ -42,6 +42,12 @@
   **为什么**: 这团编排占 CLI 四成篇幅，混着跨包接线与启动细节，继续动上传轴/节点侧时边界不可读；下沉后组装层成为单一 hub 装配点。
   **验收**: 逐行归一化对比零差异（除两处注入改名与两行注释）；HubStarter 19 个成员全保留；源码守护测试改为读 CLI + 组装层且断言不改；`pnpm typecheck` 0 错、全量 `pnpm test` 5232 passed、`arch:check` 通过、`pnpm bundle` 可运行；版本 0.0.369→0.0.370。
   **现状（2026-11-12）**: issue [#654](https://github.com/fuyucn/douyin-rec/issues/654) → PR [#655](https://github.com/fuyucn/douyin-rec/pull/655) 已合并（merge 1f0a8be6，0.0.370）；三端部署同版本 0.0.370-8431d9，fleet 两节点回报同版本、任务同步 applied=4/8/15、零落盘回执正常。独立 review 结论 PASS（P2 缺依赖已修）。
+[x] **T-204 平台登录态下发拆成 cookie-sync（plans/050 第 2 步，2026-11-12）**
+  — **做什么**: 把 hub 同步 tick 里内联的平台登录态下发（issue #563）搬进 `packages/hub-compose/src/cookie-sync.ts`，导出 `createCookieSync({ store, warn, log })`：`beginRound()` 取本轮快照（读失败只告警一次、不抛）、`pushTo(worker, transport, round)` 负责 `shouldPushCookies` 闸门、按 worker 的告警去重与 verdict 判定；tick 只留一行调用，仍保持在任务同步之前。
+  **为什么**: 这团二十多行的静默失败高发区（指纹只有真到位才记）混在 500 行的任务同步循环里，改任务侧时看不清边界；独立成模块后失败语义可单测，不必启动整个 hub。
+  **验收**: 逐行等价搬迁（闸门、四个去重结构、告警文案、旧 bundle 与未送达的区分全部不变）；新增 5 条用例（本机跳过/空登录态、复核窗口内不重推、旧 bundle 只告警一次、rejected 不记指纹且下轮重试、读失败不 reject tick）；接线守护测试改读新模块并钉住 tick 调用；撤修复三处（指纹写进 `!verdict.ok` 分支、去掉 local 守卫、删掉 tick 调用）分别变红；`pnpm typecheck` 0 错、全量 `pnpm test` 344 文件 5238 passed、`arch:check` 通过、`pnpm bundle` 可运行；版本 0.0.370→0.0.371。
+  **现状（2026-11-12）**: issue [#656](https://github.com/fuyucn/douyin-rec/issues/656) → PR [#657](https://github.com/fuyucn/douyin-rec/pull/657) 已合并（merge ee0d8ae2，0.0.371）；master 与 vps2 已 0.0.371-22a265（fleet 重连、任务同步 applied=4/8/15、零落盘回执照常；无 `登录态下发` 行 = 指纹命中后按闸门跳过，属预期），vps1 仍为 0.0.370-8431d9（`--stage vps1` 等满 12 分钟仍未空录：8 任务里 1 个在录，按 guard 跳过不改动），下次空录后重跑同一条命令即可。本轮三次独立 review 派发均因模型侧 502/超时未返回结论，改由逐行比对 + 三处变异验证替代，CI 绿。
+
 
 [~] **T-198 直播直传同场判定以真实进度为准（issue [#642](https://github.com/fuyucn/douyin-rec/issues/642)，2026-11-12）**
   — **做什么**: `rolloverStaleState` 的最后活动取 `max(state.updatedAt, 未确认分 P 的 spool mtime, 恢复进度标记)`；新增 `<state>.activity` 标记，只在恢复重传的**真实块进度**上写（每分钟节流，重试/定时心跳不写）；启动恢复把 `o.signal` 传入 `resubmitAllUnconfirmed`，取消后不再发起新的不可逆请求；重传按 10% 输出进度日志；归档时删掉标记。
