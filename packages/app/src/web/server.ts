@@ -904,6 +904,7 @@ export function createWebServer(deps: WebServerDeps): Server {
     hubDir: deps.hubDir,
     hubEnabled: deps.hubEnabled,
     syncDbPath: deps.syncDbPath,
+    deleteHubHistory: deps.deleteHubHistory,
     hubConfigPath: deps.hubConfigPath,
     hubConfigSource: deps.hubConfigSource,
     biliupCookiesPath: deps.biliupCookiesPath,
