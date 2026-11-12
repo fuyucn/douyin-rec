@@ -17,11 +17,15 @@ import {
   assertJobInvariants, canTransition, cancelOutcome, jobIdOf,
   PART_KINDS, type PartCtx,
   type EnqueueResult, type JobState, type ProcessJob, type TransitionReason, type UploadProgress,
+  type UploadTargetState,
 } from "@drec/core";
 import { migrateSchema } from "./schema.js";
 import { ProcLeaseStore } from "./lease.js";
 
 const WAL_RETRIES = 200;
+
+/** Legacy rows predate the target axis; the queue never branches on the value. */
+const LEGACY_TARGET_ID = "bilibili";
 
 function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -70,11 +74,29 @@ export interface ProcJobRecord extends ProcessJob {
   step: string | null;
   bv: string | null;
   seasonState: "pending" | "done" | "failed" | null;
+  /** Opaque target checkpoint (plans/049 §6); bv / seasonState are its legacy mirror. */
+  targetState: UploadTargetState | null;
   childPid: number | null;
   childPidStartedAt: string | null;
   prepJobId: string | null;
   /** Latest byte progress reported by the processor (display only). */
   progress: UploadProgress | null;
+}
+
+/** Merge one field into the checkpoint; unknown fields are dropped, never guessed. */
+function mergeTarget(
+  cur: UploadTargetState | null,
+  patch: { archiveId: string; season?: "pending" | "done" | "failed" | null; parts?: number },
+): UploadTargetState {
+  const next: UploadTargetState = {
+    targetId: cur?.targetId ?? LEGACY_TARGET_ID,
+    archiveId: patch.archiveId,
+  };
+  const season = patch.season !== undefined ? patch.season : cur?.season;
+  if (season !== undefined) next.season = season;
+  const parts = patch.parts !== undefined ? patch.parts : cur?.parts;
+  if (parts !== undefined) next.parts = parts;
+  return next;
 }
 
 export type { LeaseRow } from "./lease-types.js";
@@ -127,6 +149,8 @@ export interface ProcQueueStoreOpts {
   busyTimeoutMs?: number;
   /** 只读打开:不建目录、不切 WAL、不迁移、只读连接;库/表缺失时查询抛错由调用方兜。 */
   readOnly?: boolean;
+  /** Migration seam: tests inject a throwing migrator to prove the "warn and keep legacy columns" path. */
+  migrate?: (db: DatabaseSync) => void;
 }
 
 const defaultPidAlive = (pid: number): boolean => {
@@ -142,6 +166,10 @@ type Row = Record<string, unknown>;
 
 function toRecord(r: Row): ProcJobRecord {
   const outputs = r.outputs == null ? undefined : (JSON.parse(String(r.outputs)) as string[]);
+  const target = parseTargetState(r.targetState);
+  const legacySeason = r.seasonState === "pending" || r.seasonState === "done" || r.seasonState === "failed"
+    ? r.seasonState
+    : null;
   const rec: ProcJobRecord = {
     jobId: String(r.jobId),
     kind: String(r.kind),
@@ -170,10 +198,9 @@ function toRecord(r: Row): ProcJobRecord {
     orderKey: r.orderKey == null ? null : String(r.orderKey),
     seq: r.seq == null ? null : Number(r.seq),
     step: r.step == null ? null : String(r.step),
-    bv: r.bv == null ? null : String(r.bv),
-    seasonState: r.seasonState === "pending" || r.seasonState === "done" || r.seasonState === "failed"
-      ? r.seasonState
-      : null,
+    bv: target?.archiveId ?? (r.bv == null ? null : String(r.bv)),
+    seasonState: target && target.season !== undefined ? target.season : legacySeason,
+    targetState: target,
     childPid: r.childPid == null ? null : Number(r.childPid),
     childPidStartedAt: r.childPidStartedAt == null ? null : String(r.childPidStartedAt),
     prepJobId: r.prepJobId == null ? null : String(r.prepJobId),
@@ -192,6 +219,25 @@ function parseProgress(raw: unknown): UploadProgress | null {
     if (!num(p.doneBytes) || !num(p.totalBytes) || !num(p.at)) return null;
     return { doneBytes: p.doneBytes, totalBytes: p.totalBytes, bps: num(p.bps) ? p.bps : null, at: p.at };
   } catch { return null; }
+}
+
+/**
+ * Parse the opaque checkpoint. Anything malformed reads as "no checkpoint" so the legacy columns
+ * stay authoritative and a corrupted blob can never fail a queue read (plans/049 §6.2).
+ */
+function parseTargetState(raw: unknown): UploadTargetState | null {
+  if (raw == null) return null;
+  try {
+    const t = JSON.parse(String(raw)) as Partial<UploadTargetState>;
+    if (typeof t.targetId !== "string" || t.targetId === "") return null;
+    if (typeof t.archiveId !== "string" || t.archiveId === "") return null;
+    const out: UploadTargetState = { targetId: t.targetId, archiveId: t.archiveId };
+    if (typeof t.parts === "number" && Number.isFinite(t.parts) && t.parts >= 0) out.parts = Math.floor(t.parts);
+    if (t.season === "pending" || t.season === "done" || t.season === "failed" || t.season === null) out.season = t.season;
+    return out;
+  } catch {
+    return null;
+  }
 }
 
 function toLease(r: Row): LeaseRow {
@@ -214,10 +260,16 @@ export class ProcQueueStore {
   private readonly leases!: ProcLeaseStore;
   private readonly now: () => number;
   private readonly isPidAlive: (pid: number) => boolean;
+  private readonly log?: (m: string) => void;
+  private readonly migrateFn: (db: DatabaseSync) => void;
+  /** Set by migrate(); false means the v6 column is missing and only legacy columns may be written. */
+  private hasTargetState = false;
 
   constructor(readonly dbPath: string, opts: ProcQueueStoreOpts = {}) {
     this.now = opts.now ?? Date.now;
     this.isPidAlive = opts.isPidAlive ?? defaultPidAlive;
+    this.log = opts.log;
+    this.migrateFn = opts.migrate ?? migrateSchema;
     if (opts.readOnly) {
       this.db = new DatabaseSync(dbPath, { readOnly: true });
       this.db.exec(`PRAGMA busy_timeout=${opts.busyTimeoutMs ?? 5000}`);
@@ -252,7 +304,16 @@ export class ProcQueueStore {
 
   /** Idempotent migration (see schema.ts); runs on every open and upgrades old databases step by step. */
   private migrate(): void {
-    migrateSchema(this.db);
+    try {
+      this.migrateFn(this.db);
+      this.hasTargetState = true;
+    } catch (e) {
+      // plans/049 §6.2: a failed ALTER must be loud but must not block the queue - legacy columns
+      // stay authoritative, and the next open retries the migration.
+      const msg = "[proc-queue] targetState 迁移失败,保持旧列读写: " + String((e as Error)?.message ?? e);
+      (this.log ?? console.warn)(msg);
+      this.hasTargetState = false;
+    }
   }
 
   /** `BEGIN IMMEDIATE` 事务;抛错回滚并重抛。 */
@@ -403,6 +464,10 @@ export class ProcQueueStore {
         job.owner.taskId ?? null, job.owner.streamKey ?? null, t, t, t, opts.bv,
         job.orderKey ?? null, job.seq ?? null, job.prepJobId ?? null,
       );
+      if (this.hasTargetState && opts.bv) {
+        this.db.prepare("UPDATE proc_jobs SET targetState=? WHERE jobId=?")
+          .run(JSON.stringify(mergeTarget(null, { archiveId: opts.bv })), job.jobId);
+      }
       if (opts.cleanupJob) {
         assertJobInvariants(opts.cleanupJob, { allowedRoots: opts.allowedRoots });
         const c = this.enqueueTx(opts.cleanupJob, opts.cleanupJob.logicalKey);
@@ -610,21 +675,56 @@ export class ProcQueueStore {
       .run(step, this.now(), jobId).changes > 0);
   }
 
+  /** Target checkpoint as stored (null = legacy row or a malformed blob). */
+  targetState(jobId: string): UploadTargetState | null {
+    const row = this.db.prepare("SELECT targetState FROM proc_jobs WHERE jobId=?").get(jobId) as Row | undefined;
+    return row ? parseTargetState(row.targetState) : null;
+  }
+
+  /** Write the checkpoint and mirror it into the legacy columns (dual-write, plans/049 §6.1). */
+  setTargetState(jobId: string, state: UploadTargetState): boolean {
+    return this.tx(() => this.db.prepare(
+      "UPDATE proc_jobs SET targetState=?, bv=?, seasonState=?, updatedAt=? WHERE jobId=?",
+    ).run(JSON.stringify(state), state.archiveId, state.season ?? null, this.now(), jobId).changes > 0);
+  }
+
   setBv(jobId: string, bv: string): boolean {
-    return this.tx(() => this.db.prepare("UPDATE proc_jobs SET bv=?, updatedAt=? WHERE jobId=?")
-      .run(bv, this.now(), jobId).changes > 0);
+    return this.tx(() => {
+      if (!this.hasTargetState) {
+        return this.db.prepare("UPDATE proc_jobs SET bv=?, updatedAt=? WHERE jobId=?")
+          .run(bv, this.now(), jobId).changes > 0;
+      }
+      const cur = this.targetState(jobId);
+      return this.db.prepare("UPDATE proc_jobs SET bv=?, targetState=?, updatedAt=? WHERE jobId=?")
+        .run(bv, JSON.stringify(mergeTarget(cur, { archiveId: bv })), this.now(), jobId).changes > 0;
+    });
   }
 
   /** Persist a newly created BV together with its season intent in one row update. */
   setBvAndSeasonState(jobId: string, bv: string, state: "pending" | "done" | "failed" | null): boolean {
-    return this.tx(() => this.db.prepare("UPDATE proc_jobs SET bv=?, seasonState=?, updatedAt=? WHERE jobId=?")
-      .run(bv, state, this.now(), jobId).changes > 0);
+    return this.tx(() => {
+      if (!this.hasTargetState) {
+        return this.db.prepare("UPDATE proc_jobs SET bv=?, seasonState=?, updatedAt=? WHERE jobId=?")
+          .run(bv, state, this.now(), jobId).changes > 0;
+      }
+      const cur = this.targetState(jobId);
+      return this.db.prepare("UPDATE proc_jobs SET bv=?, seasonState=?, targetState=?, updatedAt=? WHERE jobId=?")
+        .run(bv, state, JSON.stringify(mergeTarget(cur, { archiveId: bv, season: state })), this.now(), jobId).changes > 0;
+    });
   }
 
   /** Persist the best-effort Bilibili season association checkpoint. */
   setSeasonState(jobId: string, state: "pending" | "done" | "failed" | null): boolean {
-    return this.tx(() => this.db.prepare("UPDATE proc_jobs SET seasonState=?, updatedAt=? WHERE jobId=?")
-      .run(state, this.now(), jobId).changes > 0);
+    return this.tx(() => {
+      const cur = this.hasTargetState ? this.targetState(jobId) : null;
+      // No archive yet -> the checkpoint has nothing to attach to; the legacy column carries the intent.
+      if (!cur) {
+        return this.db.prepare("UPDATE proc_jobs SET seasonState=?, updatedAt=? WHERE jobId=?")
+          .run(state, this.now(), jobId).changes > 0;
+      }
+      return this.db.prepare("UPDATE proc_jobs SET seasonState=?, targetState=?, updatedAt=? WHERE jobId=?")
+        .run(state, JSON.stringify(mergeTarget(cur, { archiveId: cur.archiveId, season: state })), this.now(), jobId).changes > 0;
+    });
   }
 
   setChildPid(jobId: string, pid: number | null, startedAt: string | null = null): boolean {

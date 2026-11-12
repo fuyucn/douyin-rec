@@ -7,6 +7,22 @@
  * 阶段 0 只有契约，没有实现，也没有任何生产路径 import 本文件之外的新包。
  */
 
+/**
+ * Opaque per-target checkpoint the process queue persists (plans/049 `6, stage 3).
+ *
+ * The queue stores it verbatim and only mirrors `archiveId` / `season` into the legacy `bv` /
+ * `seasonState` columns so old bundles keep reading. Each target owns the payload; unused fields
+ * stay absent rather than guessed.
+ */
+export interface UploadTargetState {
+  targetId: string;
+  archiveId: string;
+  /** Parts already confirmed on the target; absent = unknown. */
+  parts?: number;
+  /** Season association checkpoint (Bilibili-only today, generic for display). */
+  season?: "pending" | "done" | "failed" | null;
+}
+
 export type UploadVisibility = "private" | "public";
 
 export interface CredentialRef {
