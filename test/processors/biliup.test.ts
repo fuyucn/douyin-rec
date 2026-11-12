@@ -74,7 +74,7 @@ describe("biliup processor (plan 038 T08)", () => {
       await p.run(job(files(1), { cookies: login, seasonSectionId: 123 }), c1);
       expect(calls).toHaveLength(1);
       const setState = (c1 as unknown as { setState: ReturnType<typeof vi.fn> }).setState;
-      expect(setState).toHaveBeenCalledWith({ bv: "BV1aaaaaaaaa", seasonState: "pending" }); // issue-guard: allow (fake BV fixture)
+      expect(setState).toHaveBeenCalledWith({ bv: "BV1aaaaaaaaa", seasonState: "pending", targetState: { targetId: "bilibili-biliup", archiveId: "BV1aaaaaaaaa", season: "pending" } }); // issue-guard: allow (fake BV fixture)
       expect(setState).toHaveBeenCalledWith({ seasonState: "done" });
 
       const resumed = vi.fn(async () => "ok");
@@ -116,7 +116,7 @@ describe("biliup processor (plan 038 T08)", () => {
       const r = await p.run(job(files(1), { cookies: login, seasonSectionId: 123 }), c as never);
       expect(r.bv).toBe("BV1aaaaaaaaa"); // issue-guard: allow (fake BV fixture)
       expect(fetchMock).not.toHaveBeenCalled();
-      expect(c.setState).toHaveBeenCalledWith({ bv: "BV1aaaaaaaaa", seasonState: "pending" }); // issue-guard: allow (fake BV fixture)
+      expect(c.setState).toHaveBeenCalledWith({ bv: "BV1aaaaaaaaa", seasonState: "pending", targetState: { targetId: "bilibili-biliup", archiveId: "BV1aaaaaaaaa", season: "pending" } }); // issue-guard: allow (fake BV fixture)
       expect(c.setState).not.toHaveBeenCalledWith({ seasonState: "done" });
     } finally {
       vi.unstubAllGlobals();

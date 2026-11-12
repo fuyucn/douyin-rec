@@ -28,6 +28,7 @@ import {
   type PartCtx, type ProcessContext, type ProcessJob, type ProcessResult, type Processor,
 } from "@drec/core";
 import { appendGroup, isAllFilesUploadedLine, uploadPlain } from "./run-biliup.js";
+import { BILIUP_TARGET_ID } from "./target-id.js";
 import {
   afterStall, BiliupDeps, StallError, supervise, countPartsOf, params, cookiesOf,
   type RunState, type Supervisor,
@@ -116,7 +117,7 @@ export async function runOneBiliupPart(
   if (!st.bv) {
     // No archive query: per-part create is guarded by the explicit bv below, never by list trust.
     st.bv = await slotted(() => uploadPlain({ plain, run: runWithAck }));
-    c.setState?.({ bv: st.bv });
+    c.setState?.({ bv: st.bv, targetState: { targetId: BILIUP_TARGET_ID, archiveId: st.bv, parts: 1 } });
   } else {
     const countParts = countPartsOf(deps);
     await slotted(() => appendGroup({
@@ -160,7 +161,7 @@ export async function runOneBiliupPart(
   // Season association for the create branch, same helper/checkpoint as the biliup processor.
   if (!ctx.bv && p.seasonSectionId && st.bv) {
     try {
-      c.setState?.({ bv: st.bv, seasonState: "pending" });
+      c.setState?.({ bv: st.bv, seasonState: "pending", targetState: { targetId: BILIUP_TARGET_ID, archiveId: st.bv, parts: 1, season: "pending" } });
       const outcome = await (deps.addSeason ?? addArchiveToSeasonIfConfigured)({
         cookiesPath: cookies, sectionId: p.seasonSectionId, bvid: st.bv,
         reconcileFirst: false, note: (m) => c.log(m),

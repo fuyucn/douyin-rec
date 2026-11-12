@@ -1014,6 +1014,23 @@ describe("processor contract wiring (plan 038 T02)", () => {
     expect([row.step, row.bv, row.childPid]).toEqual(["transfer", "BV1WIRE", 42]);
   });
 
+  it("ctx.setState with a target checkpoint persists it and mirrors bv/seasonState", async () => {
+    registerProcessor(fakeProcessor({ kind: "chk", run: async (_j, ctx) => {
+      ctx.setState?.({ targetState: { targetId: "bilibili", archiveId: "BV1CHK", parts: 2, season: "pending" } });
+      return { outputs: [] };
+    } }));
+    const r = mkRunner("A");
+    const s = env.open();
+    const { jobId } = s.enqueue(env.job("chk.ts", { kind: "chk" }), allowed());
+    r.tick();
+    await vi.waitFor(() => expect(s.get(jobId)?.state).toBe("done"));
+    expect(s.get(jobId)).toMatchObject({
+      bv: "BV1CHK",
+      seasonState: "pending",
+      targetState: { targetId: "bilibili", archiveId: "BV1CHK", parts: 2, season: "pending" },
+    });
+  });
+
   it("ProcessResult.retry → pending with notBefore, attempts unchanged", async () => {
     registerProcessor(fakeProcessor({ kind: "biliup", run: async () => ({ outputs: [], retry: { notBefore: 5, reason: "transfer-retry" } }) }));
     const r = mkRunner("A");

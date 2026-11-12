@@ -303,7 +303,7 @@ describe("upload-part processor", () => {
       expect(addSeason).toHaveBeenCalledTimes(1);
       expect(addSeason.mock.calls[0]![0]).toMatchObject({ sectionId: 9, bvid: BV });
       const setState = (c as unknown as { setState: ReturnType<typeof vi.fn> }).setState;
-      expect(setState).toHaveBeenCalledWith({ bv: BV, seasonState: "pending" });
+      expect(setState).toHaveBeenCalledWith({ bv: BV, seasonState: "pending", targetState: { targetId: "bilibili-biliup", archiveId: BV, parts: 1, season: "pending" } });
       expect(setState).toHaveBeenCalledWith({ seasonState: "done" });
     } finally { teardown(); }
   });

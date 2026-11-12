@@ -536,7 +536,12 @@ export class ProcRunner {
       markProgress: () => {},
       setState: (patch) => {
         if (patch.step !== undefined) this.o.store.updateStep(job.jobId, patch.step);
-        if (patch.bv !== undefined && patch.seasonState !== undefined) {
+        if (patch.targetState) {
+          // The checkpoint supersedes the legacy pair: setTargetState mirrors bv / seasonState itself.
+          if (!this.o.store.setTargetState(job.jobId, patch.targetState)) {
+            throw new Error(`[proc] target checkpoint write missed its row (${job.jobId})`);
+          }
+        } else if (patch.bv !== undefined && patch.seasonState !== undefined) {
           if (!this.o.store.setBvAndSeasonState(job.jobId, patch.bv ?? "", patch.seasonState)) {
             throw new Error(`[proc] upload checkpoint write missed its row (${job.jobId})`);
           }
