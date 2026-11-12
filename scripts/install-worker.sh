@@ -294,13 +294,21 @@ node_busy_reason() {
     *) _n="$(command -v "$_n" || true)" ;;
   esac
   [ -n "$_n" ] || { printf 'node missing, cannot check\n'; return 0; }
+  _token_file="$ROOT/config/web-token"
+  if [ ! -r "$_token_file" ]; then
+    _token_file="$(systemctl show -p WorkingDirectory --value video-screenshot 2>/dev/null || true)/config/web-token"
+  fi
+  DREC_WEB_TOKEN="$(cat "$_token_file" 2>/dev/null || true)"
+  export DREC_WEB_TOKEN
   _out="$("$_n" -e '
     const http = require("node:http");
     const api = process.argv[1];
     const timeoutMs = Number(process.env.DREC_BUSY_TIMEOUT_MS) || 10000;
+    const token = process.env.DREC_WEB_TOKEN || "";
+    const headers = token ? { Authorization: "Bearer " + token } : {};
     const uploadKinds = ["biliup", "upload-part", "upload-prep", "reconcile-part"];
     const request = (path) => new Promise((resolve) => {
-      const req = http.get(api + path, { timeout: timeoutMs }, (res) => {
+      const req = http.get(api + path, { timeout: timeoutMs, headers }, (res) => {
         let body = "";
         res.setEncoding("utf8");
         res.on("data", (chunk) => { body += chunk; });

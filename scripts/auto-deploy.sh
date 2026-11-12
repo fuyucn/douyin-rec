@@ -41,12 +41,22 @@ ts() { date '+%H:%M:%S'; }
 say() { echo "[$(ts)] $*" | tee -a "$LOG"; }
 
 # ── 录制状态查询(任一失败按「在录」保守处理) ────────────────────────────────
-recording_of() {  # $1=local|vps1|vps2 → 输出 在录任务描述(空=空闲)
+# Web API 启用共享密钥(issue #600)后,不带 Authorization 的请求一律 401 → 守卫会永远
+# 读不到状态并一直等待。内部回环调用同样要带凭据(issue #641 的同一原则)。
+tasks_json() {  # $1=local|vps1|vps2 → 输出 /api/tasks 的 JSON(无凭据则不打 header)
   case "$1" in
-    local) docker exec douyin-rec sh -c 'curl -sS --max-time 6 http://127.0.0.1:7860/api/tasks' 2>/dev/null ;;
-    vps1)  ssh -o ConnectTimeout=6 vps 'curl -sS --max-time 6 http://127.0.0.1:7860/api/tasks' 2>/dev/null ;;
-    vps2)  ssh -o ConnectTimeout=6 video-rec-2 'curl -sS --max-time 6 http://127.0.0.1:7860/api/tasks' 2>/dev/null ;;
-  esac | python3 -c "$(cat <<'PY'
+    local)
+      docker exec -e DREC_TOKEN="$(cat docker-data/config/web-token 2>/dev/null)" douyin-rec \
+        sh -c 'curl -sS --max-time 6 ${DREC_TOKEN:+-H "Authorization: Bearer $DREC_TOKEN"} http://127.0.0.1:7860/api/tasks' 2>/dev/null ;;
+    vps1)
+      ssh -o ConnectTimeout=6 vps 'T=$(cat "$(systemctl show -p WorkingDirectory --value video-screenshot)/config/web-token" 2>/dev/null); curl -sS --max-time 6 ${T:+-H "Authorization: Bearer $T"} http://127.0.0.1:7860/api/tasks' 2>/dev/null ;;
+    vps2)
+      ssh -o ConnectTimeout=6 video-rec-2 'T=$(cat "$(systemctl show -p WorkingDirectory --value video-screenshot)/config/web-token" 2>/dev/null); curl -sS --max-time 6 ${T:+-H "Authorization: Bearer $T"} http://127.0.0.1:7860/api/tasks' 2>/dev/null ;;
+  esac
+}
+
+recording_of() {  # $1=local|vps1|vps2 → 输出 在录任务描述(空=空闲)
+  tasks_json "$1" | python3 -c "$(cat <<'PY'
 import sys, json
 try:
     data = json.load(sys.stdin)
@@ -85,6 +95,9 @@ FAILED=()   # 记录失败/跳过的步骤,最后汇总
 note() { FAILED+=("$1"); }
 
 # ── ① master 重建(它不直接录;只要容器内无录制子进程) ────────────────────────
+if [[ "$STAGE" != "first" && "$STAGE" != "all" ]]; then
+  say "① master: 跳过(stage=$STAGE 不包含 master)"
+else
 say "① master:检查是否在录…"
 if wait_idle local "$MAXS"; then
   say "  master 空闲 → 重建镜像"
@@ -98,8 +111,12 @@ if wait_idle local "$MAXS"; then
 else
   say "  ✗ master 等待超时 → 跳过(继续其余步骤)"; note "master 未更新(超时)"
 fi
+fi
 
 # ── ② VPS2 装 swap(不重启,零风险) ───────────────────────────────────────────
+if [[ "$STAGE" != "first" && "$STAGE" != "all" ]]; then
+  say "② VPS2 swap: 跳过(stage=$STAGE 不包含 VPS2)"
+else
 say "② VPS2:装 swap(若缺)"
 if [[ $DRY == 1 ]]; then say "  [dry] 跳过 swap"; else
   ssh -o ConnectTimeout=8 video-rec-2 'bash -s' <<'EOS' 2>&1 | tee -a "$LOG"
@@ -114,6 +131,7 @@ echo 'vm.swappiness=10' | sudo tee /etc/sysctl.d/99-swap.conf >/dev/null
 sudo sysctl -p /etc/sysctl.d/99-swap.conf >/dev/null
 echo "  ✓ swap 已启用:"; free -h | grep -i swap
 EOS
+fi
 fi
 
 # ③ VPS1 补 fstab(只写文件,零风险:不影响运行中进程/录制)。抽成函数供 stage 调用。
