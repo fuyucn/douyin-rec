@@ -5,7 +5,7 @@
  * 合并后的补跑那一轮,否则节点守卫照旧拒绝 → 静默失败(自审发现的原始缺陷)。
  */
 import { describe, it, expect, vi } from "vitest";
-import { SyncGate } from "../../packages/cli/src/sync-gate.js";
+import { SyncGate } from "../../packages/hub-compose/src/sync-gate.js";
 
 describe("SyncGate", () => {
   it("就绪后 request → 返回 true,force 由 beginRun 消费一次", () => {

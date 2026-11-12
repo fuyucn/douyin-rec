@@ -29,6 +29,9 @@ flowchart TB
   subgraph L5["L5 · 入口"]
     cli["<b>cli</b><br/>record / merge / burn / probe + task 命令组<br/>providers-register: 注册平台 + 引擎"]
   end
+  subgraph L475["rank 4.75"]
+    hubc["<b>hub-compose</b><br/>hub 组装层:web 读 hub 状态的访问器<br/>+ hub 动作代理(stop/retry/ack/runNow/日志代查)"]
+  end
   subgraph L45["L4.5 · 多节点 hub"]
     orch["<b>orchestrator</b><br/>Transport(local/ssh/tailscale-ssh) / identity 聚类<br/>select 选优 / reconciler / pipeline / SyncLedger"]
   end
@@ -82,6 +85,9 @@ flowchart TB
   cli --> procs
   cli --> engine
   cli --> zeroup
+  hubc --> app
+  hubc --> core
+  hubc --> orch
   orch --> core
   orch --> post
   app --> bup

@@ -15,17 +15,19 @@ const nodeCommands = readFileSync(join(root, "packages/cli/src/node-commands.ts"
 
 describe("T16 sync receipt wiring", () => {
   it("master sync computes and sends expectedVersion", () => {
-    expect(cli).toContain("recordExpectedVersion(hubReceiptSettings, w.id, desired)");
+    // Receipt settings now come from the hub-compose accessor, not a cli-local variable.
+    expect(cli).toContain("const receiptSettings = getReceiptSettings();");
+    expect(cli).toContain("recordExpectedVersion(receiptSettings, w.id, desired)");
     expect(cli).toMatch(/applyTasks\(\{ desired, force, \.\.\.\(expectedVersion/);
   });
 
   it("master records the apply result as syncError", () => {
-    expect(cli).toContain("recordSyncError(hubReceiptSettings, w.id, r.rejected");
-    expect(cli).toContain("recordSyncError(hubReceiptSettings, w.id, msg)");
+    expect(cli).toContain("recordSyncError(receiptSettings, w.id, r.rejected");
+    expect(cli).toContain("recordSyncError(receiptSettings, w.id, msg)");
   });
 
   it("worker status probe attaches master-side receipt fields", () => {
-    expect(cli).toContain("withMasterReceipt(base, hubReceiptSettings)");
+    expect(cli).toContain("withMasterReceipt(base, receiptSettings)");
   });
 
   it("_apply-tasks forwards the payload through applyTasksPayload", () => {

@@ -52,6 +52,10 @@ const RANKS: Record<string, number> = {
   "@drec/app": 4,
   "@drec/orchestrator": 4.5,
   "@drec/cli": 5,
+  // 4.75 hub assembly seam (plans/045 P1-3 / audit group C): web-facing state accessors
+  //        and hub action proxies; depends on app(4)/orchestrator(4.5), imported by cli(5).
+  //        Must never import cli (that would be an upward dependency).
+  "@drec/hub-compose": 4.75,
 };
 
 interface PkgInfo {

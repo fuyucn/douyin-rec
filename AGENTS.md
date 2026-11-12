@@ -137,7 +137,7 @@ pnpm serve:local                                           # 本地开发（port
 
 分层由 `test/arch/layering.test.ts` 守护：依赖只能向下，**新增包必须在该测试 `RANKS` 登记**。
 当前 rank：core=0、observability=0.5、upload-runtime=0.5、bilibili-upload=0.5、post-process=0.2、ffmpeg-recorder-extra=0、
-proc-queue=0.3、processors=0.4、record-engine=1、douyin-live/bilibili-live/kuaishou-live=1.5、manager=3、app=4、orchestrator=4.5、cli=5。
+proc-queue=0.3、processors=0.4、record-engine=1、douyin-live/bilibili-live/kuaishou-live=1.5、manager=3、app=4、orchestrator=4.5、hub-compose=4.75、cli=5。
 
 ```
 packages/
@@ -162,6 +162,7 @@ packages/
 ├── app/                      # L4 有状态层:db(node:sqlite+迁移) / store(TaskStore) / worker-store / hub-store
 │                             #   / hub-jobs / task-manager(子进程生命周期) / daemon(定时启停) / scheduler
 │                             #   / process / login(扫码) / web(server+api+static) / events / anchor / notify / upload
+├── hub-compose/              # L4.75 hub 组装层:web 读 hub 状态的访问器 + hub 动作代理(由 hubStarter.start 注入)
 ├── orchestrator/             # L4.5 hub 编排:startHub + Reconciler + SyncLedger + pipeline/workflow
 │                             #   + LocalTransport / SshTransport
 ├── cli/                      # L5 入口:cli.ts(record/merge/burn/probe + task 命令组 + --hub 隐藏命令)
