@@ -47,13 +47,13 @@ import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, drecRoot, rootOutpu
 import { initRecorderState, noteRecorderDraining, noteRecorderSignal, setRecorderPhase } from "@drec/core";
 import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, isWorkerTargeted, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type ZeroDiskNodeStatusDTO, type RollingDeliveryDTO, type HubPoolSnapshotDTO, type HubBlockedBroadcastDTO, type NodeTaskLogsDTO, type NodeTasksDTO, type WorkerStatus } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, resolveUploadAccountKey, type NotifWebhookToggles } from "@drec/app";
-import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, buildZeroDiskDelivery, zeroDiskStreamMeta, planZeroDiskSpec, APP_VERSION, syncDbPathFor } from "@drec/app";
+import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, buildZeroDiskDelivery, zeroDiskStreamMeta, planZeroDiskSpec, APP_VERSION, syncDbPathFor, hubStageDir, hubLogsDir } from "@drec/app";
 import type { HubStarter, TaskStore } from "@drec/app";
 import { applyTimezoneFromDb, dbPathForDataRoot, effectiveTimezone, rootStatsDbPath } from "@drec/app";
 import type { UploadOpts } from "@drec/core";
 import { zeroDiskStreamKey } from "@drec/core";
 import type { PipelineCfg, SyncLedger, WorkflowNodeKey } from "@drec/orchestrator";
-import { recordStreamUpload, recordZeroDiskReceipt, CookieSyncUnsupported } from "@drec/orchestrator";
+import { recordStreamUpload, recordZeroDiskReceipt, CookieSyncUnsupported, deleteHubHistory } from "@drec/orchestrator";
 import { reportStreamUploadLedgerResult } from "./stream-upload-ledger-report.js";
 import { DEFAULT_SEGMENT_CAP } from "@drec/zero-upload";
 
@@ -2379,6 +2379,9 @@ taskCmd
         undefined,
       hubStarter,
       fleetCommands: NODE_COMMANDS,
+      // Ledger deletion lives in orchestrator (it owns the schema); app/web only calls it through here.
+      deleteHubHistory: (syncDbPath, roomKey) =>
+        deleteHubHistory({ syncDbPath, roomKey, stageDir: hubStageDir(), logsDir: hubLogsDir() }),
     });
   });
 

@@ -20,7 +20,7 @@ import type { ApiCtx } from "./context.js";
 import type { ApiResult, CreateRoomInput } from "./types.js";
 import { refreshLocalRollingEffective } from "../../rolling-effective.js";
 import * as hubStore from "../../hub-store.js";
-import { activeHubJobKeys, deleteHubJobHistory } from "../../hub-jobs.js";
+import { activeHubJobKeys } from "../../hub-jobs.js";
 import type { Task, TaskStore } from "../../store.js";
 import { parseSchedule, toDanmuFlag } from "../../task-input.js";
 
@@ -663,7 +663,7 @@ export function buildRooms(ctx: ApiCtx) {
         // 异常若不接住会冒成通用 500,丢掉「任务已删、规则仍在」的显式说明 —— 那正是
         // 本端点承诺的不留静默半成功。接住后返回同一形态的 500,重试即可收敛。
         try {
-          history = deleteHubJobHistory(deps.syncDbPath, key);
+          history = deps.deleteHubHistory ? deps.deleteHubHistory(deps.syncDbPath, key) : { deleted: 0, streamKeys: [] };
         } catch (e) {
           return err(500, `录制任务已删除,但处理历史清理失败(${(e as Error).message}) —— 规则仍在,请重试删除房间`);
         }

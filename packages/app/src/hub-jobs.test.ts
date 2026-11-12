@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { STAGE_READY } from "@drec/core";
 import { needsManualPhaseOf } from "./hub-jobs.js";
-import { activeHubJobKeys, buildQueueView, deleteHubJobHistory, latestRunPerRoom, listHubJobs, readHubJobLog, jobLogPath, jobLogPaths } from "./hub-jobs.js";
+import { activeHubJobKeys, buildQueueView, latestRunPerRoom, listHubJobs, readHubJobLog, jobLogPath, jobLogPaths } from "./hub-jobs.js";
+// Deletion moved to the ledger owner (orchestrator); the fixtures below pin its SQL contract.
+import { deleteHubHistory } from "../../orchestrator/src/index.js";
 
 /** 手工建台账 fixture(表结构与 orchestrator SyncLedger 对齐——结构即契约,不 import 它保分层)。 */
 function makeSyncDb(): { dbPath: string; db: DatabaseSync } {
@@ -203,7 +205,7 @@ describe("deleteHubJobHistory / activeHubJobKeys", () => {
     writeFileSync(legacyLog, "old\n");
     db.close();
 
-    const r = deleteHubJobHistory(dbPath, "douyin.100", stage, logs);
+    const r = deleteHubHistory({ syncDbPath: dbPath, roomKey: "douyin.100", stageDir: stage, logsDir: logs });
     expect(r.deleted).toBe(2);
     expect(new Set(r.streamKeys)).toEqual(new Set(["douyin:100:2026-07-01", "douyin:100:2026-07-02"]));
 
@@ -235,10 +237,10 @@ describe("deleteHubJobHistory / activeHubJobKeys", () => {
     db.prepare("INSERT INTO sync_jobs(streamKey,state,updatedAt) VALUES(?,?,?)").run("douyin:100:2026-08-01", "done", T0);
     db.close();
 
-    const r = deleteHubJobHistory(dbPath, "douyin.100");
+    const r = deleteHubHistory({ syncDbPath: dbPath, roomKey: "douyin.100", stageDir: dir, logsDir: dir });
     expect(r).toEqual({ deleted: 1, streamKeys: ["douyin:100:2026-08-01"] });
     expect(activeHubJobKeys(dbPath, "douyin.100")).toEqual([]);
-    expect(deleteHubJobHistory("/nonexistent/x-sync.db", "douyin.100")).toEqual({ deleted: 0, streamKeys: [] });
+    expect(deleteHubHistory({ syncDbPath: "/nonexistent/x-sync.db", roomKey: "douyin.100", stageDir: dir, logsDir: dir })).toEqual({ deleted: 0, streamKeys: [] });
   });
 
   it("五表 DELETE 包事务:中途失败整体回滚,不删一半(issue #428)", () => {
@@ -252,7 +254,8 @@ describe("deleteHubJobHistory / activeHubJobKeys", () => {
     db.exec("CREATE TRIGGER boom BEFORE DELETE ON sync_node_states BEGIN SELECT RAISE(ABORT, 'boom'); END");
     db.close();
 
-    expect(() => deleteHubJobHistory(dbPath, "douyin.100")).toThrow("boom");
+    const logDir = mkdtempSync(join(tmpdir(), "hubdelete-boom-"));
+    expect(() => deleteHubHistory({ syncDbPath: dbPath, roomKey: "douyin.100", stageDir: logDir, logsDir: logDir })).toThrow("boom");
     const after = new DatabaseSync(dbPath);
     try {
       for (const table of ["sync_jobs", "sync_job_events", "sync_candidates"]) {
@@ -268,7 +271,7 @@ describe("deleteHubJobHistory / activeHubJobKeys", () => {
     const fix = new DatabaseSync(dbPath);
     fix.exec("DROP TRIGGER boom");
     fix.close();
-    const r = deleteHubJobHistory(dbPath, "douyin.100");
+    const r = deleteHubHistory({ syncDbPath: dbPath, roomKey: "douyin.100", stageDir: logDir, logsDir: logDir });
     expect(r.deleted).toBe(1);
     expect(activeHubJobKeys(dbPath, "douyin.100")).toEqual([]);
   });

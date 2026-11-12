@@ -298,6 +298,11 @@ export interface WebServerDeps {
   hubEnabled?: boolean;
   /** hub 台账 sqlite(<db>-sync.db)路径;省略=hub 任务端点返回空列表。 */
   syncDbPath?: string;
+  /**
+   * Deletes one room's hub history (ledger rows + job logs); injected by the CLI because the ledger
+   * schema belongs to @drec/orchestrator. Omitted → the endpoint deletes nothing and reports 0.
+   */
+  deleteHubHistory?: (syncDbPath: string, roomKey: string) => { deleted: number; streamKeys: string[] };
   /** hub.config.json 路径;省略回落 rootHubConfig()。 */
   hubConfigPath?: string;
   /** 远程访问鉴权;undefined = 未开启(回环本机信任)。 */
