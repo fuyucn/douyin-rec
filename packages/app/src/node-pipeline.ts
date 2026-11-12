@@ -18,7 +18,7 @@ import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, rmSync, sta
 import path from "node:path";
 import {
   addArchiveToSeasonIfConfigured, seasonCheckpointState, linkOrCopy, biliAccountKey, biliAccountKeyFromCookiesJson, resolveSubmissionTitle, formatPartTitle, isAppendAmbiguous,
-  isUploadRateLimited, createArchive, appendArchive, normalizeNodeResultFile, openUploadLimitStore, openUploadSlot, partTitleToFilename, resolveOutputStem, sanitizeStreamKey, stageSessionDir,
+  isUploadRateLimited, createArchive, appendArchive, normalizeNodeResultFile, openUploadLimitStore, openUploadSlot, resolveOutputStem, resolvePartAliasStem, sanitizeStreamKey, stageSessionDir,
   processTimeZone, stampedSessionBaseOf as sessionBaseOfFile, STAGE_EXT_ALT, UploadGate, freeGBOf, type UploadSlot, type NodePipelineResult, type NodePipelineResultFile, type NodePipelineSpec, type NodeUploadStep, type UploadGateStore,
 } from "@drec/core";
 import { ffprobeDuration, mergeSession, planSegmentGroups, remuxSegment, unreadableParts } from "@drec/post-process";
@@ -319,14 +319,10 @@ function aliasStemFor(
   log: (m: string) => void,
 ): string | null {
   const title = partTitle?.(idx, total) ?? null;
-  if (!title) return null;
-  const base = partTitleToFilename(title);
-  if (!base) return null;
-  let stem = base;
-  for (let n = 0; used.has(stem); n++) stem = `${base}-P${idx}${n > 0 ? `-${n}` : ""}`;
-  if (stem !== base) log(`分P标题「${base}」重名 → 改用「${stem}」(模板需含 {part} 才能区分多个分P)`);
-  used.add(stem);
-  return stem;
+  const alias = resolvePartAliasStem(title, idx, used);
+  if (!alias) return null;
+  if (alias.renamed) log(`分P标题「${alias.base}」重名 → 改用「${alias.stem}」(模板需含 {part} 才能区分多个分P)`);
+  return alias.stem;
 }
 
 /**

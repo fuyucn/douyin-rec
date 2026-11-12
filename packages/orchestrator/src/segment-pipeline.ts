@@ -9,7 +9,7 @@
  */
 import path from "node:path";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { addArchiveToSeasonIfConfigured, seasonCheckpointState, effectiveStageFormat, linkOrCopy, burnFlags, isAppendAmbiguous, isUploadRateLimited, stageExt, throwIfAborted, closeStageReady } from "@drec/core";
+import { addArchiveToSeasonIfConfigured, seasonCheckpointState, effectiveStageFormat, linkOrCopy, burnFlags, isAppendAmbiguous, isUploadRateLimited, resolvePartAliasStem, stageExt, throwIfAborted, closeStageReady } from "@drec/core";
 import { isCompleteMedia, planSegmentGroups, renderXmlWindowToXml, unreadableParts } from "@drec/post-process";
 import type { Broadcast } from "./identity.js";
 import type { JobState, SyncLedger } from "./ledger.js";
@@ -284,14 +284,9 @@ export async function runSegmentPipeline(o: {
   const usedAliasStems = new Set<string>();
   /** 按分P标题建上传别名(硬链接);未配置渲染器/返回 null → 原名。 */
   const aliasFor = (kind: "plain" | "danmu" | "livechat", canonical: string, idx: number, total: number): string => {
-    let title = renderPartTitle?.(kind, idx, total) ?? null;
-    if (title) {
-      const base = title;
-      for (let n = 0; usedAliasStems.has(title); n++) title = `${base}-P${idx}${n > 0 ? `-${n}` : ""}`;
-      if (title !== base) jlog(`分P标题「${base}」在分段模式下重名 → 改用「${title}」(模板需含 {part} 才能区分同类型的多个分P)`);
-      usedAliasStems.add(title);
-    }
-    return prepareUploadAlias(stageSub, `${kind}-${idx}`, canonical, title);
+    const alias = resolvePartAliasStem(renderPartTitle?.(kind, idx, total) ?? null, idx, usedAliasStems);
+    if (alias?.renamed) jlog(`分P标题「${alias.base}」在分段模式下重名 → 改用「${alias.stem}」(模板需含 {part} 才能区分同类型的多个分P)`);
+    return prepareUploadAlias(stageSub, `${kind}-${idx}`, canonical, alias?.stem ?? null);
   };
   const { ledger, notify, cfg } = deps;
   const { burnDanmu, burnLivechat } = burnFlags(cfg.steps);

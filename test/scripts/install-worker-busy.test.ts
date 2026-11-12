@@ -5,7 +5,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createServer, type Server } from "node:http";
 import { execFile, execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -70,6 +70,10 @@ describe("install-worker --check-busy", () => {
     expect(r.code).toBe(1);
     expect(r.out).toContain("upload");
   });
+  it("a running remux job → busy (restart would orphan the part chain)", async () => {
+    const port = await serve(JSON.stringify([{ id: 1, recording: false }]), JSON.stringify({ running: { remux: 1 } }));
+    expect((await check(port)).code).toBe(1);
+  });
   it("old node without the queue endpoint is judged by recording only", async () => {
     const port = await serve(JSON.stringify([{ id: 1, recording: false }]), "not json", 200, 404);
     expect(await check(port)).toMatchObject({ code: 0 });
@@ -79,6 +83,25 @@ describe("install-worker --check-busy", () => {
     const r = await check(port);
     expect(r.code).toBe(1);
     expect(r.out).toContain("unreadable upload queue");
+  });
+  it("sends the node's Web token (regression: auth turned every guard into 'busy')", async () => {
+    const token = "guard-token-1234";
+    const root = mkdtempSync(join(tmpdir(), "drec-root-"));
+    mkdirSync(join(root, "config"), { recursive: true });
+    writeFileSync(join(root, "config", "web-token"), `${token}\n`);
+    const port = await new Promise<number>((resolve) => {
+      server = createServer((req, res) => {
+        if (req.headers.authorization !== `Bearer ${token}`) { res.statusCode = 401; res.end("unauthorized"); return; }
+        if (req.url === "/api/tasks") res.end(JSON.stringify([{ id: 1, recording: false }]));
+        else if (req.url === "/api/proc/active") res.end(JSON.stringify({ running: { biliup: 0 } }));
+        else { res.statusCode = 404; res.end(); }
+      }).listen(0, LOOPBACK, () => resolve((server!.address() as { port: number }).port));
+    });
+    try {
+      expect(await check(port, { ...process.env, DREC_ROOT: root })).toMatchObject({ code: 0 });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
   it("an upload queue timeout fails closed", async () => {
     const port = await serve(JSON.stringify([{ id: 1, recording: false }]), "{}", 200, 200, "timeout");

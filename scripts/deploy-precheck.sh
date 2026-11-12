@@ -13,10 +13,31 @@ LOCAL_API="${LOCAL_API:-http://127.0.0.1:7860}"
 VPS_HOST="${VPS_HOST:-ubuntu@100.97.21.80}"
 PY="$(dirname "$0")/deploy-precheck.py"
 
+# --node local|vps1|vps2 checks one node only (auto-deploy.sh polls per node while waiting).
+NODE_ONLY=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --node) NODE_ONLY="${2:-}"; shift 2 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
 UPLOADING_STALE_MS="${UPLOADING_STALE_MS:-21600000}"   # a phase=uploading result older than this (6h) no longer counts
 LOCAL_DATA_ROOT="${LOCAL_DATA_ROOT:-$(dirname "$0")/../docker-data}"
 VPS_DATA_ROOT="${VPS_DATA_ROOT:-\$HOME/drec}"             # expanded on the node
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+
+# Web API requires a shared secret for non-loopback callers (issue #600); loopback also
+# requires it once a token file exists. Without this header every guard check reads 401 and
+# fails closed forever. Token is per node: read it from that node's own data root.
+node_token() {  # $1=local|ssh $2=target $3=root -> token or empty (legacy, auth disabled)
+  local kind="$1" target="$2" root="$3"
+  if [ "$kind" = local ]; then
+    cat "$root/config/web-token" 2>/dev/null || true
+  else
+    ssh -o ConnectTimeout=10 -o BatchMode=yes "$target" "cat \"$root/config/web-token\" 2>/dev/null" 2>/dev/null || true
+  fi
+}
 
 # Counts fresh phase=uploading node-result files under <root>/stage; prints a number or "unknown".
 # Malformed files count as fresh (fail closed); a missing stage dir is "unknown", never 0.
@@ -40,11 +61,15 @@ print(n)
 
 # fetch_proc KIND TARGET -> writes $TMP/proc.json, prints the HTTP status (0 = unreachable)
 fetch_proc() {
-  local kind="$1" target="$2" raw code
+  local kind="$1" target="$2" token="$3" raw code
   if [ "$kind" = local ]; then
-    raw="$(curl -s -m 10 -w '\n%{http_code}' "$target/api/proc/active" 2>/dev/null)" || raw=""
+    if [ -n "$token" ]; then
+      raw="$(curl -s -m 10 -H "Authorization: Bearer $token" -w '\n%{http_code}' "$target/api/proc/active" 2>/dev/null)" || raw=""
+    else
+      raw="$(curl -s -m 10 -w '\n%{http_code}' "$target/api/proc/active" 2>/dev/null)" || raw=""
+    fi
   else
-    raw="$(ssh -o ConnectTimeout=10 -o BatchMode=yes "$target" "curl -s -m 10 -w '\n%{http_code}' http://127.0.0.1:7860/api/proc/active" 2>/dev/null)" || raw=""
+    raw="$(ssh -o ConnectTimeout=10 -o BatchMode=yes "$target" "curl -s -m 10 ${token:+-H 'Authorization: Bearer $token'} -w '\\n%{http_code}' http://127.0.0.1:7860/api/proc/active" 2>/dev/null)" || raw=""
   fi
   code="${raw##*$'\n'}"
   case "$code" in ''|*[!0-9]*) code=0 ;; esac
@@ -54,22 +79,27 @@ fetch_proc() {
 
 # check_node LABEL KIND(local|ssh) TARGET(api base | ssh host) DATA_ROOT -> exit 0 ok / 1 block / 2 unknown
 check_node() {
-  local label="$1" kind="$2" target="$3" root="$4" code up="unknown"
+  local label="$1" kind="$2" target="$3" root="$4" code up="unknown" token
+  token="$(node_token "$kind" "$target" "$root")"
   : > "$TMP/tasks.json"; : > "$TMP/proc.json"
   if [ "$kind" = local ]; then
-    curl -s -m 10 "$target/api/tasks" -o "$TMP/tasks.json" 2>/dev/null || : > "$TMP/tasks.json"
-  else
-    ssh -o ConnectTimeout=10 -o BatchMode=yes "$target" 'curl -s -m 10 http://127.0.0.1:7860/api/tasks' > "$TMP/tasks.json" 2>/dev/null || : > "$TMP/tasks.json"
-  fi
-  code="$(fetch_proc "$kind" "$target")"
-  if [ "$code" = 404 ]; then   # old bundle: blocking-path uploads are invisible to the queue, read result files
-    if [ "$kind" = local ]; then
-      up="$(python3 -c "$UPLOADING_PY" "$root/stage" "$UPLOADING_STALE_MS" 2>/dev/null)" || up=unknown
+    if [ -n "$token" ]; then
+      curl -s -m 10 -H "Authorization: Bearer $token" "$target/api/tasks" -o "$TMP/tasks.json" 2>/dev/null || : > "$TMP/tasks.json"
     else
-      up="$(printf '%s' "$UPLOADING_PY" | ssh -o ConnectTimeout=10 -o BatchMode=yes "$target" "python3 - \"$root/stage\" $UPLOADING_STALE_MS" 2>/dev/null)" || up=unknown
+      curl -s -m 10 "$target/api/tasks" -o "$TMP/tasks.json" 2>/dev/null || : > "$TMP/tasks.json"
     fi
-    [ -n "$up" ] || up=unknown
+  else
+    ssh -o ConnectTimeout=10 -o BatchMode=yes "$target" "curl -s -m 10 ${token:+-H 'Authorization: Bearer $token'} http://127.0.0.1:7860/api/tasks" > "$TMP/tasks.json" 2>/dev/null || : > "$TMP/tasks.json"
   fi
+  code="$(fetch_proc "$kind" "$target" "$token")"
+  # Node-result files cover the blocking path (`_node-pipeline`) even when the queue endpoint
+  # answers 200: a fresh phase=uploading row means an irreversible submit may be in flight.
+  if [ "$kind" = local ]; then
+    up="$(python3 -c "$UPLOADING_PY" "$root/stage" "$UPLOADING_STALE_MS" 2>/dev/null)" || up=unknown
+  else
+    up="$(printf '%s' "$UPLOADING_PY" | ssh -o ConnectTimeout=10 -o BatchMode=yes "$target" "python3 - \"$root/stage\" $UPLOADING_STALE_MS" 2>/dev/null)" || up=unknown
+  fi
+  [ -n "$up" ] || up=unknown
   python3 "$PY" --label "$label" --tasks "$TMP/tasks.json" --proc-status "$code" --proc "$TMP/proc.json" --uploading "$up"
 }
 
@@ -113,9 +143,17 @@ rc=0
 worst() { # BLOCK(1) beats UNKNOWN(2) beats OK(0)
   if [ "$1" -eq 1 ] || [ "$2" -eq 1 ]; then echo 1; elif [ "$1" -gt "$2" ]; then echo "$1"; else echo "$2"; fi
 }
-nrc=0; check_node "master(本机)" local "$LOCAL_API" "$LOCAL_DATA_ROOT" || nrc=$?; rc="$(worst "$rc" "$nrc")"
-nrc=0; check_node "VPS1($VPS_HOST)" ssh "$VPS_HOST" "$VPS_DATA_ROOT" || nrc=$?; rc="$(worst "$rc" "$nrc")"
-nrc=0; check_node "VPS2(${VPS2_HOST:-video-rec-2})" ssh "${VPS2_HOST:-video-rec-2}" "$VPS_DATA_ROOT" || nrc=$?; rc="$(worst "$rc" "$nrc")"
+check_and_merge() { local nrc=0; check_node "$@" || nrc=$?; rc="$(worst "$rc" "$nrc")"; }
+case "$NODE_ONLY" in
+  local) check_and_merge "master(本机)" local "$LOCAL_API" "$LOCAL_DATA_ROOT" ;;
+  vps1)  check_and_merge "VPS1($VPS_HOST)" ssh "$VPS_HOST" "$VPS_DATA_ROOT" ;;
+  vps2)  check_and_merge "VPS2(${VPS2_HOST:-video-rec-2})" ssh "${VPS2_HOST:-video-rec-2}" "$VPS_DATA_ROOT" ;;
+  "")
+    check_and_merge "master(本机)" local "$LOCAL_API" "$LOCAL_DATA_ROOT"
+    check_and_merge "VPS1($VPS_HOST)" ssh "$VPS_HOST" "$VPS_DATA_ROOT"
+    check_and_merge "VPS2(${VPS2_HOST:-video-rec-2})" ssh "${VPS2_HOST:-video-rec-2}" "$VPS_DATA_ROOT" ;;
+  *) echo "unknown node: $NODE_ONLY (local|vps1|vps2)" >&2; exit 2 ;;
+esac
 
 echo
 case "$rc" in

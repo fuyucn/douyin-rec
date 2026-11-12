@@ -6,7 +6,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -14,6 +14,7 @@ const ROOT = join(import.meta.dirname, "..", "..");
 const PY = join(ROOT, "scripts", "deploy-precheck.py");
 const SH = join(ROOT, "scripts", "deploy-precheck.sh");
 const have = (bin: string): boolean => spawnSync(bin, ["--version"]).status === 0;
+const readFileSyncSafe = (path: string): string => { try { return readFileSync(path, "utf-8"); } catch { return ""; } };
 if (!have("python3")) console.warn("[deploy-precheck.test] python3 not found, skipping");
 const d = have("python3") && have("bash") ? describe : describe.skip;
 
@@ -25,7 +26,7 @@ function guard(c: Case): { code: number | null; out: string } {
   writeFileSync(tasks, c.tasks === undefined ? "" : JSON.stringify(c.tasks));
   writeFileSync(proc, c.proc === undefined ? "" : typeof c.proc === "string" ? c.proc : JSON.stringify(c.proc));
   const r = spawnSync("python3", ["-I", PY, "--label", "n", "--tasks", tasks, "--proc-status", String(c.procStatus ?? 0),
-    "--proc", proc, "--uploading", c.uploading ?? "unknown"], { encoding: "utf-8" });
+    "--proc", proc, "--uploading", c.uploading ?? "0"], { encoding: "utf-8" });
   return { code: r.status, out: r.stdout };
 }
 const idle = [{ id: 1, running: true, recording: false }];
@@ -38,10 +39,19 @@ d("deploy-precheck.py", () => {
   it("running.biliup > 0 blocks", () => {
     const r = guard({ tasks: idle, procStatus: 200, proc: active(1) });
     expect(r.code).toBe(1);
-    expect(r.out).toMatch(/biliup job/);
+    expect(r.out).toMatch(/upload job/);
   });
   it("running.biliup = 0 proceeds", () => {
     expect(guard({ tasks: idle, procStatus: 200, proc: active(0) }).code).toBe(0);
+  });
+  it("the part chain counts as an upload: upload-part / upload-prep / reconcile-part / remux block", () => {
+    for (const kind of ["upload-part", "upload-prep", "reconcile-part", "remux"]) {
+      const r = guard({ tasks: idle, procStatus: 200, proc: { running: { biliup: 0, [kind]: 1 } } });
+      expect(r.code, kind).toBe(1);
+    }
+  });
+  it("a fresh phase=uploading result file blocks even when the queue answers 200", () => {
+    expect(guard({ tasks: idle, procStatus: 200, proc: active(0), uploading: "1" }).code).toBe(1);
   });
   it("a 200 with a body we do not understand is unknown, not ok", () => {
     expect(guard({ tasks: idle, procStatus: 200, proc: { nope: 1 } }).code).toBe(2);
@@ -72,16 +82,25 @@ d("deploy-precheck.sh (stubbed curl/ssh)", () => {
     if (atMs !== undefined) writeFileSync(join(root, "stage", "k", ".drec-node-result.json"), JSON.stringify({ phase: "uploading", atMs }));
     return root;
   }
+  /** Local data root carrying the Web token, as every deployed node has after #600. */
+  function dataRootWithToken(token: string): string {
+    const root = dataRoot();
+    mkdirSync(join(root, "config"), { recursive: true });
+    writeFileSync(join(root, "config", "web-token"), `${token}\n`);
+    return root;
+  }
   // Stubs answer by URL; `ssh host cmd` runs cmd's curl through the same stub.
-  function runSh(procReply: string, opts: { root?: string; tasksReply?: string } = {}): { code: number | null; out: string } {
+  function runSh(procReply: string, opts: { root?: string; tasksReply?: string } = {}): { code: number | null; out: string; args: string } {
     const tasksReply = opts.tasksReply ?? "[]";
     const bin = mkdtempSync(join(tmpdir(), "dpc-bin-"));
     const stub = (name: string, body: string): void => { writeFileSync(join(bin, name), `#!/usr/bin/env bash\n${body}\n`); chmodSync(join(bin, name), 0o755); };
     // Like real curl: `-o FILE` writes the body there instead of stdout.
+    const argsFile = join(bin, "curl-args.log");
     const curlBody = `
 out=""; prev=""
 for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
 args="$*"
+printf '%s\\n' "$args" >> '${argsFile}'
 case "$args" in
   *api/tasks*) body='${tasksReply}' ;;
   *api/proc/active*) body="$(printf '%b' '${procReply}')" ;;
@@ -98,15 +117,25 @@ case "$cmd" in
 esac`);
     stub("df", "printf 'h\\nx 1 1 50 1%% /\\n'");
     const r = spawnSync("bash", [SH], { encoding: "utf-8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, LOCAL_DATA_ROOT: opts.root ?? dataRoot() } });
-    return { code: r.status, out: r.stdout };
+    const args = readFileSyncSafe(argsFile);
+    return { code: r.status, out: r.stdout, args };
   }
   it("200 with idle queue on every node is deployable", () => {
     const r = runSh('{"host":true,"running":{"biliup":0}}\\n200');
     expect(r.out).toContain("OK 可以安全部署");
     expect(r.code).toBe(0);
   });
+  it("sends the node's Web token on every API request (regression: auth made the guard wait forever)", () => {
+    const token = "guard-token-1234";
+    const r = runSh('{"host":true,"running":{"biliup":0}}\\n200', { root: dataRootWithToken(token) });
+    expect(r.code).toBe(0);
+    expect(r.args).toContain(`Authorization: Bearer ${token}`);
+  });
   it("running.biliup > 0 blocks with exit 1", () => {
     expect(runSh('{"host":true,"running":{"biliup":2}}\\n200').code).toBe(1);
+  });
+  it("fresh phase=uploading blocks even when the queue answers 200", () => {
+    expect(runSh('{"host":true,"running":{"biliup":0}}\\n200', { root: dataRoot(Date.now()) }).code).toBe(1);
   });
   it("503 waits with exit 2", () => {
     expect(runSh('{}\\n503').code).toBe(2);

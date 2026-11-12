@@ -40,37 +40,14 @@ LOG=/tmp/auto-deploy.log
 ts() { date '+%H:%M:%S'; }
 say() { echo "[$(ts)] $*" | tee -a "$LOG"; }
 
-# ── 录制状态查询(任一失败按「在录」保守处理) ────────────────────────────────
-recording_of() {  # $1=local|vps1|vps2 → 输出 在录任务描述(空=空闲)
-  case "$1" in
-    local) docker exec douyin-rec sh -c 'curl -sS --max-time 6 http://127.0.0.1:7860/api/tasks' 2>/dev/null ;;
-    vps1)  ssh -o ConnectTimeout=6 vps 'curl -sS --max-time 6 http://127.0.0.1:7860/api/tasks' 2>/dev/null ;;
-    vps2)  ssh -o ConnectTimeout=6 video-rec-2 'curl -sS --max-time 6 http://127.0.0.1:7860/api/tasks' 2>/dev/null ;;
-  esac | python3 -c "$(cat <<'PY'
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    out = []
-    for t in data:
-        if t.get("recording"):
-            out.append("%s:%s" % (t.get("id"), t.get("anchorName") or t.get("room")))
-    print("|".join(out))
-except Exception:
-    print("UNKNOWN")   # 查不到 → 视为不可安全部署
-PY
-)"
-}
-
 wait_idle() { # $1=节点名 $2=最长等待秒 ; 空闲返回0
-  local node="$1" maxs="$2" waited=0 r
+  local node="$1" maxs="$2" waited=0 r rc
   while [[ $waited -lt $maxs ]]; do
-    r=$(recording_of "$node")
-    if [[ -z "$r" ]]; then return 0; fi
-    if [[ "$r" == "UNKNOWN" ]]; then
-      say "  [$node] 状态查询失败 → 保守等待重试"
-    else
-      say "  [$node] 仍在录: $r → 等待"
-    fi
+    r=$(scripts/deploy-precheck.sh --node "$node" 2>&1); rc=$?
+    if [[ $rc -eq 0 ]]; then return 0; fi
+    # deploy-precheck also treats in-flight uploads (biliup / part chain / phase=uploading)
+    # as busy, which restarting here would turn into an irreversible duplicate submit.
+    say "  [$node] 仍在录/在上传/状态未知 → 等待:$(printf '%s' "$r" | grep -m1 'BLOCK\|WARN' | sed 's/^  //')"
     sleep "$POLL"; waited=$((waited+POLL))
   done
   return 1
@@ -85,6 +62,9 @@ FAILED=()   # 记录失败/跳过的步骤,最后汇总
 note() { FAILED+=("$1"); }
 
 # ── ① master 重建(它不直接录;只要容器内无录制子进程) ────────────────────────
+if [[ "$STAGE" != "first" && "$STAGE" != "all" ]]; then
+  say "① master: 跳过(stage=$STAGE 不包含 master)"
+else
 say "① master:检查是否在录…"
 if wait_idle local "$MAXS"; then
   say "  master 空闲 → 重建镜像"
@@ -98,8 +78,12 @@ if wait_idle local "$MAXS"; then
 else
   say "  ✗ master 等待超时 → 跳过(继续其余步骤)"; note "master 未更新(超时)"
 fi
+fi
 
 # ── ② VPS2 装 swap(不重启,零风险) ───────────────────────────────────────────
+if [[ "$STAGE" != "first" && "$STAGE" != "all" ]]; then
+  say "② VPS2 swap: 跳过(stage=$STAGE 不包含 VPS2)"
+else
 say "② VPS2:装 swap(若缺)"
 if [[ $DRY == 1 ]]; then say "  [dry] 跳过 swap"; else
   ssh -o ConnectTimeout=8 video-rec-2 'bash -s' <<'EOS' 2>&1 | tee -a "$LOG"
@@ -114,6 +98,7 @@ echo 'vm.swappiness=10' | sudo tee /etc/sysctl.d/99-swap.conf >/dev/null
 sudo sysctl -p /etc/sysctl.d/99-swap.conf >/dev/null
 echo "  ✓ swap 已启用:"; free -h | grep -i swap
 EOS
+fi
 fi
 
 # ③ VPS1 补 fstab(只写文件,零风险:不影响运行中进程/录制)。抽成函数供 stage 调用。
