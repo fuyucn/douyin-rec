@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as nodeFs from "node:fs";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { deriveTitles } from "../../packages/app/src/node-pipeline.js";
 import { UploadGate, openUploadLimitStore, biliAccountKeyFromCookiesJson, stageSessionDir, addArchiveToSeasonIfConfigured } from "@drec/core";
 import { tryDirectTsLink, nodeStageCleanupTargets, openNodeUploadGate, planGroups, prepareNodeUploadAlias, readNodeResult, resolveUploadAccountKey, runNodeSidePipeline, splitGroupsBySession, writeNodeResult, abortNodeExecutor, isExecutorCmdline, nodeExecutorPidPath } from "../../packages/app/src/node-pipeline.js";
@@ -1169,6 +1169,17 @@ describe("节点侧:.ts 直传的安全边界(审查补测)", () => {
     expect(appended.public).toBe(false);
     expect(appended.files[0]).toMatch(/\.ts$/);
     expect(vi.mocked(remuxSegment)).not.toHaveBeenCalled();
+  });
+
+  it("分P标题模板不含 {part}:两个分P仍拿到不同别名(不再互相覆盖)", async () => {
+    const { spec, gate } = scene({});
+    spec.uploadMeta.partTitleTemplate = "{name}";
+    const r = await runNodeSidePipeline(spec, silence, gate);
+    expect(r.ok).toBe(true);
+    const created = vi.mocked(uploadPlain).mock.calls[0]![0] as { video: string };
+    const appended = vi.mocked(appendGroup).mock.calls[0]![0] as { files: string[] };
+    expect(basename(created.video)).toBe("Lilt.ts");
+    expect(basename(appended.files[0]!)).toBe("Lilt-P2.ts");
   });
 
   it("清理 source+stage 都开 → 上传成功后两处链接都清完(此时才释放数据)", async () => {

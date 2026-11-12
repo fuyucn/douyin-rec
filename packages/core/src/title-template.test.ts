@@ -8,6 +8,7 @@ import {
   isSafeStem,
   partTitleToFilename,
   parseSessionStamp,
+  resolvePartAliasStem,
   resolveOutputStem,
   resolveSubmissionTitle,
   sanitizeStem,
@@ -290,6 +291,24 @@ describe("分 P 标题(与稿件名分开)", () => {
     expect(partTitleToFilename("!!!")).toBeNull();
     expect(partTitleToFilename("")).toBeNull();
     expect(partTitleToFilename(null)).toBeNull();
+  });
+
+  it("resolvePartAliasStem: dedupes after sanitization, not on the raw title", () => {
+    const used = new Set<string>();
+    expect(resolvePartAliasStem("a/b", 1, used)).toEqual({ stem: "a-b", base: "a-b", renamed: false });
+    // Different raw titles that sanitize to the same stem must still get distinct files.
+    expect(resolvePartAliasStem("a:b", 2, used)).toEqual({ stem: "a-b-P2", base: "a-b", renamed: true });
+    expect(resolvePartAliasStem("a b", 3, used)).toEqual({ stem: "a-b-P3", base: "a-b", renamed: true });
+    // A sanitized collision that survives the first fallback keeps advancing, never reuses.
+    expect(resolvePartAliasStem("a/b-P2", 2, used)).toEqual({ stem: "a-b-P2-P2", base: "a-b-P2", renamed: true });
+  });
+
+  it("resolvePartAliasStem: empty or unsanitizable titles keep the original filename", () => {
+    const used = new Set<string>();
+    expect(resolvePartAliasStem(null, 1, used)).toBeNull();
+    expect(resolvePartAliasStem("", 1, used)).toBeNull();
+    expect(resolvePartAliasStem("!!!", 1, used)).toBeNull();
+    expect(used.size).toBe(0);
   });
 
   it("partTitleToFilename: 超长截断且不留尾部分隔符", () => {

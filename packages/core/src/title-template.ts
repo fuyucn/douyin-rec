@@ -380,6 +380,39 @@ export function partTitleToFilename(title: string | null | undefined, maxLen = 6
   return `${kept.slice(0, maxLen - suffix.length).replace(/-+$/, "")}${suffix}`;
 }
 
+/** Deduplicated upload-alias stem derived from a rendered part title. */
+export interface PartAliasStem {
+  /** Sanitized filename stem to use for the upload alias. */
+  stem: string;
+  /** Sanitized base before collision handling. */
+  base: string;
+  /** True when `stem` got the `-P{index}` suffix because the base was already used. */
+  renamed: boolean;
+}
+
+/**
+ * Compute one part's upload-alias stem and reserve it in `used`.
+ *
+ * The key invariant is dedupe **after** sanitization: `a/b` and `a:b` both become `a-b`, so
+ * deduping the raw titles would hand two parts the same alias file and silently upload the
+ * same content twice. Both master and node pipelines must use this helper so the two
+ * executions cannot drift apart again.
+ *
+ * Returns null when the title is empty or sanitizes to nothing (caller keeps the original name).
+ */
+export function resolvePartAliasStem(
+  title: string | null | undefined,
+  index: number,
+  used: Set<string>,
+): PartAliasStem | null {
+  const base = partTitleToFilename(title);
+  if (!base) return null;
+  let stem = base;
+  for (let n = 0; used.has(stem); n++) stem = `${base}-P${index}${n > 0 ? `-${n}` : ""}`;
+  used.add(stem);
+  return { stem, base, renamed: stem !== base };
+}
+
 /** 一场 job 的 stem:已落盘的优先,否则按模板渲染。 */
 export function resolveOutputStem(opts: TitleContext & {
   template?: string | null;

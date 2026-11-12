@@ -62,7 +62,9 @@ check_node() {
     ssh -o ConnectTimeout=10 -o BatchMode=yes "$target" 'curl -s -m 10 http://127.0.0.1:7860/api/tasks' > "$TMP/tasks.json" 2>/dev/null || : > "$TMP/tasks.json"
   fi
   code="$(fetch_proc "$kind" "$target")"
-  if [ "$code" = 404 ]; then   # old bundle: blocking-path uploads are invisible to the queue, read result files
+  # Node-result files cover the blocking path (`_node-pipeline`) even when the queue endpoint
+  # answers 200: a fresh phase=uploading row means an irreversible submit may be in flight.
+  if true; then
     if [ "$kind" = local ]; then
       up="$(python3 -c "$UPLOADING_PY" "$root/stage" "$UPLOADING_STALE_MS" 2>/dev/null)" || up=unknown
     else

@@ -56,7 +56,7 @@ function writeFakeCli(mode: "exit" | "hang"): { entry: string; dump: string } {
   const dump = join(dir, "dump.json");
   writeFileSync(
     entry,
-    `import { readFileSync, statSync, writeFileSync } from "node:fs";
+    `import { readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 const argv = process.argv.slice(2);
 const i = argv.indexOf("--cookies-file");
 const out = { argv };
@@ -66,7 +66,10 @@ if (i >= 0) {
   out.content = readFileSync(f, "utf-8");
   out.mode = statSync(f).mode & 0o777;
 }
-writeFileSync(${JSON.stringify(dump)}, JSON.stringify(out));
+// Publish atomically: the parent polls existsSync, and a plain writeFileSync is visible
+// after create/truncate but before the content is complete (flaky JSON parse).
+writeFileSync(${JSON.stringify(dump)} + ".tmp", JSON.stringify(out));
+renameSync(${JSON.stringify(dump)} + ".tmp", ${JSON.stringify(dump)});
 ${mode === "hang" ? "setInterval(() => {}, 1e9);" : ""}
 `,
   );

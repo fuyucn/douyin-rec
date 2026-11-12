@@ -23,6 +23,10 @@ import sys
 
 OK, BLOCK, UNKNOWN = 0, 1, 2
 
+# Every queue kind that can still be writing to Bilibili. `biliup` alone misses the part
+# chain (upload-part / upload-prep / reconcile-part), which is exactly the irreversible step.
+UPLOAD_KINDS = ("biliup", "upload-part", "upload-prep", "reconcile-part", "remux")
+
 
 def load(path):
     if not path:
@@ -48,26 +52,38 @@ def decide(label, tasks, proc_status, proc, uploading):
         return BLOCK, out
     out.append(f"  OK {label}: nothing recording (of {len(tasks)}, running={run} waiting for a stream)")
 
+    fresh_upload = None
+    if uploading not in (None, "unknown"):
+        try:
+            fresh_upload = int(uploading)
+        except ValueError:
+            fresh_upload = None
+
     if proc_status == 200:
         running = proc.get("running") if isinstance(proc, dict) else None
         if not isinstance(running, dict):
             return UNKNOWN, out + [f"  WARN {label}: /api/proc/active answered 200 but the body is not understood"]
-        n = running.get("biliup", 0)
-        if not isinstance(n, int) or isinstance(n, bool) or n < 0:
-            return UNKNOWN, out + [f"  WARN {label}: running.biliup is not a count"]
+        n = 0
+        for kind in UPLOAD_KINDS:
+            count = running.get(kind, 0)
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                return UNKNOWN, out + [f"  WARN {label}: running.{kind} is not a count"]
+            n += count
         if n > 0:
-            return BLOCK, out + [f"  BLOCK {label}: {n} biliup job(s) running in the queue; wait for them"]
-        return OK, out + [f"  OK {label}: no biliup job running in the queue"]
+            return BLOCK, out + [f"  BLOCK {label}: {n} upload job(s) (biliup/part chain) running in the queue; wait for them"]
+        if fresh_upload is None:
+            return UNKNOWN, out + [f"  WARN {label}: upload result files are unreadable"]
+        if fresh_upload > 0:
+            return BLOCK, out + [f"  BLOCK {label}: {fresh_upload} fresh phase=uploading result file(s); wait for them"]
+        return OK, out + [f"  OK {label}: no upload running (queue + result files)"]
 
     if proc_status == 404:
         if uploading == "unknown" or uploading is None:
             return UNKNOWN, out + [f"  WARN {label}: old bundle without proc-queue and the upload result files are unreadable"]
-        try:
-            fresh = int(uploading)
-        except ValueError:
+        if fresh_upload is None:
             return UNKNOWN, out + [f"  WARN {label}: unreadable fresh-upload count {uploading!r}"]
-        if fresh > 0:
-            return BLOCK, out + [f"  BLOCK {label}: old bundle; {fresh} fresh phase=uploading result file(s) (blocking-path upload in flight)"]
+        if fresh_upload > 0:
+            return BLOCK, out + [f"  BLOCK {label}: old bundle; {fresh_upload} fresh phase=uploading result file(s) (blocking-path upload in flight)"]
         return OK, out + [f"  OK {label}: old bundle (no proc-queue); no fresh upload found, cannot confirm the queue, proceeding"]
 
     why = "unreachable or timed out" if proc_status == 0 else f"HTTP {proc_status}"

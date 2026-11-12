@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 import {
-  addArchiveToSeasonIfConfigured, seasonCheckpointState, APPEND_AMBIGUOUS_MARKER, BILIUP_QUEUE_CAPABILITY, BILIUP_SLOT_CAPABILITY, isSlotBusy, SLOT_BUSY_MARKER, normalizeSeasonSectionId, UncertainOutcome, formatPartTitle, linkOrCopy, partTitleToFilename, probeChild, retryBackoffMs, RETRY_BACKOFF_MS,
+  addArchiveToSeasonIfConfigured, seasonCheckpointState, APPEND_AMBIGUOUS_MARKER, BILIUP_QUEUE_CAPABILITY, BILIUP_SLOT_CAPABILITY, isSlotBusy, SLOT_BUSY_MARKER, normalizeSeasonSectionId, UncertainOutcome, formatPartTitle, linkOrCopy, resolvePartAliasStem, probeChild, retryBackoffMs, RETRY_BACKOFF_MS,
   type ProcessContext, type ProcessJob, type ProcessResult, type Processor, type TitleContext, type UploadProgress, type UploadSlot,
 } from "@drec/core";
 import { appendGroup, countVideoParts, isAllFilesUploadedLine, runBiliup, uploadPlain, type BiliupHooks } from "./run-biliup.js";
@@ -103,15 +103,13 @@ export function aliasPartFiles(files: readonly string[], template?: string, ctx?
   if (!template || !ctx) return [...files];
   const used = new Set<string>();
   return files.map((f, i) => {
-    let base: string | null = null;
+    let title: string | null = null;
     try {
-      base = partTitleToFilename(formatPartTitle(template, { ...ctx, partIndex: i + 1, partTotal: files.length }, "plain"));
+      title = formatPartTitle(template, { ...ctx, partIndex: i + 1, partTotal: files.length }, "plain");
     } catch { /* unrenderable title: keep the original name rather than fail the upload */ }
-    if (!base) return f;
-    let stem = base;
-    for (let n = 0; used.has(stem); n++) stem = `${base}-P${i + 1}${n > 0 ? `-${n}` : ""}`;
-    used.add(stem);
-    const dst = join(dirname(f), ALIAS_DIR, `${stem}${extname(f)}`);
+    const alias = resolvePartAliasStem(title, i + 1, used);
+    if (!alias) return f;
+    const dst = join(dirname(f), ALIAS_DIR, `${alias.stem}${extname(f)}`);
     try {
       mkdirSync(dirname(dst), { recursive: true });
       rmSync(dst, { force: true });
