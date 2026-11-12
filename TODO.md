@@ -18,21 +18,24 @@
   — **做什么**: `deploy-precheck.sh/.py` 读取各节点 `config/web-token` 并带 `Authorization`；200 分支统计 `biliup / upload-part / upload-prep / reconcile-part / remux` 与新鲜 `phase=uploading` 结果文件；新增 `--node` 单节点模式；`auto-deploy.sh` 的 `wait_idle` 改为逐节点调用 precheck；`install-worker.sh --check-busy` 同样带 token 并把 `remux` 计入忙。
   **为什么**: 启用 Web 鉴权后守卫全部 401 → fail-closed 永远等待；同时 precheck 只数 `running.biliup`，auto-deploy 又完全不调用 precheck，重启可能打断不可逆的上传分P链。
   **验收**: 两处 guard 测试新增 200 分支上传 kind/结果文件用例并全绿；本机实跑 precheck 三节点判定正确；节点实跑 `--check-busy` 正确；全量 test/typecheck；部署后实跑带 token 判定。
+  **现状（2026-11-12）**: PR [#647](https://github.com/fuyucn/douyin-rec/pull/647) 已合并（merge `28380b45`，版本 0.0.366）；master 与一个 worker 已实跑 precheck 带 token 判定，第三个 worker 在录期间正确 BLOCK，等空闲后由 auto-deploy 继续。
 
 - [~] **T-200 分P上传别名在清洗后去重（issue [#646](https://github.com/fuyucn/douyin-rec/issues/646) → PR [#647](https://github.com/fuyucn/douyin-rec/pull/647)，2026-11-12）**
   — **做什么**: `@drec/core` 新增 `resolvePartAliasStem(title, index, used)`：先 `partTitleToFilename` 清洗/截断，再在清洗后的 stem 上去重并补 `-P{idx}`；节点侧、分段侧、rolling 侧三处上传别名统一调用。
   **为什么**: 分段侧与节点侧曾各自在原始标题上去重、之后才清洗；两个不同标题（或 60 字符截断后）会落到同一 `.upload/<stem>.mp4`，第二次硬链接覆盖第一次 → 重复上传同一段、丢一个分P。
   **验收**: core 用例覆盖清洗后同名与不可清洗标题；节点侧两分P模板不含 `{part}` 得到 `stem` 与 `stem-P2`；撤修复单测 FAIL；全量 test/typecheck/bundle；版本 0.0.365→0.0.366。
+  **现状（2026-11-12）**: PR [#647](https://github.com/fuyucn/douyin-rec/pull/647) 已合并；全量 5231 passed；master 与一个 worker 已部署 0.0.366，第三个 worker 待空闲部署。
 
 [~] **T-198 直播直传同场判定以真实进度为准（issue [#642](https://github.com/fuyucn/douyin-rec/issues/642)，2026-11-12）**
   — **做什么**: `rolloverStaleState` 的最后活动取 `max(state.updatedAt, 未确认分 P 的 spool mtime, 恢复进度标记)`；新增 `<state>.activity` 标记，只在恢复重传的**真实块进度**上写（每分钟节流，重试/定时心跳不写）；启动恢复把 `o.signal` 传入 `resubmitAllUnconfirmed`，取消后不再发起新的不可逆请求；重传按 10% 输出进度日志；归档时删掉标记。
   **为什么**: 长分 P 录制或大文件重传期间没有状态写入，`updatedAt` 停在 54 分钟前；重启被误判为“换场”，把仍可恢复的分 P 与 archive 身份拆到归档（#642 现场证据：chunk 98 三次 PUT 重试耗尽，下一次启动归档了未确认状态）。
   **验收**: 5 条新用例（长分 P 的 spool mtime、恢复进度标记、无进度仍正常老化、取消后不提交、进度日志+标记）；撤修复 4/5 红；全量 `pnpm test` + `pnpm typecheck` + `pnpm bundle`；版本 0.0.364→0.0.365。
 
-- [~] **T-197 内部节点命令自动带节点本地 Web 凭据（issue [#641](https://github.com/fuyucn/douyin-rec/issues/641)，2026-11-12）**
+- [x] **T-197 内部节点命令自动带节点本地 Web 凭据（issue [#641](https://github.com/fuyucn/douyin-rec/issues/641)，2026-11-12）**
   — **做什么**: `web/auth.ts` 新增 `readWebToken(root)`（环境变量优先、其次 `<root>/config/web-token`；从不生成、读失败按无凭据处理）；`node-commands.ts` 的 apply-tasks 硬停/排空、anchor 刷新、`task-logs` 统一加 `Authorization: Bearer`；无凭据时零 header（旧服务行为不变）。关联/配对沿用现有自动流程，不再需要人工复制 token。
   **为什么**: 启用 Web 鉴权后 master 读节点日志返回 `serve HTTP 401`，节点 apply-tasks 的 stop/drain 也被拒——这些内部回环调用原来完全不带头。
   **验收**: 新增 4 条用例（key file、环境变量优先、无凭据零 header、stop/drain/anchor 全覆盖）；撤修复 4 条全红；全量 `pnpm test` + `pnpm typecheck` + `pnpm bundle`；版本 0.0.363→0.0.364。
+  **现状（2026-11-12）**: 已部署 0.0.366；生产实跑节点 `_task-logs` 返回日志（无 `serve HTTP 401`）。stop/drain 的内部鉴权由同一 helper 覆盖，未主动打断生产录制做破坏性验证。
 
 - [~] **T-173 直播直传 full 模式「当前分 P」崩溃后不进 WAL、被当孤儿清扫（issue [#581](https://github.com/fuyucn/douyin-rec/issues/581)，2026-11-10）**
   — **做什么**: 按独立只读 review 的 F12 最小修法——仅 `spoolMode==="full" && submit!==false` 时在 `openPart` 同步写一条 `confirmed:false` 的 `parts` 行（`noteUnconfirmedPart`，bytes/durationSec 先给 0，可选 `sealed:false` 兼容老 state）；不升 `schemaVersion`（保持 1）、不改 spool 文件名、不动 `pending` WAL / `rolloverStaleState` / `spoolSweepSafe` / CLI 命名。配套 4 项：`discard()`/discardedTail/negligibleTail 要 `dropPart`；`resubmitUnconfirmedPart` 对 0 字节/仅 PAT-PMT 孤儿 `dropPart` 不 fail；写失败时同步把 `spoolIncomplete` 刷进该行（守 #579）；核对 `keepOrLose` 不再因行已存在漏写 probe 后 duration。启动 `dropUnrecoverableUnsealed()` 作 F7 安全网。
