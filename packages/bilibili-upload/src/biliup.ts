@@ -11,6 +11,7 @@ import {
 import { appendGroup, countVideoParts, isAllFilesUploadedLine, runBiliup, uploadPlain, type BiliupHooks } from "./run-biliup.js";
 import { TransferWatch, readTcpAcked, watchConfigOf, type AckSample } from "./biliup-progress.js";
 import { findRecentArchive, type ArchiveQuery } from "@drec/processors";
+import { BILIUP_TARGET_ID } from "./target-id.js";
 
 export interface BiliupParams {
   cookies: string;
@@ -299,17 +300,17 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
           if (!ctx.setState) throw new Error("process context has no checkpoint writer");
-          ctx.setState({ bv: st.bv, seasonState: "pending" });
+          ctx.setState({ bv: st.bv, seasonState: "pending", targetState: { targetId: BILIUP_TARGET_ID, archiveId: st.bv, season: "pending" } });
           seasonCheckpointReady = true;
           break;
         } catch (e) { lastError = e; }
       }
       if (!seasonCheckpointReady) {
         ctx.log(`season pending checkpoint not saved; skipping association: ${String((lastError as Error)?.message ?? lastError).slice(0, 200)}`);
-        ctx.setState?.({ bv: st.bv });
+        ctx.setState?.({ bv: st.bv, targetState: { targetId: BILIUP_TARGET_ID, archiveId: st.bv } });
       }
     } else {
-      ctx.setState?.({ bv: st.bv });
+      ctx.setState?.({ bv: st.bv, targetState: { targetId: BILIUP_TARGET_ID, archiveId: st.bv } });
     }
   }
   const bv = st.bv;

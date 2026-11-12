@@ -33,7 +33,8 @@ import {
   type UploadTarget,
 } from "@drec/core";
 
-export const BILIUP_TARGET_ID = "bilibili-biliup";
+import { BILIUP_TARGET_ID } from "./target-id.js";
+export { BILIUP_TARGET_ID } from "./target-id.js";
 
 /** B 站「日常」分区：仅当调用方没给 tid 时兜底；真实分区来自规则。 */
 export const DEFAULT_TID = 21;

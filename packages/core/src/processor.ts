@@ -11,6 +11,7 @@
 
 import { isAbsolute, relative, resolve } from "node:path";
 import type { UploadProgressDTO } from "./api-types.js";
+import type { UploadTargetState } from "./upload-target.js";
 import { isVideoFileName } from "./output-format.js";
 import { rollingSidecarPathOf } from "./rolling.js";
 import { isUploadRateLimited } from "./upload-contract.js";
@@ -155,6 +156,8 @@ export interface ProcessContext {
   setState?(patch: {
     step?: string | null; bv?: string | null; seasonState?: "pending" | "done" | "failed" | null;
     childPid?: number | null; childPidStartedAt?: string | null; progress?: UploadProgress | null;
+    /** Opaque target checkpoint (plans/049 `6). When present it supersedes bv / seasonState. */
+    targetState?: UploadTargetState;
   }): void;
 }
 
