@@ -55,6 +55,12 @@
   **现状（2026-11-12）**: issue [#658](https://github.com/fuyucn/douyin-rec/issues/658) → PR [#659](https://github.com/fuyucn/douyin-rec/pull/659) 已合并（merge 5586af8b，0.0.372）；master 与 vps2 已 0.0.372-cdccfa（fleet 重连、任务同步 applied=4/8/15 与搬迁前逐项一致、零落盘回执照常），vps1 仍为 0.0.370-8431d9（任务 #34 `347071634383` 一直在录，两次 `--stage vps1` 各等满 10/12 分钟后按 guard 跳过），等它收播后重跑同一条命令。独立 review 仍因模型侧无响应未返回结论，本轮以逐行比对 + 两处变异验证 + CI 兜底。
   — **插曲**: 新用例最初误用了已存在的 `test/app/task-sync.test.ts`（53 条 `applyRemoteTasks` 用例），导致全量测试少 48 条；已改名为 `test/app/hub-task-sync.test.ts` 并恢复原文件。
 
+[x] **T-206 零落盘编排拆成 zero-disk-sync（plans/050 第 4 步，2026-11-12）**
+  — **做什么**: 把 master 侧零落盘编排（`ZeroDiskFleet` 构造、目标清单、每轮能力门控、回执轮询、控制台快照、投递账本）从 `createHubStarter.start` 搬进 `packages/hub-compose/src/zero-disk-sync.ts`，导出 `createZeroDiskSync(deps)`：`allowsPush` / `liveRooms` / `targets` / `beginRound` / `finishRound` / `delivery` / `clearSnapshot`；starter 只装配并把它交给 spec builder、task-sync 与 stop 路径。
+  **为什么**: 门控 + 轮询 + 快照是「节点自报、master 记账」这条链的边界，散在启动编排里既没法单测，也让 task-sync 的注入面含糊；独立后 050.5 只剩动作代理。
+  **验收**: 逐行等价搬迁（fleet 选项与 TTL、目标清单规则、blocked 重置与 last-good 清理、告警文案、stop 清快照全部不变）；新增 3 条用例（目标清单只认「源任务开零落盘 + 节点被勾选」、门控只探测目标节点并驱动 `allowsPush`、被拦房间在轮末快照里可见）；撤修复两处（去掉 streamUpload 过滤、快照不带 blocked）分别变红；接线与顺序守护改用跨模块断言；`pnpm typecheck` 0 错、全量 `pnpm test` 347 文件 5246 passed、`arch:check` 通过、`pnpm bundle` 可运行；版本 0.0.372→0.0.373。
+  **现状（2026-11-12）**: issue [#660](https://github.com/fuyucn/douyin-rec/issues/660) → PR [#661](https://github.com/fuyucn/douyin-rec/pull/661) 已合并（merge 85d09071，0.0.373）；master 与 vps2 已 0.0.373-d6806f（fleet 重连、任务同步 applied=4/8/15、零落盘回执照常），vps1 仍为 0.0.370-8431d9（任务 #34 一直在录，`--stage vps1` 按 guard 跳过）。独立 review 依旧无响应，本轮以逐行比对 + 两处变异验证 + CI 兜底。
+
 
 [~] **T-198 直播直传同场判定以真实进度为准（issue [#642](https://github.com/fuyucn/douyin-rec/issues/642)，2026-11-12）**
   — **做什么**: `rolloverStaleState` 的最后活动取 `max(state.updatedAt, 未确认分 P 的 spool mtime, 恢复进度标记)`；新增 `<state>.activity` 标记，只在恢复重传的**真实块进度**上写（每分钟节流，重试/定时心跳不写）；启动恢复把 `o.signal` 传入 `resubmitAllUnconfirmed`，取消后不再发起新的不可逆请求；重传按 10% 输出进度日志；归档时删掉标记。
