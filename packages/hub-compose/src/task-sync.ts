@@ -21,19 +21,13 @@ import { recordExpectedVersion, recordSyncError, refreshLocalRollingEffective } 
 import type { TaskStore } from "@drec/app";
 import type { Transport } from "@drec/orchestrator";
 import { getReceiptSettings, hubSyncGate } from "./hub-runtime.js";
+import type { ZeroDiskTarget } from "./zero-disk-sync.js";
 import type { CookieSync } from "./cookie-sync.js";
 
 /** The worker fields this loop needs. */
 export interface TaskSyncWorker {
   id: string;
   kind: string;
-}
-
-/** One zero-disk delivery target: the pair the round may deliver for. */
-export interface ZeroDiskTarget {
-  workerId: string;
-  platform: string;
-  roomSlug: string;
 }
 
 export interface TaskSyncDeps {

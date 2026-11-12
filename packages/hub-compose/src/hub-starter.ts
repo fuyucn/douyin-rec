@@ -12,12 +12,11 @@ import {
   resolveHubConfig, rootStatsDbPath,
 } from "@drec/app";
 import type { HubStarter } from "@drec/app";
-import { recordZeroDiskReceipt } from "@drec/orchestrator";
 import type { PipelineCfg, WorkflowNodeKey } from "@drec/orchestrator";
 import { createBiliupFileTarget } from "@drec/bilibili-upload";
 import {
   burnFlags, closeStageReady, effectiveStageFormat, isJobAbort, isJobLive, isUploadingMode,
-  isWorkerAssigned, listProcessors, normalizeSeasonSectionId, platformForRoom, registerChild,
+  listProcessors, normalizeSeasonSectionId, platformForRoom, registerChild,
   resolveDiskMinGB, resolveJobLogPath, resolveSeasonSectionId, runWithJob, stageSessionDir,
   throwIfAborted, ttlMemoAsync, USER_STOP,
 } from "@drec/core";
@@ -29,12 +28,12 @@ import {
   requestHubRetryNode, requestHubRunNow, requestHubStopJob, requestHubSync, requestNodeTaskLogs,
   requestNodeTasks, requestNotifyOutbox, setAckJob, setDeliverySnapshot, setFleetController,
   setPoolProviders, setProbeDrainSupport, setRecordingSnapshot, setRetryNode, setRunNow, setStopJob,
-  setSyncTasks, setZeroDiskLive, setZeroDiskSnapshot, setReceiptSettings, stopFleet,
+  setSyncTasks, setZeroDiskLive, setReceiptSettings, stopFleet,
   warnRuleIdentityMismatch,
 } from "./hub-runtime.js";
 import { createCookieSync } from "./cookie-sync.js";
 import { createTaskSync } from "./task-sync.js";
-import type { ZeroDiskTarget } from "./task-sync.js";
+import { createZeroDiskSync } from "./zero-disk-sync.js";
 
 export interface LocalRoomProbeFallback {
   isRoomRecording(roomSlug: string): boolean;
@@ -73,7 +72,7 @@ export function createHubStarter(deps: HubStarterDeps): HubStarter {
       setReceiptSettings(opts.store);
       const {
         registerBuiltinTransports, Reconciler, SyncLedger, startHub, getTransport, recordingStatusWorkerIds,
-        satisfiesCapabilities, ZeroDiskFleet, blockedKey,
+        satisfiesCapabilities, blockedKey,
         buildWorkflow, runWorkflowNodes, deriveStageProducts, withOutputStem, ResourcePool, openUploadLimitStore,
         parseNodeUploadConfig } = await import("@drec/orchestrator");
       const { ffprobeVideo } = await import("@drec/post-process");
@@ -316,47 +315,19 @@ export function createHubStarter(deps: HubStarterDeps): HubStarter {
       const transports = buildTransports();     // 初始 Map(pipelineDeps 也用它)
       const dbPath = (opts.dbPath ?? "douyin-rec.db").replace(/\.db$/, "-sync.db");
       const ledger = new SyncLedger(dbPath);
-      // Zero-disk on side nodes (issue #331): capability gate + receipt polling + console status.
-      // The master owns the ledger; a node only reports. `recordStreamUpload` is idempotent (terminal
-      // rows are never overwritten), so re-polling or a master restart cannot double-record.
-      const zeroDiskFleet = new ZeroDiskFleet({
-        applyReceipt: (r) => {
-          const res = recordZeroDiskReceipt(dbPath, r);
-          if (res.ok && res.alreadyTerminal) opts.log(`[zero-disk] 台账已是终态,未覆盖: ${r.streamKey}`);
-          return res;
-        },
-        log: (m) => opts.log(m),
-        alert: (message) => opts.onEvent({ kind: "error", stage: "直播直传", message }),
+      // Zero-disk orchestration (issue #331): capability gate, receipt poll and console view live in
+      // zero-disk-sync.ts; the starter only assembles the instance and hands its delivery book to the
+      // spec builder.
+      const zeroDisk = createZeroDiskSync({
+        store: opts.store,
+        log: opts.log,
+        warn: opts.warn,
+        onEvent: opts.onEvent,
+        hubDir: () => hubDir,
+        workers: loadWorkers,
+        transports: buildTransports,
+        dbPath,
       });
-      setZeroDiskLive((platform, roomSlug) => loadWorkers()
-        .filter((w) => w.kind !== "local")
-        .flatMap((w) => {
-          const lv = zeroDiskFleet.live(w.id, platform, roomSlug);
-          return lv ? [{ workerId: w.id, workerName: w.name ?? w.id, ...lv }] : [];
-        }));
-      /** Targets the master currently expects to run zero-disk: (room, non-local node) pairs. */
-      const zeroDiskTargetList = (): Array<{ workerId: string; platform: string; roomSlug: string }> => {
-        const out: Array<{ workerId: string; platform: string; roomSlug: string }> = [];
-        for (const rule of hubStore.listHubRules(hubDir)) {
-          const src = rule.recording?.sourceTaskId ? opts.store.getTask(rule.recording.sourceTaskId) : null;
-          if (!src?.streamUpload) continue;
-          const sync = resolveRuleSyncRoom(rule, src.room);
-          const srcSlug = sync.roomSlug;
-          warnRuleIdentityMismatch(rule, sync, opts.warn);
-          for (const w of loadWorkers()) {
-            if (w.kind === "local" || w.id === "local") continue;
-            if (!isWorkerAssigned(rule, w.id, w.capabilities)) continue;
-            out.push({ workerId: w.id, platform: sync.platform, roomSlug: srcSlug });
-          }
-        }
-        return out;
-      };
-      /** Rooms the master refused to push this round (reason shown in the console). Rebuilt every sync. */
-      let zeroDiskBlocked = new Map<string, string>();
-      /** Last delivery built per (node, room): reused when a rebuild fails, so a transient read error cannot stop a live upload. */
-      const zeroDiskLastGood = new Map<string, import("@drec/core").ZeroDiskDelivery>();
-      /** Last stale reason logged per (node, room), so the same warning is not repeated every sync tick. */
-      const zeroDiskStaleWarned = new Map<string, string>();
 
       // 投稿默认:uploadDefaults(新)> uploadMeta(旧,迁移兼容)> 硬兜底。
       const uploadDefaults = hubCfg.uploadDefaults ?? hubCfg.uploadMeta ?? {};
@@ -589,49 +560,12 @@ export function createHubStarter(deps: HubStarterDeps): HubStarter {
         getTask: (id) => opts.store.getTask(id),
         workers: loadWorkers(),
         cookiesPath: hubCfg.cookies,
-        allowsPush: (id) => zeroDiskFleet.allowsPush(id),
+        allowsPush: zeroDisk.allowsPush,
         blockedKey,
-        delivery: {
-          lastGood: (k) => zeroDiskLastGood.get(k),
-          remember: (k, d) => { zeroDiskLastGood.set(k, d); },
-          staleWarned: (k) => zeroDiskStaleWarned.get(k),
-          setStale: (k, reason) => { zeroDiskStaleWarned.set(k, reason); },
-          clearStale: (k) => { zeroDiskStaleWarned.delete(k); },
-          block: (k, reason) => { zeroDiskBlocked.set(k, reason); },
-        },
+        delivery: zeroDisk.delivery,
         warn: opts.warn,
         onRuleIdentityMismatch: (rule, sync) => warnRuleIdentityMismatch(rule, sync, opts.warn),
       });
-      // Zero-disk round glue: the capability gate runs before any spec is built, the receipt poll
-      // after the worker loop. Both stay here for now (plan 050.4 moves them out); task-sync owns
-      // only the loop and the per-worker apply.
-      const fleetWorkers = (): Array<{ id: string; name: string; kind: string; transport?: ReturnType<typeof getTransport> }> => {
-        const tmap = buildTransports();
-        return loadWorkers().map((w) => ({ id: w.id, name: w.name ?? w.id, kind: w.kind, transport: tmap.get(w.id) }));
-      };
-      const beginZeroDiskRound = async (): Promise<ZeroDiskTarget[]> => {
-        const targets = zeroDiskTargetList();
-        zeroDiskBlocked = new Map();
-        // Forget deliveries of pairs that are no longer targeted: a later re-assignment must rebuild.
-        const liveKeys = new Set(targets.map((x) => blockedKey(x.workerId, x.platform, x.roomSlug)));
-        for (const k of [...zeroDiskLastGood.keys()]) if (!liveKeys.has(k)) zeroDiskLastGood.delete(k);
-        try {
-          const wanted = new Set(targets.map((x) => x.workerId));
-          await zeroDiskFleet.refreshSupport(fleetWorkers().filter((w) => wanted.has(w.id)));
-        } catch (e) {
-          opts.warn(`[zero-disk] 能力探测失败(按不支持处理): ${(e as Error).message}`);
-        }
-        return targets;
-      };
-      const finishZeroDiskRound = async (targets: ZeroDiskTarget[]): Promise<void> => {
-        try {
-          const fw = fleetWorkers();
-          await zeroDiskFleet.poll(fw, new Set(targets.map((x) => x.workerId)));
-          setZeroDiskSnapshot(zeroDiskFleet.snapshot(targets, fw, zeroDiskBlocked));
-        } catch (e) {
-          opts.warn(`[zero-disk] 回执轮询失败(下轮重试): ${(e as Error).message}`);
-        }
-      };
       const syncTasks = createTaskSync({
         store: opts.store,
         manager: opts.manager,
@@ -642,8 +576,8 @@ export function createHubStarter(deps: HubStarterDeps): HubStarter {
         workers: loadWorkers,
         transports: buildTransports,
         cookieSync,
-        beginRound: beginZeroDiskRound,
-        finishRound: finishZeroDiskRound,
+        beginRound: zeroDisk.beginRound,
+        finishRound: zeroDisk.finishRound,
       });
       setSyncTasks(syncTasks);
       hubSyncGate.bind(syncTasks);
@@ -841,7 +775,7 @@ export function createHubStarter(deps: HubStarterDeps): HubStarter {
         recordingProbeStopped = true;
         if (recordingStatusTimer) clearTimeout(recordingStatusTimer);
         setRecordingSnapshot(new Map());
-        setZeroDiskSnapshot(new Map());
+        zeroDisk.clearSnapshot();
         setZeroDiskLive(undefined);
         setSyncTasks(undefined);
         hubSyncGate.unbind(); // 必须解绑:否则 stop 之后的同步请求会打到已停的旧 runner(自审发现)

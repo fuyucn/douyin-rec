@@ -77,10 +77,11 @@ describe("master spec builder", () => {
     // task-sync loop owns the apply. Pin both the seam and the per-round order inside the loop.
     const hubStarter = readFileSync(join(ROOT, "packages/hub-compose/src/hub-starter.ts"), "utf-8");
     const taskSync = readFileSync(join(ROOT, "packages/hub-compose/src/task-sync.ts"), "utf-8");
-    expect(hubStarter).toContain("zeroDiskFleet.refreshSupport(");
-    expect(hubStarter).toContain("zeroDiskFleet.poll(");
-    expect(hubStarter).toContain("beginRound: beginZeroDiskRound");
-    expect(hubStarter).toContain("finishRound: finishZeroDiskRound");
+    const zeroDisk = readFileSync(join(ROOT, "packages/hub-compose/src/zero-disk-sync.ts"), "utf-8");
+    expect(zeroDisk).toContain("fleet.refreshSupport(");
+    expect(zeroDisk).toContain("fleet.poll(");
+    expect(hubStarter).toContain("beginRound: zeroDisk.beginRound");
+    expect(hubStarter).toContain("finishRound: zeroDisk.finishRound");
     expect(taskSync).toContain("await t.applyTasks({ desired");
     const gate = taskSync.indexOf("await deps.beginRound()");
     const loop = taskSync.indexOf("for (const w of deps.workers())");

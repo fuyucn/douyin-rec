@@ -72,8 +72,8 @@ describe("T16 sync receipt wiring", () => {
   // and the credential push must stay ahead of applies inside that loop.
   it("hub starter assembles the task sync loop and keeps push-before-apply", () => {
     expect(hubStarter).toContain("createTaskSync({");
-    expect(hubStarter).toContain("beginRound: beginZeroDiskRound");
-    expect(hubStarter).toContain("finishRound: finishZeroDiskRound");
+    expect(hubStarter).toContain("beginRound: zeroDisk.beginRound");
+    expect(hubStarter).toContain("finishRound: zeroDisk.finishRound");
     const pushAt = taskSync.indexOf("await deps.cookieSync.pushTo(");
     const applyAt = taskSync.indexOf("await t.applyTasks(");
     expect(pushAt).toBeGreaterThan(-1);
