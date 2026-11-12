@@ -48,6 +48,13 @@
   **验收**: 逐行等价搬迁（闸门、四个去重结构、告警文案、旧 bundle 与未送达的区分全部不变）；新增 5 条用例（本机跳过/空登录态、复核窗口内不重推、旧 bundle 只告警一次、rejected 不记指纹且下轮重试、读失败不 reject tick）；接线守护测试改读新模块并钉住 tick 调用；撤修复三处（指纹写进 `!verdict.ok` 分支、去掉 local 守卫、删掉 tick 调用）分别变红；`pnpm typecheck` 0 错、全量 `pnpm test` 344 文件 5238 passed、`arch:check` 通过、`pnpm bundle` 可运行；版本 0.0.370→0.0.371。
   **现状（2026-11-12）**: issue [#656](https://github.com/fuyucn/douyin-rec/issues/656) → PR [#657](https://github.com/fuyucn/douyin-rec/pull/657) 已合并（merge ee0d8ae2，0.0.371）；master 与 vps2 已 0.0.371-22a265（fleet 重连、任务同步 applied=4/8/15、零落盘回执照常；无 `登录态下发` 行 = 指纹命中后按闸门跳过，属预期），vps1 仍为 0.0.370-8431d9（`--stage vps1` 等满 12 分钟仍未空录：8 任务里 1 个在录，按 guard 跳过不改动），下次空录后重跑同一条命令即可。本轮三次独立 review 派发均因模型侧 502/超时未返回结论，改由逐行比对 + 三处变异验证替代，CI 绿。
 
+[x] **T-205 任务同步循环拆成 task-sync（plans/050 第 3 步，2026-11-12）**
+  — **做什么**: 把 hub 每轮的任务对账循环（约 145 行）从 `createHubStarter.start` 搬进 `packages/hub-compose/src/task-sync.ts`，导出 `createTaskSync(deps)`；零落盘能力门控与回执轮询留在 starter，以 `beginRound` / `finishRound` 注入。轮次顺序不变：边录边传重算 → 零落盘门控 → 平台登录态下发 → 逐节点下发 → 回执轮询。
+  **为什么**: 这轮循环握着 force 累积、回执写入、本机硬停与 drain 例外、坏配置告警去重四处易错语义，混在 900 行的启动编排里既没法单测也看不清边界；独立后 starter 只剩装配与零落盘胶水。
+  **验收**: 逐行等价搬迁（SyncGate force 与补跑递归、期望版本/同步失败回执、本机 pending 硬停 + `enabled=false && drain=true` 跳过、跳过原因去重与告警文案全部不变）；新增 4 条用例（force 透传、drain 例外、apply 抛错写 syncError 且不外抛、跳过原因只告警一次）；撤修复两处（关掉 drain 判断、关掉 syncError 写入）分别变红；接线守护与零落盘顺序守护改用跨模块断言；`pnpm typecheck` 0 错、全量 `pnpm test` 346 文件 5243 passed、`arch:check` 通过、`pnpm bundle` 可运行；版本 0.0.371→0.0.372。
+  **现状（2026-11-12）**: issue [#658](https://github.com/fuyucn/douyin-rec/issues/658) → PR [#659](https://github.com/fuyucn/douyin-rec/pull/659) 已合并（merge 5586af8b，0.0.372）；master 与 vps2 已 0.0.372-cdccfa（fleet 重连、任务同步 applied=4/8/15 与搬迁前逐项一致、零落盘回执照常），vps1 仍为 0.0.370-8431d9（任务 #34 `347071634383` 一直在录，两次 `--stage vps1` 各等满 10/12 分钟后按 guard 跳过），等它收播后重跑同一条命令。独立 review 仍因模型侧无响应未返回结论，本轮以逐行比对 + 两处变异验证 + CI 兜底。
+  — **插曲**: 新用例最初误用了已存在的 `test/app/task-sync.test.ts`（53 条 `applyRemoteTasks` 用例），导致全量测试少 48 条；已改名为 `test/app/hub-task-sync.test.ts` 并恢复原文件。
+
 
 [~] **T-198 直播直传同场判定以真实进度为准（issue [#642](https://github.com/fuyucn/douyin-rec/issues/642)，2026-11-12）**
   — **做什么**: `rolloverStaleState` 的最后活动取 `max(state.updatedAt, 未确认分 P 的 spool mtime, 恢复进度标记)`；新增 `<state>.activity` 标记，只在恢复重传的**真实块进度**上写（每分钟节流，重试/定时心跳不写）；启动恢复把 `o.signal` 传入 `resubmitAllUnconfirmed`，取消后不再发起新的不可逆请求；重传按 10% 输出进度日志；归档时删掉标记。
