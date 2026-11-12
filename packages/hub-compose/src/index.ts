@@ -5,3 +5,4 @@ export { SyncGate } from "./sync-gate.js";
 export * from "./hub-starter.js";
 export * from "./cookie-sync.js";
 export * from "./task-sync.js";
+export * from "./zero-disk-sync.js";
