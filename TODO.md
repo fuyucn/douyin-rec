@@ -14,6 +14,11 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+[~] **T-198 直播直传同场判定以真实进度为准（issue [#642](https://github.com/fuyucn/douyin-rec/issues/642)，2026-11-12）**
+  — **做什么**: `rolloverStaleState` 的最后活动取 `max(state.updatedAt, 未确认分 P 的 spool mtime, 恢复进度标记)`；新增 `<state>.activity` 标记，只在恢复重传的**真实块进度**上写（每分钟节流，重试/定时心跳不写）；启动恢复把 `o.signal` 传入 `resubmitAllUnconfirmed`，取消后不再发起新的不可逆请求；重传按 10% 输出进度日志；归档时删掉标记。
+  **为什么**: 长分 P 录制或大文件重传期间没有状态写入，`updatedAt` 停在 54 分钟前；重启被误判为“换场”，把仍可恢复的分 P 与 archive 身份拆到归档（#642 现场证据：chunk 98 三次 PUT 重试耗尽，下一次启动归档了未确认状态）。
+  **验收**: 5 条新用例（长分 P 的 spool mtime、恢复进度标记、无进度仍正常老化、取消后不提交、进度日志+标记）；撤修复 4/5 红；全量 `pnpm test` + `pnpm typecheck` + `pnpm bundle`；版本 0.0.364→0.0.365。
+
 - [~] **T-197 内部节点命令自动带节点本地 Web 凭据（issue [#641](https://github.com/fuyucn/douyin-rec/issues/641)，2026-11-12）**
   — **做什么**: `web/auth.ts` 新增 `readWebToken(root)`（环境变量优先、其次 `<root>/config/web-token`；从不生成、读失败按无凭据处理）；`node-commands.ts` 的 apply-tasks 硬停/排空、anchor 刷新、`task-logs` 统一加 `Authorization: Bearer`；无凭据时零 header（旧服务行为不变）。关联/配对沿用现有自动流程，不再需要人工复制 token。
   **为什么**: 启用 Web 鉴权后 master 读节点日志返回 `serve HTTP 401`，节点 apply-tasks 的 stop/drain 也被拒——这些内部回环调用原来完全不带头。

@@ -3197,6 +3197,65 @@ describe("same-broadcast rule on the room-keyed state (issue #293)", () => {
     expect(archives().length).toBe(0);
   });
 
+  it("issue #642: an unconfirmed part still being written keeps the same broadcast", () => {
+    // A 2-hour part has one open-time state write; its spool is appended the whole time.
+    seed(120, { parts: [part(false)] });
+    writeFileSync(join(dir, "p0.ts"), "x");   // mtime = now = real recording activity
+    const alerts: string[] = [];
+    expect(openWithAlerts(alerts).bvid).toBe(FAKE_BV);
+    expect(alerts.length).toBe(0);
+    expect(archives().length).toBe(0);
+  });
+
+  it("issue #642: recovery progress marker keeps a slow resubmit in the same broadcast", () => {
+    seed(54);
+    writeFileSync(`${statePath()}.activity`, "x");   // chunk progress 20 min into the retry
+    expect(open().bvid).toBe(FAKE_BV);
+    expect(archives().length).toBe(0);
+  });
+
+  it("issue #642: a stuck recovery with no chunk progress still ages out", () => {
+    seed(54);
+    const marker = `${statePath()}.activity`;
+    writeFileSync(marker, "x");
+    const old = new Date(Date.now() - 40 * MIN);
+    utimesSync(marker, old, old);
+    expect(open().bvid).toBeUndefined();
+    expect(archives().length).toBe(1);
+  });
+
+  it("issue #642: an aborted startup recovery performs no submit and keeps the part unconfirmed", async () => {
+    seed(5, { parts: [part(false)] });
+    writeFileSync(join(dir, "p0.ts"), "x");
+    const s = open();
+    const ctrl = new AbortController();
+    ctrl.abort();
+    const r = await s.resubmitAllUnconfirmed(ctrl.signal);
+    expect(r.ok).toBe(false);
+    expect(r.error).toBe("resubmit aborted");
+    expect(readLivePumpState(statePath())?.parts[0]?.confirmed).toBe(false);
+    expect(archives().length).toBe(0);
+  });
+
+  it("issue #642: recovery chunk progress is logged and marks activity", async () => {
+    const spool = join(dir, "rec.ts");
+    writeFileSync(spool, Buffer.alloc(CHUNK * 3, 7));
+    const { fake } = makeUploadFetch();
+    const logs: string[] = [];
+    const s = new LivePumpSession({
+      cookiesPath: COOKIES, room: "rec", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      fetchImpl: fake, log: (m) => logs.push(m), probeDuration: async () => 5,
+      scanDtsGap: async () => null,
+    });
+    s.noteUnconfirmedPart({ index: 0, spoolPath: spool, title: "P1", bytes: 0, durationSec: 0 });
+    const submit = vi.spyOn(s, "submitPart").mockResolvedValue({ ok: true, bvid: FAKE_BV });
+    const r = await s.resubmitUnconfirmedPart();
+    expect(r.ok).toBe(true);
+    expect(submit).toHaveBeenCalled();
+    expect(logs.join("\n")).toContain("重传进度");
+    expect(existsSync(`${livePumpStatePath(dir, "rec")}.activity`)).toBe(true);
+  });
+
   it("corrupt state: archived byte-for-byte, one alert, new submission, never throws", () => {
     writeFileSync(statePath(), "{not json");
     const alerts: string[] = [];
