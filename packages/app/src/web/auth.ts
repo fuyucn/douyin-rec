@@ -93,6 +93,25 @@ export function resolveWebAuth(o: ResolveWebAuthOpts): WebAuthConfig | undefined
   return configOf(token);
 }
 
+/**
+ * Existing credential of this data root: env first, then the 0600 token file. Never generates.
+ * Internal node calls (stop/drain/anchor refresh/log tail) use it so enabling Web auth needs no
+ * manual token copying; a credential-free legacy service keeps answering (undefined -> no header).
+ */
+export function readWebToken(root: string, env: Record<string, string | undefined> = process.env): string | undefined {
+  const envToken = (env[WEB_TOKEN_ENV] ?? "").trim();
+  if (envToken) return envToken;
+  const file = webTokenPath(root);
+  try {
+    if (!existsSync(file)) return undefined;
+    const token = readFileSync(file, "utf-8").trim();
+    return token || undefined;
+  } catch {
+    // Unreadable file: behave like "no credential" instead of failing the command.
+    return undefined;
+  }
+}
+
 /** 该请求路径是否受鉴权保护；登录/版本/静态资源公开。 */
 export function authRequiredFor(pathname: string, _method: string, auth: WebAuthConfig | undefined): boolean {
   if (!auth) return false;
