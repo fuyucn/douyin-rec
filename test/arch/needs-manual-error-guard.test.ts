@@ -97,7 +97,7 @@ describe("needs_manual 必须带 error(issue #188 源码守护)", () => {
       // core 里是定义 + 类型声明,不是调用方。
       .filter((f) => !f.includes(join("packages", "core")));
     expect(users.map((f) => relative(ROOT, f)).sort()).toEqual([
-      "packages/hub-compose/src/hub-starter.ts",
+      "packages/hub-compose/src/hub-actions.ts",
       "packages/orchestrator/src/pipeline.ts",
       "packages/orchestrator/src/segment-pipeline.ts",
     ]);

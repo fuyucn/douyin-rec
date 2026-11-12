@@ -12,13 +12,11 @@ import {
   resolveHubConfig, rootStatsDbPath,
 } from "@drec/app";
 import type { HubStarter } from "@drec/app";
-import type { PipelineCfg, WorkflowNodeKey } from "@drec/orchestrator";
+import type { PipelineCfg } from "@drec/orchestrator";
 import { createBiliupFileTarget } from "@drec/bilibili-upload";
 import {
-  burnFlags, closeStageReady, effectiveStageFormat, isJobAbort, isJobLive, isUploadingMode,
-  listProcessors, normalizeSeasonSectionId, platformForRoom, registerChild,
-  resolveDiskMinGB, resolveJobLogPath, resolveSeasonSectionId, runWithJob, stageSessionDir,
-  throwIfAborted, ttlMemoAsync, USER_STOP,
+  isUploadingMode, listProcessors, normalizeSeasonSectionId, platformForRoom, registerChild,
+  resolveDiskMinGB, resolveJobLogPath, resolveSeasonSectionId, throwIfAborted, ttlMemoAsync,
 } from "@drec/core";
 import type { EnqueueRequest, HubResources, RecordingWorkerStatusDTO, RemoteTaskSpec, RollingDeliveryDTO, WorkerStatus } from "@drec/core";
 import {
@@ -26,12 +24,12 @@ import {
   readPoolSnapshot, readRecordingWorkers, readRollingDelivery, readZeroDiskLive, readZeroDiskStatus,
   recordingSnapshotKey, recordingSnapshotValues, requestHubAckJob, requestHubProbeDrainSupport,
   requestHubRetryNode, requestHubRunNow, requestHubStopJob, requestHubSync, requestNodeTaskLogs,
-  requestNodeTasks, requestNotifyOutbox, setAckJob, setDeliverySnapshot, setFleetController,
-  setPoolProviders, setProbeDrainSupport, setRecordingSnapshot, setRetryNode, setRunNow, setStopJob,
+  requestNodeTasks, requestNotifyOutbox, setDeliverySnapshot, setFleetController, setRecordingSnapshot,
   setSyncTasks, setZeroDiskLive, setReceiptSettings, stopFleet,
   warnRuleIdentityMismatch,
 } from "./hub-runtime.js";
 import { createCookieSync } from "./cookie-sync.js";
+import { createHubActions } from "./hub-actions.js";
 import { createTaskSync } from "./task-sync.js";
 import { createZeroDiskSync } from "./zero-disk-sync.js";
 
@@ -73,7 +71,7 @@ export function createHubStarter(deps: HubStarterDeps): HubStarter {
       const {
         registerBuiltinTransports, Reconciler, SyncLedger, startHub, getTransport, recordingStatusWorkerIds,
         satisfiesCapabilities, blockedKey,
-        buildWorkflow, runWorkflowNodes, deriveStageProducts, withOutputStem, ResourcePool, openUploadLimitStore,
+        ResourcePool, openUploadLimitStore,
         parseNodeUploadConfig } = await import("@drec/orchestrator");
       const { ffprobeVideo } = await import("@drec/post-process");
       const { handleEnqueue, handleProcStatus, handleProcCancel } = await import("@drec/app");
@@ -582,145 +580,21 @@ export function createHubStarter(deps: HubStarterDeps): HubStarter {
       setSyncTasks(syncTasks);
       hubSyncGate.bind(syncTasks);
 
-      // 正在进行的重跑(streamKey):检查与占用必须同步完成,否则并发请求会双双通过
-      // isJobLive/hasStreamLock 检查、再被 withStreamLock 排队串行执行两次(上传类节点会重复投稿)。
-      const retryingKeys = new Set<string>();
-      // 手动单节点重跑:UI → web API → 这里。与 reconciler 共享同一 ResourcePool 流锁,保证同场不并发;
-      // 上传类节点默认拒绝(可能已建稿/已 append),force 才放行(UI 二次确认)。
-      const retryNode = async (
-        streamKey: string,
-        node: WorkflowNodeKey,
-        force = false,
-      ): Promise<{ ok: boolean; error?: string; code?: number }> => {
-        const CORE: WorkflowNodeKey[] = ["merge", "burn_danmu", "burn_livechat", "upload_plain", "append_danmu", "append_livechat"];
-        const unsafe = (n: WorkflowNodeKey): boolean =>
-          n === "upload_plain" || n === "append_danmu" || n === "append_livechat";
-        if (!CORE.includes(node)) return { ok: false, error: `不可重跑的节点: ${node}`, code: 400 };
-        if (unsafe(node) && !force) return { ok: false, error: `${node} 属上传类节点,需确认后才可重跑`, code: 400 };
-        const parts = streamKey.split(":");
-        if (parts.length < 3) return { ok: false, error: `非法 streamKey: ${streamKey}`, code: 400 };
-        const platform = parts[0];
-        const roomSlug = parts[1];
-        const stageSub = stageSessionDir(hubCfg.stageDir ?? rootStageDir(), streamKey);
-        const job = ledger.get(streamKey);
-        // 同场 pipeline 正在跑(持流锁 / live job)→ 不排队,直接 409。
-        // 否则会静默等在锁后,等当前上传完成又重跑一次,造成重复烧录/重复分 P。
-        if (isJobLive(streamKey) || pool.hasStreamLock(streamKey)) {
-          return { ok: false, error: "任务正在执行,不能重跑节点", code: 409 };
-        }
-        // 已建稿后重传 P1 会重复投稿;已有 append done 再跑 append 会重复分 P → 拒绝(除非 force 且 UI 二次确认)。
-        if (node === "upload_plain" && job?.bv) {
-          const appended = ["append_danmu", "append_livechat"].some(
-            (k) => ledger.getNodeState(streamKey, k as WorkflowNodeKey)?.state === "done",
-          );
-          if (appended) return { ok: false, error: `已建稿(${job.bv})且已有分 P,不能重跑 P1(会重复投稿)`, code: 409 };
-        }
-        if (retryingKeys.has(streamKey)) {
-          return { ok: false, error: "该场已有重跑在执行,请稍后", code: 409 };
-        }
-        retryingKeys.add(streamKey);
-        return runWithJob(streamKey, async () => {
-          try {
-            return await pool.withStreamLock(streamKey, async () => {
-              throwIfAborted();
-              ledger.setState(streamKey, "retrying", {}, { force: true }); // 人工重跑:允许 done 场重跑单节点
-              const cfg = resolveCfg(platform, roomSlug);
-              if (!cfg) {
-                ledger.setState(streamKey, "failed", { error: `房间未开 hub: ${streamKey}` });
-                return { ok: false, error: `房间未开 hub: ${streamKey}`, code: 400 };
-              }
-              // 分段模式:产出/烧录/上传是一个整体(逐段 remux + 多文件建稿),不做单节点重跑
-              // (单段重烧会与已建稿的分 P 错位)。用「重新运行」整场重跑(幂等:已建稿只补 append)。
-              if (cfg.steps?.mergeSegments === false) {
-                return { ok: false, error: "分段上传模式不支持单节点重跑,请用「重新运行」整场重跑", code: 400 };
-              }
-              ledger.backfillNodeStates(streamKey);
-              const derived = deriveStageProducts(stageSub, effectiveStageFormat(cfg.outputFormat, cfg.uploadMode));
-              if (!derived) {
-                ledger.setState(streamKey, "failed", { error: `stage 产物缺失,无法重跑: ${stageSub}` });
-                return { ok: false, error: `stage 产物缺失,无法重跑: ${stageSub}`, code: 409 };
-              }
-              const products = job?.outputStem ? withOutputStem(derived, job.outputStem) : derived;
-              const workflow = buildWorkflow({
-                streamKey, stageSub, products, deps: pipelineDeps, cfg, log: opts.log,
-                willUpload: cfg.uploadMode === "upload",
-                ...burnFlags(cfg.steps),
-                segmentCount: 0,
-              });
-              const r = await runWorkflowNodes({
-                streamKey, nodes: workflow.nodes, edges: workflow.edges, ctx: workflow.ctx,
-                pool, forceRetry: new Set<WorkflowNodeKey>([node]),
-              });
-              if (r.ok) {
-                if (cfg.uploadMode === "upload") {
-                  const bv = ledger.get(streamKey)?.bv ?? "";
-                  ledger.markDone(streamKey, bv);
-                  if (bv) opts.onEvent({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}`, streamKey });
-                } else {
-                  // stage 模式正常收口必须带显式标记(issue #188):空 error 会被队列判成红灯事故。
-                  closeStageReady(ledger, streamKey, cfg.uploadMode);
-                }
-                return { ok: true };
-              }
-              const errText = r.failed.length
-                ? ledger.getNodeState(streamKey, r.failed[0])?.error ?? `节点失败: ${r.failed.join(",")}`
-                : `节点被阻断: ${r.blocked.join(",")}`;
-              if (errText === USER_STOP || r.blocked.some((k) => ledger.getNodeState(streamKey, k)?.error === USER_STOP)) {
-                ledger.setState(streamKey, "needs_manual", { error: USER_STOP });
-                return { ok: false, error: USER_STOP, code: 409 };
-              }
-              ledger.setState(streamKey, "failed", { error: errText });
-              return { ok: false, error: errText, code: 500 };
-            });
-          } catch (e) {
-            if (isJobAbort(e)) {
-              ledger.setState(streamKey, "needs_manual", { error: USER_STOP });
-              return { ok: false, error: USER_STOP, code: 409 };
-            }
-            throw e;
-          }
-        }).finally(() => retryingKeys.delete(streamKey));
-      };
-      setRetryNode((streamKey, node, o?: { force?: boolean }) =>
-        retryNode(streamKey, node, o?.force === true));
-      setStopJob((streamKey) => reconciler.stopJob(streamKey));
-      setAckJob((streamKey, o) => reconciler.ackJob(streamKey, o));
-      setRunNow((opts) => reconciler.runNow(opts));
-      // 远端排空能力探测(issue #569):master 只查绑定的录制节点;本机(local)跳过(自己就支持)。
-      // 任一节点旧 bundle / 不可达就失败 —— API 保持录制,绝不回退成硬停(硬停会截断当前分段)。
-      setProbeDrainSupport(async (workerIds) => {
-        for (const id of workerIds) {
-          const w = loadWorkers().find((x) => x.id === id);
-          if (!w) {
-            // 老规则可能残留已删除的 worker id:desired 构造会忽略它(没有通道可下发),探测同样跳过,
-            // 不能因此把整个房间的排空永久判失败(issue #569 review P2)。
-            opts.warn(`[hub] 排空探测:规则的 worker ${id} 不在 hub 配置里,跳过`);
-            continue;
-          }
-          if (w.kind === "local") continue;
-          let t: ReturnType<typeof getTransport> | undefined;
-          try {
-            t = buildTransports().get(id);
-          } catch (e) {
-            return { ok: false, error: `节点 ${w.name ?? id} 通道配置无效: ${(e as Error).message}` };
-          }
-          if (!t) return { ok: false, error: `节点 ${w.name ?? id} 没有可用通道` };
-          if (!t.nodeCapabilities) {
-            return { ok: false, error: `节点 ${w.name ?? id} 不支持优雅排空(旧 bundle),请先升级节点` };
-          }
-          try {
-            const caps = await t.nodeCapabilities();
-            if (caps.drain !== true) {
-              return { ok: false, error: `节点 ${w.name ?? id} 不支持优雅排空(旧 bundle),请先升级节点` };
-            }
-          } catch (e) {
-            return { ok: false, error: `节点 ${w.name ?? id} 不可达,无法确认排空: ${(e as Error).message}` };
-          }
-        }
-        return { ok: true };
+      // Operator actions (plan 050.5): manual node re-run, stop/ack/run-now, the drain-support probe
+      // and the queue-page pool providers live in hub-actions.ts; this only wires them in.
+      const hubActions = createHubActions({
+        log: opts.log,
+        warn: opts.warn,
+        ledger,
+        pool,
+        resolveCfg,
+        workers: loadWorkers,
+        transports: buildTransports,
+        pipelineDeps,
+        onEvent: opts.onEvent,
+        stageDir: () => hubCfg.stageDir ?? rootStageDir(),
       });
-      // 队列页的「排队位次 / 资源占用」来源:读同一 ResourcePool 实例(进程内共享)。
-      setPoolProviders({ poolSnapshot: () => pool.snapshot(), blockedBroadcasts: () => reconciler.blockedBroadcasts() });
+      hubActions.install(reconciler);
 
       const stop = startHub({
         tasks: () => opts.store.listTasks(),
@@ -779,12 +653,7 @@ export function createHubStarter(deps: HubStarterDeps): HubStarter {
         setZeroDiskLive(undefined);
         setSyncTasks(undefined);
         hubSyncGate.unbind(); // 必须解绑:否则 stop 之后的同步请求会打到已停的旧 runner(自审发现)
-        setRetryNode(undefined);
-        setStopJob(undefined);
-        setAckJob(undefined);
-        setRunNow(undefined);
-        setProbeDrainSupport(undefined);
-        setPoolProviders({});
+        hubActions.uninstall();
         setReceiptSettings(undefined);
       };
     },
