@@ -26,11 +26,11 @@
   **验收**: core 用例覆盖清洗后同名与不可清洗标题；节点侧两分P模板不含 `{part}` 得到 `stem` 与 `stem-P2`；撤修复单测 FAIL；全量 test/typecheck/bundle；版本 0.0.365→0.0.366。
   **现状（2026-11-12）**: PR [#647](https://github.com/fuyucn/douyin-rec/pull/647) 已合并；全量 5231 passed；三节点均已部署 0.0.366。
 
-[~] **T-201 抽出 hub 组装层 @drec/hub-compose（audit 2026-11-10 C / plans/045 P1-3，第一刀，2026-11-12）**
+[x] **T-201 抽出 hub 组装层 @drec/hub-compose（audit 2026-11-10 C / plans/045 P1-3，第一刀，2026-11-12）**
   — **做什么**: 新建 `@drec/hub-compose`（rank 4.75，介于 orchestrator 4.5 与 cli 5）；把 `cli.ts` 里 web 读 hub 状态的访问器（录制/零落盘/滚动/资源池快照）与 hub 动作代理（retry/stop/ack/runNow/排空探测/日志代查/发件箱）、`SyncGate` 一起搬进去，改由具名 setter 注入；`cli.ts` 只保留 hubStarter 本体与接线（2778 → 2600 行）。
   **为什么**: `cli.ts` 承担了本该属于组装层的跨包接线（web ↔ orchestrator ↔ app），web 只能读 cli 内部变量拿 hub 状态；这是 045 P1-3 的第一刀，为把 `hubStarter`（约 1060 行）整体下沉做容器。
   **验收**: 纯搬迁、行为不变——`pnpm typecheck` 0 错、全量 `pnpm test` 343 文件全绿、`arch:check` 通过（README 包数/AGENTS 目录树/RANKS/架构文档同步）、`pnpm bundle` 生成 0.0.367。
-  **现状（2026-11-12）**: 代码完成并自测通过；待开 issue/PR 由审查会话合并。
+  **现状（2026-11-12）**: issue [#648](https://github.com/fuyucn/douyin-rec/issues/648) → PR [#649](https://github.com/fuyucn/douyin-rec/pull/649) 已合并（merge `97c71864`，0.0.367）；三节点已部署 0.0.367-b8ff9a，fleet 两个节点回报同版本、任务同步 applied=4/8/15、web 200。
 
 [~] **T-198 直播直传同场判定以真实进度为准（issue [#642](https://github.com/fuyucn/douyin-rec/issues/642)，2026-11-12）**
   — **做什么**: `rolloverStaleState` 的最后活动取 `max(state.updatedAt, 未确认分 P 的 spool mtime, 恢复进度标记)`；新增 `<state>.activity` 标记，只在恢复重传的**真实块进度**上写（每分钟节流，重试/定时心跳不写）；启动恢复把 `o.signal` 传入 `resubmitAllUnconfirmed`，取消后不再发起新的不可逆请求；重传按 10% 输出进度日志；归档时删掉标记。
