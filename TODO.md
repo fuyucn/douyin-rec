@@ -14,17 +14,17 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
-- [~] **T-199 部署守卫带 Web 凭据并覆盖在途上传（issue [#645](https://github.com/fuyucn/douyin-rec/issues/645) → PR [#647](https://github.com/fuyucn/douyin-rec/pull/647)，2026-11-12）**
+- [x] **T-199 部署守卫带 Web 凭据并覆盖在途上传（issue [#645](https://github.com/fuyucn/douyin-rec/issues/645) → PR [#647](https://github.com/fuyucn/douyin-rec/pull/647)，2026-11-12）**
   — **做什么**: `deploy-precheck.sh/.py` 读取各节点 `config/web-token` 并带 `Authorization`；200 分支统计 `biliup / upload-part / upload-prep / reconcile-part / remux` 与新鲜 `phase=uploading` 结果文件；新增 `--node` 单节点模式；`auto-deploy.sh` 的 `wait_idle` 改为逐节点调用 precheck；`install-worker.sh --check-busy` 同样带 token 并把 `remux` 计入忙。
   **为什么**: 启用 Web 鉴权后守卫全部 401 → fail-closed 永远等待；同时 precheck 只数 `running.biliup`，auto-deploy 又完全不调用 precheck，重启可能打断不可逆的上传分P链。
   **验收**: 两处 guard 测试新增 200 分支上传 kind/结果文件用例并全绿；本机实跑 precheck 三节点判定正确；节点实跑 `--check-busy` 正确；全量 test/typecheck；部署后实跑带 token 判定。
-  **现状（2026-11-12）**: PR [#647](https://github.com/fuyucn/douyin-rec/pull/647) 已合并（merge `28380b45`，版本 0.0.366）；master 与一个 worker 已实跑 precheck 带 token 判定，第三个 worker 在录期间正确 BLOCK，等空闲后由 auto-deploy 继续。
+  **现状（2026-11-12）**: PR [#647](https://github.com/fuyucn/douyin-rec/pull/647) 已合并（merge `28380b45`，版本 0.0.366）；三节点均已部署 0.0.366，实跑 precheck 带 token 判定正确，在录节点正确 BLOCK。
 
-- [~] **T-200 分P上传别名在清洗后去重（issue [#646](https://github.com/fuyucn/douyin-rec/issues/646) → PR [#647](https://github.com/fuyucn/douyin-rec/pull/647)，2026-11-12）**
+- [x] **T-200 分P上传别名在清洗后去重（issue [#646](https://github.com/fuyucn/douyin-rec/issues/646) → PR [#647](https://github.com/fuyucn/douyin-rec/pull/647)，2026-11-12）**
   — **做什么**: `@drec/core` 新增 `resolvePartAliasStem(title, index, used)`：先 `partTitleToFilename` 清洗/截断，再在清洗后的 stem 上去重并补 `-P{idx}`；节点侧、分段侧、rolling 侧三处上传别名统一调用。
   **为什么**: 分段侧与节点侧曾各自在原始标题上去重、之后才清洗；两个不同标题（或 60 字符截断后）会落到同一 `.upload/<stem>.mp4`，第二次硬链接覆盖第一次 → 重复上传同一段、丢一个分P。
   **验收**: core 用例覆盖清洗后同名与不可清洗标题；节点侧两分P模板不含 `{part}` 得到 `stem` 与 `stem-P2`；撤修复单测 FAIL；全量 test/typecheck/bundle；版本 0.0.365→0.0.366。
-  **现状（2026-11-12）**: PR [#647](https://github.com/fuyucn/douyin-rec/pull/647) 已合并；全量 5231 passed；master 与一个 worker 已部署 0.0.366，第三个 worker 待空闲部署。
+  **现状（2026-11-12）**: PR [#647](https://github.com/fuyucn/douyin-rec/pull/647) 已合并；全量 5231 passed；三节点均已部署 0.0.366。
 
 [~] **T-198 直播直传同场判定以真实进度为准（issue [#642](https://github.com/fuyucn/douyin-rec/issues/642)，2026-11-12）**
   — **做什么**: `rolloverStaleState` 的最后活动取 `max(state.updatedAt, 未确认分 P 的 spool mtime, 恢复进度标记)`；新增 `<state>.activity` 标记，只在恢复重传的**真实块进度**上写（每分钟节流，重试/定时心跳不写）；启动恢复把 `o.signal` 传入 `resubmitAllUnconfirmed`，取消后不再发起新的不可逆请求；重传按 10% 输出进度日志；归档时删掉标记。
