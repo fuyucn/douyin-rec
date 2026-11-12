@@ -329,6 +329,39 @@ describe("createWebServer (live)", () => {
     expect(requestSyncTasks).toHaveBeenCalledTimes(2);
   });
 
+  // Wiring guard (#650 review): createWebServer must forward the injected deleteHubHistory into makeApi.
+  // Without this forward, production DELETE /api/rooms/:key reports deletedHistory=0 and leaves the
+  // ledger rows + job.log behind while returning 200.
+  it("DELETE /api/rooms/:key calls the injected deleteHubHistory (wiring regression)", async () => {
+    const syncDbPath = join(mkdtempSync(join(tmpdir(), "web-del-")), "x-sync.db");
+    const deleteHubHistory = vi.fn(() => ({ deleted: 2, streamKeys: ["douyin:123456:2026-01-01"] }));
+    const s3 = createWebServer({
+      store, manager: new MockManager(), log: () => {},
+      resolveAnchor: async () => null, resolveShortUrl: async () => null,
+      hubDir, hubEnabled: true, syncDbPath, deleteHubHistory,
+    });
+    await new Promise<void>((r) => s3.listen(0, "127.0.0.1", r));
+    const b3 = `http://127.0.0.1:${(s3.address() as AddressInfo).port}`;
+    try {
+      const created = await fetch(`${b3}/api/tasks`, {
+        method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ room: "123456" }),
+      });
+      expect(created.status).toBe(201);
+      const task = (await created.json()) as { id: number };
+      const rule = await fetch(`${b3}/api/hub/rules`, {
+        method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ recording: { sourceTaskId: task.id } }),
+      });
+      expect(rule.status).toBe(201);
+
+      const del = await fetch(`${b3}/api/rooms/douyin.123456`, { method: "DELETE" });
+      expect(del.status).toBe(200);
+      expect((await del.json()) as { deletedHistory: number }).toMatchObject({ deletedHistory: 2 });
+      expect(deleteHubHistory).toHaveBeenCalledWith(syncDbPath, "douyin.123456");
+    } finally {
+      await new Promise<void>((r) => s3.close(() => r()));
+    }
+  });
+
   // 回归:资源端点必须**经由 server.ts 的 deps 转发**生效。
   // 之前我在 WebServerDeps 加了 hubConfigSource 却忘了转进 makeApi,
   // 而 web-api.test 直接往 makeApi 注入 → 两端各自绿,线上却是「hub 未启用」(自审发现)。
