@@ -73,11 +73,20 @@ describe("master spec builder", () => {
     expect(builder).toContain("masterCookiesPath: ctx.cookiesPath");
   });
   it("probes capabilities before building specs and polls receipts after applying them", () => {
-    const refresh = cli.indexOf("zeroDiskFleet.refreshSupport(");
-    const apply = cli.indexOf("await t.applyTasks({ desired");
-    const poll = cli.indexOf("zeroDiskFleet.poll(");
-    expect(refresh).toBeGreaterThan(-1);
-    expect(apply).toBeGreaterThan(refresh);
-    expect(poll).toBeGreaterThan(apply);
+    // The round is split across two modules since plan 050.3: the starter owns the gate/poll, the
+    // task-sync loop owns the apply. Pin both the seam and the per-round order inside the loop.
+    const hubStarter = readFileSync(join(ROOT, "packages/hub-compose/src/hub-starter.ts"), "utf-8");
+    const taskSync = readFileSync(join(ROOT, "packages/hub-compose/src/task-sync.ts"), "utf-8");
+    expect(hubStarter).toContain("zeroDiskFleet.refreshSupport(");
+    expect(hubStarter).toContain("zeroDiskFleet.poll(");
+    expect(hubStarter).toContain("beginRound: beginZeroDiskRound");
+    expect(hubStarter).toContain("finishRound: finishZeroDiskRound");
+    expect(taskSync).toContain("await t.applyTasks({ desired");
+    const gate = taskSync.indexOf("await deps.beginRound()");
+    const loop = taskSync.indexOf("for (const w of deps.workers())");
+    const poll = taskSync.indexOf("await deps.finishRound(");
+    expect(gate).toBeGreaterThan(-1);
+    expect(loop).toBeGreaterThan(gate);
+    expect(poll).toBeGreaterThan(loop);
   });
 });

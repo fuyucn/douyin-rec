@@ -8,7 +8,7 @@
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import {
-  APP_VERSION, effectiveTimezone, readManagedState, readOutputLayout, refreshLocalRollingEffective,
+  APP_VERSION, effectiveTimezone, readManagedState, readOutputLayout,
   resolveHubConfig, rootStatsDbPath,
 } from "@drec/app";
 import type { HubStarter } from "@drec/app";
@@ -33,6 +33,8 @@ import {
   warnRuleIdentityMismatch,
 } from "./hub-runtime.js";
 import { createCookieSync } from "./cookie-sync.js";
+import { createTaskSync } from "./task-sync.js";
+import type { ZeroDiskTarget } from "./task-sync.js";
 
 export interface LocalRoomProbeFallback {
   isRoomRecording(roomSlug: string): boolean;
@@ -50,8 +52,6 @@ export interface HubStarterDeps {
 }
 
 export function createHubStarter(deps: HubStarterDeps): HubStarter {
-  // Warning dedupe sets live with the instance: one line per distinct reason / worker, same as before.
-  const warnedSkipReasons = new Set<string>();
   const hubStarter: HubStarter = {
     fleetUpgrade: (req, socket, head) => fleetUpgrade(req, socket, head),
     requestSyncTasks: requestHubSync,
@@ -81,7 +81,6 @@ export function createHubStarter(deps: HubStarterDeps): HubStarter {
       const { statSync } = await import("node:fs");
       const { countVideoParts, hubStore, resolveRuleSyncRoom, desiredSpecsForWorker, workerStore, rootHubDir, rootHubConfig, rootConfigDir, rootStageDir, rootLogsDir, drecRoot, listNodeTasks, applyRemoteTasks, recordRoomSessions } = await import("@drec/app");
       const { FileLogger } = await import("@drec/observability");
-      const { recordExpectedVersion, recordSyncError } = await import("@drec/app");
       // Platform login push (issue #563): one instance per start(), so its dedupe sets live as
       // long as this hub does. It has to run before task sync - see cookie-sync.ts.
       const cookieSync = createCookieSync({ store: opts.store, warn: opts.warn, log: opts.log });
@@ -603,154 +602,49 @@ export function createHubStarter(deps: HubStarterDeps): HubStarter {
         warn: opts.warn,
         onRuleIdentityMismatch: (rule, sync) => warnRuleIdentityMismatch(rule, sync, opts.warn),
       });
-      // 周期 tick 与 web API 的「变更即同步」共用同一函数:内部守卫防重入,
-      // 期间再有请求则合并成一轮补跑(期望任务是全量对账,不丢变更)。
-      const syncTasks = async (req?: { force?: boolean }): Promise<void> => {
-        // force 从 SyncGate 的累积标志取(在途请求的 force 必须落在**这一轮**,见 SyncGate 注释)。
-        const force = hubSyncGate.beginRun(req?.force);
-        if (hubSyncGate.running) {
-          hubSyncGate.rerunRequested = true;
-          return;
-        }
-        hubSyncGate.running = true;
+      // Zero-disk round glue: the capability gate runs before any spec is built, the receipt poll
+      // after the worker loop. Both stay here for now (plan 050.4 moves them out); task-sync owns
+      // only the loop and the per-worker apply.
+      const fleetWorkers = (): Array<{ id: string; name: string; kind: string; transport?: ReturnType<typeof getTransport> }> => {
+        const tmap = buildTransports();
+        return loadWorkers().map((w) => ({ id: w.id, name: w.name ?? w.id, kind: w.kind, transport: tmap.get(w.id) }));
+      };
+      const beginZeroDiskRound = async (): Promise<ZeroDiskTarget[]> => {
+        const targets = zeroDiskTargetList();
+        zeroDiskBlocked = new Map();
+        // Forget deliveries of pairs that are no longer targeted: a later re-assignment must rebuild.
+        const liveKeys = new Set(targets.map((x) => blockedKey(x.workerId, x.platform, x.roomSlug)));
+        for (const k of [...zeroDiskLastGood.keys()]) if (!liveKeys.has(k)) zeroDiskLastGood.delete(k);
         try {
-          // 边录边传(issue #40):本机源任务的派生值每轮都重算 —— 规则被删/解绑/停用时 desiredFor 里
-          // 已没有该任务的条目,applyTasks 不会再写它,不在这里回落就会残留旧的 true。
-          try {
-            refreshLocalRollingEffective(opts.store, hubDir, undefined, opts.warn);
-          } catch (e) {
-            opts.warn(`[rolling] 同步 tick 重算边录边传生效值失败: ${(e as Error).message}`);
-          }
-          // Zero-disk capability gate (issue #331): refresh which nodes advertise support BEFORE building
-          // specs, and reset this round's "blocked" reasons. Failures here only mean "not confirmed",
-          // which the gate treats as not supported.
-          const zeroDiskTargets = zeroDiskTargetList();
-          zeroDiskBlocked = new Map();
-          // Forget deliveries of pairs that are no longer targeted: a later re-assignment must rebuild.
-          const liveKeys = new Set(zeroDiskTargets.map((x) => blockedKey(x.workerId, x.platform, x.roomSlug)));
-          for (const k of [...zeroDiskLastGood.keys()]) if (!liveKeys.has(k)) zeroDiskLastGood.delete(k);
-          const fleetWorkers = (): Array<{ id: string; name: string; kind: string; transport?: ReturnType<typeof getTransport> }> => {
-            const tmap = buildTransports();
-            return loadWorkers().map((w) => ({ id: w.id, name: w.name ?? w.id, kind: w.kind, transport: tmap.get(w.id) }));
-          };
-          try {
-            const wanted = new Set(zeroDiskTargets.map((x) => x.workerId));
-            await zeroDiskFleet.refreshSupport(fleetWorkers().filter((w) => wanted.has(w.id)));
-          } catch (e) {
-            opts.warn(`[zero-disk] 能力探测失败(按不支持处理): ${(e as Error).message}`);
-          }
-          // Issue #563:平台登录态单向下发(master = 唯一登录源)。**必须先于任务下发** ——
-          // 任务侧会清掉节点上残留的陈旧任务级串(回落到平台串),所以平台串得先就位。
-          // 读取失败与单节点下发细节都在 cookie-sync.ts 内(每个实例自带告警去重)。
-          const cookiesRound = cookieSync.beginRound();
-          for (const w of loadWorkers()) {
-            const t = buildTransports().get(w.id);
-            if (!t?.applyTasks) continue; // 该 transport 不支持任务同步 → 跳过(下轮再试)
-            // 本机 = master 自己:store 就是源头,没有任何东西可下发(cookie-sync 内判定)。
-            await cookieSync.pushTo({ id: w.id, kind: w.kind }, t, cookiesRound);
-            try {
-              const desired = desiredFor(w.id);
-              // T16:版本由内容派生;周期 tick 内容不变时复用同一版,避免假的 syncLag。
-              // 回执只是观测:settings 写失败绝不能阻止本轮任务同步(否则一次磁盘/DB 故障会停录)。
-              let expectedVersion: number | undefined;
-              try {
-                const receiptSettings = getReceiptSettings();
-                expectedVersion = receiptSettings
-                  ? recordExpectedVersion(receiptSettings, w.id, desired)
-                  : undefined;
-              } catch (e) {
-                opts.warn(`[hub] 记录期望版本 ${w.id} 失败(忽略,继续同步): ${(e as Error).message}`);
-              }
-              const r = await t.applyTasks({ desired, force, ...(expectedVersion !== undefined ? { expectedVersion } : {}) });
-              for (const warning of r.warnings ?? []) {
-                opts.log(`[hub] 节点 ${w.id} 回执: ${warning}`);
-              }
-              // A safety-valve rejection means the expected set was NOT fully applied:
-              // keep it visible as syncError instead of clearing the receipt.
-              try {
-                const receiptSettings = getReceiptSettings();
-                if (receiptSettings) recordSyncError(receiptSettings, w.id, r.rejected ? `rejected: ${r.rejected}` : null);
-              } catch (e) {
-                opts.warn(`[hub] 记录同步结果 ${w.id} 失败(忽略): ${(e as Error).message}`);
-              }
-              // 本机(local worker)的 pending 任务直接走同一进程里的 TaskManager 硬停,
-              // 与远端 `_apply-tasks` 的 serve API 硬停语义一致:停源任务/删规则要立即停,
-              // 不能等排空(否则 hub settle 会一直等这场直播自然收播,迟迟不建 job)。
-              // 例外 = 源任务的「录完这场再停」(issue #569):期望里带 `enabled=false + drain=true`
-              // 时**不得硬停**,daemon 的 stopGraceful / drainTask 已经让当前场自然收播。
-              const drainKeys = new Set(
-                desired
-                  .filter((s) => s.enabled === false && s.drain === true)
-                  .map((s) => `${s.platform}:${s.roomSlug}`),
-              );
-              if (w.kind === "local" && r.pending.length > 0) {
-                for (const key of r.pending) {
-                  if (drainKeys.has(key)) {
-                    opts.log(`[hub] 任务 ${key} 排空中:不硬停,等本场自然收播`);
-                    continue;
-                  }
-                  const task = opts.store.listTasks().find((x) => {
-                    try {
-                      const p = platformForRoom(x.room);
-                      return `${p.id}:${p.extractRoomSlug(x.room)}` === key;
-                    } catch {
-                      return false;
-                    }
-                  });
-                  if (task && opts.manager.isRunning(task.id)) opts.manager.requestStop(task.id); // 不等退出,避免卡住同步 tick
-                }
-              }
-              if (r.applied.length > 0 || r.removed.length > 0 || r.pending.length > 0) {
-                opts.log(`[hub] 任务同步 ${w.id}: applied=${r.applied.length} removed=${r.removed.length}`
-                  + ` pending=${r.pending.length}${force ? " (forced)" : ""}`);
-              }
-              // Issue #480: a node skips malformed specs instead of failing the whole batch — surface the count
-              // so a master bug does not look like a healthy sync. Old nodes never send the field.
-              if (r.skipped && r.skipped.length > 0) {
-                // Rate-limited per distinct reason set per process: a persistent master bug would otherwise warn
-                // on every sync tick for the life of the serve process.
-                const reasonSet = [...new Set(r.skipped.map((s) => s.reason))].sort().join("|");
-                if (!warnedSkipReasons.has(reasonSet)) {
-                  warnedSkipReasons.add(reasonSet);
-                  opts.warn(`[hub] 任务同步 ${w.id}: 节点跳过 ${r.skipped.length} 条坏配置`
-                    + `(其余照常应用;坏条目对应的本机任务不会被删除): ${r.skipped.map((s) => `#${s.index + 1} ${s.reason}`).join("; ")}`);
-                }
-              }
-              // 节点侧安全阀命中(T-2):必须让 master 侧看得见,否则「下发被拒」在 UI 上是静默的 ——
-              // 用户只会看到任务没变,却不知道是节点在保护自己。
-              if (r.rejected) {
-                opts.warn(`[hub] 任务同步 ${w.id} 被节点安全阀拒绝(rejected=${r.rejected}, force=${force}):`
-                  + `本轮期望未完整生效(节点受管任务保持原状)。`
-                  + `若确认要缩容/清空该节点,在节点上设 DREC_ALLOW_SHRINK=1 后重试;`
-                  + `若 master 侧配置读取异常,先检查 config/hub/ 目录。`);
-              }
-            } catch (e) {
-              const msg = (e as Error).message;
-              // 失败原因必须留在 receipt 里:只有日志的话,重启后无从判断「期望没应用到」。
-              // 同样包住:回执失败不能再抛进外层 catch 形成二次异常。
-              try {
-                const receiptSettings = getReceiptSettings();
-                if (receiptSettings) recordSyncError(receiptSettings, w.id, msg);
-              } catch (recordErr) {
-                opts.warn(`[hub] 记录同步失败原因 ${w.id} 失败: ${(recordErr as Error).message}`);
-              }
-              // 节点离线/命令失败 → 只 warn,下轮对账自愈,不打断 reconcile。
-              opts.warn(`[hub] 任务同步 ${w.id} 失败: ${msg}`);
-            }
-          }
-          // Collect zero-disk receipts (-> master ledger) and refresh the console view. Never throws into
-          // the sync tick: a polling failure must not stop task sync.
-          try {
-            const fw = fleetWorkers();
-            await zeroDiskFleet.poll(fw, new Set(zeroDiskTargets.map((x) => x.workerId)));
-            setZeroDiskSnapshot(zeroDiskFleet.snapshot(zeroDiskTargets, fw, zeroDiskBlocked));
-          } catch (e) {
-            opts.warn(`[zero-disk] 回执轮询失败(下轮重试): ${(e as Error).message}`);
-          }
-        } finally {
-          if (hubSyncGate.endRun()) void syncTasks();
+          const wanted = new Set(targets.map((x) => x.workerId));
+          await zeroDiskFleet.refreshSupport(fleetWorkers().filter((w) => wanted.has(w.id)));
+        } catch (e) {
+          opts.warn(`[zero-disk] 能力探测失败(按不支持处理): ${(e as Error).message}`);
+        }
+        return targets;
+      };
+      const finishZeroDiskRound = async (targets: ZeroDiskTarget[]): Promise<void> => {
+        try {
+          const fw = fleetWorkers();
+          await zeroDiskFleet.poll(fw, new Set(targets.map((x) => x.workerId)));
+          setZeroDiskSnapshot(zeroDiskFleet.snapshot(targets, fw, zeroDiskBlocked));
+        } catch (e) {
+          opts.warn(`[zero-disk] 回执轮询失败(下轮重试): ${(e as Error).message}`);
         }
       };
+      const syncTasks = createTaskSync({
+        store: opts.store,
+        manager: opts.manager,
+        warn: opts.warn,
+        log: opts.log,
+        hubDir: () => hubDir,
+        desiredFor,
+        workers: loadWorkers,
+        transports: buildTransports,
+        cookieSync,
+        beginRound: beginZeroDiskRound,
+        finishRound: finishZeroDiskRound,
+      });
       setSyncTasks(syncTasks);
       hubSyncGate.bind(syncTasks);
 
