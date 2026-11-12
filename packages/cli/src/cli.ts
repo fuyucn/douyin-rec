@@ -12,7 +12,15 @@
 import { createBiliupFileTarget } from "@drec/bilibili-upload";
 import "./load-env.js"; // 副作用:必须最先 import——从 <cwd>/.env 灌 env(如 DOUYIN_REC_ROOT),
                          // 抢在下面 @drec/app 的 DEFAULT_COOKIES(模块加载时就读 env)求值之前生效。
-import { SyncGate } from "./sync-gate.js";
+import {
+  fleetLink, fleetUpgrade, getReceiptSettings, hubSyncGate, PROBE_CACHE_MS, readBlockedBroadcasts, readPoolSnapshot,
+  readRecordingWorkers, readRollingDelivery, readZeroDiskLive, readZeroDiskStatus, recordingSnapshotValues,
+  requestHubAckJob, requestHubProbeDrainSupport, requestHubRetryNode, requestHubRunNow, requestHubStopJob,
+  recordingSnapshotKey, requestHubSync, requestNodeTaskLogs, requestNodeTasks, requestNotifyOutbox,
+  setAckJob, setDeliverySnapshot, setFleetController, setPoolProviders, setProbeDrainSupport, setReceiptSettings,
+  setRecordingSnapshot, setRetryNode, setRunNow, setStopJob, unbindSyncGate,
+  setSyncTasks, setZeroDiskLive, setZeroDiskSnapshot, stopFleet, warnRuleIdentityMismatch,
+} from "@drec/hub-compose";
 import { streamPartMaxMs } from "./stream-part-duration.js";
 import { zeroDiskSpoolName, zeroDiskXmlPath } from "./zero-disk-room.js";
 import { zeroDiskUploadCookie } from "./zero-disk-upload-cookie.js";
@@ -1264,7 +1272,6 @@ program
 // ─── Hub starter: 多节点同步编排（cli L5 注入到 app L4，避免循环依赖）──────────────
 // app 不直接依赖 @drec/orchestrator（orchestrator 依赖 app），由 cli 作为 L5 入口注入。
 // web API 在 hub 规则/worker 变更后立即触发一次任务同步(不等 60s 周期 tick)。
-let hubSyncTasks: ((opts?: { force?: boolean }) => Promise<void>) | undefined;
 /**
  * Issue #480: reason sets already warned about, so a persistent bad-spec bug warns once per distinct set
  * instead of on every sync tick for the life of the process.
@@ -1279,194 +1286,8 @@ const cookieUnsupportedSeen = new Set<string>();
 /** Issue #563: last "cannot read platform credentials" message, so a busy db does not warn every tick. */
 let cookieReadWarn = "";
 /** Master side of the fleet long connection (plans/042); null when `fleet.controllerUrl` is not configured. */
-let hubFleet: import("@drec/orchestrator").FleetController | null = null;
-/** For every SshTransport this process builds: fleet first, ssh otherwise (read per call). */
-const fleetLink = (): import("@drec/orchestrator").FleetLink | null => hubFleet?.link ?? null;
-
-const hubSyncGate = new SyncGate();
-const requestHubSync = (opts?: { force?: boolean }): void => {
-  // 返回 true = 现在就跑一轮(force 由 beginRun 消费);false = 已合并进补跑 / 等就绪。
-  if (hubSyncGate.request(opts?.force)) void hubSyncTasks!({ force: hubSyncGate.beginRun() });
-};
-
-let hubRetryNode:
-  | ((streamKey: string, node: WorkflowNodeKey, opts?: { force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number }>)
-  | undefined;
-let hubStopJob:
-  | ((streamKey: string) => Promise<{ ok: boolean; error?: string; code?: number }>)
-  | undefined;
-let hubAckJob:
-  | ((streamKey: string, opts: { note?: string; undo?: boolean }) => { ok: boolean; error?: string; code?: number })
-  | undefined;
-let hubRunNow:
-  | ((opts: { streamKey: string; winnerWorker?: string; wait?: boolean; force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string; forceable?: boolean }>)
-  | undefined;
-/**
- * 远端排空能力探测(issue #569;hubStarter.start 注入)。master 在把 hub 源任务置停用前调用;
- * hub 未启动 / 未注入 → 返回失败(API 保持录制,不回退成硬停)。
- */
-let hubProbeDrainSupport: ((workerIds: string[]) => Promise<{ ok: boolean; error?: string }>) | undefined;
-const requestHubProbeDrainSupport = async (
-  workerIds: string[],
-): Promise<{ ok: boolean; error?: string }> => (hubProbeDrainSupport
-  ? hubProbeDrainSupport(workerIds)
-  : { ok: false, error: "hub 未启动" });
-let hubRecordingSnapshot = new Map<string, RecordingWorkerStatusDTO[]>();
-/** Zero-disk side-node status snapshot (issue #331); replaced wholesale on each hub sync tick, display only. */
-let hubZeroDiskSnapshot = new Map<string, ZeroDiskNodeStatusDTO[]>();
-let hubZeroDiskLive: ((platform: string, roomSlug: string) => Array<{
-  workerId: string; workerName: string;
-  current?: import("@drec/core").LiveUploadSnapshot;
-  previous?: import("@drec/core").LiveUploadSnapshot;
-  history?: import("@drec/core").LiveUploadSnapshot[];
-}>) | undefined;
-/** 各节点边录边传的实时进度(F1;随 5 秒状态轮询整体替换,只读展示)。 */
-let hubDeliverySnapshot: RollingDeliveryDTO[] = [];
-/** probeAllWorkers 的结果缓存 TTL。 */
-const PROBE_CACHE_MS = 30_000;
-const readRollingDelivery = (): RollingDeliveryDTO[] => hubDeliverySnapshot;
-const recordingSnapshotKey = (platform: string, roomSlug: string): string => `${platform}:${roomSlug}`;
-
-/**
- * Issue #481: the rule file stem is the identity, but the SOURCE TASK decides which room is actually synced.
- * A divergent stem (rule.room edited / task room edited after creation) must not drop the room from desired —
- * that would make task-sync delete the remote managed task. Warn once per (stem -> task room) pair.
- */
-const warnedRuleIdentity = new Set<string>();
-const warnRuleIdentityMismatch = (
-  rule: { key: string; platform: string; roomSlug: string },
-  sync: { platform: string; roomSlug: string; mismatched: boolean },
-  warn: (m: string) => void,
-): void => {
-  if (!sync.mismatched) return;
-  const token = `${rule.key}->${sync.platform}.${sync.roomSlug}`;
-  if (warnedRuleIdentity.has(token)) return;
-  warnedRuleIdentity.add(token);
-  warn(`[hub] 规则 ${rule.key} 的 stem(${rule.platform}.${rule.roomSlug})与绑定源任务房间(${sync.platform}.${sync.roomSlug})不一致;按源任务房间继续同步`);
-};
-const readRecordingWorkers = (platform: string, roomSlug: string): RecordingWorkerStatusDTO[] =>
-  hubRecordingSnapshot.get(recordingSnapshotKey(platform, roomSlug)) ?? [];
-const readZeroDiskStatus = (platform: string, roomSlug: string): ZeroDiskNodeStatusDTO[] =>
-  hubZeroDiskSnapshot.get(recordingSnapshotKey(platform, roomSlug)) ?? [];
-const readZeroDiskLive = (platform: string, roomSlug: string): Array<{
-  workerId: string; workerName: string;
-  current?: import("@drec/core").LiveUploadSnapshot;
-  previous?: import("@drec/core").LiveUploadSnapshot;
-  history?: import("@drec/core").LiveUploadSnapshot[];
-}> => hubZeroDiskLive?.(platform, roomSlug) ?? [];
-/** master 资源池快照提供者(由 hubStarter.start 注入,读同一 ResourcePool 实例);未启动 → undefined。 */
-let hubPoolSnapshot: (() => HubPoolSnapshotDTO) | undefined;
-/** Blocked-broadcast provider (injected by hubStarter.start from the live Reconciler); hub not started → empty. */
-let hubBlockedBroadcasts: (() => HubBlockedBroadcastDTO[]) | undefined;
-const readBlockedBroadcasts = (): HubBlockedBroadcastDTO[] => hubBlockedBroadcasts?.() ?? [];
-const readPoolSnapshot = (): HubPoolSnapshotDTO | undefined => hubPoolSnapshot?.();
-/**
- * Master-side sync receipt settings (expected version / last sync error).
- * Hub start injects the live TaskStore; undefined until hub starts.
- */
-let hubReceiptSettings: Pick<TaskStore, "getSetting" | "setSetting"> | undefined;
-/** web API → hubStarter.retryNode 的统一入口(hub 未启动 → 400)。 */
-const requestHubRetryNode = async (
-  streamKey: string,
-  node: string,
-  opts?: { force?: boolean },
-): Promise<{ ok: boolean; error?: string; code?: number }> => {
-  if (!hubRetryNode) return { ok: false, error: "hub 未启动", code: 400 };
-  return hubRetryNode(streamKey, node as WorkflowNodeKey, opts);
-};
-const requestHubStopJob = async (
-  streamKey: string,
-): Promise<{ ok: boolean; error?: string; code?: number }> => {
-  if (!hubStopJob) return { ok: false, error: "hub 未启动", code: 400 };
-  return hubStopJob(streamKey);
-};
-const requestHubAckJob = async (
-  streamKey: string,
-  opts: { note?: string; undo?: boolean },
-): Promise<{ ok: boolean; error?: string; code?: number }> => {
-  if (!hubAckJob) return { ok: false, error: "hub 未启动", code: 400 };
-  return hubAckJob(streamKey, opts);
-};
-/**
- * web API → 节点日志代查的统一入口(F3)。
- *
- * 每次现读 hub.config.json 找 worker(与 probeAllWorkers 同源)→ 建 scoped transport → 读日志。
- * **刻意不缓存结果**:日志就是要看最新的;一次点击一条 ssh,代价可接受。
- *
- * 本机(local)worker 直接回提示:它的日志就在 master 自己的任务详情页,F3 要解决的是
- * 「远端节点要登机器看网页」,本机代查没有意义。
- */
-const requestNodeTaskLogs = async (workerId: string, taskId: number, lines: number): Promise<NodeTaskLogsDTO> => {
-  const { SshTransport } = await import("@drec/orchestrator");
-  const { workerStore, rootHubConfig } = await import("@drec/app");
-  const w = workerStore.listWorkers(rootHubConfig()).find((x) => x.id === workerId);
-  if (!w) return { workerId, taskId, lines: [], error: `未配置的 worker id: ${workerId}` };
-  if (w.kind === "local") return { workerId, taskId, lines: [], error: "本机节点:日志就在 master 的任务详情页" };
-  const t = new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot!, fleet: fleetLink });
-  try {
-    const r = await t.taskLogs(taskId, lines);
-    return { workerId, taskId, lines: r.lines, ...(r.error ? { error: r.error } : {}) };
-  } catch (e) {
-    const msg = (e as Error)?.message ?? String(e);
-    // 旧 bundle 没有该隐藏命令 → 说清楚是「节点版本旧」,别让用户以为是网络问题。
-    const unsupported = /unknown command|未知命令/i.test(msg);
-    return { workerId, taskId, lines: [], error: unsupported ? "节点 bundle 过旧,不支持日志代查(需升级节点)" : msg };
-  }
-};
-
-/** web API → 读某节点的任务清单(F3)。与日志代查同一取舍:现读配置、不缓存。 */
-const requestNodeTasks = async (workerId: string): Promise<NodeTasksDTO> => {
-  const { SshTransport } = await import("@drec/orchestrator");
-  const { workerStore, rootHubConfig } = await import("@drec/app");
-  const w = workerStore.listWorkers(rootHubConfig()).find((x) => x.id === workerId);
-  if (!w) return { workerId, tasks: [], error: `未配置的 worker id: ${workerId}` };
-  if (w.kind === "local") return { workerId, tasks: [], error: "本机节点:日志就在 master 的任务详情页" };
-  const t = new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot!, fleet: fleetLink });
-  try {
-    const r = await t.listTasks();
-    return { workerId, tasks: r.tasks };
-  } catch (e) {
-    return { workerId, tasks: [], error: (e as Error)?.message ?? String(e) };
-  }
-};
-
-/**
- * 主控拉取某个节点的通知发件箱(issue #405)。
- * 本机节点直接读本地库;远端走既有 SSH 通道,不开新端口。
- */
-const requestNotifyOutbox = async (
-  workerId: string,
-  after: number,
-  limit: number,
-  ackIds: number[] = [],
-): Promise<Array<{ id: number; at: number; taskId: number | null; room: string | null; wantWebhook: boolean; event: import("@drec/core").NotifyEvent }>> => {
-  const { workerStore, rootHubConfig, NotifyOutbox, drecRoot } = await import("@drec/app");
-  const w = workerStore.listWorkers(rootHubConfig()).find((x) => x.id === workerId);
-  if (!w) return [];
-  if (w.kind === "local") {
-    const box = new NotifyOutbox(`${w.dataRoot ?? drecRoot()}/db/notify-outbox.db`);
-    try {
-      if (ackIds.length > 0) box.ack(ackIds);
-      return box.list(after, limit);
-    } finally {
-      box.close();
-    }
-  }
-  const { SshTransport } = await import("@drec/orchestrator");
-  const t = new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot!, fleet: fleetLink });
-  const rows = await t.notifyOutbox(after, limit, ackIds);
-  return (rows ?? []) as Array<{ id: number; at: number; taskId: number | null; room: string | null; wantWebhook: boolean; event: import("@drec/core").NotifyEvent }>;
-};
-
-const requestHubRunNow = async (
-  opts: { streamKey: string; winnerWorker?: string; wait?: boolean; force?: boolean },
-): Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string; forceable?: boolean }> => {
-  if (!hubRunNow) return { ok: false, error: "hub 未启动", code: 400 };
-  return hubRunNow(opts);
-};
-
 const hubStarter: HubStarter = {
-  fleetUpgrade: (req, socket, head) => hubFleet?.upgrade(req, socket, head) ?? false,
+  fleetUpgrade: (req, socket, head) => fleetUpgrade(req, socket, head),
   requestSyncTasks: requestHubSync,
   probeDrainSupport: requestHubProbeDrainSupport,
   recordingWorkers: readRecordingWorkers,
@@ -1483,7 +1304,7 @@ const hubStarter: HubStarter = {
   ackJob: requestHubAckJob,
   runNow: requestHubRunNow,
   async start(opts) {
-    hubReceiptSettings = opts.store;
+    setReceiptSettings(opts.store);
     const {
       registerBuiltinTransports, Reconciler, SyncLedger, startHub, getTransport, recordingStatusWorkerIds,
       satisfiesCapabilities, ZeroDiskFleet, blockedKey,
@@ -1621,7 +1442,7 @@ const hubStarter: HubStarter = {
     const fleetControllerUrl = hubCfg.fleet?.controllerUrl?.trim();
     if (fleetControllerUrl) {
       const { startFleetController } = await import("@drec/orchestrator");
-      hubFleet = startFleetController({
+      setFleetController(startFleetController({
         controllerUrl: fleetControllerUrl,
         tokenPath: join(rootConfigDir(), "fleet-nodes.json"),
         loadWorkers,
@@ -1629,7 +1450,7 @@ const hubStarter: HubStarter = {
         warn: opts.warn,
         // A worker's recording rooms changed: refresh the console snapshot now (it reads the fresh heartbeat).
         onRecordingChange: () => void refreshRecordingStatus(),
-      });
+      }));
     }
     let refreshingRecordingStatus = false;
     /** 状态探测与 pipeline 共用同一批 transport 实例(避免每 5s 重建 SshTransport)。 */
@@ -1705,9 +1526,9 @@ const hubStarter: HubStarter = {
         }
         // `next` 每次从空 Map 重建,天然丢掉「源任务已删除/解绑」的房间,
         // 不需要也不能在遍历 hubRecordingSnapshot 时删它(会边迭代边改)。
-        hubRecordingSnapshot = next;
+        setRecordingSnapshot(next);
         // F1:边录边传进度。节点探测失败 → 该节点的进度整体丢弃(不展示陈旧数字冒充实时)。
-        hubDeliverySnapshot = results.flatMap((r) => r.error ? [] : r.rolling.map((s): RollingDeliveryDTO => ({
+        setDeliverySnapshot(results.flatMap((r) => r.error ? [] : r.rolling.map((s): RollingDeliveryDTO => ({
           workerId: r.worker.id,
           workerName: r.worker.name ?? r.worker.id,
           platform: s.platform, roomSlug: s.roomSlug, anchorName: null,
@@ -1715,7 +1536,7 @@ const hubStarter: HubStarter = {
           confirmed: s.confirmed, total: s.total, ambiguous: s.ambiguous,
           uploading: s.uploading ?? null, recording: s.recording, checkedAt,
           ...(s.lockedBytes !== undefined ? { lockedBytes: s.lockedBytes } : {}),
-        })));
+        }))));
       } catch (e) {
         opts.warn(`[hub] 刷新 worker 录制状态失败: ${(e as Error).message}`);
       } finally {
@@ -1739,12 +1560,12 @@ const hubStarter: HubStarter = {
       log: (m) => opts.log(m),
       alert: (message) => opts.onEvent({ kind: "error", stage: "直播直传", message }),
     });
-    hubZeroDiskLive = (platform, roomSlug) => loadWorkers()
+    setZeroDiskLive((platform, roomSlug) => loadWorkers()
       .filter((w) => w.kind !== "local")
       .flatMap((w) => {
         const lv = zeroDiskFleet.live(w.id, platform, roomSlug);
         return lv ? [{ workerId: w.id, workerName: w.name ?? w.id, ...lv }] : [];
-      });
+      }));
     /** Targets the master currently expects to run zero-disk: (room, non-local node) pairs. */
     const zeroDiskTargetList = (): Array<{ workerId: string; platform: string; roomSlug: string }> => {
       const out: Array<{ workerId: string; platform: string; roomSlug: string }> = [];
@@ -2116,8 +1937,9 @@ const hubStarter: HubStarter = {
             // 回执只是观测:settings 写失败绝不能阻止本轮任务同步(否则一次磁盘/DB 故障会停录)。
             let expectedVersion: number | undefined;
             try {
-              expectedVersion = hubReceiptSettings
-                ? recordExpectedVersion(hubReceiptSettings, w.id, desired)
+              const receiptSettings = getReceiptSettings();
+              expectedVersion = receiptSettings
+                ? recordExpectedVersion(receiptSettings, w.id, desired)
                 : undefined;
             } catch (e) {
               opts.warn(`[hub] 记录期望版本 ${w.id} 失败(忽略,继续同步): ${(e as Error).message}`);
@@ -2129,7 +1951,8 @@ const hubStarter: HubStarter = {
             // A safety-valve rejection means the expected set was NOT fully applied:
             // keep it visible as syncError instead of clearing the receipt.
             try {
-              if (hubReceiptSettings) recordSyncError(hubReceiptSettings, w.id, r.rejected ? `rejected: ${r.rejected}` : null);
+              const receiptSettings = getReceiptSettings();
+              if (receiptSettings) recordSyncError(receiptSettings, w.id, r.rejected ? `rejected: ${r.rejected}` : null);
             } catch (e) {
               opts.warn(`[hub] 记录同步结果 ${w.id} 失败(忽略): ${(e as Error).message}`);
             }
@@ -2189,7 +2012,8 @@ const hubStarter: HubStarter = {
             // 失败原因必须留在 receipt 里:只有日志的话,重启后无从判断「期望没应用到」。
             // 同样包住:回执失败不能再抛进外层 catch 形成二次异常。
             try {
-              if (hubReceiptSettings) recordSyncError(hubReceiptSettings, w.id, msg);
+              const receiptSettings = getReceiptSettings();
+              if (receiptSettings) recordSyncError(receiptSettings, w.id, msg);
             } catch (recordErr) {
               opts.warn(`[hub] 记录同步失败原因 ${w.id} 失败: ${(recordErr as Error).message}`);
             }
@@ -2202,7 +2026,7 @@ const hubStarter: HubStarter = {
         try {
           const fw = fleetWorkers();
           await zeroDiskFleet.poll(fw, new Set(zeroDiskTargets.map((x) => x.workerId)));
-          hubZeroDiskSnapshot = zeroDiskFleet.snapshot(zeroDiskTargets, fw, zeroDiskBlocked);
+          setZeroDiskSnapshot(zeroDiskFleet.snapshot(zeroDiskTargets, fw, zeroDiskBlocked));
         } catch (e) {
           opts.warn(`[zero-disk] 回执轮询失败(下轮重试): ${(e as Error).message}`);
         }
@@ -2210,7 +2034,7 @@ const hubStarter: HubStarter = {
         if (hubSyncGate.endRun()) void syncTasks();
       }
     };
-    hubSyncTasks = syncTasks;
+    setSyncTasks(syncTasks);
     hubSyncGate.bind(syncTasks);
 
     // 正在进行的重跑(streamKey):检查与占用必须同步完成,否则并发请求会双双通过
@@ -2312,14 +2136,14 @@ const hubStarter: HubStarter = {
         }
       }).finally(() => retryingKeys.delete(streamKey));
     };
-    hubRetryNode = (streamKey: string, node: WorkflowNodeKey, o?: { force?: boolean }) =>
-      retryNode(streamKey, node, o?.force === true);
-    hubStopJob = (streamKey: string) => reconciler.stopJob(streamKey);
-    hubAckJob = (streamKey, o) => reconciler.ackJob(streamKey, o);
-    hubRunNow = (opts) => reconciler.runNow(opts);
+    setRetryNode((streamKey, node, o?: { force?: boolean }) =>
+      retryNode(streamKey, node, o?.force === true));
+    setStopJob((streamKey) => reconciler.stopJob(streamKey));
+    setAckJob((streamKey, o) => reconciler.ackJob(streamKey, o));
+    setRunNow((opts) => reconciler.runNow(opts));
     // 远端排空能力探测(issue #569):master 只查绑定的录制节点;本机(local)跳过(自己就支持)。
     // 任一节点旧 bundle / 不可达就失败 —— API 保持录制,绝不回退成硬停(硬停会截断当前分段)。
-    hubProbeDrainSupport = async (workerIds) => {
+    setProbeDrainSupport(async (workerIds) => {
       for (const id of workerIds) {
         const w = loadWorkers().find((x) => x.id === id);
         if (!w) {
@@ -2349,10 +2173,9 @@ const hubStarter: HubStarter = {
         }
       }
       return { ok: true };
-    };
+    });
     // 队列页的「排队位次 / 资源占用」来源:读同一 ResourcePool 实例(进程内共享)。
-    hubPoolSnapshot = () => pool.snapshot();
-    hubBlockedBroadcasts = () => reconciler.blockedBroadcasts();
+    setPoolProviders({ poolSnapshot: () => pool.snapshot(), blockedBroadcasts: () => reconciler.blockedBroadcasts() });
 
     const stop = startHub({
       tasks: () => opts.store.listTasks(),
@@ -2391,8 +2214,8 @@ const hubStarter: HubStarter = {
           // 用 finally:refreshRecordingStatus 内部已自己吞异常,这里只是保证
           // 「无论成功失败都继续排下一轮」——否则一次意外会让状态探测**永久停摆**
           // (自审发现:第一版把调度放在 then 里,失败路径直接断链,且没人会发现)。
-          const busy = [...hubRecordingSnapshot.values()].some(
-            (rows) => rows.some((r) => r.state === "recording" || r.state === "unavailable"),
+          const busy = recordingSnapshotValues().some(
+            (r) => r.state === "recording" || r.state === "unavailable",
           );
           scheduleRecordingStatusProbe(busy ? RECORDING_BUSY_POLL_MS : RECORDING_IDLE_POLL_MS);
         });
@@ -2402,24 +2225,22 @@ const hubStarter: HubStarter = {
     scheduleRecordingStatusProbe(RECORDING_IDLE_POLL_MS);
     opts.log(`[hub] 已启用，${loadWorkers().length} 个 worker`);
     return () => {
-      hubFleet?.stop();
-      hubFleet = null;
+      stopFleet();
       stop();
       recordingProbeStopped = true;
       if (recordingStatusTimer) clearTimeout(recordingStatusTimer);
-      hubRecordingSnapshot = new Map();
-      hubZeroDiskSnapshot = new Map();
-      hubZeroDiskLive = undefined;
-      hubSyncTasks = undefined;
+      setRecordingSnapshot(new Map());
+      setZeroDiskSnapshot(new Map());
+      setZeroDiskLive(undefined);
+      setSyncTasks(undefined);
       hubSyncGate.unbind(); // 必须解绑:否则 stop 之后的同步请求会打到已停的旧 runner(自审发现)
-      hubRetryNode = undefined;
-      hubStopJob = undefined;
-      hubAckJob = undefined;
-      hubRunNow = undefined;
-      hubProbeDrainSupport = undefined;
-      hubPoolSnapshot = undefined;
-      hubBlockedBroadcasts = undefined;
-      hubReceiptSettings = undefined;
+      setRetryNode(undefined);
+      setStopJob(undefined);
+      setAckJob(undefined);
+      setRunNow(undefined);
+      setProbeDrainSupport(undefined);
+      setPoolProviders({});
+      setReceiptSettings(undefined);
     };
   },
   async testWorker(cfg) {
@@ -2515,7 +2336,8 @@ const hubStarter: HubStarter = {
         ? { id: w.id, ok: true, appVersion: ns.appVersion, appliedVersion: ns.appliedVersion, appliedAt: ns.appliedAt, ...disk }
         : { id: w.id, ok: true, ...disk };
       // T16:把 master 侧期望版本与最近同步失败附在节点回执上;旧节点/未注入 → 字段缺省。
-      return hubReceiptSettings ? withMasterReceipt(base, hubReceiptSettings) : base;
+      const receiptSettings = getReceiptSettings();
+      return receiptSettings ? withMasterReceipt(base, receiptSettings) : base;
     });
   },
 };

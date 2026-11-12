@@ -197,6 +197,18 @@ importers:
 
   packages/ffmpeg-recorder-extra: {}
 
+  packages/hub-compose:
+    dependencies:
+      '@drec/app':
+        specifier: workspace:*
+        version: link:../app
+      '@drec/core':
+        specifier: workspace:*
+        version: link:../core
+      '@drec/orchestrator':
+        specifier: workspace:*
+        version: link:../orchestrator
+
   packages/kuaishou-live:
     dependencies:
       '@drec/core':

@@ -320,6 +320,7 @@ const PKG_BLURB = {
   "@drec/manager": "RecordingSession 会话生命周期<br/>onLive→connectDanmu / 断流重连 / drain",
   "@drec/app": "db/store/hub-store(文件版规则)/ daemon/scheduler/task-manager<br/>web(api+server)/ login(扫码)/ upload / anchor",
   "@drec/orchestrator": "Transport(local/ssh/tailscale-ssh) / identity 聚类<br/>select 选优 / reconciler / pipeline / SyncLedger",
+  "@drec/hub-compose": "hub 组装层:web 读 hub 状态的访问器<br/>+ hub 动作代理(stop/retry/ack/runNow/日志代查)",
   "@drec/cli": "record / merge / burn / probe + task 命令组<br/>providers-register: 注册平台 + 引擎",
 };
 const NODE_ID = {
@@ -327,7 +328,7 @@ const NODE_ID = {
   "@drec/processors": "procs",
   "@drec/ffmpeg-recorder-extra": "extra", "@drec/record-engine": "engine",
   "@drec/douyin-live": "douyin", "@drec/bilibili-live": "bilibili", "@drec/kuaishou-live": "kuaishou",
-  "@drec/manager": "manager", "@drec/app": "app", "@drec/orchestrator": "orch", "@drec/cli": "cli",
+  "@drec/manager": "manager", "@drec/app": "app", "@drec/orchestrator": "orch", "@drec/hub-compose": "hubc", "@drec/cli": "cli",
 };
 
 function buildMermaid() {
