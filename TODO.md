@@ -31,11 +31,17 @@
   — **做什么**: 把 deleteHubJobHistory 从 packages/app/src/hub-jobs.ts（写连接删五表 + job.log）搬到 @drec/orchestrator 的 ledger-history.ts；web 侧改由 deps.deleteHubHistory(syncDbPath, roomKey) 注入调用，serve 与 cli 负责接线；app 只保留只读访问。
   **为什么**: 台账 schema 属 orchestrator（SyncLedger 写），app 另开一条可写连接删表 = 一份 schema 两个所有者（audit 明确点名的分层缺陷）。
   **验收**: 事务与等锁语义逐行等价（BEGIN IMMEDIATE + busy_timeout=3000 + 缺表跳过）；删除用例（五表 + 双位置日志 + 回滚触发）全绿；全量 pnpm test / typecheck / bundle；部署后线上删房间/删规则实跑一次。
-  **现状（2026-11-12）**: issue [#650](https://github.com/fuyucn/douyin-rec/issues/650) → PR [#651](https://github.com/fuyucn/douyin-rec/pull/651) 已合并（merge `ff94dd2c`，0.0.368）；三节点已部署 0.0.368-edc525，fleet 同版本、web 200、任务同步正常。线上删除路径尚未实跑（需一个可牺牲的测试房间）。
+  **现状（2026-11-12）**: issue [#650](https://github.com/fuyucn/douyin-rec/issues/650) → PR [#651](https://github.com/fuyucn/douyin-rec/pull/651) 已合并（merge `ff94dd2c`，0.0.368）；三节点已部署 0.0.370。线上删除路径已实跑：合成台账行 + 真实日志文件 → 删除返回 deletedHistory: 1，行、规则、日志同时消失（接线缺陷由 #653 修掉）。
   — **做什么**: 新建 `@drec/hub-compose`（rank 4.75，介于 orchestrator 4.5 与 cli 5）；把 `cli.ts` 里 web 读 hub 状态的访问器（录制/零落盘/滚动/资源池快照）与 hub 动作代理（retry/stop/ack/runNow/排空探测/日志代查/发件箱）、`SyncGate` 一起搬进去，改由具名 setter 注入；`cli.ts` 只保留 hubStarter 本体与接线（2778 → 2600 行）。
   **为什么**: `cli.ts` 承担了本该属于组装层的跨包接线（web ↔ orchestrator ↔ app），web 只能读 cli 内部变量拿 hub 状态；这是 045 P1-3 的第一刀，为把 `hubStarter`（约 1060 行）整体下沉做容器。
   **验收**: 纯搬迁、行为不变——`pnpm typecheck` 0 错、全量 `pnpm test` 343 文件全绿、`arch:check` 通过（README 包数/AGENTS 目录树/RANKS/架构文档同步）、`pnpm bundle` 生成 0.0.367。
   **现状（2026-11-12）**: issue [#648](https://github.com/fuyucn/douyin-rec/issues/648) → PR [#649](https://github.com/fuyucn/douyin-rec/pull/649) 已合并（merge `97c71864`，0.0.367）；三节点已部署 0.0.367-b8ff9a，fleet 两个节点回报同版本、任务同步 applied=4/8/15、web 200。
+
+[x] **T-203 hub 启动编排迁入组装层（audit C / plans/050 第 1 步，2026-11-12）**
+  — **做什么**: 把 `cli.ts` 里约 1043 行的 hub 启动编排整体搬进 `@drec/hub-compose`，导出 `createHubStarter(deps)`；CLI 只留装配调用与两处仍属它的注入（本机房间探针、上传账号分键）；搬迁后 CLI 1526 行（2603 → 1526）。
+  **为什么**: 这团编排占 CLI 四成篇幅，混着跨包接线与启动细节，继续动上传轴/节点侧时边界不可读；下沉后组装层成为单一 hub 装配点。
+  **验收**: 逐行归一化对比零差异（除两处注入改名与两行注释）；HubStarter 19 个成员全保留；源码守护测试改为读 CLI + 组装层且断言不改；`pnpm typecheck` 0 错、全量 `pnpm test` 5232 passed、`arch:check` 通过、`pnpm bundle` 可运行；版本 0.0.369→0.0.370。
+  **现状（2026-11-12）**: issue [#654](https://github.com/fuyucn/douyin-rec/issues/654) → PR [#655](https://github.com/fuyucn/douyin-rec/pull/655) 已合并（merge 1f0a8be6，0.0.370）；三端部署同版本 0.0.370-8431d9，fleet 两节点回报同版本、任务同步 applied=4/8/15、零落盘回执正常。独立 review 结论 PASS（P2 缺依赖已修）。
 
 [~] **T-198 直播直传同场判定以真实进度为准（issue [#642](https://github.com/fuyucn/douyin-rec/issues/642)，2026-11-12）**
   — **做什么**: `rolloverStaleState` 的最后活动取 `max(state.updatedAt, 未确认分 P 的 spool mtime, 恢复进度标记)`；新增 `<state>.activity` 标记，只在恢复重传的**真实块进度**上写（每分钟节流，重试/定时心跳不写）；启动恢复把 `o.signal` 传入 `resubmitAllUnconfirmed`，取消后不再发起新的不可逆请求；重传按 10% 输出进度日志；归档时删掉标记。
