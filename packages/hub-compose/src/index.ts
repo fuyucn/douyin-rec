@@ -2,3 +2,4 @@
 // published by hub startup. See packages/hub-compose/src/hub-runtime.ts.
 export * from "./hub-runtime.js";
 export { SyncGate } from "./sync-gate.js";
+export * from "./hub-starter.js";

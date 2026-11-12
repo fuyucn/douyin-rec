@@ -11,6 +11,9 @@
   "dependencies": {
     "@drec/app": "workspace:*",
     "@drec/core": "workspace:*",
-    "@drec/orchestrator": "workspace:*"
+    "@drec/orchestrator": "workspace:*",
+    "@drec/observability": "workspace:*",
+    "@drec/post-process": "workspace:*",
+    "@drec/bilibili-upload": "workspace:*"
   }
 }

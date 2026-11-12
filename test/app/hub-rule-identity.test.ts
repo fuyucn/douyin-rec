@@ -108,7 +108,8 @@ describe("bound rule sync identity comes from the source task (issue #481 review
   });
 
   it("wiring: cli desiredFor / status / zero-disk and rolling-effective use the helper, not a mismatch skip", () => {
-    const cli = readFileSync(new URL("../../packages/cli/src/cli.ts", import.meta.url), "utf-8");
+    const cli = readFileSync(new URL("../../packages/cli/src/cli.ts", import.meta.url), "utf-8")
+      + "\n" + readFileSync(new URL("../../packages/hub-compose/src/hub-starter.ts", import.meta.url), "utf-8");
     expect(cli).toContain("resolveRuleSyncRoom");
     expect(cli).not.toContain("!== rule.roomSlug) continue"); // the old "drop from desired" guard
     const rolling = readFileSync(new URL("../../packages/app/src/rolling-effective.ts", import.meta.url), "utf-8");

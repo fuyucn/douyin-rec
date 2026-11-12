@@ -86,8 +86,11 @@ flowchart TB
   cli --> engine
   cli --> zeroup
   hubc --> app
+  hubc --> bup
   hubc --> core
+  hubc --> observ
   hubc --> orch
+  hubc --> post
   orch --> core
   orch --> post
   app --> bup

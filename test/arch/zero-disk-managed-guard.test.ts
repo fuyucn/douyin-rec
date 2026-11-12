@@ -11,7 +11,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const ROOT = join(import.meta.dirname, "..", "..");
-const cli = readFileSync(join(ROOT, "packages/cli/src/cli.ts"), "utf-8");
+const cli = readFileSync(join(ROOT, "packages/cli/src/cli.ts"), "utf-8")
+  + "\n" + readFileSync(join(ROOT, "packages/hub-compose/src/hub-starter.ts"), "utf-8");
 
 function streamUploadBlock(): string {
   const start = cli.indexOf("if (streamUploadEnabled) {");
