@@ -465,6 +465,9 @@ nodeId，迁移步不用再跑。
 测试改为 mock 新模块（`vi.mock("@drec/bilibili-api")`），撤掉对 core 内部函数的 mock；全量 `pnpm test`
 5319 passed、`pnpm typecheck` 0 错、`arch:check` 一致、`pnpm bundle` 0.0.384。
 
+**合并**：issue #682 → PR #683（merge `dca7cfa2`，0.0.384）。CI 首跑红在 `test/orchestrator/ledger-wal`
+的「并发首开切 WAL」用例（5000ms 超时），与本改动无关——本机连跑 3 次全绿，重跑该 job 通过。
+
 ## §9 验收清单（对应审计「复审验收点」）
 
 - [ ] 新增假上传目标 + 假平台：一个包 + 一行注册；app/web/orchestrator 零改动；
