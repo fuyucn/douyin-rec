@@ -373,6 +373,13 @@ verify
 `bv` / `seasonState`，读取优先 checkpoint、缺失或损坏回退旧列；`ALTER` 失败只告警不阻塞队列（
 `user_version` 停在 5，下次开库重试）。回滚演练与新库升级写在 `test/proc-queue/target-state.test.ts`。
 
+**阶段 3 补线（2026-11-12）**：issue #666 → PR #667（merge e5529350，0.0.376）。上一版只加了列和双写，
+没有任何生产调用点，`parts` 永远写不进去；现在 `ProcessContext.setState` 接受 `UploadTargetState`
+（`targetId` / `archiveId` / `parts?` / `season?`），`runner` 的 `ctxFor().setState` 遇到该载荷直接走
+`store.setTargetState`（行不存在就抛 `[proc] target checkpoint write missed its row`），`biliup` 与
+`upload-part` 的 5 个调用点改为发 checkpoint；`parts` 只由 `upload-part` 上报 `1`（每分 P 一次），
+跨场累加仍由 `store` 按 archiveId 归并。
+
 教训（写给下一个改这里的人）：**「调用点数量 / 文件数」必须 grep 实测，不能凭结构推断。** 我在 1b 里
 三次数错——1b-1 前以为「只有两处」，实测五条路径；测试面以为「10 个文件」，实测 32 个；1b-3 之后以为
 「最后一条」，实测还有 `node-pipeline`。这三个错误都会让「上传轴已接完」的结论提前成立。
