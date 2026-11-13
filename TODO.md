@@ -127,7 +127,7 @@
   — **做什么**: 用 `scripts/auto-deploy.sh --stage all` 把 0.0.384（阶段 4 合并后的 main，HEAD `5ee2af32`）推到 master 与两台节点；清理 staging 阶段建的测试任务与测试录像目录。
   **为什么**: 阶段 4 是纯搬迁但动了包的依赖图与产物结构，三端要同版本才能排除「新旧混搭」的干扰；测试房间的任务与目录留着会被下一次同步误当成真实房间。
   **验收**: 三端 `api/version` 同一版本、bundle md5 一致、systemd active；录制 0、上传 0；台账里 `TEST-` 任务 0 条。
-  **现状（2026-11-13）**: 三端均为 `0.0.384-e1206d`（本地 `dist/douyin-rec.mjs` md5 `e2acbbef93c582226c243c50102b7016`，两台节点同一 md5）；任务同步 applied=4/6/12；删掉 4 条 `TEST-` 任务，录像目录移到节点上的 `.trash-20261113/`（未删除，可回收）。
+  **现状（2026-11-13）**: 三端均为 `0.0.384-e1206d`（本地 bundle 的 md5 前缀 `e2acbbef`，两台节点与之相同）；任务同步 applied=4/6/12；删掉 4 条 `TEST-` 任务，录像目录移到节点上的回收目录(`.trash-` 以日期为名)（未删除，可回收）。
 
 [~] **T-198 直播直传同场判定以真实进度为准（issue [#642](https://github.com/fuyucn/douyin-rec/issues/642)，2026-11-12）**
   — **做什么**: `rolloverStaleState` 的最后活动取 `max(state.updatedAt, 未确认分 P 的 spool mtime, 恢复进度标记)`；新增 `<state>.activity` 标记，只在恢复重传的**真实块进度**上写（每分钟节流，重试/定时心跳不写）；启动恢复把 `o.signal` 传入 `resubmitAllUnconfirmed`，取消后不再发起新的不可逆请求；重传按 10% 输出进度日志；归档时删掉标记。
