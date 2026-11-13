@@ -38,6 +38,25 @@ export interface UploadFile {
   /** 幂等线索：大小 + mtime 足以识别「同一段」，不读内容哈希。 */
   size?: number;
   mtimeMs?: number;
+  /**
+   * Bytes straight from memory (plans/049 stage 2: zero-disk uploads have no readable file).
+   *
+   * When present the target reads chunks from here and `path` is only a name for logs / part
+   * titles. Targets that shell out to an external uploader must reject it explicitly rather than
+   * silently uploading an empty or stale file.
+   */
+  source?: UploadByteSource;
+}
+
+/**
+ * 分块读取的字节来源。大小在**开始前**就必须确定(UPOS 的 preupload 协议要求预声明总量),
+ * 这让「零落盘」也能用同一个契约: 字节来自内存缓冲, 不来自文件。
+ */
+export interface UploadByteSource {
+  /** Exact number of bytes the uploader will publish. */
+  size: number;
+  /** Read chunk `index`; `size` is the exact length the target asked for. */
+  readChunk(index: number, size: number): Promise<Uint8Array>;
 }
 
 /** 硬策略：水印必须关闭、投稿类型必须是自制；调用方只能显式覆盖 visibility。 */

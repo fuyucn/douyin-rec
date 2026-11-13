@@ -8,6 +8,7 @@
   "exports": { ".": "./src/index.ts" },
   "dependencies": {
     "@drec/core": "workspace:*",
-    "@drec/processors": "workspace:*"
+    "@drec/processors": "workspace:*",
+    "@drec/zero-upload": "workspace:*"
   }
 }

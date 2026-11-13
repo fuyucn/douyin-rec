@@ -8,9 +8,7 @@
  *
  * 已是全部生产路径的唯一入口：orchestrator / app / node-pipeline 仍走旧实现，直到阶段 1b。
  */
-import { createHash } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
 import {
   appendGroup,
   countVideoParts,
@@ -30,18 +28,21 @@ import {
   type CredentialRef,
   type UploadErrorClass,
   type UploadOpts,
+  type UploadFile,
   type UploadTarget,
 } from "@drec/core";
 
 import { BILIUP_TARGET_ID } from "./target-id.js";
+import { accountKeyFor, cookieLocator, COOKIE_ENV as SHARED_COOKIE_ENV } from "./credential.js";
 export { BILIUP_TARGET_ID } from "./target-id.js";
+export { COOKIE_ENV } from "./credential.js";
 
 /** B 站「日常」分区：仅当调用方没给 tid 时兜底；真实分区来自规则。 */
 export const DEFAULT_TID = 21;
 /** B 站标题上限（字符）。 */
 export const TITLE_MAX_LENGTH = 80;
 /** 凭据环境变量：与 app 的既有默认（`BILIUP_COOKIE`）同口径，不新造第二套命名。 */
-export const COOKIE_ENV = "BILIUP_COOKIE";
+const COOKIE_ENV = SHARED_COOKIE_ENV;
 
 export interface BiliupTargetDeps {
   /** spawn 注入（测试捕获 argv，不真跑子进程）。 */
@@ -58,24 +59,14 @@ export interface BiliupTargetDeps {
   sleep?: (ms: number) => Promise<void>;
 }
 
-/** accountKey 对外只暴露不可逆短哈希：Gate 需要稳定分键，日志不需要路径。 */
-function shortHash(s: string): string {
-  return createHash("sha1").update(s).digest("hex").slice(0, 12);
-}
-
 function messageOf(err: unknown): string {
   return String((err as Error)?.message ?? err);
 }
 
-/** 从 biliup cookies JSON 取 B 站 `DedeUserID`：同一账号换路径仍是同一个分键。 */
-function dedeUserId(text: string | null): string | null {
-  if (!text) return null;
-  try {
-    const j = JSON.parse(text) as { cookie_info?: { cookies?: Array<{ name?: string; value?: string }> } };
-    const hit = j.cookie_info?.cookies?.find((c) => c.name === "DedeUserID");
-    return hit?.value?.trim() || null;
-  } catch {
-    return null;
+/** biliup 把文件交给外部子进程:内存字节没有路径可读,必须显式拒绝而不是传一个空文件。 */
+function assertLocalFiles(files: UploadFile[]): void {
+  if (files.some((f) => f.source)) {
+    throw new Error("biliup 目标只能上传本地文件;内存字节请走 UPOS 目标");
   }
 }
 
@@ -97,24 +88,18 @@ export function createBiliupFileTarget(deps: BiliupTargetDeps = {}): UploadTarge
 
     resolveCredential({ dataRoot, explicitPath }): CredentialRef {
       // 显式 > 环境变量 > 数据根默认（plans/049 §5.2），与 app 既有默认同序。
-      // 环境变量为空串/纯空格时按「没给」处理，回落到数据根默认（与仓库既有实现同口径）。
-      const fromEnv = env(COOKIE_ENV)?.trim() || undefined;
-      const locator = explicitPath ?? fromEnv ?? join(dataRoot, "config", "biliup", "cookies.json");
-      if (!exists(locator)) throw new Error(`bilibili 上传凭据不存在（target=${BILIUP_TARGET_ID}）`);
+      // 环境变量为空串/纯空格时按「没给」处理，回落到数据根默认——判定与 UPOS 目标共用一份实现。
+      const locator = cookieLocator(
+        BILIUP_TARGET_ID,
+        { dataRoot, ...(explicitPath ? { explicitPath } : {}) },
+        { env, exists },
+      );
       return { targetId: BILIUP_TARGET_ID, locator };
     },
 
     accountKey(cred: CredentialRef): string {
-      let uid: string | null = null;
-      try {
-        uid = dedeUserId(readText(cred.locator));
-      } catch {
-        // 文件被删/权限变化（exists 与 read 之间有窗口）也退回路径哈希：
-        // accountKey 是同步签名，不能把文件系统异常丢给调用方。
-        uid = null;
-      }
       // 读不到账号 ID 时退回路径哈希：仍然稳定，但换了路径就换了键，能区分而不是静默合并。
-      return `${BILIUP_TARGET_ID}:${shortHash(uid ?? cred.locator)}`;
+      return accountKeyFor(BILIUP_TARGET_ID, cred.locator, { readText });
     },
 
     hardPolicy() {
@@ -127,6 +112,7 @@ export function createBiliupFileTarget(deps: BiliupTargetDeps = {}): UploadTarge
     },
 
     async create(input: CreateArchiveInput): Promise<CreateArchiveResult> {
+      assertLocalFiles(input.files);
       // 只映射 path：`UploadFile` 的 title/size/mtimeMs 不进 biliup 的 argv
       // （旧链按文件整段上传，分 P 标题由文件顺序/文件名决定），阶段 1a 不做额外映射。
       const opts: UploadOpts = {
@@ -151,6 +137,7 @@ export function createBiliupFileTarget(deps: BiliupTargetDeps = {}): UploadTarge
     },
 
     async append(input: AppendPartsInput): Promise<AppendPartsResult> {
+      assertLocalFiles(input.files);
       try {
         // appendGroup = 逐线路重试 + 分 P 数回读 + 不确定标记（与旧链完全同一套判定）。
         await appendGroup({
