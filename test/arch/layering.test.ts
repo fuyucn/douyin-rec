@@ -30,6 +30,9 @@ const RANKS: Record<string, number> = {
   "@drec/upload-runtime": 0.5,
   // 0.5:B 站上传目标实现(包装既有 biliup 链;依赖 core + processors 0.4;cli 注册,orchestrator/app 不 import)
   "@drec/bilibili-upload": 0.5,
+  // 0.1:B 站 HTTP 助手(登录态解析 + 合集关联)。不依赖任何 workspace 包,故 0 落盘(0.35)
+  //     与上传目标(0.5)都能用它,而不必把对方的层拉上来。
+  "@drec/bilibili-api": 0.1,
   // 0.2:依赖 core 的会话基名(issue #50);被 processors/app/orchestrator/cli 依赖
   "@drec/post-process": 0.2,
   // 0.3:每节点持久任务表 + 租约执行循环(依赖 core + node:sqlite;被 app/cli 依赖,不依赖 observability)

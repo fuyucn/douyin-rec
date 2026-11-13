@@ -53,17 +53,8 @@ import {
   type UposPart,
   type StudioVideo,
 } from "./upos-stream.js";
-import {
-  addArchiveToSeasonIfConfigured,
-  seasonCheckpointState,
-  isSameBroadcastGap,
-  isUploadRateLimited,
-  noteRecorderProgress,
-  type DanmuMessage,
-  type LivePumpReporter,
-  type PartSubmitter,
-  type UploadPolicy,
-} from "@drec/core";
+import { isSameBroadcastGap, isUploadRateLimited, noteRecorderProgress, type DanmuMessage, type LivePumpReporter, type PartSubmitter, type UploadPolicy } from "@drec/core";
+import { addArchiveToSeasonIfConfigured, seasonCheckpointState } from "@drec/bilibili-api";
 import { ffprobeDuration, ffprobeDtsGap, type DtsGap } from "@drec/post-process";
 import { TsCutter, type CutterEvent, type PartTiming } from "./ts-cutter.js";
 

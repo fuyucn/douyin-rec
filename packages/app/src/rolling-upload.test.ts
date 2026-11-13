@@ -8,7 +8,8 @@ import {
 } from "./rolling-upload.js";
 import {
   UploadGate, RecorderStateWriter, parseRecorderState, recorderActivity, recorderStatePath, rollingUploadSingleNode,
-  type ProcProbe, type RecorderActivity, type SeasonAddOutcome, fakeUploadTarget } from "@drec/core";
+  type ProcProbe, type RecorderActivity, fakeUploadTarget } from "@drec/core";
+import type { SeasonAddOutcome } from "@drec/bilibili-api";
 import type { AckSample } from "@drec/bilibili-upload";
 
 const seasonHook = vi.hoisted(() => ({
@@ -16,8 +17,8 @@ const seasonHook = vi.hoisted(() => ({
   onCall: undefined as undefined | ((o: { bvid?: string }) => void | Promise<void>),
   result: undefined as SeasonAddOutcome | undefined,
 }));
-vi.mock("@drec/core", async (orig) => {
-  const m = await orig<typeof import("@drec/core")>();
+vi.mock("@drec/bilibili-api", async (orig) => {
+  const m = await orig<typeof import("@drec/bilibili-api")>();
   return {
     ...m,
     addArchiveToSeasonIfConfigured: async (o: Parameters<typeof m.addArchiveToSeasonIfConfigured>[0]) => {

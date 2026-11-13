@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { cleanupSourcesShared, consecutiveSidecarSkips, removeEmptyStageDir, xmlKeepRule, runPipeline, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
 import { ResourcePool } from "./workflow.js";
 import { SyncLedger } from "./ledger.js";
-import { addArchiveToSeasonIfConfigured, APPEND_AMBIGUOUS_MARKER, closeStageReady, STAGE_READY } from "@drec/core";
+import { APPEND_AMBIGUOUS_MARKER, closeStageReady, STAGE_READY } from "@drec/core";
+import { addArchiveToSeasonIfConfigured } from "@drec/bilibili-api";
 import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { NotifyEvent } from "@drec/core";
@@ -24,15 +25,22 @@ vi.mock("node:fs", { spy: true });
 // 全局 setup 已先于本文件加载 @drec/core(其 node:fs 绑定不受上面的 spy 影响),
 // 故「硬链接不可用」改经 linkOrCopy 的注入口(fs)模拟 EXDEV。
 const linkFail = vi.hoisted(() => ({ on: false }));
+vi.mock("@drec/bilibili-api", async (orig) => {
+  const s = await orig<typeof import("@drec/bilibili-api")>();
+  return {
+    ...s,
+    addArchiveToSeasonIfConfigured: vi.fn(async (o: Parameters<typeof s.addArchiveToSeasonIfConfigured>[0]) =>
+      o.sectionId
+        ? { status: "added" as const, sectionId: o.sectionId, aid: 1, cid: 1, title: "t" }
+        : { status: "skipped" as const, reason: "season section id is off" }),
+  };
+});
+
 vi.mock("@drec/core", async (orig) => {
   const m = await orig<typeof import("@drec/core")>();
   const fs = await import("node:fs");
   return {
     ...m,
-    addArchiveToSeasonIfConfigured: vi.fn(async (o: Parameters<typeof m.addArchiveToSeasonIfConfigured>[0]) =>
-      o.sectionId
-        ? { status: "added" as const, sectionId: o.sectionId, aid: 1, cid: 1, title: "t" }
-        : { status: "skipped" as const, reason: "season section id is off" }),
     linkOrCopy: (s: string, d: string, o?: Parameters<typeof m.linkOrCopy>[2]) =>
       m.linkOrCopy(s, d, linkFail.on ? {
         ...o,

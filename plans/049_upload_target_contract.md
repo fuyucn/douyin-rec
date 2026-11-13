@@ -298,7 +298,7 @@ verify
 | 1 | `bilibili-upload` 包装 biliup；`run-biliup` 纯搬迁；orchestrator 合并/分段先接驱动 | 无（对拍） | 现有 upload/append 用例全绿；argv/输出与旧实现逐字一致 |
 | 2 | UPOS 传输接入（2a 已完成：`bilibili-upos` 目标）；上传驱动实现完成（2b-1，0.0.378，零接入）；`live-pump` 改走驱动（2b-2a 接缝 0.0.379；2b-2b 流式发布契约 0.0.380；2b-2c 装配 0.0.381，默认关闭；**2b-2c 于 2026-11-12 实机验证通过，见 §8.3**）；`rolling-upload` 走驱动单独拆为 **2d（未开始，needs-decision）** | 无（对拍） | 分 P 数/文件名/可见性一致；cover 行为单独验证 |
 | 3 | `proc-queue` `targetState` dual-write + 读取回退 | 无 | 新旧 bundle 互读；回滚演练 |
-| 4 | 删 core 的 B 站代码、更新架构文档/守护 | 无 | `core` grep `bili|biliup|upos` 只剩注释；`pnpm arch:check` 绿 |
+| 4 | 删 core 的 B 站代码、更新架构文档/守护（**已完成 0.0.384，2026-11-13，见 §8.4**） | 无（纯搬迁） | `core` grep `bili|biliup|upos` 只剩注释与两类登记例外；`pnpm arch:check` 绿 |
 
 每个阶段单独 PR；阶段 0/1 先做，阶段 2 需要真实稿件验证 UPOS 封面行为。
 
@@ -437,11 +437,38 @@ docker run --rm --network host --entrypoint node \
 `dist/douyin-rec.mjs.bak-<旧版本>`，回滚 = `cp` 回去 + `systemctl restart video-screenshot`。worker id 已经是
 nodeId，迁移步不用再跑。
 
+### 8.4 阶段 4：core 去 B 站化（2026-11-13）
+
+新增叶子包 **`@drec/bilibili-api`**（rank 0.1，不依赖任何内包），把「只有 B 站才有的知识」从 `core` 搬出去：
+
+| 文件 | 来源 | 内容 |
+|---|---|---|
+| `credential.ts` | `core/upload-gate.ts` | 账号键（`biliAccountKey` / `biliAccountKeyFromCookiesJson`）、`biliupCookieHeader`、CSRF（`biliupCsrf`） |
+| `season.ts` | `core/bili-season.ts` | 提交后把稿件加入合集小节，返回 `SeasonAddOutcome` |
+| `season-resolve.ts` | `core/bili-season-resolve.ts` | 配置里的小节号归一化与解析 |
+
+调用方（`app` / `cli` / `orchestrator` / `zero-upload` / `bilibili-upload` / `hub-compose`）改为从新包导入；
+`tsconfig` / `vitest` 别名、`test/arch/layering.test.ts` 的 RANKS、`scripts/gen-architecture.mjs` 与生成的
+`docs/architecture.{html,md}` 同步（19 → 20 包），README 包数同步。
+
+**留下来的两类登记例外**（不是漏搬）：
+
+1. `core/processor.ts` 的 `BILIUP_QUEUE_CAPABILITY` / `BILIUP_SLOT_CAPABILITY`——这是**能力字符串**（规则
+   `requires`、worker 上报、UI 门控共用的一套词汇）。改字符串等于改节点协议，与「去 B 站化」无关。
+2. `core/title-template.ts` 的 `formatBiliTitle` / `partTitleToFilename`——标题与文件名清洗，调用方是
+   平台无关的分 P 命名逻辑；搬走会把纯格式化拖进叶子包并制造反向依赖。
+
+**兼容壳**（保留一个发布周期，行为不变）：`orchestrator/src/upload-limits.ts` 与
+`bilibili-upload/src/run-biliup.ts` 继续 re-export 同名符号，调用方不必同时改。
+
+**验收**：`rg -ni "bili|biliup|upos" packages/core/src` 只剩注释、测试夹具里的字符串、上面两类例外；
+测试改为 mock 新模块（`vi.mock("@drec/bilibili-api")`），撤掉对 core 内部函数的 mock；全量 `pnpm test`
+5319 passed、`pnpm typecheck` 0 错、`arch:check` 一致、`pnpm bundle` 0.0.384。
 
 ## §9 验收清单（对应审计「复审验收点」）
 
 - [ ] 新增假上传目标 + 假平台：一个包 + 一行注册；app/web/orchestrator 零改动；
-- [ ] core 里 `bili|biliup|upos` 只剩注释（阶段 4 后）；
+- [x] core 里 `bili|biliup|upos` 只剩注释（阶段 4，0.0.384，例外见 §8.4）；
 - [ ] 三种管线模式共用一份「建稿→append→重试→幂等」驱动；
 - [x] `proc-queue` 存不透明目标状态（阶段 3：`targetState` 双写，旧列保留一个发布周期）；
 - [ ] 手动上传与生产共用 `UploadGate` + 槽位（#596）；

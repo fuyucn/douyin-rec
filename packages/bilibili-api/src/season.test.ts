@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { addArchiveToSeason, normalizeSeasonSectionId, resolveSeasonSectionId, seasonCheckpointState } from "./bili-season.js";
+import { addArchiveToSeason, normalizeSeasonSectionId, resolveSeasonSectionId, seasonCheckpointState } from "./season.js";
 
 function loginFile(csrf = "csrf-token"): string {
   const dir = mkdtempSync(join(tmpdir(), "season-test-"));

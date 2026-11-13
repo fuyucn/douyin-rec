@@ -9,7 +9,8 @@
  */
 import path from "node:path";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { addArchiveToSeasonIfConfigured, seasonCheckpointState, effectiveStageFormat, linkOrCopy, burnFlags, isAppendAmbiguous, isUploadRateLimited, resolvePartAliasStem, stageExt, throwIfAborted, closeStageReady } from "@drec/core";
+import { effectiveStageFormat, linkOrCopy, burnFlags, isAppendAmbiguous, isUploadRateLimited, resolvePartAliasStem, stageExt, throwIfAborted, closeStageReady } from "@drec/core";
+import { addArchiveToSeasonIfConfigured, seasonCheckpointState } from "@drec/bilibili-api";
 import { isCompleteMedia, planSegmentGroups, renderXmlWindowToXml, unreadableParts } from "@drec/post-process";
 import type { Broadcast } from "./identity.js";
 import type { JobState, SyncLedger } from "./ledger.js";

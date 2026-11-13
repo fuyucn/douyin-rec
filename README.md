@@ -10,11 +10,11 @@
 - **引擎策略化录制**(通用 `record-engine` + 引擎 `ffmpeg`[默认,.ts] / `mesio`[rust-srec,.flv],任务字段 `engine` 选):取流靠平台 `getStream`(抖音 vendored a_bogus 签名,匿名不踢手机),引擎平台无关;已对真实直播 live 端到端验证。
 - **Platform 抽象**：平台专属逻辑收口 `Platform` 接口 + 注册表(matchUrl/getStream/getLiving/connectDanmu/…),抖音与 bilibili **均完整实装**(取流 + 弹幕);接第二平台 = 写 `<平台>-live` 包 + 注册一行。
 - **多节点 hub**(`orchestrator`):Docker `task serve --hub` 是控制器，也注册为可选的 `local` 录制 worker；VPS 运行普通 `task serve`。每个房间的 Hub 规则选择录制节点：仅 VPS 时 Docker 不会同时本地录制，选择 local+VPS 才会双录。master 按规则下发受管任务(远端只读)、收集录像、覆盖度选优、拉取后合并/烧录并穿插上传;配置文件化(`config/hub/{platform}.{roomSlug}.json` + `hub.config.json`)。详见 [多节点同步](#多节点同步hub)。
-- pnpm workspace,19 包,主线在 `main`。
+- pnpm workspace,20 包,主线在 `main`。
 
 ## 架构
 
-pnpm workspace（19 包），收敛成 **2 个可插拔接缝** + **1 个多节点编排层**:**平台轴**(各 `<平台>-live`,平台专属取流+弹幕)+ **引擎轴**(`record-engine`,平台无关下载)+ **多节点 hub**(`orchestrator`,master 管理任务分配、收集选中节点录像并后处理),其余全通用。依赖只能向下（`test/arch/layering.test.ts` 守护）。esbuild 把 `cli` 打成 `dist/douyin-rec.mjs`。
+pnpm workspace（20 包），收敛成 **2 个可插拔接缝** + **1 个多节点编排层**:**平台轴**(各 `<平台>-live`,平台专属取流+弹幕)+ **引擎轴**(`record-engine`,平台无关下载)+ **多节点 hub**(`orchestrator`,master 管理任务分配、收集选中节点录像并后处理),其余全通用。依赖只能向下（`test/arch/layering.test.ts` 守护）。esbuild 把 `cli` 打成 `dist/douyin-rec.mjs`。
 
 > 📐 **架构图(依赖分层 + 运行时数据流,mermaid)：[docs/architecture.md](./docs/architecture.md)**(GitHub 直接渲染);可交互版 [docs/architecture.html](./docs/architecture.html)。
 

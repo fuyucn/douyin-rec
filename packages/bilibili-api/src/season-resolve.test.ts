@@ -9,8 +9,8 @@ import {
   seasonAccountKey,
   seasonCacheFile,
   seasonCacheGet,
-} from "./bili-season-resolve.js";
-import { addArchiveToSeasonIfConfigured } from "./bili-season.js";
+} from "./season-resolve.js";
+import { addArchiveToSeasonIfConfigured } from "./season.js";
 
 interface Login { path: string; dir: string }
 

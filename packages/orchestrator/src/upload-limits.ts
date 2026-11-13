@@ -13,11 +13,10 @@ export {
   sanitizeUploadLimitState,
   UPLOAD_FAIL_CLOSED_MS,
   UPLOAD_GATE_DEFAULT_KEY,
-  biliAccountKey,
-  biliAccountKeyFromCookiesJson,
   UploadGate,
 } from "@drec/core";
 export type { UploadLimitState, UploadGateStore, UploadGateOpts } from "@drec/core";
+export { biliAccountKey, biliAccountKeyFromCookiesJson } from "@drec/bilibili-api";
 
 import type { UploadGateStore } from "@drec/core";
 

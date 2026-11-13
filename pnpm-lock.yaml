@@ -51,6 +51,9 @@ importers:
 
   packages/app:
     dependencies:
+      '@drec/bilibili-api':
+        specifier: workspace:*
+        version: link:../bilibili-api
       '@drec/bilibili-upload':
         specifier: workspace:*
         version: link:../bilibili-upload
@@ -95,6 +98,8 @@ importers:
         specifier: ^1.5.6
         version: 1.5.6
 
+  packages/bilibili-api: {}
+
   packages/bilibili-live:
     dependencies:
       '@drec/core':
@@ -103,6 +108,9 @@ importers:
 
   packages/bilibili-upload:
     dependencies:
+      '@drec/bilibili-api':
+        specifier: workspace:*
+        version: link:../bilibili-api
       '@drec/core':
         specifier: workspace:*
         version: link:../core
@@ -118,6 +126,9 @@ importers:
       '@drec/app':
         specifier: workspace:*
         version: link:../app
+      '@drec/bilibili-api':
+        specifier: workspace:*
+        version: link:../bilibili-api
       '@drec/bilibili-live':
         specifier: workspace:*
         version: link:../bilibili-live
@@ -205,6 +216,9 @@ importers:
       '@drec/app':
         specifier: workspace:*
         version: link:../app
+      '@drec/bilibili-api':
+        specifier: workspace:*
+        version: link:../bilibili-api
       '@drec/bilibili-upload':
         specifier: workspace:*
         version: link:../bilibili-upload
@@ -241,6 +255,9 @@ importers:
 
   packages/orchestrator:
     dependencies:
+      '@drec/bilibili-api':
+        specifier: workspace:*
+        version: link:../bilibili-api
       '@drec/core':
         specifier: workspace:*
         version: link:../core
@@ -302,6 +319,9 @@ importers:
 
   packages/zero-upload:
     dependencies:
+      '@drec/bilibili-api':
+        specifier: workspace:*
+        version: link:../bilibili-api
       '@drec/core':
         specifier: workspace:*
         version: link:../core

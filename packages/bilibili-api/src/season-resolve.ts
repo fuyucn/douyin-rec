@@ -17,7 +17,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { biliAccountKeyFromCookiesJson, biliupCookieHeader } from "./upload-gate.js";
+import { biliAccountKeyFromCookiesJson, biliupCookieHeader } from "./credential.js";
 
 const MEMBER = "https://member.bilibili.com";
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";

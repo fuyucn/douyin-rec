@@ -19,7 +19,8 @@
  * 由分层保证而不是靠人记得。processors 只 re-export 它(保持旧导入点),不反向依赖。
  */
 import { existsSync, readFileSync } from "node:fs";
-import { biliupCookieHeader, biliupCsrf, noteRecorderProgress } from "@drec/core";
+import { noteRecorderProgress } from "@drec/core";
+import { biliupCookieHeader, biliupCsrf } from "@drec/bilibili-api";
 
 /**
  * Read biliup cookies.json into a Cookie header, or null when the file is missing/unreadable.

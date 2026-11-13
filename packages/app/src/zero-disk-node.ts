@@ -10,28 +10,8 @@
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, posix } from "node:path";
-import {
-  biliAccountKeyFromCookiesJson,
-  isKnownAccountKey,
-  normalizeZeroDiskReceipt,
-  zeroDiskStreamKey,
-  normalizeZeroDiskStatus,
-  parseZeroDiskDelivery,
-  zeroDiskAccountVerdict,
-  normalizeLiveUploadSnapshot,
-  capLiveUploadSnapshot,
-  LIVE_HISTORY_LIMIT,
-  REPORT_EVENT_LIMIT,
-  REPORT_PART_LIMIT,
-  type ZeroDiskDelivery,
-  type ZeroDiskNodeStatus,
-  type ZeroDiskReceipt,
-  type ZeroDiskRefusal,
-  type ZeroDiskReport,
-  type LiveUploadSnapshot,
-  type UploadGateStore,
-  openUploadLimitStore,
-} from "@drec/core";
+import { isKnownAccountKey, normalizeZeroDiskReceipt, zeroDiskStreamKey, normalizeZeroDiskStatus, parseZeroDiskDelivery, zeroDiskAccountVerdict, normalizeLiveUploadSnapshot, capLiveUploadSnapshot, LIVE_HISTORY_LIMIT, REPORT_EVENT_LIMIT, REPORT_PART_LIMIT, type ZeroDiskDelivery, type ZeroDiskNodeStatus, type ZeroDiskReceipt, type ZeroDiskRefusal, type ZeroDiskReport, type LiveUploadSnapshot, type UploadGateStore, openUploadLimitStore } from "@drec/core";
+import { biliAccountKeyFromCookiesJson } from "@drec/bilibili-api";
 import { platformForRoom } from "@drec/core";
 import {
   NODE_UPLOAD_COOLDOWN_MS, NODE_UPLOAD_RATE_LIMIT, NODE_UPLOAD_WINDOW_MS, openNodeUploadGate, resolveUploadAccountKey,

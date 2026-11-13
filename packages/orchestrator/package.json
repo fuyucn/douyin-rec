@@ -1,17 +1,18 @@
 {
-  "name": "@drec/orchestrator",
-  "version": "0.0.1",
-  "private": true,
-  "type": "module",
-  "exports": {
-    ".": "./src/index.ts"
-  },
-  "dependencies": {
-    "@drec/core": "workspace:*",
-    "@drec/post-process": "workspace:*",
-    "ws": "^8.21.0"
-  },
-  "devDependencies": {
-    "@types/ws": "^8.5.0"
-  }
+ "name": "@drec/orchestrator",
+ "version": "0.0.1",
+ "private": true,
+ "type": "module",
+ "exports": {
+  ".": "./src/index.ts"
+ },
+ "dependencies": {
+  "@drec/core": "workspace:*",
+  "@drec/post-process": "workspace:*",
+  "ws": "^8.21.0",
+  "@drec/bilibili-api": "workspace:*"
+ },
+ "devDependencies": {
+  "@types/ws": "^8.5.0"
+ }
 }

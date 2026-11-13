@@ -18,11 +18,11 @@ describe("biliup re-export surface (plan 038 T05)", () => {
 
 describe("@drec/zero-upload re-export (零落盘拆包)", () => {
   it("cookie 头解析下沉 core 后,processors 仍是同一份函数(调用点不变)", async () => {
-    const core = await import("../../packages/core/src/upload-gate.js");
+    const cred = await import("../../packages/bilibili-api/src/credential.js");
     const proc = await import("../../packages/bilibili-upload/src/run-biliup.js");
     // 同一引用 = 没有第二份实现,0 落盘与进程内上传共用单一真理。
-    expect(proc.biliupCookieHeader).toBe(core.biliupCookieHeader);
-    expect(core.biliupCookieHeader({
+    expect(proc.biliupCookieHeader).toBe(cred.biliupCookieHeader);
+    expect(cred.biliupCookieHeader({
       cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }] },
     })).toBe("SESSDATA=x");
   });
