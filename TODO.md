@@ -123,6 +123,12 @@
   **验收**: 纯搬迁、行为不变——`rg -ni "bili|biliup|upos" packages/core/src` 只剩注释、测试夹具字符串与两类登记例外（能力字符串 `BILIUP_*_CAPABILITY`、标题清洗 `formatBiliTitle`）；`pnpm test` 5319 passed / 0 failed、`pnpm typecheck` 0 错、`arch:check` 20 包一致、`pnpm bundle` 0.0.384；兼容壳（`orchestrator/src/upload-limits.ts`、`bilibili-upload/src/run-biliup.ts`）保留一个发布周期。
   **现状（2026-11-13）**: issue [#682](https://github.com/fuyucn/douyin-rec/issues/682) → PR [#683](https://github.com/fuyucn/douyin-rec/pull/683) 已合并（merge dca7cfa2，0.0.384，CI 全绿：全量 5319 passed；首跑红在 `ledger-wal` 的 5s 超时用例，本机连跑 3 次全绿、重跑 job 通过）。代码与文档见 plans/049 §8.4。
 
+[x] **T-217 部署 0.0.384 到三端并清理测试残留（2026-11-13）**
+  — **做什么**: 用 `scripts/auto-deploy.sh --stage all` 把 0.0.384（阶段 4 合并后的 main，HEAD `5ee2af32`）推到 master 与两台节点；清理 staging 阶段建的测试任务与测试录像目录。
+  **为什么**: 阶段 4 是纯搬迁但动了包的依赖图与产物结构，三端要同版本才能排除「新旧混搭」的干扰；测试房间的任务与目录留着会被下一次同步误当成真实房间。
+  **验收**: 三端 `api/version` 同一版本、bundle md5 一致、systemd active；录制 0、上传 0；台账里 `TEST-` 任务 0 条。
+  **现状（2026-11-13）**: 三端均为 `0.0.384-e1206d`（本地 `dist/douyin-rec.mjs` md5 `e2acbbef93c582226c243c50102b7016`，两台节点同一 md5）；任务同步 applied=4/6/12；删掉 4 条 `TEST-` 任务，录像目录移到节点上的 `.trash-20261113/`（未删除，可回收）。
+
 [~] **T-198 直播直传同场判定以真实进度为准（issue [#642](https://github.com/fuyucn/douyin-rec/issues/642)，2026-11-12）**
   — **做什么**: `rolloverStaleState` 的最后活动取 `max(state.updatedAt, 未确认分 P 的 spool mtime, 恢复进度标记)`；新增 `<state>.activity` 标记，只在恢复重传的**真实块进度**上写（每分钟节流，重试/定时心跳不写）；启动恢复把 `o.signal` 传入 `resubmitAllUnconfirmed`，取消后不再发起新的不可逆请求；重传按 10% 输出进度日志；归档时删掉标记。
   **为什么**: 长分 P 录制或大文件重传期间没有状态写入，`updatedAt` 停在 54 分钟前；重启被误判为“换场”，把仍可恢复的分 P 与 archive 身份拆到归档（#642 现场证据：chunk 98 三次 PUT 重试耗尽，下一次启动归档了未确认状态）。
