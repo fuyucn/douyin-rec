@@ -7,12 +7,12 @@ import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ArchiveRef, PartSubmitter, SubmitArchiveMeta } from "@drec/core";
-import { LivePumpSession } from "./live-pump.js";
+import { LivePumpSession, livePumpStatePath, readLivePumpState } from "./live-pump.js";
 
 const REF: ArchiveRef = { targetId: "bilibili-upos", id: "BILIfake1" };
 
 interface Calls {
-  ensure: Array<{ archive: SubmitArchiveMeta; name: string; title?: string }>;
+  ensure: Array<{ archive: SubmitArchiveMeta; name: string; title?: string; skipFindRecent?: boolean }>;
   append: Array<{ ref: ArchiveRef; name: string; title?: string }>;
 }
 
@@ -102,7 +102,12 @@ describe("live-pump -> PartSubmitter seam", () => {
     expect(r.needsManual).toBe(true);
     expect(calls.ensure).toHaveLength(1);
     expect(existsSync(spool)).toBe(true);
-    expect(s.parts.every((p) => !p.confirmed)).toBe(true);
+    // An empty array satisfies `every(...)`, so asserting on the in-memory list proved nothing.
+    // Read the WAL the next start actually recovers from.
+    const state = readLivePumpState(livePumpStatePath(dir, "r"));
+    expect(state).not.toBeNull();
+    expect(state!.pending).toMatchObject({ kind: "create", partIndex: 0, stem: "stem0", spoolPath: spool });
+    expect(state!.parts.some((p) => p.confirmed)).toBe(false);
     expect(s.bvid).toBeUndefined();
   });
 
@@ -114,5 +119,16 @@ describe("live-pump -> PartSubmitter seam", () => {
     const r = await s.submitPart({ index: 0, spoolPath: spool, stem: "stem0", title: "P1", bytes: 6, durationSec: 10 });
     expect(r.ok).toBe(false);
     expect(calls.ensure).toHaveLength(1);
+  });
+
+  it("the first part asks the submitter to create, never to adopt an older same-title archive", async () => {
+    const { submitter, calls } = fakeSubmitter();
+    const s = session(submitter);
+    const spool = join(dir, "p0.ts");
+    writeFileSync(spool, "part-0");
+    await s.submitPart({ index: 0, spoolPath: spool, stem: "stem0", title: "P1", bytes: 6, durationSec: 10 });
+    // The legacy path only dedupes by title during crash recovery; a live title template can render
+    // the same title twice in a day, and adopting the first archive would mix two broadcasts.
+    expect(calls.ensure[0]!.skipFindRecent).toBe(true);
   });
 });

@@ -468,6 +468,68 @@ nodeId，迁移步不用再跑。
 **合并**：issue #682 → PR #683（merge `dca7cfa2`，0.0.384）。CI 首跑红在 `test/orchestrator/ledger-wal`
 的「并发首开切 WAL」用例（5000ms 超时），与本改动无关——本机连跑 3 次全绿，重跑该 job 通过。
 
+### 8.5 阶段 2b-2d：驱动路径对齐旧路径（0.0.385，2026-11-13）
+
+阶段 2b-2c 的实机验证（§8.3）跑的是**本机直传**，而 `DREC_LIVE_PUMP_DRIVER=1` 一旦默认开启，执行体就在
+节点上跑。逐行对拍旧路径（`submitWithRateLimitRetry`）与新路径（`submitPartViaSubmitter` → 驱动 →
+`upos-target.publishStreamed`）后，共 **7 处**会改变「一场直播能不能收尾」的差异。
+
+**第一轮发现并修复的 3 处**（首次提交时的结论，当时漏掉了下面 4 处）：
+
+| 差异 | 旧路径 | 新路径（改前） | 改法 |
+|---|---|---|---|
+| 账号配额记账（#331） | 每次提交前 `submitGate.noteSubmit()`，限流时 `noteRateLimited()` | **完全没有** | `UploadRuntimeDeps.accounting` 可选注入；驱动在每次尝试前与每次限流判定后调用，异常吞掉 |
+| 限流重试预算 | 5 次，60s 起，指数退避封顶 300s | 3 次（驱动默认，未传 `retry`） | `buildLivePumpSubmitter` 显式传 `attempts: 5` 与同一组退避参数 |
+| 首次建稿去重 | 只在**崩溃恢复**里按标题找稿 | 每次建稿都 `findRecent`，命中即复用 | 首次建稿传 `skipFindRecent: true` |
+
+**独立审查（6.1 sol）后追加的 4 处**，都不在前一次的结论里：
+
+| 差异 | 后果 | 改法 |
+|---|---|---|
+| `RunLivePumpOptions` 没有 `submitter` 字段 | **flag 一直是空转**：CLI 用对象展开传参，TypeScript 的多余属性检查不报错，submitter 被静默丢弃，真实录制仍走旧路径 | `RunLivePumpOptions` 补 `submitter`/`submitterTargetId`，在 `openSession` 里透传给 `LivePumpSession`；补 `runLivePump` 级接缝测试，断言投稿端点一次都没被直连 |
+| 限流码被折成 `confirmed-not-submitted` | 驱动按 transient 只等 1/2/4/8 秒，既不冷却账号也不等冷却窗口 | `publishStreamed` 保留原始响应体，限流照旧抛出交给分类器 |
+| 分类判定收到的是包装对象 | `String(res)` 得到 `"[object Object]"`，601/21540 等码全部匹配失败——上一条「保留响应体」也因此形同虚设 | 先 `JSON.stringify(res.raw)` 再交给 `isUploadRateLimited`／`isAppendAmbiguous`／`isPlainNoBv` |
+| 建稿遇到传输错误当作 transient | 重试可能建出**第二份稿件**（第一次 POST 也许已经成功，只是响应丢了） | POST 后的传输错误返回 `proof: unknown` 转人工；只有请求前就能判定的失败才允许重试 |
+
+**顺带收紧的四处**（审查标为 should-fix，同样改变行为）：
+
+- 限流等待改为按尝试次数增长（60s、120s、240s，封顶 300s）。原实现每次都取固定 `rateLimitMs`，等于在同一个冷却窗口里连撞 5 次。
+- `signal` 从 runner 一路传到 driver：停止后排空中的分 P 不会再在冷却结束后补发一次不可逆请求。
+- 首建成功时 checkpoint 从 **P1** 开始记录（原来是 `parts: []`，下一段会把自己记成 P1，而稿件实际已有两个分 P）。
+- `publishStreamed` 的追加失败**不再按码猜「确定未提交」**：除限流外一律 `unknown`。按 21001 等码报「可重试」会让驱动把同一份无效载荷再提交 5 次（第三轮修正，见 §8.5.1）。
+
+**接缝**：`PartSubmitter` 与 `UploadRuntimeDeps` 的新字段全部可选，队列/测试路径不注入即行为不变；
+`RunLivePumpOptions` 的结构性缺口是本轮最严重的一条——它说明 **0.0.381–0.0.384 期间这个 flag 从未真正生效**，
+§8.3 那次实机验证覆盖的也不是新路径执行体。
+
+**验收**：新增 22 个用例（真实 UPOS 目标＋假网络 7 个、驱动层 8 个、装配层 6 个、runner 接缝 1 个）。
+逐项撤回修复都会让对应用例失败（两轮各 5 条，见 PR 正文）。全量 `pnpm test` 5341 passed / 0 failed、
+`pnpm typecheck` 0 错、`arch:check` 一致、`pnpm bundle` 0.0.385。
+
+### 8.5.1 第三轮：复核发现的「对齐后仍然更危险」（0.0.385，2026-11-13）
+
+第二轮独立复核确认上一版仍有四处会把一场直播的分 P 或稿件搞丢，全部修复后才算完成：
+
+| 差异 | 后果 | 改法 |
+|---|---|---|
+| 建稿非 ok 响应按**文本**分类 | 响应体只要出现 `timeout` 就判 transient，驱动重试建稿 5 次；第一次 POST 可能已经建好 → 重复稿件 | 非 ok 只认限流码（冷却后重试）；其余一律 `proof: unknown`，一次即停 |
+| 追加遇到传输错误仍重试 | 编辑请求可能已生效；旧路径遇异常直接停、留 pending，重试会重复分 P | 追加的 catch 里 transport／ambiguous 一律 `unknown` |
+| 校验类拒绝报 `confirmed-not-submitted` | 该证明会被驱动当成「可安全重试」，同一份无效载荷（如 21001）再提交 5 次 | 去掉按码猜的证明：非限流拒绝一律 `unknown`；旧路径同样只停不重试 |
+| pending 冷却等待不可中断 | 停止后还要等满 60–300s，超出 pump 7s 收尾预算，子进程只能被 supervisor 杀 | `driver.pause` 同时监听运行/单次 signal；`buildLivePumpSubmitter` 默认 sleep 在 abort 时清 timer |
+
+复核后还补了一处同类缺陷：非流式 `create()` 的 `submitStudio` 没有包 `catch`，POST 超时抛出的错误仍会被文本分类成
+transient → 再建一次稿（当前无生产调用者，但 `ensureArchive` 一接上就是活的）。已与流式路径同规则：`isTransport` → `unknown`，并加对应用例。
+
+**测试补强**：等待序列改为断言精确的 `[60s,120s,240s,300s]`（旧的「最后一条 ≥60s」对平 60s 也成立）；
+停止用例改为在**真正 pending 的 sleep** 中 abort；建稿/追加各加「响应体只提到 timeout」与「编辑响应丢失」用例，
+并用驱动断言只发一次请求。默认 sleep 的 timer 清理用 fake timers 直接断言 `getTimerCount()===0`。
+
+**验收（第三轮后）**：全量 `pnpm test` **5353 passed / 42 skipped / 0 failed**、`pnpm typecheck` 0 错、
+`arch:check` 一致、`pnpm bundle` 0.0.385；本轮新增 12 条用例；每处修复逐项撤回都有用例变红（见 PR 正文）。
+
+**仍然不能默认开启**：`DREC_LIVE_PUMP_DRIVER` 默认值保持 0。上面 11 处对齐（§8.5 的 7 处 + §8.5.1 的 4 处）只说明两条路径在**代码层面**一致，
+不代表节点执行体跑过——下一版必须选**一台**节点开 flag 实跑一场（分 P 数、stem、private、受管回执）才能翻转默认值。
+
 ## §9 验收清单（对应审计「复审验收点」）
 
 - [ ] 新增假上传目标 + 假平台：一个包 + 一行注册；app/web/orchestrator 零改动；

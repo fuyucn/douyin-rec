@@ -163,6 +163,31 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
     return new Error(what + " rejected: " + JSON.stringify(res.raw).slice(0, 300));
   }
 
+  /**
+   * Errors that happen after (or while) a request is on the wire.
+   *
+   * A create that dies here is NOT provably "not submitted": the POST may have reached the server
+   * and built the archive while the response was lost. Retrying it is exactly how a second
+   * archive gets created next to the first one, so it must surface as proof "unknown" and go to a
+   * human instead of through the driver's transient retry (plans/049 §8.5).
+   *
+   * Shared with `classifyError` so the two lists cannot drift: a transport failure is judged by
+   * whether it happened before or after an irreversible submit, never by which function raised it.
+   */
+  function isTransport(err: unknown): boolean {
+    return TRANSPORT_RE.test(messageOf(err));
+  }
+
+  /**
+   * Everything that means "the wire, not the server, decided the outcome".
+   */
+  const TRANSPORT_RE = /econnreset|etimedout|timeout|timed out|connection reset|socket hang up|unexpected eof|fetch failed|aborted|network/i;
+
+  /**
+   * Which submit responses are safe to retry is decided per call site: a rate-limit body throws so
+   * the driver cools, every other non-ok body is unknown (the request may have landed). No proof
+   * here is built from a guessed code list.
+   */
   return {
     id: UPOS_TARGET_ID,
     platformIds: ["bilibili"],
@@ -194,17 +219,32 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
       const cookiesPath = credPath(input.cred);
       const videos: StudioInput["videos"] = [];
       for (const file of input.files) videos.push(await uploadPart(file, cookiesPath));
-      const res = await submitStudio({
-        cookiesPath,
-        title: input.title,
-        tid: input.tid ?? DEFAULT_TID,
-        tag: (input.tags ?? []).join(","),
-        ...(input.desc ? { desc: input.desc } : {}),
-        private: input.policy.visibility !== "public",
-        videos,
-        ...(fetchImpl ? { fetchImpl } : {}),
-      });
-      if (!res.ok) throw submitFailure(res, "create");
+      let res: SubmitResult;
+      try {
+        res = await submitStudio({
+          cookiesPath,
+          title: input.title,
+          tid: input.tid ?? DEFAULT_TID,
+          tag: (input.tags ?? []).join(","),
+          ...(input.desc ? { desc: input.desc } : {}),
+          private: input.policy.visibility !== "public",
+          videos,
+          ...(fetchImpl ? { fetchImpl } : {}),
+        });
+      } catch (e) {
+        // The POST may already have built the archive; classifying a transport error as transient
+        // made the driver POST the create again. Unknown, never retried (same rule as the streamed
+        // publish below).
+        if (isTransport(e)) return { proof: "unknown", ref: null };
+        throw e;
+      }
+      if (!res.ok) {
+        // Only a rate limit provably did not create the archive. Any other rejection body may
+        // merely *mention* timeout; classifying it as transient made the driver POST the create
+        // again and could build a second archive. Stop and hand it to a human.
+        if (!isUploadRateLimited(JSON.stringify(res.raw))) return { proof: "unknown", ref: null };
+        throw submitFailure(res, "create");
+      }
       // ok but no bvid: the archive exists and we cannot name it. Never retry, never guess.
       if (!res.bvid) return { proof: "unknown", ref: null };
       return { proof: "created", ref: { targetId: UPOS_TARGET_ID, id: res.bvid } };
@@ -231,6 +271,9 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
         if (!res.ok) {
           // A rejected edit did not take effect, but a previous file in this batch may have landed.
           if (appended > 0) return { proof: "unknown" };
+          // Only a rate limit is safe to retry after a cooldown; any other rejection (even one
+          // whose text mentions timeout) is not provably "not submitted". Legacy stops here.
+          if (!isUploadRateLimited(JSON.stringify(res.raw))) return { proof: "unknown" };
           throw submitFailure(res, "append");
         }
         appended++;
@@ -246,9 +289,9 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
      * Publish metadata for bytes the streaming transport already uploaded (plans/049 stage 2b-2b).
      *
      * live-pump already runs preupload -> chunks -> complete while the part is still recording, so
-     * there is nothing left to transfer here. Mapping proof is the same as create/append: an unreadable
-     * submit is unknown, a provably rejected edit is confirmed-not-submitted, anything else throws so
-     * the driver can classify rate limits and permanent failures.
+     * there is nothing left to transfer here. Mapping proof is the same as create/append: an
+     * unreadable submit is unknown, a rate limit throws so the driver can cool and retry, and a
+     * create response we cannot prove did not land is unknown rather than a guessed retry.
      */
     async publishStreamed(input: PublishStreamedInput): Promise<PublishStreamedResult> {
       const cookiesPath = credPath(input.cred);
@@ -259,17 +302,33 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
       if (!input.ref) {
         const archive = input.archive;
         if (!archive) throw new Error("publishStreamed: archive metadata is required to create");
-        const res = await submitStudio({
-          cookiesPath,
-          title: archive.title,
-          tid: archive.tid ?? DEFAULT_TID,
-          tag: (archive.tags ?? []).join(","),
-          ...(archive.desc ? { desc: archive.desc } : {}),
-          private: (archive.policy?.visibility ?? "private") !== "public",
-          videos: [video],
-          ...(fetchImpl ? { fetchImpl } : {}),
-        });
-        if (!res.ok) throw submitFailure(res, "create");
+        let res: SubmitResult;
+        try {
+          res = await submitStudio({
+            cookiesPath,
+            title: archive.title,
+            tid: archive.tid ?? DEFAULT_TID,
+            tag: (archive.tags ?? []).join(","),
+            ...(archive.desc ? { desc: archive.desc } : {}),
+            private: (archive.policy?.visibility ?? "private") !== "public",
+            videos: [video],
+            ...(fetchImpl ? { fetchImpl } : {}),
+          });
+        } catch (e) {
+          // The request may already have created the archive; a retry would create a second one.
+          if (isTransport(e)) return { proof: "unknown", ref: null };
+          throw e;
+        }
+        if (!res.ok) {
+          // A rate limit provably did not create the archive and is the only rejection the
+          // legacy path retries (after a cooldown). Any other non-ok body — a validation error,
+          // an HTTP error page, or a body whose text merely mentions "timeout" — cannot prove
+          // that the POST did not land. Matching that text as transient retried the create five
+          // times, which is how a second archive is born. Report unknown and stop instead.
+          const body = JSON.stringify(res.raw);
+          if (isUploadRateLimited(body)) throw submitFailure(res, "create");
+          return { proof: "unknown", ref: null };
+        }
         if (!res.bvid) return { proof: "unknown", ref: null };
         return { proof: "created", ref: { targetId: UPOS_TARGET_ID, id: res.bvid } };
       }
@@ -282,15 +341,25 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
           ...(fetchImpl ? { fetchImpl } : {}),
         });
       } catch (e) {
-        if (isAppendAmbiguous(e)) return { proof: "unknown", ref: null };
+        // A transport failure during the edit may still have applied it (the legacy path stops
+        // here and leaves the intent pending). A lost read is also not provably an untouched
+        // archive. Either way: unknown, never a blind POST retry.
+        if (isAppendAmbiguous(e) || isPlainNoBv(e) || isTransport(e)) return { proof: "unknown", ref: null };
         throw e;
       }
       if (!res.ok) {
-        // A rejected edit provably did not take effect; an unreadable one might have.
-        if (isAppendAmbiguous(res) || isPlainNoBv(res)) return { proof: "unknown", ref: null };
-        return { proof: "confirmed-not-submitted", ref: null };
+        // The classifier predicates read a message. Handing them the wrapper object made
+        // String(res) "[object Object]", so every code (601/21540/...) silently missed and a
+        // rate-limited edit looked like a plain rejection. Serialize the raw body instead.
+        const body = JSON.stringify(res.raw);
+        // A rate limit provably did not take effect and is the one rejection we may retry: keep
+        // the raw body so classification cools the account like the legacy path.
+        if (isUploadRateLimited(body)) throw submitFailure(res, "append");
+        // Everything else — including a recognised validation rejection — stops here. The legacy
+        // path never retried a non-rate-limited rejection; retrying a 21001 five times only
+        // submits an invalid payload again, and an unknown body may already have applied.
+        return { proof: "unknown", ref: null };
       }
-      if (!res.bvid && !input.ref) return { proof: "unknown", ref: null };
       return { proof: "confirmed", ref: input.ref };
     },
 
@@ -324,9 +393,10 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
       // submit is exactly how duplicate parts and duplicate archives get created.
       if (isAppendAmbiguous(err) || isPlainNoBv(err)) return { kind: "ambiguous", reason: msg };
       if (err instanceof UposRateLimited || isUploadRateLimited(err)) return { kind: "rate-limited" };
-      if (/econnreset|etimedout|timeout|timed out|connection reset|socket hang up|unexpected eof|fetch failed/i.test(msg)) {
-        return { kind: "transient", reason: msg };
-      }
+      // A transport error during a pre-submit step (preupload/chunk PUT) is retryable: no archive
+      // exists yet, so a retry cannot duplicate one. Submit-path transport errors never reach this
+      // classifier — their call sites map them to proof unknown first.
+      if (TRANSPORT_RE.test(msg)) return { kind: "transient", reason: msg };
       return { kind: "permanent", reason: msg };
     },
   };

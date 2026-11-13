@@ -591,6 +591,62 @@ describe("runLivePump 的 fetchImpl 必须贯通到稿件提交", () => {
   }, 20_000);
 });
 
+describe("runLivePump must actually use the injected submitter (issue #688)", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "live-pump-submitter-seam-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  it("routes every part through the submitter instead of the legacy in-process path", async () => {
+    // The submitter used to be accepted by the session constructor and dropped by runLivePump,
+    // so DREC_LIVE_PUMP_DRIVER=1 built a submitter that a real recording never called.
+    writeFileSync(join(dir, "cookies.json"), JSON.stringify({
+      cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
+    }));
+    const calls: string[] = [];
+    const submitter = {
+      ensureStreamedArchive: async (req: { name: string; skipFindRecent?: boolean }) => {
+        calls.push("ensure:" + req.name + (req.skipFindRecent ? ":skip" : ":search"));
+        return { ref: { targetId: "bilibili-upos", id: "BILIfake1" }, reused: false };
+      },
+      appendStreamedPart: async (req: { name: string }) => {
+        calls.push("append:" + req.name);
+        return { confirmed: [1] };
+      },
+      verify: async () => ({ ok: true, observedParts: null }),
+    };
+    // The bytes still travel over UPOS; only the submit endpoints prove the legacy path was used.
+    const submitHits: string[] = [];
+    const fake = ((input: string | URL | Request) => {
+      const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
+      if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
+      if (u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
+      if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
+      if (u.pathname === "/x/vu/web/add/v3" || u.pathname === "/x/vu/web/edit") {
+        submitHits.push(u.pathname);
+        return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } }));
+      }
+      if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BILIfake1", title: "t", tid: 21 }, videos: [] } }));
+      if (u.pathname === "/x/web/archives") return Promise.resolve(json({ code: 0, data: { arc_audits: [] } }));
+      return Promise.resolve(json({ code: 0, data: {} }));
+    }) as unknown as typeof fetch;
+    installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 0x5a));
+    const r = await runLivePump({
+      cookiesPath: join(dir, "cookies.json"), room: "seam", spoolDir: dir, title: "seam",
+      tid: 21, tag: "x", private: true, sizeCap: CHUNK, maxMs: 300, maxSegments: 1,
+      quality: "origin", submit: true, spoolMode: "none", fetchImpl: fake, submitter,
+      fetch: async () => ({ living: true, url: "http://x/y.ts" }),
+      sleep: async () => {},
+    });
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0]).toContain("ensure:");
+    expect(calls[0]).toContain(":skip");
+    // The submitter owned every submission: no studio create/edit reached the wire.
+    expect(submitHits).toEqual([]);
+  }, 20_000);
+});
+
 describe("archive description survives state and reaches the create request", () => {
   it("passes desc from runLivePump options to the first studio create", async () => {
     const dir = mkdtempSync(join(tmpdir(), "live-pump-desc-"));

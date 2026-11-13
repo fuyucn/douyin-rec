@@ -1132,7 +1132,7 @@ export class LivePumpSession {
     }
     const existing = this.state.parts.find((p) => p.index === input.index);
     if (existing?.confirmed) return { ok: true, bvid: this.state.bvid, aid: this.state.aid };
-    if (this.o.submitter) return this.submitPartViaSubmitter(input, existing);
+    if (this.o.submitter) return this.submitPartViaSubmitter(input, existing, signal);
     const doFetch = this.o.fetchImpl ?? fetch;
     // Bilibili part titles are capped; long filenames otherwise make the whole edit fail.
     const video: StudioVideo = { filename: input.stem, title: input.title.slice(0, 80) };
@@ -1222,6 +1222,7 @@ export class LivePumpSession {
   private async submitPartViaSubmitter(
     input: PartSubmitInput,
     existing: LivePumpState["parts"][number] | undefined,
+    signal?: AbortSignal,
   ): Promise<{ ok: boolean; bvid?: string; aid?: number; error?: string; needsManual?: boolean }> {
     const submitter = this.o.submitter;
     if (!submitter) return { ok: false, error: "submitter missing" };
@@ -1259,6 +1260,7 @@ export class LivePumpSession {
           name: input.stem,
           ...(input.title ? { title: input.title.slice(0, 80) } : {}),
           size: input.bytes,
+          ...(signal ? { signal } : {}),
         });
       } else {
         const out = await submitter.ensureStreamedArchive({
@@ -1272,6 +1274,12 @@ export class LivePumpSession {
           name: input.stem,
           ...(input.title ? { title: input.title.slice(0, 80) } : {}),
           ...(input.durationSec > 0 ? { expectedDurationSec: Math.round(input.durationSec) } : {}),
+          // A fresh create never reuses an archive by title. The legacy path only searches by
+          // title during crash recovery, and the title here can come from a live-title template:
+          // two broadcasts of the same anchor can render the identical title, and reusing the
+          // earlier archive would attach this broadcast's parts to it.
+          skipFindRecent: true,
+          ...(signal ? { signal } : {}),
         });
         bvid = out.ref.id;
         aid = undefined;
@@ -2859,6 +2867,15 @@ export interface RunLivePumpOptions {
   log?: (msg: string) => void;
   /** Shared account accounting for archive submissions (see {@link LivePumpSessionOpts.submitGate}). */
   submitGate?: SubmitGate;
+  /**
+   * Injected upload submitter (plans/049 stage 2b). Absent = the legacy in-process path.
+   *
+   * This field existed only on {@link LivePumpSessionOpts} before 0.0.385, and the caller passing
+   * it through a spread was silently dropped: the flag built a submitter that the run never used.
+   */
+  submitter?: PartSubmitter;
+  /** Target id the submitter owns; defaults to the in-process UPOS target. */
+  submitterTargetId?: string;
   /** Display-only run timeline sink; errors are swallowed and never change upload behavior. */
   reporter?: LivePumpReporter;
   /**
@@ -3131,6 +3148,8 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       log,
       ...(o.onAlert ? { onAlert: o.onAlert } : {}),
       ...(o.submitGate ? { submitGate: o.submitGate } : {}),
+      ...(o.submitter ? { submitter: o.submitter } : {}),
+      ...(o.submitterTargetId ? { submitterTargetId: o.submitterTargetId } : {}),
       // The session performs the archive create/append requests; it must use the same fetch
       // override as the segment uploader, or a fake transport would silently fall back to the
       // real network (real bug: a fake-UPOS run hit live Bilibili and got -400).
