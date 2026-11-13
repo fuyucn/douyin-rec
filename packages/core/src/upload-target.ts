@@ -102,6 +102,12 @@ export interface UploadTargetCapabilities {
   appendGranularity: "single" | "group";
   /** 是否支持合集 / 赛季。 */
   seasons: boolean;
+  /**
+   * true = the target can publish a part whose bytes it already received (a streaming upload),
+   * without uploading them again. Absent means the transport only knows the upload-then-submit
+   * shape, and a runner must not pretend otherwise (plans/049 stage 2b-2b).
+   */
+  streamPublish?: boolean;
 }
 
 /** 上传子进程的观察钩子：目标实现把底层进度事件透传出去,编排层据此回报进度(不参与判定)。 */
@@ -148,6 +154,34 @@ export interface AppendPartsResult {
   proof: AppendProof;
 }
 
+/**
+ * Publish a part whose bytes the target already received (plans/049 stage 2b-2b).
+ *
+ * A streaming runner uploads bytes while the part is still being recorded, so by the time it
+ * wants the part on the archive there is nothing left to transfer. create/append would send the
+ * bytes a second time; this operation only submits metadata. A target that cannot do that leaves
+ * publishStreamed undefined and capabilities.streamPublish false.
+ */
+export interface PublishStreamedInput {
+  cred: CredentialRef;
+  /** null = this is the first part: create the archive. */
+  ref: ArchiveRef | null;
+  /** File name the transport already produced for these bytes. */
+  name: string;
+  /** Part title. */
+  title?: string;
+  /** Archive metadata; required only when ref is null (the create request). */
+  archive?: { title: string; tid?: number; tags?: string[]; desc?: string; policy?: UploadPolicy };
+}
+
+export type PublishStreamedProof = "created" | "confirmed" | "confirmed-not-submitted" | "unknown";
+
+export interface PublishStreamedResult {
+  /** "created" must carry a ref; "unknown" must not claim one. */
+  proof: PublishStreamedProof;
+  ref: ArchiveRef | null;
+}
+
 export interface UploadTarget {
   readonly id: string;
   readonly platformIds: readonly string[];
@@ -168,6 +202,12 @@ export interface UploadTarget {
   /** 建稿前去重：同标题 + 预期时长找已有稿；返回 "unknown" 时不得建稿。 */
   findRecent(input: { cred: CredentialRef; title: string; expectedDurationSec?: number }):
     Promise<ArchiveInfo | "none" | "unknown">;
+
+  /**
+   * Publish metadata for bytes already on the target. Only present when capabilities.streamPublish
+   * is true; callers must check that instead of guessing.
+   */
+  publishStreamed?(input: PublishStreamedInput): Promise<PublishStreamedResult>;
 
   classifyError(err: unknown): UploadErrorClass;
   readonly capabilities: UploadTargetCapabilities;

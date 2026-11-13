@@ -41,6 +41,8 @@ import {
   type ArchiveInfo,
   type CreateArchiveInput,
   type CreateArchiveResult,
+  type PublishStreamedInput,
+  type PublishStreamedResult,
   type CredentialRef,
   type UploadErrorClass,
   type UploadFile,
@@ -165,7 +167,7 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
     id: UPOS_TARGET_ID,
     platformIds: ["bilibili"],
     // Group append is biliup's argv shape; UPOS appends one part per edit call, by construction.
-    capabilities: { appendGranularity: "single", seasons: false },
+    capabilities: { appendGranularity: "single", seasons: false, streamPublish: true },
 
     resolveCredential({ dataRoot, explicitPath }): CredentialRef {
       const locator = cookieLocator(
@@ -238,6 +240,58 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
         if (observed === null) return { proof: "unknown" };
       }
       return { proof: "observed" };
+    },
+
+    /**
+     * Publish metadata for bytes the streaming transport already uploaded (plans/049 stage 2b-2b).
+     *
+     * live-pump already runs preupload -> chunks -> complete while the part is still recording, so
+     * there is nothing left to transfer here. Mapping proof is the same as create/append: an unreadable
+     * submit is unknown, a provably rejected edit is confirmed-not-submitted, anything else throws so
+     * the driver can classify rate limits and permanent failures.
+     */
+    async publishStreamed(input: PublishStreamedInput): Promise<PublishStreamedResult> {
+      const cookiesPath = credPath(input.cred);
+      const video: StudioInput["videos"][number] = {
+        filename: input.name,
+        ...(input.title ? { title: input.title } : {}),
+      };
+      if (!input.ref) {
+        const archive = input.archive;
+        if (!archive) throw new Error("publishStreamed: archive metadata is required to create");
+        const res = await submitStudio({
+          cookiesPath,
+          title: archive.title,
+          tid: archive.tid ?? DEFAULT_TID,
+          tag: (archive.tags ?? []).join(","),
+          ...(archive.desc ? { desc: archive.desc } : {}),
+          private: (archive.policy?.visibility ?? "private") !== "public",
+          videos: [video],
+          ...(fetchImpl ? { fetchImpl } : {}),
+        });
+        if (!res.ok) throw submitFailure(res, "create");
+        if (!res.bvid) return { proof: "unknown", ref: null };
+        return { proof: "created", ref: { targetId: UPOS_TARGET_ID, id: res.bvid } };
+      }
+      let res: SubmitResult;
+      try {
+        res = await appendStudioPart({
+          cookiesPath,
+          bvid: input.ref.id,
+          video,
+          ...(fetchImpl ? { fetchImpl } : {}),
+        });
+      } catch (e) {
+        if (isAppendAmbiguous(e)) return { proof: "unknown", ref: null };
+        throw e;
+      }
+      if (!res.ok) {
+        // A rejected edit provably did not take effect; an unreadable one might have.
+        if (isAppendAmbiguous(res) || isPlainNoBv(res)) return { proof: "unknown", ref: null };
+        return { proof: "confirmed-not-submitted", ref: null };
+      }
+      if (!res.bvid && !input.ref) return { proof: "unknown", ref: null };
+      return { proof: "confirmed", ref: input.ref };
     },
 
     async inspect({ ref, cred }): Promise<ArchiveInfo | null> {

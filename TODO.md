@@ -93,6 +93,12 @@
   **验收**: 4 条新用例（P1 走 ensureArchive 并记下返回的稿件号、P2 用同一稿件号 append、needs-manual 保留 spool 且分 P 不确认、被拒一次不再重试）；live-pump 既有 224 条全绿；`pnpm typecheck` 0 错、`arch:check` 通过、`pnpm bundle` 0.0.379-50c314；版本 0.0.378→0.0.379。
   **现状（2026-11-12）**: issue [#672](https://github.com/fuyucn/douyin-rec/issues/672) → PR [#673](https://github.com/fuyucn/douyin-rec/pull/673) 已合并（merge 10d9edd4，0.0.379，CI 全绿：typecheck + 全量 vitest + bundle + web build）；仍零接入——cli 尚未注入 submitter，线上仍走原路径；把装配接上并观察一场零落盘直播是 2b-2b（needs-decision）。
 
+[x] **T-212 流式发布契约（plans/049 阶段 2b-2b，2026-11-12）**
+  — **做什么**: `UploadTarget` 增加可选 `publishStreamed` 与 `capabilities.streamPublish`：只提交元数据，不再上传字节；UPOS 目标实现它（建稿走 `add/v3`、追 P 走 `edit`，全程没有 preupload/PUT）；驱动增加 `ensureStreamedArchive` / `appendStreamedPart`，复用建稿前去重、unknown → needs-manual、只有 `confirmed-not-submitted` 才重试这套判定；目标缺 `publishStreamed` 时驱动直接 fatal，不回落成「再传一遍」。
+  **为什么**: live-pump 是「先传字节、再交元数据」（`complete` 在 2517/2715，`submitPart` 在 3597），而 `create/append` 会把字节再传一次；零落盘模式下字节不在磁盘上，重传必然失败。契约缺的就是「已上传分段的发布」。
+  **验收**: 9 条驱动用例 + 3 条 UPOS 用例（复用命中不发布、列表不可读不建稿、无稿件号只发一次、追加续号、只有 `confirmed-not-submitted` 重试、无能力目标 fatal；UPOS 侧断言整条链没有 preupload/PUT）；`pnpm typecheck` 0 错、`arch:check` 一致、`pnpm bundle` 0.0.380-bc00fa；版本 0.0.379→0.0.380。
+  **现状（2026-11-12）**: 仍未接入 live-pump——PartSubmitter 还没暴露这两个方法，cli 也没注入；翻转线上行为是 2b-2c。
+
 [~] **T-198 直播直传同场判定以真实进度为准（issue [#642](https://github.com/fuyucn/douyin-rec/issues/642)，2026-11-12）**
   — **做什么**: `rolloverStaleState` 的最后活动取 `max(state.updatedAt, 未确认分 P 的 spool mtime, 恢复进度标记)`；新增 `<state>.activity` 标记，只在恢复重传的**真实块进度**上写（每分钟节流，重试/定时心跳不写）；启动恢复把 `o.signal` 传入 `resubmitAllUnconfirmed`，取消后不再发起新的不可逆请求；重传按 10% 输出进度日志；归档时删掉标记。
   **为什么**: 长分 P 录制或大文件重传期间没有状态写入，`updatedAt` 停在 54 分钟前；重启被误判为“换场”，把仍可恢复的分 P 与 archive 身份拆到归档（#642 现场证据：chunk 98 三次 PUT 重试耗尽，下一次启动归档了未确认状态）。

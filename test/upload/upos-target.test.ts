@@ -348,7 +348,7 @@ describe("upos target: contract surface", () => {
     const t = createUposTarget({ statSize: () => 1 });
     expect(t.id).toBe(UPOS_TARGET_ID);
     expect(t.platformIds).toEqual(["bilibili"]);
-    expect(t.capabilities).toEqual({ appendGranularity: "single", seasons: false });
+    expect(t.capabilities).toEqual({ appendGranularity: "single", seasons: false, streamPublish: true });
     expect(t.hardPolicy()).toEqual({ visibility: "private", watermark: false, copyright: "self" });
     expect(t.defaults().tid).toBe(21);
     expect(t.defaults().titleMaxLength).toBe(80);
@@ -373,3 +373,41 @@ describe("upos target: contract surface", () => {
   });
 });
 
+
+describe("upos target: publishStreamed (stage 2b-2b)", () => {
+  it("creates without uploading the bytes again", async () => {
+    const net = fakeNet({});
+    const t = netTarget(net, 6);
+    expect(t.capabilities.streamPublish).toBe(true);
+    const r = await t.publishStreamed!({
+      cred: CRED,
+      ref: null,
+      name: "stem0",
+      title: "P1",
+      archive: { title: "标题", tid: 21, tags: ["t1"], policy: POLICY },
+    });
+    expect(r).toEqual({ proof: "created", ref: { targetId: UPOS_TARGET_ID, id: FAKE_BV } });
+    expect(net.calls.some((c) => c.url.includes("/preupload"))).toBe(false);
+    expect(net.calls.some((c) => c.method === "PUT")).toBe(false);
+    expect(net.calls.filter((c) => c.url.includes("/x/vu/web/add/v3"))).toHaveLength(1);
+  });
+
+  it("appends a part with metadata only", async () => {
+    const net = fakeNet({});
+    const t = netTarget(net, 6);
+    const ref = { targetId: UPOS_TARGET_ID, id: FAKE_BV };
+    const r = await t.publishStreamed!({ cred: CRED, ref, name: "stem1", title: "P2" });
+    expect(r).toEqual({ proof: "confirmed", ref });
+    expect(net.calls.some((c) => c.url.includes("preupload"))).toBe(false);
+    expect(net.calls.filter((c) => c.url.includes("/x/vu/web/edit"))).toHaveLength(1);
+  });
+
+  it("a rejected edit is confirmed-not-submitted, an unreadable one is unknown", async () => {
+    const rejected = await netTarget(fakeNet({ edit: () => json({ code: 21001, message: "参数错误" }) }), 6)
+      .publishStreamed!({ cred: CRED, ref: { targetId: UPOS_TARGET_ID, id: FAKE_BV }, name: "stem1" });
+    expect(rejected.proof).toBe("confirmed-not-submitted");
+    const unreadable = await netTarget(fakeNet({ throwOnSubmit: new Error("[append-ambiguous] socket hang up") }), 6)
+      .publishStreamed!({ cred: CRED, ref: { targetId: UPOS_TARGET_ID, id: FAKE_BV }, name: "stem1" });
+    expect(unreadable.proof).toBe("unknown");
+  });
+});
