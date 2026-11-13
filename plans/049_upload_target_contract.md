@@ -296,7 +296,7 @@ verify
 |---|---|---|---|
 | 0 | core 契约 + 注册表 + `upload-runtime` 空驱动 + 假 target 测试 | 无 | `test/arch` 通过；fake target 一行注册；app/web/orchestrator 零改动 |
 | 1 | `bilibili-upload` 包装 biliup；`run-biliup` 纯搬迁；orchestrator 合并/分段先接驱动 | 无（对拍） | 现有 upload/append 用例全绿；argv/输出与旧实现逐字一致 |
-| 2 | UPOS 传输接入（2a 已完成：`bilibili-upos` 目标）；上传驱动实现完成（2b-1，0.0.378，零接入）；`live-pump` / `rolling-upload` 改走驱动（2b-2a 接缝已完成 0.0.379；2b-2b 装配未开始，needs-decision） | 无（对拍） | 分 P 数/文件名/可见性一致；cover 行为单独验证 |
+| 2 | UPOS 传输接入（2a 已完成：`bilibili-upos` 目标）；上传驱动实现完成（2b-1，0.0.378，零接入）；`live-pump` / `rolling-upload` 改走驱动（2b-2a 接缝 0.0.379；2b-2b 流式发布契约 0.0.380；2b-2c 装配未开始，needs-decision） | 无（对拍） | 分 P 数/文件名/可见性一致；cover 行为单独验证 |
 | 3 | `proc-queue` `targetState` dual-write + 读取回退 | 无 | 新旧 bundle 互读；回滚演练 |
 | 4 | 删 core 的 B 站代码、更新架构文档/守护 | 无 | `core` grep `bili|biliup|upos` 只剩注释；`pnpm arch:check` 绿 |
 

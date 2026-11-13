@@ -97,7 +97,7 @@
   — **做什么**: `UploadTarget` 增加可选 `publishStreamed` 与 `capabilities.streamPublish`：只提交元数据，不再上传字节；UPOS 目标实现它（建稿走 `add/v3`、追 P 走 `edit`，全程没有 preupload/PUT）；驱动增加 `ensureStreamedArchive` / `appendStreamedPart`，复用建稿前去重、unknown → needs-manual、只有 `confirmed-not-submitted` 才重试这套判定；目标缺 `publishStreamed` 时驱动直接 fatal，不回落成「再传一遍」。
   **为什么**: live-pump 是「先传字节、再交元数据」（`complete` 在 2517/2715，`submitPart` 在 3597），而 `create/append` 会把字节再传一次；零落盘模式下字节不在磁盘上，重传必然失败。契约缺的就是「已上传分段的发布」。
   **验收**: 9 条驱动用例 + 3 条 UPOS 用例（复用命中不发布、列表不可读不建稿、无稿件号只发一次、追加续号、只有 `confirmed-not-submitted` 重试、无能力目标 fatal；UPOS 侧断言整条链没有 preupload/PUT）；`pnpm typecheck` 0 错、`arch:check` 一致、`pnpm bundle` 0.0.380-bc00fa；版本 0.0.379→0.0.380。
-  **现状（2026-11-12）**: 仍未接入 live-pump——PartSubmitter 还没暴露这两个方法，cli 也没注入；翻转线上行为是 2b-2c。
+  **现状（2026-11-12）**: issue [#674](https://github.com/fuyucn/douyin-rec/issues/674) → PR [#675](https://github.com/fuyucn/douyin-rec/pull/675) 已合并（merge 17d4b589，0.0.380，CI 全绿）；仍未接入 live-pump——PartSubmitter 还没暴露这两个方法，cli 也没注入；翻转线上行为是 2b-2c。
 
 [~] **T-198 直播直传同场判定以真实进度为准（issue [#642](https://github.com/fuyucn/douyin-rec/issues/642)，2026-11-12）**
   — **做什么**: `rolloverStaleState` 的最后活动取 `max(state.updatedAt, 未确认分 P 的 spool mtime, 恢复进度标记)`；新增 `<state>.activity` 标记，只在恢复重传的**真实块进度**上写（每分钟节流，重试/定时心跳不写）；启动恢复把 `o.signal` 传入 `resubmitAllUnconfirmed`，取消后不再发起新的不可逆请求；重传按 10% 输出进度日志；归档时删掉标记。
