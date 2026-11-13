@@ -517,14 +517,17 @@ nodeId，迁移步不用再跑。
 | 校验类拒绝报 `confirmed-not-submitted` | 该证明会被驱动当成「可安全重试」，同一份无效载荷（如 21001）再提交 5 次 | 去掉按码猜的证明：非限流拒绝一律 `unknown`；旧路径同样只停不重试 |
 | pending 冷却等待不可中断 | 停止后还要等满 60–300s，超出 pump 7s 收尾预算，子进程只能被 supervisor 杀 | `driver.pause` 同时监听运行/单次 signal；`buildLivePumpSubmitter` 默认 sleep 在 abort 时清 timer |
 
+复核后还补了一处同类缺陷：非流式 `create()` 的 `submitStudio` 没有包 `catch`，POST 超时抛出的错误仍会被文本分类成
+transient → 再建一次稿（当前无生产调用者，但 `ensureArchive` 一接上就是活的）。已与流式路径同规则：`isTransport` → `unknown`，并加对应用例。
+
 **测试补强**：等待序列改为断言精确的 `[60s,120s,240s,300s]`（旧的「最后一条 ≥60s」对平 60s 也成立）；
 停止用例改为在**真正 pending 的 sleep** 中 abort；建稿/追加各加「响应体只提到 timeout」与「编辑响应丢失」用例，
 并用驱动断言只发一次请求。默认 sleep 的 timer 清理用 fake timers 直接断言 `getTimerCount()===0`。
 
-**验收（第三轮后）**：全量 `pnpm test` **5351 passed / 42 skipped / 0 failed**、`pnpm typecheck` 0 错、
-`arch:check` 一致、`pnpm bundle` 0.0.385；本轮新增 10 条用例；每处修复逐项撤回都有用例变红（见 PR 正文）。
+**验收（第三轮后）**：全量 `pnpm test` **5353 passed / 42 skipped / 0 failed**、`pnpm typecheck` 0 错、
+`arch:check` 一致、`pnpm bundle` 0.0.385；本轮新增 12 条用例；每处修复逐项撤回都有用例变红（见 PR 正文）。
 
-**仍然不能默认开启**：`DREC_LIVE_PUMP_DRIVER` 默认值保持 0。上面 11 处对齐只说明两条路径在**代码层面**一致，
+**仍然不能默认开启**：`DREC_LIVE_PUMP_DRIVER` 默认值保持 0。上面 11 处对齐（§8.5 的 7 处 + §8.5.1 的 4 处）只说明两条路径在**代码层面**一致，
 不代表节点执行体跑过——下一版必须选**一台**节点开 flag 实跑一场（分 P 数、stem、private、受管回执）才能翻转默认值。
 
 ## §9 验收清单（对应审计「复审验收点」）
