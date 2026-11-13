@@ -67,6 +67,26 @@ export interface AppendPartsOutcome {
   confirmed: number[];
 }
 
+export interface StreamedArchiveRequest {
+  cred: CredentialRef;
+  /** Archive metadata for the create request; ignored when an archive is reused. */
+  archive: { title: string; tid?: number; tags?: string[]; desc?: string; policy?: UploadPolicy };
+  /** File name the transport already produced for the part bytes. */
+  name: string;
+  title?: string;
+  expectedDurationSec?: number;
+  skipFindRecent?: boolean;
+}
+
+export interface StreamedPartRequest {
+  cred: CredentialRef;
+  ref: ArchiveRef;
+  name: string;
+  title?: string;
+  /** Size of the part the transport already uploaded; 0 = unknown. */
+  size?: number;
+}
+
 export interface VerifyRequest {
   cred: CredentialRef;
   ref: ArchiveRef;
@@ -93,6 +113,10 @@ export interface UploadDriver {
   ensureArchive(req: EnsureArchiveRequest): Promise<EnsureArchiveOutcome>;
   appendParts(req: AppendPartsRequest): Promise<AppendPartsOutcome>;
   verify(req: VerifyRequest): Promise<VerifyOutcome>;
+  /** Create or reuse an archive for bytes a streaming runner already uploaded. */
+  ensureStreamedArchive(req: StreamedArchiveRequest): Promise<EnsureArchiveOutcome>;
+  /** Publish one already-uploaded part; the returned number is the one this call proved. */
+  appendStreamedPart(req: StreamedPartRequest): Promise<AppendPartsOutcome>;
 }
 
 const DEFAULTS = {
@@ -260,6 +284,95 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
         }
       }
       throw new UploadDriverError("retry-exhausted", "追加重试耗尽");
+    },
+
+    async ensureStreamedArchive(req: StreamedArchiveRequest): Promise<EnsureArchiveOutcome> {
+      const publish = target.publishStreamed?.bind(target);
+      if (!publish || target.capabilities.streamPublish !== true) {
+        throw new UploadDriverError("fatal", "目标不支持流式发布（publishStreamed 缺失）");
+      }
+      const archiveTitle = req.archive.title;
+      if (!req.skipFindRecent) {
+        const found = await target.findRecent({ cred: req.cred, title: archiveTitle });
+        if (found === "unknown") {
+          throw new UploadDriverError("needs-manual", "建稿前去重结果不确定（列表读取失败）");
+        }
+        if (found !== "none") {
+          log("[upload-driver] reusing archive " + found.ref.id);
+          const key = checkpointKey(found.ref.targetId, found.ref.id);
+          store.save(key, { targetId: found.ref.targetId, archiveId: found.ref.id, parts: [] });
+          return { ref: found.ref, reused: true };
+        }
+      }
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        try {
+          const res = await publish({
+            cred: req.cred,
+            ref: null,
+            name: req.name,
+            ...(req.title ? { title: req.title } : {}),
+            archive: req.archive,
+          });
+          if (res.proof === "unknown" || !res.ref) {
+            throw new UploadDriverError("needs-manual", "流式建稿结果不确定（没有可读的稿件号）");
+          }
+          const key = checkpointKey(res.ref.targetId, res.ref.id);
+          store.save(key, { targetId: res.ref.targetId, archiveId: res.ref.id, parts: [] });
+          return { ref: res.ref, reused: false };
+        } catch (err) {
+          if (err instanceof UploadDriverError) throw err;
+          const cls = classify(err);
+          const stop = stopFor(cls, "流式建稿");
+          if (stop) throw stop;
+          if (attempt + 1 >= attempts) {
+            throw new UploadDriverError("retry-exhausted", "流式建稿重试 " + attempts + " 次仍失败: " + messageOf(err));
+          }
+          await pause(attempt, cls);
+        }
+      }
+      throw new UploadDriverError("retry-exhausted", "流式建稿重试耗尽");
+    },
+
+    async appendStreamedPart(req: StreamedPartRequest): Promise<AppendPartsOutcome> {
+      const publish = target.publishStreamed?.bind(target);
+      if (!publish || target.capabilities.streamPublish !== true) {
+        throw new UploadDriverError("fatal", "目标不支持流式发布（publishStreamed 缺失）");
+      }
+      const key = checkpointKey(req.ref.targetId, req.ref.id);
+      const policy: UploadPolicy = target.hardPolicy();
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        try {
+          const res = await publish({
+            cred: req.cred,
+            ref: req.ref,
+            name: req.name,
+            ...(req.title ? { title: req.title } : {}),
+          });
+          if (res.proof === "unknown") {
+            throw new UploadDriverError("needs-manual", "流式追加结果不确定（分 P 可能已提交）");
+          }
+          if (res.proof === "confirmed-not-submitted") {
+            if (attempt + 1 >= attempts) {
+              throw new UploadDriverError("retry-exhausted", "流式追加重试 " + attempts + " 次仍未提交");
+            }
+            await pause(attempt, { kind: "transient", reason: "confirmed-not-submitted" });
+            continue;
+          }
+          const file: UploadFile = { path: req.name, size: req.size ?? 0, mtimeMs: 0, ...(req.title ? { title: req.title } : {}) };
+          const confirmed = confirm({ cred: req.cred, ref: req.ref, files: [file], policy }, key);
+          return { confirmed };
+        } catch (err) {
+          if (err instanceof UploadDriverError) throw err;
+          const cls = classify(err);
+          const stop = stopFor(cls, "流式追加");
+          if (stop) throw stop;
+          if (attempt + 1 >= attempts) {
+            throw new UploadDriverError("retry-exhausted", "流式追加重试 " + attempts + " 次仍失败: " + messageOf(err));
+          }
+          await pause(attempt, cls);
+        }
+      }
+      throw new UploadDriverError("retry-exhausted", "流式追加重试耗尽");
     },
 
     async verify(req: VerifyRequest): Promise<VerifyOutcome> {
