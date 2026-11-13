@@ -1272,6 +1272,11 @@ export class LivePumpSession {
           name: input.stem,
           ...(input.title ? { title: input.title.slice(0, 80) } : {}),
           ...(input.durationSec > 0 ? { expectedDurationSec: Math.round(input.durationSec) } : {}),
+          // A fresh create never reuses an archive by title. The legacy path only searches by
+          // title during crash recovery, and the title here can come from a live-title template:
+          // two broadcasts of the same anchor can render the identical title, and reusing the
+          // earlier archive would attach this broadcast's parts to it.
+          skipFindRecent: true,
         });
         bvid = out.ref.id;
         aid = undefined;

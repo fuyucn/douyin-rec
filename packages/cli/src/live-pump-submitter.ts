@@ -9,7 +9,7 @@
  * legacy one, and this flip changes what happens when the archive id is unreadable.
  */
 import { createUposTarget, UPOS_TARGET_ID } from "@drec/bilibili-upload";
-import type { ArchiveRef, PartSubmitter } from "@drec/core";
+import type { ArchiveRef, PartSubmitter, UploadTarget } from "@drec/core";
 import type { UploadCheckpoint, UploadPartRecord, UploadStateStore } from "@drec/upload-runtime";
 import { createUploadDriver } from "@drec/upload-runtime";
 import { livePumpStatePath, readLivePumpState } from "@drec/zero-upload";
@@ -18,6 +18,16 @@ export interface LivePumpSubmitterOpts {
   cookiesPath: string;
   spoolDir: string;
   pumpRoom: string;
+  /**
+   * Shared per-account submission accounting (issue #331). The legacy in-process path records
+   * every attempt in the same window/cooling state the node's queued uploads wait on; the driver
+   * path must keep that parity or a direct upload silently under-counts the account quota.
+   */
+  submitGate?: { noteSubmit(): void; noteRateLimited(): void };
+  /** Test seam: a fake UPOS target, so the wiring below is exercised without the wire. */
+  target?: UploadTarget;
+  /** Test seam: cooldown waits must not be real sleeps in tests. */
+  sleep?: (ms: number) => Promise<void>;
   env?: (key: string) => string | undefined;
   log?: (msg: string) => void;
 }
@@ -57,14 +67,19 @@ export function buildLivePumpSubmitter(o: LivePumpSubmitterOpts): PartSubmitter 
   const env = o.env ?? ((key: string) => process.env[key]);
   if (env("DREC_LIVE_PUMP_DRIVER") !== "1") return null;
   const log = o.log ?? (() => {});
-  const target = createUposTarget({ log });
+  const target = o.target ?? createUposTarget({ log });
   const cred: { targetId: string; locator: string } = { targetId: UPOS_TARGET_ID, locator: o.cookiesPath };
   const driver = createUploadDriver({
     target,
     store: stateFileStore(o),
-    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    sleep: o.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
     now: () => Date.now(),
     log,
+    // Same budget as the legacy path (rateLimitAttempts 5, 60s base, 300s cap). The driver
+    // default of 3 attempts would hand a live part to a human one cooldown earlier than the
+    // path it replaces, and a lost part cannot be recovered after the broadcast ends.
+    retry: { attempts: 5, transientBaseMs: 1_000, rateLimitMs: 60_000, maxWaitMs: 300_000 },
+    ...(o.submitGate ? { accounting: o.submitGate } : {}),
   });
   return {
     ensureStreamedArchive: async (req) => {
@@ -74,6 +89,7 @@ export function buildLivePumpSubmitter(o: LivePumpSubmitterOpts): PartSubmitter 
         name: req.name,
         ...(req.title ? { title: req.title } : {}),
         ...(req.expectedDurationSec !== undefined ? { expectedDurationSec: req.expectedDurationSec } : {}),
+        ...(req.skipFindRecent ? { skipFindRecent: true } : {}),
       });
       const ref: ArchiveRef = out.ref;
       return { ref, reused: out.reused };

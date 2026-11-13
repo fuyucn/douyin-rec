@@ -30,6 +30,24 @@ export interface UploadRuntimeDeps {
   sleep(ms: number): Promise<void>;
   now(): number;
   log(msg: string): void;
+  /**
+   * Account-level bookkeeping shared with every other upload on this machine (issue #331).
+   *
+   * The legacy in-process submit path records each attempt in the same per-account window rolling
+   * and queued uploads on this node wait on, and cools that account when Bilibili answers with a
+   * submission rate limit. The driver is the only layer that knows how many attempts a publish
+   * really made, so the wiring lives here; both hooks are optional because a standalone driver
+   * (tests, the queue path) has no shared window to feed.
+   *
+   * Neither hook may block or break a publish: the bytes are already on the target and recording
+   * continues, so accounting is best effort and failures are swallowed.
+   */
+  accounting?: {
+    /** Called before every attempt, right before the irreversible request goes out. */
+    noteSubmit(): void;
+    /** Called when the target reported a submission rate limit for this attempt. */
+    noteRateLimited(): void;
+  };
   /** Retry policy. Defaults keep a live broadcast from waiting forever on one rate limit. */
   retry?: {
     attempts?: number;
@@ -141,6 +159,23 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
   const rateLimitMs = deps.retry?.rateLimitMs ?? DEFAULTS.rateLimitMs;
   const maxWaitMs = deps.retry?.maxWaitMs ?? DEFAULTS.maxWaitMs;
 
+  /** Accounting must never be the reason a live part stops being published. */
+  function noteSubmit(): void {
+    try {
+      deps.accounting?.noteSubmit();
+    } catch {
+      /* accounting is observability: never block a submit */
+    }
+  }
+
+  function noteRateLimited(): void {
+    try {
+      deps.accounting?.noteRateLimited();
+    } catch {
+      /* accounting is observability: never block a submit */
+    }
+  }
+
   /** Bounded wait. */
   async function pause(attempt: number, cls: UploadErrorClass): Promise<void> {
     const want =
@@ -166,6 +201,18 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
     if (cls.kind === "ambiguous") return new UploadDriverError("needs-manual", what + ": " + cls.reason);
     if (cls.kind === "permanent") return new UploadDriverError("fatal", what + ": " + cls.reason);
     return null;
+  }
+
+  /**
+   * Classify one failed attempt and apply the shared-account discount before deciding what to do.
+   *
+   * A rate limit is recorded even when the attempt budget is exhausted: the account is cooling
+   * either way, and the next upload on this node must see that.
+   */
+  function classifyAttempt(err: unknown): UploadErrorClass {
+    const cls = classify(err);
+    if (cls.kind === "rate-limited") noteRateLimited();
+    return cls;
   }
 
   /** Record each appended file once. Indexes continue from the stored checkpoint. */
@@ -218,6 +265,7 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
       }
 
       for (let attempt = 0; attempt < attempts; attempt++) {
+        noteSubmit();
         try {
           const res = await target.create({
             cred: req.cred,
@@ -237,7 +285,7 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
           return { ref: res.ref, reused: res.proof === "found-existing" };
         } catch (err) {
           if (err instanceof UploadDriverError) throw err;
-          const cls = classify(err);
+          const cls = classifyAttempt(err);
           const stop = stopFor(cls, "建稿");
           if (stop) throw stop;
           if (attempt + 1 >= attempts) {
@@ -252,6 +300,7 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
     async appendParts(req: AppendPartsRequest): Promise<AppendPartsOutcome> {
       const key = checkpointKey(req.ref.targetId, req.ref.id);
       for (let attempt = 0; attempt < attempts; attempt++) {
+        noteSubmit();
         try {
           const res = await target.append({
             cred: req.cred,
@@ -274,7 +323,7 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
           return { confirmed };
         } catch (err) {
           if (err instanceof UploadDriverError) throw err;
-          const cls = classify(err);
+          const cls = classifyAttempt(err);
           const stop = stopFor(cls, "追加");
           if (stop) throw stop;
           if (attempt + 1 >= attempts) {
@@ -305,6 +354,7 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
         }
       }
       for (let attempt = 0; attempt < attempts; attempt++) {
+        noteSubmit();
         try {
           const res = await publish({
             cred: req.cred,
@@ -321,7 +371,7 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
           return { ref: res.ref, reused: false };
         } catch (err) {
           if (err instanceof UploadDriverError) throw err;
-          const cls = classify(err);
+          const cls = classifyAttempt(err);
           const stop = stopFor(cls, "流式建稿");
           if (stop) throw stop;
           if (attempt + 1 >= attempts) {
@@ -341,6 +391,7 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
       const key = checkpointKey(req.ref.targetId, req.ref.id);
       const policy: UploadPolicy = target.hardPolicy();
       for (let attempt = 0; attempt < attempts; attempt++) {
+        noteSubmit();
         try {
           const res = await publish({
             cred: req.cred,
@@ -363,7 +414,7 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
           return { confirmed };
         } catch (err) {
           if (err instanceof UploadDriverError) throw err;
-          const cls = classify(err);
+          const cls = classifyAttempt(err);
           const stop = stopFor(cls, "流式追加");
           if (stop) throw stop;
           if (attempt + 1 >= attempts) {

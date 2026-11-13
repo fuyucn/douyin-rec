@@ -12,7 +12,7 @@ import { LivePumpSession } from "./live-pump.js";
 const REF: ArchiveRef = { targetId: "bilibili-upos", id: "BILIfake1" };
 
 interface Calls {
-  ensure: Array<{ archive: SubmitArchiveMeta; name: string; title?: string }>;
+  ensure: Array<{ archive: SubmitArchiveMeta; name: string; title?: string; skipFindRecent?: boolean }>;
   append: Array<{ ref: ArchiveRef; name: string; title?: string }>;
 }
 
@@ -114,5 +114,16 @@ describe("live-pump -> PartSubmitter seam", () => {
     const r = await s.submitPart({ index: 0, spoolPath: spool, stem: "stem0", title: "P1", bytes: 6, durationSec: 10 });
     expect(r.ok).toBe(false);
     expect(calls.ensure).toHaveLength(1);
+  });
+
+  it("the first part asks the submitter to create, never to adopt an older same-title archive", async () => {
+    const { submitter, calls } = fakeSubmitter();
+    const s = session(submitter);
+    const spool = join(dir, "p0.ts");
+    writeFileSync(spool, "part-0");
+    await s.submitPart({ index: 0, spoolPath: spool, stem: "stem0", title: "P1", bytes: 6, durationSec: 10 });
+    // The legacy path only dedupes by title during crash recovery; a live title template can render
+    // the same title twice in a day, and adopting the first archive would mix two broadcasts.
+    expect(calls.ensure[0]!.skipFindRecent).toBe(true);
   });
 });

@@ -27,6 +27,12 @@ export interface PartSubmitter {
     name: string;
     title?: string;
     expectedDurationSec?: number;
+    /**
+     * Skip the title-based dedupe before creating. Set on the FIRST part of a fresh broadcast: the
+     * legacy path never dedupes a create either (it only searches by title during crash recovery),
+     * and reusing an older same-title archive would attach this broadcast's parts to it.
+     */
+    skipFindRecent?: boolean;
   }): Promise<{ ref: ArchiveRef; reused: boolean }>;
   /** Publish one part whose bytes the runner already uploaded. Bytes are not sent. */
   appendStreamedPart(req: {

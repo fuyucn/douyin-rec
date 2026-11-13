@@ -468,6 +468,33 @@ nodeId，迁移步不用再跑。
 **合并**：issue #682 → PR #683（merge `dca7cfa2`，0.0.384）。CI 首跑红在 `test/orchestrator/ledger-wal`
 的「并发首开切 WAL」用例（5000ms 超时），与本改动无关——本机连跑 3 次全绿，重跑该 job 通过。
 
+### 8.5 阶段 2b-2d：驱动路径补口（0.0.385，2026-11-13）
+
+阶段 2b-2c 的实机验证（§8.3）跑的是**本机直传**，但 `DREC_LIVE_PUMP_DRIVER=1` 一旦默认开启，执行体就在
+节点上跑。对拍新旧两条提交路径后（旧 = `submitWithRateLimitRetry`，新 = `driver.appendStreamedPart` →
+`publishStreamed`），发现三处与本场录像无关、但会改变「一场直播能不能收尾」的差异，全部补齐后才谈默认开启：
+
+| 差异 | 旧路径 | 新路径（改前） | 改法 |
+|---|---|---|---|
+| 账号配额记账（#331） | 每次提交前 `submitGate.noteSubmit()`，限流时 `noteRateLimited()` | **完全没有** | `UploadRuntimeDeps.accounting` 可选注入；驱动在每次尝试前与每次限流判定后调用，异常一律吞掉（记账不得吃掉一个直播分 P） |
+| 限流重试预算 | 5 次，60s 起，指数退避封顶 300s | 3 次（驱动默认，未传 `retry`） | `buildLivePumpSubmitter` 显式传 `attempts: 5` 与同一组退避参数 |
+| 首次建稿去重 | 只在**崩溃恢复**里按标题找稿 | 每次建稿都 `findRecent`，命中即复用 | 首次建稿传 `skipFindRecent: true` |
+
+第三条的真实风险：零落盘稿件标题可来自直播标题模板（`{title}`），同一主播同日两场可能渲染出**同一标题**；
+复用旧稿会把这一场的分 P 追加到上一场里。旧路径不做这件事，语义必须以旧路径为准。
+
+**接缝**：`PartSubmitter.ensureStreamedArchive` 增加可选 `skipFindRecent`（core 契约、rank 0）；
+`UploadRuntimeDeps.accounting` 同样可选，队列/测试路径不注入即行为不变。
+
+**验收**：新增 8 个用例（驱动层 4：每次尝试记账、预算耗尽仍冷却账号、记账异常不吞分 P、skipFindRecent
+生效；装配层 3：5 次预算、记账透传、skipFindRecent 透传；runner 层 1：首建必带 skipFindRecent）。逐个
+撤回修复都能让对应用例失败（见 PR 正文的变异验证）。全量 `pnpm test` 5327 passed / 0 failed、
+`pnpm typecheck` 0 错、`arch:check` 一致、`pnpm bundle` 0.0.385。
+
+**未做（仍不能默认开启的部分）**：`DREC_LIVE_PUMP_DRIVER` 默认值保持 0。补齐这三处只让新路径与旧路径
+等价，不等于在节点执行体上跑过——0.0.385 需要选**一台**节点先开 flag 观察一场（分 P 数、stem、private、
+受管回执），再决定是否把默认值翻转。
+
 ## §9 验收清单（对应审计「复审验收点」）
 
 - [ ] 新增假上传目标 + 假平台：一个包 + 一行注册；app/web/orchestrator 零改动；

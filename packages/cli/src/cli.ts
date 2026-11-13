@@ -583,6 +583,9 @@ program
         cookiesPath: uploadCookies,
         spoolDir: pumpFilesDir,
         pumpRoom,
+        // Quota accounting must follow the submit path, not the transport: the legacy path and
+        // the driver both count against the same per-account window, on managed nodes too.
+        ...(delivery ? { submitGate: makeNodeSubmitGate({ cookiesPath: uploadCookies, log: (m) => console.log(m) }) } : {}),
         log: console.log,
       });
       const run = runLivePump({

@@ -43,10 +43,13 @@ function driver(o: {
   publishStreamed?: (input: PublishStreamedInput) => Promise<PublishStreamedResult>;
   findRecent?: UploadTarget["findRecent"];
   streamPublish?: boolean;
+  retryAttempts?: number;
+  accounting?: { noteSubmit(): void; noteRateLimited(): void };
 } = {}) {
   const store = memoryStore();
   const sleeps: number[] = [];
   const calls: PublishStreamedInput[] = [];
+  const findRecentCalls: Array<Parameters<UploadTarget["findRecent"]>[0]> = [];
   const target: UploadTarget = {
     id: "t",
     platformIds: ["p"],
@@ -57,7 +60,7 @@ function driver(o: {
     create: async () => ({ proof: "created", ref: REF }),
     append: async () => ({ proof: "observed" }),
     inspect: async () => ({ ref: REF, title: "T", partCount: 1 } as ArchiveInfo),
-    findRecent: async (input) => (o.findRecent ? o.findRecent(input) : "none"),
+    findRecent: async (input) => { findRecentCalls.push(input); return o.findRecent ? o.findRecent(input) : "none"; },
     classifyError: (err): UploadErrorClass =>
       err instanceof RateLimited
         ? { kind: "rate-limited", retryAfterMs: 7 }
@@ -75,9 +78,26 @@ function driver(o: {
     sleep: async (ms) => { sleeps.push(ms); },
     now: () => 1_700_000_000_000,
     log: () => {},
-    retry: { attempts: 3, transientBaseMs: 1_000, rateLimitMs: 60_000, maxWaitMs: 300_000 },
+    retry: { attempts: o.retryAttempts ?? 3, transientBaseMs: 1_000, rateLimitMs: 60_000, maxWaitMs: 300_000 },
+    ...(o.accounting ? { accounting: o.accounting } : {}),
   });
-  return { d, store, sleeps, calls };
+  return { d, store, sleeps, calls, findRecentCalls };
+}
+
+/** Records what the driver told the shared account window, in order. */
+function accountingSpy(limitFailures = 0) {
+  const events: Array<"submit" | "rate-limited"> = [];
+  let failures = 0;
+  return {
+    events,
+    account: {
+      noteSubmit() { events.push("submit"); },
+      noteRateLimited() { failures++; events.push("rate-limited"); },
+    },
+    get rateLimitedCalls() { return failures; },
+    /** true while the fake target should keep answering with a rate limit */
+    shouldFail(n: number) { return n <= limitFailures; },
+  };
 }
 
 describe("upload driver: streamed publish", () => {
@@ -167,5 +187,67 @@ describe("upload driver: streamed publish", () => {
     await expect(d.ensureStreamedArchive({ cred: CRED, archive: ARCHIVE, name: "stem0" }))
       .rejects.toMatchObject({ failure: "fatal" });
     expect(calls).toHaveLength(0);
+  });
+
+  it("counts every publish attempt in the shared account window", async () => {
+    const spy = accountingSpy();
+    let n = 0;
+    const { d } = driver({
+      accounting: spy.account,
+      publishStreamed: async () => {
+        n++;
+        if (n < 2) throw new RateLimited("code:21540");
+        return { proof: "confirmed", ref: REF };
+      },
+    });
+    await d.appendStreamedPart({ cred: CRED, ref: REF, name: "stem0", size: 6 });
+    // An attempt is recorded before each request, and a rate limit cools the account.
+    expect(spy.events).toEqual(["submit", "rate-limited", "submit"]);
+  });
+
+  it("cools the account when the rate limit outlives the attempt budget", async () => {
+    const spy = accountingSpy();
+    const { d } = driver({
+      retryAttempts: 3,
+      accounting: spy.account,
+      publishStreamed: async () => { throw new RateLimited("code:21540"); },
+    });
+    await expect(d.appendStreamedPart({ cred: CRED, ref: REF, name: "stem0", size: 6 }))
+      .rejects.toMatchObject({ failure: "retry-exhausted" });
+    // Three attempts, three rate-limit discounts: the account is cooling either way, and the
+    // next upload on this node must see it.
+    expect(spy.events.filter((e) => e === "submit")).toHaveLength(3);
+    expect(spy.rateLimitedCalls).toBe(3);
+  });
+
+  it("accounting failures never stop a publish", async () => {
+    let n = 0;
+    const { d, store } = driver({
+      accounting: {
+        noteSubmit() { throw new Error("store closed"); },
+        noteRateLimited() { throw new Error("store closed"); },
+      },
+      publishStreamed: async () => {
+        n++;
+        if (n < 2) throw new RateLimited("code:21540");
+        return { proof: "confirmed", ref: REF };
+      },
+    });
+    // A broken accounting store must not be able to eat a live part: the retry still happens and
+    // the confirmation is still recorded.
+    const out = await d.appendStreamedPart({ cred: CRED, ref: REF, name: "stem0", size: 6 });
+    expect(out).toEqual({ confirmed: [1] });
+    expect(store.parts).toHaveLength(1);
+  });
+
+  it("a fresh create skips the title dedupe when asked, and still searches otherwise", async () => {
+    const skipped = driver({ publishStreamed: async () => ({ proof: "created", ref: REF }) });
+    await skipped.d.ensureStreamedArchive({ cred: CRED, archive: ARCHIVE, name: "stem0", skipFindRecent: true });
+    expect(skipped.findRecentCalls).toHaveLength(0);
+
+    const searched = driver({ publishStreamed: async () => ({ proof: "created", ref: REF }) });
+    await searched.d.ensureStreamedArchive({ cred: CRED, archive: ARCHIVE, name: "stem0" });
+    expect(searched.findRecentCalls).toHaveLength(1);
+    expect(searched.findRecentCalls[0]!.title).toBe("T");
   });
 });
