@@ -527,6 +527,11 @@ transient → 再建一次稿（当前无生产调用者，但 `ensureArchive` �
 **验收（第三轮后）**：全量 `pnpm test` **5353 passed / 42 skipped / 0 failed**、`pnpm typecheck` 0 错、
 `arch:check` 一致、`pnpm bundle` 0.0.385；本轮新增 12 条用例；每处修复逐项撤回都有用例变红（见 PR 正文）。
 
+**真实直播间实跑（2026-11-13，flag=1）**：0.0.385 bundle 在容器内跑 `_live-pump`，3 段各约 30s，同一私稿 `BV1xx`；
+服务端回读 3 个分 P、cid 不同、`is_only_self=1`、stem 与三段一致，`checkArchivePartsWarn` 未触发，确认后 spool 清空。
+state 无 `aid`（driver 建稿只回 bvid）确认走的是 driver 路径。**本次没有触发 21540**，限流冷却的真实成功仍只有单测；
+受管节点的 `submitGate`／`onPartConfirmed` 装配也未在节点上跑过。
+
 **仍然不能默认开启**：`DREC_LIVE_PUMP_DRIVER` 默认值保持 0。上面 11 处对齐（§8.5 的 7 处 + §8.5.1 的 4 处）只说明两条路径在**代码层面**一致，
 不代表节点执行体跑过——下一版必须选**一台**节点开 flag 实跑一场（分 P 数、stem、private、受管回执）才能翻转默认值。
 
