@@ -177,9 +177,19 @@ describe("upos target: create", () => {
     expect(t.classifyError(thrown).kind).toBe("rate-limited");
   });
 
-  it("a create rejection that only mentions timeout is unknown, not a retryable transient", async () => {
+  it("a create rejection that only mentions timeout is unknown", async () => {
     // Raw text matching turned such a body into a transient create and retried it five times.
     const net = fakeNet({ submit: () => json({ code: -400, message: "upstream timeout" }) });
+    const t = netTarget(net, 4);
+    const r = await t.create({ cred: CRED, title: "标题", files: [{ path: "/tmp/a.mp4" }], policy: POLICY });
+    expect(r).toEqual({ proof: "unknown", ref: null });
+    expect(net.calls.filter((c) => c.url.includes("/x/vu/web/add/v3"))).toHaveLength(1);
+  });
+
+  it("a transport error on the create POST is unknown, never retried", async () => {
+    // submitStudio wraps the POST in a 60s timeout: a thrown transport error after the request
+    // may already have built the archive. Classifying it as transient would POST again.
+    const net = fakeNet({ throwOnSubmit: new Error("socket hang up") });
     const t = netTarget(net, 4);
     const r = await t.create({ cred: CRED, title: "标题", files: [{ path: "/tmp/a.mp4" }], policy: POLICY });
     expect(r).toEqual({ proof: "unknown", ref: null });

@@ -170,11 +170,18 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
    * and built the archive while the response was lost. Retrying it is exactly how a second
    * archive gets created next to the first one, so it must surface as proof "unknown" and go to a
    * human instead of through the driver's transient retry (plans/049 §8.5).
+   *
+   * Shared with `classifyError` so the two lists cannot drift: a transport failure is judged by
+   * whether it happened before or after an irreversible submit, never by which function raised it.
    */
   function isTransport(err: unknown): boolean {
-    return /econnreset|etimedout|timeout|timed out|connection reset|socket hang up|unexpected eof|fetch failed|aborted|network/i
-      .test(messageOf(err));
+    return TRANSPORT_RE.test(messageOf(err));
   }
+
+  /**
+   * Everything that means "the wire, not the server, decided the outcome".
+   */
+  const TRANSPORT_RE = /econnreset|etimedout|timeout|timed out|connection reset|socket hang up|unexpected eof|fetch failed|aborted|network/i;
 
   /**
    * Which submit responses are safe to retry is decided per call site: a rate-limit body throws so
@@ -212,16 +219,25 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
       const cookiesPath = credPath(input.cred);
       const videos: StudioInput["videos"] = [];
       for (const file of input.files) videos.push(await uploadPart(file, cookiesPath));
-      const res = await submitStudio({
-        cookiesPath,
-        title: input.title,
-        tid: input.tid ?? DEFAULT_TID,
-        tag: (input.tags ?? []).join(","),
-        ...(input.desc ? { desc: input.desc } : {}),
-        private: input.policy.visibility !== "public",
-        videos,
-        ...(fetchImpl ? { fetchImpl } : {}),
-      });
+      let res: SubmitResult;
+      try {
+        res = await submitStudio({
+          cookiesPath,
+          title: input.title,
+          tid: input.tid ?? DEFAULT_TID,
+          tag: (input.tags ?? []).join(","),
+          ...(input.desc ? { desc: input.desc } : {}),
+          private: input.policy.visibility !== "public",
+          videos,
+          ...(fetchImpl ? { fetchImpl } : {}),
+        });
+      } catch (e) {
+        // The POST may already have built the archive; classifying a transport error as transient
+        // made the driver POST the create again. Unknown, never retried (same rule as the streamed
+        // publish below).
+        if (isTransport(e)) return { proof: "unknown", ref: null };
+        throw e;
+      }
       if (!res.ok) {
         // Only a rate limit provably did not create the archive. Any other rejection body may
         // merely *mention* timeout; classifying it as transient made the driver POST the create
@@ -344,7 +360,6 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
         // submits an invalid payload again, and an unknown body may already have applied.
         return { proof: "unknown", ref: null };
       }
-      if (!res.bvid && !input.ref) return { proof: "unknown", ref: null };
       return { proof: "confirmed", ref: input.ref };
     },
 
@@ -378,9 +393,10 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
       // submit is exactly how duplicate parts and duplicate archives get created.
       if (isAppendAmbiguous(err) || isPlainNoBv(err)) return { kind: "ambiguous", reason: msg };
       if (err instanceof UposRateLimited || isUploadRateLimited(err)) return { kind: "rate-limited" };
-      if (/econnreset|etimedout|timeout|timed out|connection reset|socket hang up|unexpected eof|fetch failed/i.test(msg)) {
-        return { kind: "transient", reason: msg };
-      }
+      // A transport error during a pre-submit step (preupload/chunk PUT) is retryable: no archive
+      // exists yet, so a retry cannot duplicate one. Submit-path transport errors never reach this
+      // classifier — their call sites map them to proof unknown first.
+      if (TRANSPORT_RE.test(msg)) return { kind: "transient", reason: msg };
       return { kind: "permanent", reason: msg };
     },
   };

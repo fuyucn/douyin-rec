@@ -47,6 +47,8 @@ function driver(o: {
   accounting?: { noteSubmit(): void; noteRateLimited(): void };
   /** Override the wait to prove a stop interrupts a genuinely pending cooldown. */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  /** Driver-wide stop (UploadRuntimeDeps.signal), distinct from the per-call one. */
+  driverSignal?: AbortSignal;
   /** false = the fake rate-limit error carries no retryAfterMs hint, so the schedule applies. */
   rateLimitHint?: boolean;
 } = {}) {
@@ -84,6 +86,7 @@ function driver(o: {
     log: () => {},
     retry: { attempts: o.retryAttempts ?? 3, transientBaseMs: 1_000, rateLimitMs: 60_000, maxWaitMs: 300_000 },
     ...(o.accounting ? { accounting: o.accounting } : {}),
+    ...(o.driverSignal ? { signal: o.driverSignal } : {}),
   });
   return { d, store, sleeps, calls, findRecentCalls };
 }
@@ -299,6 +302,32 @@ describe("upload driver: streamed publish", () => {
       },
     });
     const settled = d.appendStreamedPart({ cred: CRED, ref: REF, name: "stem0", size: 6, signal: ac.signal })
+      .then(() => "settled", () => "settled");
+    const outcome = await Promise.race([
+      settled,
+      new Promise<string>((r) => setTimeout(() => r("still-waiting"), 500)),
+    ]);
+    expect(outcome).toBe("settled");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("a run-level stop also ends a pending cooldown (both signals are honoured)", async () => {
+    // UploadRuntimeDeps.signal is the run-wide stop; the per-call signal only owns one part. The
+    // two-signal branch must settle the wait and still not fire another request.
+    const run = new AbortController();
+    const perCall = new AbortController();
+    const pending = new Promise<void>(() => { /* holds until aborted */ });
+    const { d, calls } = driver({
+      driverSignal: run.signal,
+      rateLimitHint: false,
+      publishStreamed: async () => { throw new RateLimited("code:21540"); },
+      sleep: (ms) => {
+        // The stop lands while the wait is pending.
+        run.abort();
+        return pending;
+      },
+    });
+    const settled = d.appendStreamedPart({ cred: CRED, ref: REF, name: "stem0", size: 6, signal: perCall.signal })
       .then(() => "settled", () => "settled");
     const outcome = await Promise.race([
       settled,

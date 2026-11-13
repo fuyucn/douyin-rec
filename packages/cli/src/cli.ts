@@ -579,13 +579,18 @@ program
       });
       // Stage 2b-2c: metadata-only publish for the parts this pump already uploaded. Off unless
       // DREC_LIVE_PUMP_DRIVER=1, so the legacy in-process submit stays the default path.
+      // One gate for both paths: each construction opens the upload-limit store and reads the
+      // cookie file, and the driver and the pump must share the same account window.
+      const nodeSubmitGate = delivery
+        ? makeNodeSubmitGate({ cookiesPath: uploadCookies, log: (m) => console.log(m) })
+        : undefined;
       const pumpSubmitter = buildLivePumpSubmitter({
         cookiesPath: uploadCookies,
         spoolDir: pumpFilesDir,
         pumpRoom,
         // Quota accounting must follow the submit path, not the transport: the legacy path and
         // the driver both count against the same per-account window, on managed nodes too.
-        ...(delivery ? { submitGate: makeNodeSubmitGate({ cookiesPath: uploadCookies, log: (m) => console.log(m) }) } : {}),
+        ...(nodeSubmitGate ? { submitGate: nodeSubmitGate } : {}),
         log: console.log,
       });
       const run = runLivePump({
@@ -664,8 +669,8 @@ program
         reporter: liveReporter,
         // Managed nodes share the account's submission window with the node's other uploads and
         // report part progress to the master console (issue #331).
-        ...(delivery ? {
-          submitGate: makeNodeSubmitGate({ cookiesPath: uploadCookies, log: (m) => console.log(m) }),
+        ...(nodeSubmitGate ? {
+          submitGate: nodeSubmitGate,
           onPartConfirmed: (info: { count: number; bvid?: string }) => reporter?.partConfirmed(info),
         } : {}),
       }).then(async (res) => {
