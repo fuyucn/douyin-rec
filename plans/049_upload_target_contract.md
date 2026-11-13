@@ -384,6 +384,22 @@ verify
 三次数错——1b-1 前以为「只有两处」，实测五条路径；测试面以为「10 个文件」，实测 32 个；1b-3 之后以为
 「最后一条」，实测还有 `node-pipeline`。这三个错误都会让「上传轴已接完」的结论提前成立。
 
+### 8.2 阶段 2b-2b 的阻塞事实（2026-11-12）
+
+2b-2a 的接缝默认不注入，正好用来验证「live-pump 能不能直接换成驱动的 create/append」。结论：不能。
+
+live-pump 的顺序是**先传字节、再交元数据**：每段在 `runSegment` 里 `preupload` → 分块 PUT → `complete`（live-pump.ts 2517 / 2715），拿到 complete 结果之后才调用 `submitPart`（live-pump.ts 3597，`submitStudio` / `appendStudioPart` 只提交文件名和标题）。
+
+而 `UploadTarget.create/append` 的语义是「把字节传上去，再建稿/追 P」（`upos-target.ts` 的 `preupload` → `uploadChunks` → `complete` → `submitStudio`）。让 live-pump 走驱动的 create/append，等于把已经传完的字节**再传一遍**；零落盘模式下这些字节根本不在磁盘上，第二次上传只会失败或翻倍。
+
+所以 2b-2b 不是「装配一下」，而是契约缺一个操作：**把已经上传的分段发布成稿/分 P**。
+
+- 契约：`UploadTarget` 增加可选 `publishStreamed`（`{ cred, ref?: ArchiveRef, name, title }` → `{ proof: "created" | "confirmed" | "confirmed-not-submitted" | "unknown", ref?: ArchiveRef }`），目标用 `capabilities.streamPublish` 声明支持；没有这个能力的路径（biliup 子进程）必须显式拒绝，不静默回落。
+- 驱动：新增 `ensureStreamedArchive` / `appendStreamedPart`，复用现有判定（建稿前去重、unknown → needs-manual、`confirmed-not-submitted` 才重试），不再写第二套退避。
+- live-pump：注入 submitter 时改调这两个方法，字节与元数据仍由它自己掌管。
+
+这一步会翻转「拿不到稿件号」的行为（重试开第二个稿 → `needs-manual`），所以仍需单独 PR + 一场真实直播验证。
+
 ## §9 验收清单（对应审计「复审验收点」）
 
 - [ ] 新增假上传目标 + 假平台：一个包 + 一行注册；app/web/orchestrator 零改动；
