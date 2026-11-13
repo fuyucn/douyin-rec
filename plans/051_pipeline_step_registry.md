@@ -55,7 +55,7 @@
 ### 4.1 StepSpec
 
 ```ts
-// packages/pipeline/src/step.ts (rank 0.6, depends on @drec/core only)
+// new package @drec/pipeline (rank 0.6, depends on @drec/core only)
 export type StepResource = "cpu" | "net" | "upload" | "none";
 
 export interface StepSpec {
@@ -118,8 +118,8 @@ app 的节点模式改为 `runGraph(deps, graphOf("node", cfg))`。三份状态�
 
 core 是叶子（rank 0），不能反向 import pipeline。做法与 `docs/architecture.html` 相同：
 
-- `scripts/gen-hub-flow.mjs` 读注册表，生成 `packages/core/src/hub-flow.generated.ts`
-  （只含 `HUB_FLOW_EDGES` / `HUB_FLOW_ORDER` 数据）；
+- `scripts/gen-hub-flow.mjs` 读注册表，在 core 里生成一份「只含两张常量」的数据文件
+  （`HUB_FLOW_EDGES` / `HUB_FLOW_ORDER`，与手写逻辑分文件）；
 - 守护测试：生成物与注册表不一致 → FAIL（照 `test/arch/architecture-docs.test.ts` 的写法）；
 - `hub-flow.ts` 保留手写部分（`readyNodes` / 侧车前缀判定），只把两张常量换成生成物。
 
