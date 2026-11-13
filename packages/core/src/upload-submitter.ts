@@ -33,6 +33,8 @@ export interface PartSubmitter {
      * and reusing an older same-title archive would attach this broadcast's parts to it.
      */
     skipFindRecent?: boolean;
+    /** Hard-stop: once aborted, no new attempt is made and no further irreversible request fires. */
+    signal?: AbortSignal;
   }): Promise<{ ref: ArchiveRef; reused: boolean }>;
   /** Publish one part whose bytes the runner already uploaded. Bytes are not sent. */
   appendStreamedPart(req: {
@@ -40,6 +42,8 @@ export interface PartSubmitter {
     name: string;
     title?: string;
     size?: number;
+    /** Hard-stop: once aborted, no new attempt is made and no further irreversible request fires. */
+    signal?: AbortSignal;
   }): Promise<{ confirmed: number[] }>;
   verify(req: { ref: ArchiveRef; expectedParts: number | null }):
     Promise<{ ok: boolean; observedParts: number | null }>;

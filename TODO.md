@@ -129,11 +129,11 @@
   **验收**: 三端 `api/version` 同一版本、bundle md5 一致、systemd active；录制 0、上传 0；台账里 `TEST-` 任务 0 条。
   **现状（2026-11-13）**: 三端均为 `0.0.384-e1206d`（本地 bundle 的 md5 前缀 `e2acbbef`，两台节点与之相同）；任务同步 applied=4/6/12；删掉 4 条 `TEST-` 任务，录像目录移到节点上的回收目录(`.trash-` 以日期为名)（未删除，可回收）。
 
-[x] **T-218 直播直传驱动路径补齐三处缺口（plans/049 阶段 2b-2d，0.0.385，2026-11-13）**
-  — **做什么**: ① `UploadRuntimeDeps.accounting`（可选）：驱动在每次尝试前 `noteSubmit`、每次限流判定后 `noteRateLimited`，异常吞掉；`buildLivePumpSubmitter` 接收 `submitGate` 并透传，`cli` 在受管节点上也装配 `makeNodeSubmitGate`。② 流式路径显式 `retry: attempts 5 / 60s 起 / 封顶 300s`，与旧 `submitWithRateLimitRetry` 一致。③ `PartSubmitter.ensureStreamedArchive` 新增可选 `skipFindRecent`，live-pump 首次建稿一律带上。
-  **为什么**: 新路径一旦默认开启，执行体就在节点上。对拍旧路径后确认三处差异都会改变「一场直播能不能收尾」：直传完全不记账号配额（多节点同账号会少算窗口、不触发冷却）、限流预算从 5 次缩到 3 次（比它替换掉的路径早一步转人工）、每次建稿都按标题找旧稿（标题可来自直播标题模板，同一主播同日两场会渲染同标题，复用会把这一场的分 P 追加进上一场）。
-  **验收**: 8 条新用例；逐个撤回修复对应用例必红；全量 `pnpm test` 5327 passed / 0 failed、`pnpm typecheck` 0 错、`arch:check` 一致、`pnpm bundle` 0.0.385。
-  **现状（2026-11-13）**: 代码完成，待 review。flag `DREC_LIVE_PUMP_DRIVER` 仍默认关闭——三处补齐只让新路径与旧路径等价，节点执行体上还没跑过。
+[x] **T-218 直播直传驱动路径对齐旧路径（plans/049 阶段 2b-2d，0.0.385，2026-11-13）**
+  — **做什么**: ① `UploadRuntimeDeps.accounting`（可选）+ `buildLivePumpSubmitter` 透传 `submitGate`，clients 在受管节点上装配；② 流式路径显式 `retry: attempts 5 / 60s 起 / 封顶 300s`；③ `PartSubmitter.ensureStreamedArchive` 加可选 `skipFindRecent`，首建一律带上。独立审查后又补 4 处：`RunLivePumpOptions` 缺少 `submitter` 字段（flag 一直空转）、`publishStreamed` 折掉限流码、分类判定收到包装对象、建稿传输错误当 transient 可能重复建稿；并收紧限流等待为指数增长、`signal` 贯通、首建 checkpoint 记 P1、未知码转 unknown。
+  **为什么**: flag 一旦默认开启，执行体就在节点上。对拍旧路径后确认这些差异都会改变「一场直播能不能收尾」——直传不记账号配额、限流预算 5→3、每次建稿都按标题复用旧稿（标题模板可能同日重名）、以及**接缝缺失导致新路径根本没跑过**。
+  **验收**: 22 条新用例；逐项撤回修复对应用例必红（两轮各 5 条）；全量 `pnpm test` 5341 passed / 0 failed、`pnpm typecheck` 0 错、`arch:check` 一致、`pnpm bundle` 0.0.385。
+  **现状（2026-11-13）**: 代码完成，待 review。flag `DREC_LIVE_PUMP_DRIVER` 仍默认关闭——代码层对齐不等于节点执行体跑过，下一版需选一台节点开 flag 实跑一场。
 
 [~] **T-198 直播直传同场判定以真实进度为准（issue [#642](https://github.com/fuyucn/douyin-rec/issues/642)，2026-11-12）**
   — **做什么**: `rolloverStaleState` 的最后活动取 `max(state.updatedAt, 未确认分 P 的 spool mtime, 恢复进度标记)`；新增 `<state>.activity` 标记，只在恢复重传的**真实块进度**上写（每分钟节流，重试/定时心跳不写）；启动恢复把 `o.signal` 传入 `resubmitAllUnconfirmed`，取消后不再发起新的不可逆请求；重传按 10% 输出进度日志；归档时删掉标记。

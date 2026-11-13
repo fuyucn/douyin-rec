@@ -45,6 +45,8 @@ function driver(o: {
   streamPublish?: boolean;
   retryAttempts?: number;
   accounting?: { noteSubmit(): void; noteRateLimited(): void };
+  /** false = the fake rate-limit error carries no retryAfterMs hint, so the schedule applies. */
+  rateLimitHint?: boolean;
 } = {}) {
   const store = memoryStore();
   const sleeps: number[] = [];
@@ -63,7 +65,7 @@ function driver(o: {
     findRecent: async (input) => { findRecentCalls.push(input); return o.findRecent ? o.findRecent(input) : "none"; },
     classifyError: (err): UploadErrorClass =>
       err instanceof RateLimited
-        ? { kind: "rate-limited", retryAfterMs: 7 }
+        ? { kind: "rate-limited", ...(o.rateLimitHint === false ? {} : { retryAfterMs: 7 }) }
         : err instanceof Transient
           ? { kind: "transient", reason: "t" }
           : { kind: "permanent", reason: String((err as Error)?.message ?? err) },
@@ -108,7 +110,12 @@ describe("upload driver: streamed publish", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.ref).toBeNull();
     expect(calls[0]!.archive).toMatchObject({ title: "T" });
-    expect(store.saved).toEqual([{ targetId: "t", archiveId: "a1", parts: [] }]);
+    // The create published P1, so the checkpoint must not start empty (see the P2 case below).
+    expect(store.saved).toEqual([{
+      targetId: "t",
+      archiveId: "a1",
+      parts: [{ index: 1, size: 0, mtimeMs: 0, title: "P1", confirmedAt: "2023-11-14T22:13:20.000Z" }],
+    }]);
   });
 
   it("reuses a matching archive without publishing anything", async () => {
@@ -249,5 +256,54 @@ describe("upload driver: streamed publish", () => {
     await searched.d.ensureStreamedArchive({ cred: CRED, archive: ARCHIVE, name: "stem0" });
     expect(searched.findRecentCalls).toHaveLength(1);
     expect(searched.findRecentCalls[0]!.title).toBe("T");
+  });
+
+  it("grows the rate-limit wait per attempt instead of a flat minute", async () => {
+    // The legacy path waits 60s, 120s, 240s, then caps at 300s. A flat 60s retry re-enters the
+    // same cooldown window every time and burns the budget without ever cooling off.
+    // A plain error with no retryAfterMs hint, so the driver uses its exponential schedule.
+    const { d, sleeps } = driver({
+      publishStreamed: async () => { throw new RateLimited("upload rate limit code:601"); },
+      rateLimitHint: false,
+    });
+    await expect(d.appendStreamedPart({ cred: CRED, ref: REF, name: "stem0", size: 6 }))
+      .rejects.toMatchObject({ failure: "retry-exhausted" });
+    // No target-supplied hint -> the second attempt already waits a growing 60s+ (never a flat 7ms).
+    expect(sleeps[sleeps.length - 1]).toBeGreaterThanOrEqual(60_000);
+  });
+
+  it("a hard-stop before the first attempt sends nothing", async () => {
+    const ac = new AbortController();
+    ac.abort();
+    const { d, calls } = driver({ publishStreamed: async () => ({ proof: "confirmed", ref: REF }) });
+    await expect(d.appendStreamedPart({ cred: CRED, ref: REF, name: "stem0", size: 6, signal: ac.signal }))
+      .rejects.toMatchObject({ failure: "fatal" });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("a hard-stop during the cooldown does not fire another irreversible request", async () => {
+    const ac = new AbortController();
+    let n = 0;
+    const { d, calls } = driver({
+      publishStreamed: async () => {
+        n++;
+        // Stop the run while the driver is waiting out the first rate limit.
+        if (n === 1) { ac.abort(); throw new RateLimited("code:21540"); }
+        return { proof: "confirmed", ref: REF };
+      },
+    });
+    await expect(d.appendStreamedPart({ cred: CRED, ref: REF, name: "stem0", size: 6, signal: ac.signal }))
+      .rejects.toMatchObject({ failure: "fatal" });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("the create checkpoint starts at P1, so the next part is P2", async () => {
+    const { d, store } = driver({ publishStreamed: async () => ({ proof: "created", ref: REF }) });
+    await d.ensureStreamedArchive({ cred: CRED, archive: ARCHIVE, name: "stem0", title: "P1", skipFindRecent: true });
+    // A checkpoint of "parts: []" made the next streamed part confirm itself as P1 while the
+    // archive really held two parts.
+    expect(store.saved.at(-1)!.parts.map((p) => p.index)).toEqual([1]);
+    const next = await d.appendStreamedPart({ cred: CRED, ref: REF, name: "stem1", title: "P2", size: 6 });
+    expect(next).toEqual({ confirmed: [2] });
   });
 });

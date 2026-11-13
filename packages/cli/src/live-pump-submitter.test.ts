@@ -34,7 +34,7 @@ class FakeRateLimited extends Error {}
  * The driver wiring, seen from the production entry point: budget, account accounting and the
  * no-dedupe-on-create rule are the three gaps that made the driver path unsafe to default-enable.
  */
-function fakeTarget(o: { failTimes?: number } = {}) {
+function fakeTarget(o: { failTimes?: number; rateLimitHint?: boolean } = {}) {
   const calls: PublishStreamedInput[] = [];
   const finds: string[] = [];
   const REF = { targetId: "bilibili-upos", id: "BILIfake1" };
@@ -51,7 +51,11 @@ function fakeTarget(o: { failTimes?: number } = {}) {
     inspect: async () => ({ ref: REF, title: "t", partCount: 1 }) as ArchiveInfo,
     findRecent: async (input) => { finds.push(input.title); return "none"; },
     classifyError: (err): UploadErrorClass =>
-      err instanceof FakeRateLimited ? { kind: "rate-limited", retryAfterMs: 1 } : { kind: "permanent", reason: String(err) },
+      err instanceof FakeRateLimited
+        // Default carries a 1ms hint so budget tests stay instant; rateLimitHint: false exercises
+        // the real schedule (60s, 120s, ...) that the production wiring must supply.
+        ? { kind: "rate-limited", ...(o.rateLimitHint === false ? {} : { retryAfterMs: 1 }) }
+        : { kind: "permanent", reason: String(err) },
     capabilities: { appendGranularity: "single", seasons: false, streamPublish: true },
     publishStreamed: async (input): Promise<PublishStreamedResult> => {
       calls.push(input);
@@ -119,6 +123,16 @@ describe("live-pump submitter driver wiring", () => {
     });
     await s!.ensureStreamedArchive({ archive: ARCHIVE, name: "stem0", skipFindRecent: true });
     expect(events).toEqual(["submit", "rate-limited", "submit"]);
+  });
+
+  it("uses the legacy cooldown schedule when the target gives no hint", async () => {
+    // Without an explicit retry block, the driver waits its own default (a flat 60s) at every
+    // attempt — still inside the window Bilibili is holding. This is what the wiring prevents.
+    const { s, calls, sleeps } = built({ failTimes: 2, rateLimitHint: false });
+    await s.ensureStreamedArchive({ archive: ARCHIVE, name: "stem0", skipFindRecent: true });
+    expect(calls).toHaveLength(3);
+    // 60s then 120s: the schedule grows, it is not a flat minute.
+    expect(sleeps).toEqual([60_000, 120_000]);
   });
 
   it("passes skipFindRecent through, so a fresh create never adopts an older same-title archive", async () => {

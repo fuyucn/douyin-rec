@@ -90,6 +90,7 @@ export function buildLivePumpSubmitter(o: LivePumpSubmitterOpts): PartSubmitter 
         ...(req.title ? { title: req.title } : {}),
         ...(req.expectedDurationSec !== undefined ? { expectedDurationSec: req.expectedDurationSec } : {}),
         ...(req.skipFindRecent ? { skipFindRecent: true } : {}),
+        ...(req.signal ? { signal: req.signal } : {}),
       });
       const ref: ArchiveRef = out.ref;
       return { ref, reused: out.reused };
@@ -101,6 +102,7 @@ export function buildLivePumpSubmitter(o: LivePumpSubmitterOpts): PartSubmitter 
         name: req.name,
         ...(req.title ? { title: req.title } : {}),
         ...(req.size !== undefined ? { size: req.size } : {}),
+        ...(req.signal ? { signal: req.signal } : {}),
       });
       return { confirmed: out.confirmed };
     },

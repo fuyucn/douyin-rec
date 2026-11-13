@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ArchiveRef, PartSubmitter, SubmitArchiveMeta } from "@drec/core";
-import { LivePumpSession } from "./live-pump.js";
+import { LivePumpSession, livePumpStatePath, readLivePumpState } from "./live-pump.js";
 
 const REF: ArchiveRef = { targetId: "bilibili-upos", id: "BILIfake1" };
 
@@ -102,7 +102,12 @@ describe("live-pump -> PartSubmitter seam", () => {
     expect(r.needsManual).toBe(true);
     expect(calls.ensure).toHaveLength(1);
     expect(existsSync(spool)).toBe(true);
-    expect(s.parts.every((p) => !p.confirmed)).toBe(true);
+    // An empty array satisfies `every(...)`, so asserting on the in-memory list proved nothing.
+    // Read the WAL the next start actually recovers from.
+    const state = readLivePumpState(livePumpStatePath(dir, "r"));
+    expect(state).not.toBeNull();
+    expect(state!.pending).toMatchObject({ kind: "create", partIndex: 0, stem: "stem0", spoolPath: spool });
+    expect(state!.parts.some((p) => p.confirmed)).toBe(false);
     expect(s.bvid).toBeUndefined();
   });
 

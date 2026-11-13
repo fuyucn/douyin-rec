@@ -163,6 +163,31 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
     return new Error(what + " rejected: " + JSON.stringify(res.raw).slice(0, 300));
   }
 
+  /**
+   * Errors that happen after (or while) a request is on the wire.
+   *
+   * A create that dies here is NOT provably "not submitted": the POST may have reached the server
+   * and built the archive while the response was lost. Retrying it is exactly how a second
+   * archive gets created next to the first one, so it must surface as proof "unknown" and go to a
+   * human instead of through the driver's transient retry (plans/049 §8.5).
+   */
+  function isTransport(err: unknown): boolean {
+    return /econnreset|etimedout|timeout|timed out|connection reset|socket hang up|unexpected eof|fetch failed|aborted|network/i
+      .test(messageOf(err));
+  }
+
+  /**
+   * Codes Bilibili uses to reject a submission on its content, which therefore provably did not
+   * take effect: 21001 参数错误, 21015 视频可能上传过程出现问题, 21005/21007 稿件状态/权限类拒绝.
+   * Everything else (an unrecognised code, an HTTP-level error body) stays unprovable, because
+   * the edit may already have applied.
+   */
+  function isProvableRejection(res: SubmitResult): boolean {
+    const raw = res.raw as { code?: unknown };
+    const code = Number(raw.code);
+    return code === 21001 || code === 21015 || code === 21005 || code === 21007;
+  }
+
   return {
     id: UPOS_TARGET_ID,
     platformIds: ["bilibili"],
@@ -259,16 +284,23 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
       if (!input.ref) {
         const archive = input.archive;
         if (!archive) throw new Error("publishStreamed: archive metadata is required to create");
-        const res = await submitStudio({
-          cookiesPath,
-          title: archive.title,
-          tid: archive.tid ?? DEFAULT_TID,
-          tag: (archive.tags ?? []).join(","),
-          ...(archive.desc ? { desc: archive.desc } : {}),
-          private: (archive.policy?.visibility ?? "private") !== "public",
-          videos: [video],
-          ...(fetchImpl ? { fetchImpl } : {}),
-        });
+        let res: SubmitResult;
+        try {
+          res = await submitStudio({
+            cookiesPath,
+            title: archive.title,
+            tid: archive.tid ?? DEFAULT_TID,
+            tag: (archive.tags ?? []).join(","),
+            ...(archive.desc ? { desc: archive.desc } : {}),
+            private: (archive.policy?.visibility ?? "private") !== "public",
+            videos: [video],
+            ...(fetchImpl ? { fetchImpl } : {}),
+          });
+        } catch (e) {
+          // The request may already have created the archive; a retry would create a second one.
+          if (isTransport(e)) return { proof: "unknown", ref: null };
+          throw e;
+        }
         if (!res.ok) throw submitFailure(res, "create");
         if (!res.bvid) return { proof: "unknown", ref: null };
         return { proof: "created", ref: { targetId: UPOS_TARGET_ID, id: res.bvid } };
@@ -286,8 +318,21 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
         throw e;
       }
       if (!res.ok) {
+        // The classifier predicates read a message. Handing them the wrapper object made
+        // String(res) "[object Object]", so every code (601/21540/...) silently missed and a
+        // rate-limited edit looked like a plain rejection. Serialize the raw body instead.
+        const body = JSON.stringify(res.raw);
         // A rejected edit provably did not take effect; an unreadable one might have.
-        if (isAppendAmbiguous(res) || isPlainNoBv(res)) return { proof: "unknown", ref: null };
+        if (isAppendAmbiguous(body) || isPlainNoBv(body)) return { proof: "unknown", ref: null };
+        // A rate limit is also "not submitted", but reporting it as a bare confirmed-not-submitted
+        // makes the driver treat it as a short transient blip (1s/2s/4s/8s) with no long cooldown
+        // and no account cooling. Keep the raw body so classification cools like the legacy path.
+        if (isUploadRateLimited(body)) throw submitFailure(res, "append");
+        // "confirmed-not-submitted" is a promise that the request provably did not take effect.
+        // Only a body we recognise as a validation rejection can promise that; an unknown code
+        // might have applied the edit, and retrying it would append the part twice. Anything we
+        // cannot classify stays unknown and goes to a human, exactly like the legacy path.
+        if (!isProvableRejection(res)) return { proof: "unknown", ref: null };
         return { proof: "confirmed-not-submitted", ref: null };
       }
       if (!res.bvid && !input.ref) return { proof: "unknown", ref: null };

@@ -31,6 +31,12 @@ export interface UploadRuntimeDeps {
   now(): number;
   log(msg: string): void;
   /**
+  * Hard-stop signal. When aborted, no further attempt is made and the current bounded wait ends
+  * immediately. A live part may be mid-cooldown when the operator stops the run; finishing the
+  * wait and firing one more irreversible request afterwards is not a stop.
+   */
+  signal?: AbortSignal;
+  /**
    * Account-level bookkeeping shared with every other upload on this machine (issue #331).
    *
    * The legacy in-process submit path records each attempt in the same per-account window rolling
@@ -65,6 +71,8 @@ export interface EnsureArchiveRequest {
   expectedDurationSec?: number;
   /** Skip findRecent. Default false: dedupe before creating is the whole point. */
   skipFindRecent?: boolean;
+  /** Hard-stop; see UploadRuntimeDeps.signal. */
+  signal?: AbortSignal;
 }
 
 export interface EnsureArchiveOutcome {
@@ -78,6 +86,8 @@ export interface AppendPartsRequest {
   ref: ArchiveRef;
   files: UploadFile[];
   policy: UploadPolicy;
+  /** Hard-stop; see UploadRuntimeDeps.signal. */
+  signal?: AbortSignal;
 }
 
 export interface AppendPartsOutcome {
@@ -94,6 +104,8 @@ export interface StreamedArchiveRequest {
   title?: string;
   expectedDurationSec?: number;
   skipFindRecent?: boolean;
+  /** Hard-stop; see UploadRuntimeDeps.signal. */
+  signal?: AbortSignal;
 }
 
 export interface StreamedPartRequest {
@@ -103,6 +115,8 @@ export interface StreamedPartRequest {
   title?: string;
   /** Size of the part the transport already uploaded; 0 = unknown. */
   size?: number;
+  /** Hard-stop; see UploadRuntimeDeps.signal. */
+  signal?: AbortSignal;
 }
 
 export interface VerifyRequest {
@@ -178,13 +192,26 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
 
   /** Bounded wait. */
   async function pause(attempt: number, cls: UploadErrorClass): Promise<void> {
+    // A target-reported hint wins; otherwise the wait grows per attempt (60s, 120s, 240s, capped
+    // at maxWaitMs) exactly like the legacy in-process path. A flat 60s per attempt is shorter
+    // than the cooldown Bilibili is still holding, so every retry lands inside the window.
     const want =
       cls.kind === "rate-limited"
-        ? cls.retryAfterMs ?? rateLimitMs
+        ? cls.retryAfterMs ?? rateLimitMs * 2 ** attempt
         : transientBaseMs * 2 ** attempt;
     const ms = Math.min(Math.max(1, want), maxWaitMs);
     log("[upload-driver] waiting " + Math.round(ms / 1000) + "s before retry (" + cls.kind + ")");
     await sleep(ms);
+  }
+
+  /** A hard-stop must not be followed by another irreversible request. Per-call signal wins over
+   * the driver-wide one, so a runner that owns its own abort can stop only its own part. */
+  function stopped(reqSignal?: AbortSignal): boolean {
+    return reqSignal?.aborted === true || deps.signal?.aborted === true;
+  }
+
+  function assertNotStopped(what: string, reqSignal?: AbortSignal): void {
+    if (stopped(reqSignal)) throw new UploadDriverError("fatal", what + ": 已收到停止信号，不再提交");
   }
 
   function classify(err: unknown): UploadErrorClass {
@@ -265,6 +292,7 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
       }
 
       for (let attempt = 0; attempt < attempts; attempt++) {
+        assertNotStopped("建稿", req.signal);
         noteSubmit();
         try {
           const res = await target.create({
@@ -300,6 +328,7 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
     async appendParts(req: AppendPartsRequest): Promise<AppendPartsOutcome> {
       const key = checkpointKey(req.ref.targetId, req.ref.id);
       for (let attempt = 0; attempt < attempts; attempt++) {
+        assertNotStopped("追加", req.signal);
         noteSubmit();
         try {
           const res = await target.append({
@@ -354,6 +383,7 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
         }
       }
       for (let attempt = 0; attempt < attempts; attempt++) {
+        assertNotStopped("流式建稿", req.signal);
         noteSubmit();
         try {
           const res = await publish({
@@ -367,7 +397,20 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
             throw new UploadDriverError("needs-manual", "流式建稿结果不确定（没有可读的稿件号）");
           }
           const key = checkpointKey(res.ref.targetId, res.ref.id);
-          store.save(key, { targetId: res.ref.targetId, archiveId: res.ref.id, parts: [] });
+          // The create already published this part, so the checkpoint must start at P1. Saving
+          // "parts: []" made the NEXT streamed part confirm itself as P1: the archive really had
+          // two parts while the checkpoint (and every proof built on it) said one.
+          store.save(key, {
+            targetId: res.ref.targetId,
+            archiveId: res.ref.id,
+            parts: [{
+              index: 1,
+              size: 0,
+              mtimeMs: 0,
+              ...(req.title ? { title: req.title } : {}),
+              confirmedAt: new Date(now()).toISOString(),
+            }],
+          });
           return { ref: res.ref, reused: false };
         } catch (err) {
           if (err instanceof UploadDriverError) throw err;
@@ -391,6 +434,7 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
       const key = checkpointKey(req.ref.targetId, req.ref.id);
       const policy: UploadPolicy = target.hardPolicy();
       for (let attempt = 0; attempt < attempts; attempt++) {
+        assertNotStopped("流式追加", req.signal);
         noteSubmit();
         try {
           const res = await publish({
