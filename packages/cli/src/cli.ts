@@ -939,7 +939,15 @@ program
     const spoolDir = o.spoolDir ?? `${tmpdir()}/live-pump`;
     const maxSegments = Math.max(1, Number(o.segments));
     const title = o.title ?? `测试-${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "")}`;
+    // Same opt-in as the production record path: the manual harness must be able to exercise it.
+    const pumpSubmitter = buildLivePumpSubmitter({
+      cookiesPath: o.cookies,
+      spoolDir,
+      pumpRoom: room,
+      log: console.log,
+    });
     const res = await runLivePump({
+      ...(pumpSubmitter ? { submitter: pumpSubmitter } : {}),
       cookiesPath: o.cookies,
       room,
       fetch: async (r, q) => {
