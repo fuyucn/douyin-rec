@@ -10,26 +10,31 @@
  * Credentials are deliberately absent: the implementation is already bound to one account, so a
  * runner cannot switch accounts between parts.
  */
-import type { ArchiveRef, UploadFile, UploadPolicy } from "./upload-target.js";
+import type { ArchiveRef, UploadPolicy } from "./upload-target.js";
 
-export interface SubmitEnsureRequest {
+export interface SubmitArchiveMeta {
   title: string;
-  files: UploadFile[];
-  policy: UploadPolicy;
-  expectedDurationSec?: number;
-}
-
-export interface SubmitAppendRequest {
-  ref: ArchiveRef;
-  files: UploadFile[];
-  policy: UploadPolicy;
+  tid?: number;
+  tags?: string[];
+  desc?: string;
+  policy?: UploadPolicy;
 }
 
 export interface PartSubmitter {
-  /** Create the archive, or reuse the one findRecent proves already exists. */
-  ensureArchive(req: SubmitEnsureRequest): Promise<{ ref: ArchiveRef; reused: boolean }>;
-  /** Append parts; the returned numbers are the ones this call proved are on the archive. */
-  appendParts(req: SubmitAppendRequest): Promise<{ confirmed: number[] }>;
+  /** Create the archive, or reuse the one findRecent proves already exists. Bytes are not sent. */
+  ensureStreamedArchive(req: {
+    archive: SubmitArchiveMeta;
+    name: string;
+    title?: string;
+    expectedDurationSec?: number;
+  }): Promise<{ ref: ArchiveRef; reused: boolean }>;
+  /** Publish one part whose bytes the runner already uploaded. Bytes are not sent. */
+  appendStreamedPart(req: {
+    ref: ArchiveRef;
+    name: string;
+    title?: string;
+    size?: number;
+  }): Promise<{ confirmed: number[] }>;
   verify(req: { ref: ArchiveRef; expectedParts: number | null }):
     Promise<{ ok: boolean; observedParts: number | null }>;
 }
