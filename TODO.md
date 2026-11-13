@@ -81,6 +81,12 @@
   **验收**: 17 条新用例（提交的是 `complete()` 的 stem 而不是声明名、`is_only_self` 只由显式 public 打开、ok 但无 bvid → unknown 且不重试、限流码 → rate-limited、分块失败不进提交、内存字节不读盘、追 P 合并旧列表/幂等/传输失败 unknown/已落地后拒稿 unknown、inspect 与 findRecent 的 none/one/many/unknown、凭据优先级与账号键）；两处变异分别变红（stem→声明名 3 红、强制走文件读取 1 红）；`pnpm typecheck` 0 错、`arch:check` 通过、`pnpm bundle` 0.0.377-d97083；版本 0.0.376→0.0.377。
   **现状（2026-11-12）**: issue [#668](https://github.com/fuyucn/douyin-rec/issues/668) → PR [#669](https://github.com/fuyucn/douyin-rec/pull/669) 已合并（merge 83b3927b，0.0.377，CI 全绿：typecheck + 全量 vitest + bundle + web build）；零生产接入——未注册到 cli 的目标表，`forPlatform("bilibili")` 仍只命中 biliup 目标，线上行为无变化，尚未部署。2b（live-pump / rolling-upload 改走驱动）未开始。
 
+[x] **T-210 上传驱动实现（plans/049 阶段 2b-1，2026-11-12）**
+  — **做什么**: `@drec/upload-runtime` 的 `driver.ts` 从「只有类型」变成实现：`ensureArchive`（先 `findRecent` 去重再建稿，proof unknown 直接转人工）、`appendParts`（只有 observed 才落 checkpoint，proof unknown 绝不重试，`confirmed-not-submitted` 才允许重试）、`verify`（`inspect` 对账）；限流/瞬时错误按分类退避（限流用 `retryAfterMs`，所有等待 300s 封顶），永久失败零等待；失败原因集中在 `UploadDriverError.failure`（needs-manual / retry-exhausted / fatal）。
+  **为什么**: 「不确定就转人工」这条判定不能由每个调用方各写一遍——写错一次就是重复投稿。阶段 2b 的接线必须先有唯一的判定点。
+  **验收**: 14 条新用例（去重命中不建稿、去重读取失败不建稿、proof unknown 只调一次、瞬时失败按 1s/2s 退避、限流用 `retryAfterMs`、永久失败零等待、重试预算耗尽、追加序号从 checkpoint 续、unknown 不落盘、`confirmed-not-submitted` 才重试、ambiguous 一次即停、verify 三态）；`pnpm typecheck` 0 错、`pnpm bundle` 0.0.378-d176de、`arch:check` 通过；版本 0.0.377→0.0.378。
+  **现状（2026-11-12）**: 零生产接入（driver 尚无调用方）；live-pump / rolling-upload 接线是 2b-2。
+
 [~] **T-198 直播直传同场判定以真实进度为准（issue [#642](https://github.com/fuyucn/douyin-rec/issues/642)，2026-11-12）**
   — **做什么**: `rolloverStaleState` 的最后活动取 `max(state.updatedAt, 未确认分 P 的 spool mtime, 恢复进度标记)`；新增 `<state>.activity` 标记，只在恢复重传的**真实块进度**上写（每分钟节流，重试/定时心跳不写）；启动恢复把 `o.signal` 传入 `resubmitAllUnconfirmed`，取消后不再发起新的不可逆请求；重传按 10% 输出进度日志；归档时删掉标记。
   **为什么**: 长分 P 录制或大文件重传期间没有状态写入，`updatedAt` 停在 54 分钟前；重启被误判为“换场”，把仍可恢复的分 P 与 archive 身份拆到归档（#642 现场证据：chunk 98 三次 PUT 重试耗尽，下一次启动归档了未确认状态）。
