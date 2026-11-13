@@ -496,7 +496,7 @@ nodeId，迁移步不用再跑。
 - 限流等待改为按尝试次数增长（60s、120s、240s，封顶 300s）。原实现每次都取固定 `rateLimitMs`，等于在同一个冷却窗口里连撞 5 次。
 - `signal` 从 runner 一路传到 driver：停止后排空中的分 P 不会再在冷却结束后补发一次不可逆请求。
 - 首建成功时 checkpoint 从 **P1** 开始记录（原来是 `parts: []`，下一段会把自己记成 P1，而稿件实际已有两个分 P）。
-- `publishStreamed` 的追加失败只有**能证明未生效**的码（21001／21015／21005／21007）才报 `confirmed-not-submitted`；其余未知码转 `unknown`，避免对一次可能已生效的编辑再发一次。
+- `publishStreamed` 的追加失败**不再按码猜「确定未提交」**：除限流外一律 `unknown`。按 21001 等码报「可重试」会让驱动把同一份无效载荷再提交 5 次（第三轮修正，见 §8.5.1）。
 
 **接缝**：`PartSubmitter` 与 `UploadRuntimeDeps` 的新字段全部可选，队列/测试路径不注入即行为不变；
 `RunLivePumpOptions` 的结构性缺口是本轮最严重的一条——它说明 **0.0.381–0.0.384 期间这个 flag 从未真正生效**，
@@ -506,7 +506,25 @@ nodeId，迁移步不用再跑。
 逐项撤回修复都会让对应用例失败（两轮各 5 条，见 PR 正文）。全量 `pnpm test` 5341 passed / 0 failed、
 `pnpm typecheck` 0 错、`arch:check` 一致、`pnpm bundle` 0.0.385。
 
-**仍然不能默认开启**：`DREC_LIVE_PUMP_DRIVER` 默认值保持 0。上面 7 处对齐只说明两条路径在**代码层面**一致，
+### 8.5.1 第三轮：复核发现的「对齐后仍然更危险」（0.0.385，2026-11-13）
+
+第二轮独立复核确认上一版仍有四处会把一场直播的分 P 或稿件搞丢，全部修复后才算完成：
+
+| 差异 | 后果 | 改法 |
+|---|---|---|
+| 建稿非 ok 响应按**文本**分类 | 响应体只要出现 `timeout` 就判 transient，驱动重试建稿 5 次；第一次 POST 可能已经建好 → 重复稿件 | 非 ok 只认限流码（冷却后重试）；其余一律 `proof: unknown`，一次即停 |
+| 追加遇到传输错误仍重试 | 编辑请求可能已生效；旧路径遇异常直接停、留 pending，重试会重复分 P | 追加的 catch 里 transport／ambiguous 一律 `unknown` |
+| 校验类拒绝报 `confirmed-not-submitted` | 该证明会被驱动当成「可安全重试」，同一份无效载荷（如 21001）再提交 5 次 | 去掉按码猜的证明：非限流拒绝一律 `unknown`；旧路径同样只停不重试 |
+| pending 冷却等待不可中断 | 停止后还要等满 60–300s，超出 pump 7s 收尾预算，子进程只能被 supervisor 杀 | `driver.pause` 同时监听运行/单次 signal；`buildLivePumpSubmitter` 默认 sleep 在 abort 时清 timer |
+
+**测试补强**：等待序列改为断言精确的 `[60s,120s,240s,300s]`（旧的「最后一条 ≥60s」对平 60s 也成立）；
+停止用例改为在**真正 pending 的 sleep** 中 abort；建稿/追加各加「响应体只提到 timeout」与「编辑响应丢失」用例，
+并用驱动断言只发一次请求。默认 sleep 的 timer 清理用 fake timers 直接断言 `getTimerCount()===0`。
+
+**验收（第三轮后）**：全量 `pnpm test` **5351 passed / 42 skipped / 0 failed**、`pnpm typecheck` 0 错、
+`arch:check` 一致、`pnpm bundle` 0.0.385；本轮新增 10 条用例；每处修复逐项撤回都有用例变红（见 PR 正文）。
+
+**仍然不能默认开启**：`DREC_LIVE_PUMP_DRIVER` 默认值保持 0。上面 11 处对齐只说明两条路径在**代码层面**一致，
 不代表节点执行体跑过——下一版必须选**一台**节点开 flag 实跑一场（分 P 数、stem、private、受管回执）才能翻转默认值。
 
 ## §9 验收清单（对应审计「复审验收点」）
