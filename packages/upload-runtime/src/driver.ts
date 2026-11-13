@@ -26,8 +26,14 @@ import type { UploadCheckpoint, UploadPartRecord, UploadStateStore } from "./sta
 export interface UploadRuntimeDeps {
   target: UploadTarget;
   store: UploadStateStore;
-  /** Test seam: cooldowns must not be real sleeps in tests. */
-  sleep(ms: number): Promise<void>;
+  /**
+   * Test seam: cooldowns must not be real sleeps in tests.
+   *
+   * The signal is the wait's own cancellation: an implementation that owns a timer must clear it
+   * when the signal aborts, or the process stays alive for the rest of the cooldown after the run
+   * has already settled.
+   */
+  sleep(ms: number, signal?: AbortSignal): Promise<void>;
   now(): number;
   log(msg: string): void;
   /**
@@ -166,6 +172,66 @@ function checkpointKey(targetId: string, archiveId: string): string {
   return targetId + ":" + archiveId;
 }
 
+/**
+ * One signal that aborts when any input does. `detach` must be called when the wait ends, or
+ * every retry would leave listeners on the run's signal.
+ */
+function combineSignals(signals: AbortSignal[]): { signal: AbortSignal; detach(): void } | null {
+  if (signals.length === 0) return null;
+  if (signals.length === 1) return { signal: signals[0]!, detach: () => {} };
+  const ac = new AbortController();
+  const onAbort = (): void => ac.abort();
+  for (const s of signals) {
+    if (s.aborted) {
+      ac.abort();
+      break;
+    }
+    s.addEventListener("abort", onAbort, { once: true });
+  }
+  return {
+    signal: ac.signal,
+    detach: () => { for (const s of signals) s.removeEventListener("abort", onAbort); },
+  };
+}
+
+/**
+ * Wait `ms`, but settle the moment `signal` aborts even if the injected sleep ignores the signal
+ * (a fake in tests, or an old implementation). The timer itself is owned by `sleep`; production
+ * callers clear it on abort so a pending cooldown cannot hold the process open.
+ */
+async function sleepUnlessAborted(
+  sleep: UploadRuntimeDeps["sleep"],
+  ms: number,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  if (!signal) {
+    await sleep(ms);
+    return;
+  }
+  if (signal.aborted) return;
+  let slept: Promise<void>;
+  try {
+    slept = Promise.resolve(sleep(ms, signal));
+  } catch {
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const done = (): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    signal.addEventListener("abort", done, { once: true });
+    // A sleep that throws must not turn a cooldown into a failed publish: end the wait and let
+    // the next loop decide (the attempt checks will stop it if the run was aborted).
+    void slept.then(done, done);
+    // The abort may have landed while `sleep` was being called (before this listener existed).
+    if (signal.aborted) done();
+  });
+}
+
 export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
   const { target, store, sleep, now, log } = deps;
   const attempts = Math.max(1, deps.retry?.attempts ?? DEFAULTS.attempts);
@@ -190,8 +256,15 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
     }
   }
 
-  /** Bounded wait. */
-  async function pause(attempt: number, cls: UploadErrorClass): Promise<void> {
+  /**
+   * Bounded wait that a hard-stop can end immediately.
+   *
+   * The legacy in-process path sleeps through `sleepUnlessAborted`: a stop during a 300s cooldown
+   * must not keep the pump alive for the rest of it (its finalize budget is seconds, not minutes).
+   * Both signals are honoured: the run's stop and the per-call one (a runner that stops only its
+   * own part).
+   */
+  async function pause(attempt: number, cls: UploadErrorClass, reqSignal?: AbortSignal): Promise<void> {
     // A target-reported hint wins; otherwise the wait grows per attempt (60s, 120s, 240s, capped
     // at maxWaitMs) exactly like the legacy in-process path. A flat 60s per attempt is shorter
     // than the cooldown Bilibili is still holding, so every retry lands inside the window.
@@ -201,7 +274,13 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
         : transientBaseMs * 2 ** attempt;
     const ms = Math.min(Math.max(1, want), maxWaitMs);
     log("[upload-driver] waiting " + Math.round(ms / 1000) + "s before retry (" + cls.kind + ")");
-    await sleep(ms);
+    const signals = [deps.signal, reqSignal].filter((s): s is AbortSignal => !!s);
+    const combined = combineSignals(signals);
+    try {
+      await sleepUnlessAborted(sleep, ms, combined?.signal);
+    } finally {
+      combined?.detach();
+    }
   }
 
   /** A hard-stop must not be followed by another irreversible request. Per-call signal wins over
@@ -319,7 +398,7 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
           if (attempt + 1 >= attempts) {
             throw new UploadDriverError("retry-exhausted", "建稿重试 " + attempts + " 次仍失败: " + messageOf(err));
           }
-          await pause(attempt, cls);
+          await pause(attempt, cls, req.signal);
         }
       }
       throw new UploadDriverError("retry-exhausted", "建稿重试耗尽");
@@ -345,7 +424,7 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
             if (attempt + 1 >= attempts) {
               throw new UploadDriverError("retry-exhausted", "追加重试 " + attempts + " 次仍未提交");
             }
-            await pause(attempt, { kind: "transient", reason: "confirmed-not-submitted" });
+            await pause(attempt, { kind: "transient", reason: "confirmed-not-submitted" }, req.signal);
             continue;
           }
           const confirmed = confirm(req, key);
@@ -358,7 +437,7 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
           if (attempt + 1 >= attempts) {
             throw new UploadDriverError("retry-exhausted", "追加重试 " + attempts + " 次仍失败: " + messageOf(err));
           }
-          await pause(attempt, cls);
+          await pause(attempt, cls, req.signal);
         }
       }
       throw new UploadDriverError("retry-exhausted", "追加重试耗尽");
@@ -420,7 +499,7 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
           if (attempt + 1 >= attempts) {
             throw new UploadDriverError("retry-exhausted", "流式建稿重试 " + attempts + " 次仍失败: " + messageOf(err));
           }
-          await pause(attempt, cls);
+          await pause(attempt, cls, req.signal);
         }
       }
       throw new UploadDriverError("retry-exhausted", "流式建稿重试耗尽");
@@ -450,7 +529,7 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
             if (attempt + 1 >= attempts) {
               throw new UploadDriverError("retry-exhausted", "流式追加重试 " + attempts + " 次仍未提交");
             }
-            await pause(attempt, { kind: "transient", reason: "confirmed-not-submitted" });
+            await pause(attempt, { kind: "transient", reason: "confirmed-not-submitted" }, req.signal);
             continue;
           }
           const file: UploadFile = { path: req.name, size: req.size ?? 0, mtimeMs: 0, ...(req.title ? { title: req.title } : {}) };
@@ -464,7 +543,7 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
           if (attempt + 1 >= attempts) {
             throw new UploadDriverError("retry-exhausted", "流式追加重试 " + attempts + " 次仍失败: " + messageOf(err));
           }
-          await pause(attempt, cls);
+          await pause(attempt, cls, req.signal);
         }
       }
       throw new UploadDriverError("retry-exhausted", "流式追加重试耗尽");

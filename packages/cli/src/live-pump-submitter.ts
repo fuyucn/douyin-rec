@@ -27,7 +27,7 @@ export interface LivePumpSubmitterOpts {
   /** Test seam: a fake UPOS target, so the wiring below is exercised without the wire. */
   target?: UploadTarget;
   /** Test seam: cooldown waits must not be real sleeps in tests. */
-  sleep?: (ms: number) => Promise<void>;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   env?: (key: string) => string | undefined;
   log?: (msg: string) => void;
 }
@@ -61,6 +61,29 @@ function stateFileStore(o: LivePumpSubmitterOpts): UploadStateStore {
 }
 
 /**
+ * Default cooldown wait. The timer must be cleared when the signal aborts: the driver settles the
+ * moment the stop lands, and a live pump that has already reported its result must not stay alive
+ * for the remaining minutes of a rate-limit wait (its supervisor kills the child by then).
+ */
+export function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal?.aborted) { resolve(); return; }
+    // Declared first so the abort path can clear it; the callback only runs after this frame.
+    let timer: NodeJS.Timeout | undefined;
+    const onAbort = (): void => {
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    };
+    timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
  * Returns null when the flag is off, so the caller keeps the legacy in-process path untouched.
  */
 export function buildLivePumpSubmitter(o: LivePumpSubmitterOpts): PartSubmitter | null {
@@ -72,7 +95,7 @@ export function buildLivePumpSubmitter(o: LivePumpSubmitterOpts): PartSubmitter 
   const driver = createUploadDriver({
     target,
     store: stateFileStore(o),
-    sleep: o.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
+    sleep: o.sleep ?? abortableSleep,
     now: () => Date.now(),
     log,
     // Same budget as the legacy path (rateLimitAttempts 5, 60s base, 300s cap). The driver

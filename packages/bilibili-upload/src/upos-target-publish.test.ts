@@ -97,10 +97,20 @@ describe("publishStreamed: append classification", () => {
     expect(t.classifyError(err)).toMatchObject({ kind: "rate-limited" });
   });
 
-  it("a provably rejected edit still reports confirmed-not-submitted", async () => {
+  it("a validation rejection is never retried: one edit, then unknown", async () => {
+    // 21001 is a payload rejection, not a rate limit. The legacy path stops on any
+    // non-rate-limited failure; reporting "confirmed-not-submitted" made the driver submit the
+    // identical invalid payload five times.
     const f = fakeFetch({ edit: { code: 21001, message: "参数错误" } });
     const t = target(f.impl);
-    await expect(append(t)).resolves.toMatchObject({ proof: "confirmed-not-submitted" });
+    await expect(append(t)).resolves.toMatchObject({ proof: "unknown", ref: null });
+  });
+
+  it("a lost edit response is unknown, never a blind retry", async () => {
+    // The edit may have applied before the connection died. Retrying it appends the part twice.
+    const f = fakeFetch({ editThrows: new Error("fetch failed") });
+    const t = target(f.impl);
+    await expect(append(t)).resolves.toMatchObject({ proof: "unknown", ref: null });
   });
 
   it("an unreadable edit stays unknown and is never retried by the driver", async () => {
@@ -129,6 +139,14 @@ describe("publishStreamed: create classification", () => {
     const t = target(f.impl);
     const err = await create(t).catch((e) => e);
     expect(t.classifyError(err)).toMatchObject({ kind: "rate-limited" });
+  });
+
+  it("a create body that merely mentions timeout is unknown, not a retryable transient", async () => {
+    // Text matching made this a transient create and the driver retried it five times — how a
+    // second archive is born. An unreadable body proves nothing about whether the POST landed.
+    const f = fakeFetch({ create: { code: -400, message: "upstream timeout" } });
+    const t = target(f.impl);
+    await expect(create(t)).resolves.toMatchObject({ proof: "unknown", ref: null });
   });
 
   it("a successful create reports proof created with the BV", async () => {
@@ -161,7 +179,53 @@ describe("publishStreamed drives the upload driver's cooldown, not a 1s blip", (
       .rejects.toMatchObject({ failure: "retry-exhausted" });
     expect(events.filter((e) => e === "rate-limited")).toHaveLength(5);
     // 60s / 120s / 240s / 300s — never the transient blip schedule.
-    expect(sleeps.every((ms) => ms >= 60_000)).toBe(true);
-    expect(sleeps.length).toBe(4);
+    expect(sleeps).toEqual([60_000, 120_000, 240_000, 300_000]);
+  });
+
+  it("one create attempt when a rejection body only says timeout", async () => {
+    const f = fakeFetch({ create: { code: -400, message: "upstream timeout" } });
+    const d = createUploadDriver({
+      target: target(f.impl),
+      store: memoryStore(),
+      sleep: async () => {},
+      now: () => 1_700_000_000_000,
+      log: () => {},
+      retry: { attempts: 5, transientBaseMs: 1_000, rateLimitMs: 60_000, maxWaitMs: 300_000 },
+    });
+    await expect(d.ensureStreamedArchive({ cred: CRED(), archive: ARCHIVE, name: "stem0", skipFindRecent: true }))
+      .rejects.toMatchObject({ failure: "needs-manual" });
+    expect(f.hits.filter((h) => h === "/x/vu/web/add/v3")).toHaveLength(1);
+  });
+
+  it("one edit attempt when the response is a validation rejection", async () => {
+    const f = fakeFetch({ edit: { code: 21001, message: "参数错误" } });
+    const d = createUploadDriver({
+      target: target(f.impl),
+      store: memoryStore(),
+      sleep: async () => {},
+      now: () => 1_700_000_000_000,
+      log: () => {},
+      retry: { attempts: 5, transientBaseMs: 1_000, rateLimitMs: 60_000, maxWaitMs: 300_000 },
+    });
+    await expect(d.appendStreamedPart({ cred: CRED(), ref: REF, name: "stem1", title: "P2" }))
+      .rejects.toMatchObject({ failure: "needs-manual" });
+    expect(f.hits.filter((h) => h === "/x/vu/web/edit")).toHaveLength(1);
+  });
+
+  it("one edit attempt when the edit response is lost", async () => {
+    // A transport failure on the edit itself is not provably "not submitted": the driver must
+    // not fire the same irreversible POST again.
+    const f = fakeFetch({ editThrows: new Error("fetch failed") });
+    const d = createUploadDriver({
+      target: target(f.impl),
+      store: memoryStore(),
+      sleep: async () => {},
+      now: () => 1_700_000_000_000,
+      log: () => {},
+      retry: { attempts: 5, transientBaseMs: 1_000, rateLimitMs: 60_000, maxWaitMs: 300_000 },
+    });
+    await expect(d.appendStreamedPart({ cred: CRED(), ref: REF, name: "stem1", title: "P2" }))
+      .rejects.toMatchObject({ failure: "needs-manual" });
+    expect(f.hits.filter((h) => h === "/x/vu/web/edit")).toHaveLength(1);
   });
 });

@@ -177,17 +177,10 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
   }
 
   /**
-   * Codes Bilibili uses to reject a submission on its content, which therefore provably did not
-   * take effect: 21001 参数错误, 21015 视频可能上传过程出现问题, 21005/21007 稿件状态/权限类拒绝.
-   * Everything else (an unrecognised code, an HTTP-level error body) stays unprovable, because
-   * the edit may already have applied.
+   * Which submit responses are safe to retry is decided per call site: a rate-limit body throws so
+   * the driver cools, every other non-ok body is unknown (the request may have landed). No proof
+   * here is built from a guessed code list.
    */
-  function isProvableRejection(res: SubmitResult): boolean {
-    const raw = res.raw as { code?: unknown };
-    const code = Number(raw.code);
-    return code === 21001 || code === 21015 || code === 21005 || code === 21007;
-  }
-
   return {
     id: UPOS_TARGET_ID,
     platformIds: ["bilibili"],
@@ -229,7 +222,13 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
         videos,
         ...(fetchImpl ? { fetchImpl } : {}),
       });
-      if (!res.ok) throw submitFailure(res, "create");
+      if (!res.ok) {
+        // Only a rate limit provably did not create the archive. Any other rejection body may
+        // merely *mention* timeout; classifying it as transient made the driver POST the create
+        // again and could build a second archive. Stop and hand it to a human.
+        if (!isUploadRateLimited(JSON.stringify(res.raw))) return { proof: "unknown", ref: null };
+        throw submitFailure(res, "create");
+      }
       // ok but no bvid: the archive exists and we cannot name it. Never retry, never guess.
       if (!res.bvid) return { proof: "unknown", ref: null };
       return { proof: "created", ref: { targetId: UPOS_TARGET_ID, id: res.bvid } };
@@ -256,6 +255,9 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
         if (!res.ok) {
           // A rejected edit did not take effect, but a previous file in this batch may have landed.
           if (appended > 0) return { proof: "unknown" };
+          // Only a rate limit is safe to retry after a cooldown; any other rejection (even one
+          // whose text mentions timeout) is not provably "not submitted". Legacy stops here.
+          if (!isUploadRateLimited(JSON.stringify(res.raw))) return { proof: "unknown" };
           throw submitFailure(res, "append");
         }
         appended++;
@@ -271,9 +273,9 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
      * Publish metadata for bytes the streaming transport already uploaded (plans/049 stage 2b-2b).
      *
      * live-pump already runs preupload -> chunks -> complete while the part is still recording, so
-     * there is nothing left to transfer here. Mapping proof is the same as create/append: an unreadable
-     * submit is unknown, a provably rejected edit is confirmed-not-submitted, anything else throws so
-     * the driver can classify rate limits and permanent failures.
+     * there is nothing left to transfer here. Mapping proof is the same as create/append: an
+     * unreadable submit is unknown, a rate limit throws so the driver can cool and retry, and a
+     * create response we cannot prove did not land is unknown rather than a guessed retry.
      */
     async publishStreamed(input: PublishStreamedInput): Promise<PublishStreamedResult> {
       const cookiesPath = credPath(input.cred);
@@ -301,7 +303,16 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
           if (isTransport(e)) return { proof: "unknown", ref: null };
           throw e;
         }
-        if (!res.ok) throw submitFailure(res, "create");
+        if (!res.ok) {
+          // A rate limit provably did not create the archive and is the only rejection the
+          // legacy path retries (after a cooldown). Any other non-ok body — a validation error,
+          // an HTTP error page, or a body whose text merely mentions "timeout" — cannot prove
+          // that the POST did not land. Matching that text as transient retried the create five
+          // times, which is how a second archive is born. Report unknown and stop instead.
+          const body = JSON.stringify(res.raw);
+          if (isUploadRateLimited(body)) throw submitFailure(res, "create");
+          return { proof: "unknown", ref: null };
+        }
         if (!res.bvid) return { proof: "unknown", ref: null };
         return { proof: "created", ref: { targetId: UPOS_TARGET_ID, id: res.bvid } };
       }
@@ -314,7 +325,10 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
           ...(fetchImpl ? { fetchImpl } : {}),
         });
       } catch (e) {
-        if (isAppendAmbiguous(e)) return { proof: "unknown", ref: null };
+        // A transport failure during the edit may still have applied it (the legacy path stops
+        // here and leaves the intent pending). A lost read is also not provably an untouched
+        // archive. Either way: unknown, never a blind POST retry.
+        if (isAppendAmbiguous(e) || isPlainNoBv(e) || isTransport(e)) return { proof: "unknown", ref: null };
         throw e;
       }
       if (!res.ok) {
@@ -322,18 +336,13 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
         // String(res) "[object Object]", so every code (601/21540/...) silently missed and a
         // rate-limited edit looked like a plain rejection. Serialize the raw body instead.
         const body = JSON.stringify(res.raw);
-        // A rejected edit provably did not take effect; an unreadable one might have.
-        if (isAppendAmbiguous(body) || isPlainNoBv(body)) return { proof: "unknown", ref: null };
-        // A rate limit is also "not submitted", but reporting it as a bare confirmed-not-submitted
-        // makes the driver treat it as a short transient blip (1s/2s/4s/8s) with no long cooldown
-        // and no account cooling. Keep the raw body so classification cools like the legacy path.
+        // A rate limit provably did not take effect and is the one rejection we may retry: keep
+        // the raw body so classification cools the account like the legacy path.
         if (isUploadRateLimited(body)) throw submitFailure(res, "append");
-        // "confirmed-not-submitted" is a promise that the request provably did not take effect.
-        // Only a body we recognise as a validation rejection can promise that; an unknown code
-        // might have applied the edit, and retrying it would append the part twice. Anything we
-        // cannot classify stays unknown and goes to a human, exactly like the legacy path.
-        if (!isProvableRejection(res)) return { proof: "unknown", ref: null };
-        return { proof: "confirmed-not-submitted", ref: null };
+        // Everything else — including a recognised validation rejection — stops here. The legacy
+        // path never retried a non-rate-limited rejection; retrying a 21001 five times only
+        // submits an invalid payload again, and an unknown body may already have applied.
+        return { proof: "unknown", ref: null };
       }
       if (!res.bvid && !input.ref) return { proof: "unknown", ref: null };
       return { proof: "confirmed", ref: input.ref };

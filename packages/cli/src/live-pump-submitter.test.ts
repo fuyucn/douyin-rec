@@ -2,9 +2,11 @@
  * The zero-disk submitter stays off unless the flag is set: a half-wired upload path is worse
  * than the legacy one (plans/049 stage 2b-2c).
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import type { ArchiveInfo, PublishStreamedInput, PublishStreamedResult, UploadErrorClass, UploadTarget } from "@drec/core";
-import { buildLivePumpSubmitter } from "./live-pump-submitter.js";
+import { abortableSleep, buildLivePumpSubmitter } from "./live-pump-submitter.js";
+
+afterEach(() => { vi.useRealTimers(); });
 
 const base = {
   cookiesPath: "/tmp/cookies.json",
@@ -143,5 +145,34 @@ describe("live-pump submitter driver wiring", () => {
     const searched = built();
     await searched.s.ensureStreamedArchive({ archive: ARCHIVE, name: "stem0" });
     expect(searched.finds).toEqual(["T"]);
+  });
+
+  it("a stop clears the pending cooldown timer instead of holding the process for it", async () => {
+    // The driver settles on abort; the timer must go with it, or a stopped pump that already
+    // reported its result keeps the child alive for the rest of a 60-300s cooldown.
+    vi.useFakeTimers();
+    const ac = new AbortController();
+    const waited = abortableSleep(300_000, ac.signal);
+    expect(vi.getTimerCount()).toBe(1);
+    ac.abort();
+    await waited;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("a signal that already aborted never installs a timer", async () => {
+    vi.useFakeTimers();
+    const ac = new AbortController();
+    ac.abort();
+    await abortableSleep(300_000, ac.signal);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("runs the timer normally when no signal aborts", async () => {
+    vi.useFakeTimers();
+    const ac = new AbortController();
+    const waited = abortableSleep(300_000, ac.signal);
+    await vi.advanceTimersByTimeAsync(300_000);
+    await waited;
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

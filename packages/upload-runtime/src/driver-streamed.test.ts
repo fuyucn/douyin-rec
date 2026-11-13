@@ -45,6 +45,8 @@ function driver(o: {
   streamPublish?: boolean;
   retryAttempts?: number;
   accounting?: { noteSubmit(): void; noteRateLimited(): void };
+  /** Override the wait to prove a stop interrupts a genuinely pending cooldown. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   /** false = the fake rate-limit error carries no retryAfterMs hint, so the schedule applies. */
   rateLimitHint?: boolean;
 } = {}) {
@@ -77,7 +79,7 @@ function driver(o: {
   const d = createUploadDriver({
     target,
     store,
-    sleep: async (ms) => { sleeps.push(ms); },
+    sleep: o.sleep ?? (async (ms) => { sleeps.push(ms); }),
     now: () => 1_700_000_000_000,
     log: () => {},
     retry: { attempts: o.retryAttempts ?? 3, transientBaseMs: 1_000, rateLimitMs: 60_000, maxWaitMs: 300_000 },
@@ -258,18 +260,18 @@ describe("upload driver: streamed publish", () => {
     expect(searched.findRecentCalls[0]!.title).toBe("T");
   });
 
-  it("grows the rate-limit wait per attempt instead of a flat minute", async () => {
+  it("waits 60s / 120s / 240s and caps at 300s, exactly like the legacy path", async () => {
     // The legacy path waits 60s, 120s, 240s, then caps at 300s. A flat 60s retry re-enters the
-    // same cooldown window every time and burns the budget without ever cooling off.
-    // A plain error with no retryAfterMs hint, so the driver uses its exponential schedule.
+    // same cooldown window every time and burns the budget without ever cooling off; asserting
+    // only "the last wait is >= 60s" would also pass for a flat minute.
     const { d, sleeps } = driver({
       publishStreamed: async () => { throw new RateLimited("upload rate limit code:601"); },
       rateLimitHint: false,
+      retryAttempts: 5,
     });
     await expect(d.appendStreamedPart({ cred: CRED, ref: REF, name: "stem0", size: 6 }))
       .rejects.toMatchObject({ failure: "retry-exhausted" });
-    // No target-supplied hint -> the second attempt already waits a growing 60s+ (never a flat 7ms).
-    expect(sleeps[sleeps.length - 1]).toBeGreaterThanOrEqual(60_000);
+    expect(sleeps).toEqual([60_000, 120_000, 240_000, 300_000]);
   });
 
   it("a hard-stop before the first attempt sends nothing", async () => {
@@ -281,19 +283,28 @@ describe("upload driver: streamed publish", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("a hard-stop during the cooldown does not fire another irreversible request", async () => {
+  it("a hard-stop ends a genuinely pending cooldown wait and fires no second request", async () => {
     const ac = new AbortController();
-    let n = 0;
-    const { d, calls } = driver({
-      publishStreamed: async () => {
-        n++;
-        // Stop the run while the driver is waiting out the first rate limit.
-        if (n === 1) { ac.abort(); throw new RateLimited("code:21540"); }
-        return { proof: "confirmed", ref: REF };
+    // A wait that never settles on its own: only the abort can end it. Production sleeps own a
+    // timer that is cleared by the signal; the driver must also settle when the sleep ignores it.
+    const pending = new Promise<void>(() => { /* holds until aborted */ });
+    const { d, calls, sleeps } = driver({
+      publishStreamed: async () => { throw new RateLimited("code:21540"); },
+      rateLimitHint: false,
+      sleep: (ms) => {
+        sleeps.push(ms);
+        // The stop lands while the wait is genuinely pending, not before it starts.
+        ac.abort();
+        return pending;
       },
     });
-    await expect(d.appendStreamedPart({ cred: CRED, ref: REF, name: "stem0", size: 6, signal: ac.signal }))
-      .rejects.toMatchObject({ failure: "fatal" });
+    const settled = d.appendStreamedPart({ cred: CRED, ref: REF, name: "stem0", size: 6, signal: ac.signal })
+      .then(() => "settled", () => "settled");
+    const outcome = await Promise.race([
+      settled,
+      new Promise<string>((r) => setTimeout(() => r("still-waiting"), 500)),
+    ]);
+    expect(outcome).toBe("settled");
     expect(calls).toHaveLength(1);
   });
 
