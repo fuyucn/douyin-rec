@@ -939,17 +939,21 @@ program
     const spoolDir = o.spoolDir ?? `${tmpdir()}/live-pump`;
     const maxSegments = Math.max(1, Number(o.segments));
     const title = o.title ?? `测试-${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "")}`;
+    // Production hands the pump a normalized room id, and the harness used to hand it the full URL.
+    // That is the one difference that made every fresh fetch answer 10011 while probe (which
+    // normalizes) still resolved the stream.
+    const pumpRoom = platform.extractRoomSlug(roomToUrl(room));
     // Same opt-in as the production record path: the manual harness must be able to exercise it.
     const pumpSubmitter = buildLivePumpSubmitter({
       cookiesPath: o.cookies,
       spoolDir,
-      pumpRoom: room,
+      pumpRoom,
       log: console.log,
     });
     const res = await runLivePump({
       ...(pumpSubmitter ? { submitter: pumpSubmitter } : {}),
       cookiesPath: o.cookies,
-      room,
+      room: pumpRoom,
       fetch: async (r, q) => {
         const s = await platform.getStream(r, q);
         return {
