@@ -84,8 +84,8 @@
 [x] **T-210 上传驱动实现（plans/049 阶段 2b-1，2026-11-12）**
   — **做什么**: `@drec/upload-runtime` 的 `driver.ts` 从「只有类型」变成实现：`ensureArchive`（先 `findRecent` 去重再建稿，proof unknown 直接转人工）、`appendParts`（只有 observed 才落 checkpoint，proof unknown 绝不重试，`confirmed-not-submitted` 才允许重试）、`verify`（`inspect` 对账）；限流/瞬时错误按分类退避（限流用 `retryAfterMs`，所有等待 300s 封顶），永久失败零等待；失败原因集中在 `UploadDriverError.failure`（needs-manual / retry-exhausted / fatal）。
   **为什么**: 「不确定就转人工」这条判定不能由每个调用方各写一遍——写错一次就是重复投稿。阶段 2b 的接线必须先有唯一的判定点。
-  **验收**: 14 条新用例（去重命中不建稿、去重读取失败不建稿、proof unknown 只调一次、瞬时失败按 1s/2s 退避、限流用 `retryAfterMs`、永久失败零等待、重试预算耗尽、追加序号从 checkpoint 续、unknown 不落盘、`confirmed-not-submitted` 才重试、ambiguous 一次即停、verify 三态）；`pnpm typecheck` 0 错、`pnpm bundle` 0.0.378-d176de、`arch:check` 通过；版本 0.0.377→0.0.378。
-  **现状（2026-11-12）**: 零生产接入（driver 尚无调用方）；live-pump / rolling-upload 接线是 2b-2。
+  **验收**: 15 条新用例（去重命中不建稿、去重读取失败不建稿、proof unknown 只调一次、瞬时失败按 1s/2s 退避、限流用 `retryAfterMs`、永久失败零等待、重试预算耗尽、追加序号从 checkpoint 续、unknown 不落盘、`confirmed-not-submitted` 才重试、ambiguous 一次即停、verify 三态、proof unknown 但有可读稿件号）；两处变异分别变红（去掉去重 unknown 守卫、接受有 ref 的 unknown）；`pnpm typecheck` 0 错、`pnpm bundle` 0.0.378-d176de、`arch:check` 通过；版本 0.0.377→0.0.378。
+  **现状（2026-11-12）**: issue [#670](https://github.com/fuyucn/douyin-rec/issues/670) → PR [#671](https://github.com/fuyucn/douyin-rec/pull/671) 已合并（merge 956998ba，0.0.378，CI 全绿：typecheck + 全量 vitest + bundle + web build）；仍零生产接入（driver 尚无调用方，`forPlatform("bilibili")` 仍只命中 biliup），live-pump / rolling-upload 接线是 2b-2（needs-decision）。
 
 [~] **T-198 直播直传同场判定以真实进度为准（issue [#642](https://github.com/fuyucn/douyin-rec/issues/642)，2026-11-12）**
   — **做什么**: `rolloverStaleState` 的最后活动取 `max(state.updatedAt, 未确认分 P 的 spool mtime, 恢复进度标记)`；新增 `<state>.activity` 标记，只在恢复重传的**真实块进度**上写（每分钟节流，重试/定时心跳不写）；启动恢复把 `o.signal` 传入 `resubmitAllUnconfirmed`，取消后不再发起新的不可逆请求；重传按 10% 输出进度日志；归档时删掉标记。
