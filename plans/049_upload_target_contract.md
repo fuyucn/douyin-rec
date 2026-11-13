@@ -444,8 +444,8 @@ nodeId，迁移步不用再跑。
 | 文件 | 来源 | 内容 |
 |---|---|---|
 | `credential.ts` | `core/upload-gate.ts` | 账号键（`biliAccountKey` / `biliAccountKeyFromCookiesJson`）、`biliupCookieHeader`、CSRF（`biliupCsrf`） |
-| `season.ts` | `core/bili-season.ts` | 提交后把稿件加入合集小节，返回 `SeasonAddOutcome` |
-| `season-resolve.ts` | `core/bili-season-resolve.ts` | 配置里的小节号归一化与解析 |
+| `season.ts` | 原 core 合集模块 | 提交后把稿件加入合集小节，返回 `SeasonAddOutcome` |
+| `season-resolve.ts` | 原 core 小节解析模块 | 配置里的小节号归一化与解析 |
 
 调用方（`app` / `cli` / `orchestrator` / `zero-upload` / `bilibili-upload` / `hub-compose`）改为从新包导入；
 `tsconfig` / `vitest` 别名、`test/arch/layering.test.ts` 的 RANKS、`scripts/gen-architecture.mjs` 与生成的

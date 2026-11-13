@@ -118,7 +118,7 @@
   **现状（2026-11-12）**: 通过。附带确认宿主机 ffmpeg 的 `libx265` ABI 对不上（4.2 vs 4.3），本机跑 `_live-pump` 必须走容器；测试稿件 `BV1xx` 是私有的，等人工删。开关仍默认关闭。**已部署 master 与一台节点（`0.0.383-bd1d55`，bundle md5 `eef4b6effdc5` 一致）；另一台因任务 #30 在录按 guard 跳过，仍是 `0.0.376-063584`。**
 
 [x] **T-216 core 去 B 站化：新增 `@drec/bilibili-api` 叶子包（plans/049 阶段 4，2026-11-13）**
-  — **做什么**: 新建叶子包 `@drec/bilibili-api`（rank 0.1，无内包依赖），把 `core` 里只属于 B 站的三块搬进去：`upload-gate.ts` 的账号键 / Cookie 头 / CSRF（`credential.ts`）、`bili-season.ts`、`bili-season-resolve.ts`；六个调用包（app / cli / orchestrator / zero-upload / bilibili-upload / hub-compose）改从新包导入；tsconfig / vitest 别名、layering RANKS、gen-architecture 与生成文档、README 包数（19 → 20）同步；测试的 mock 目标从 core 内部函数改为新模块。
+  — **做什么**: 新建叶子包 `@drec/bilibili-api`（rank 0.1，无内包依赖），把 `core` 里只属于 B 站的三块搬进去：`upload-gate.ts` 的账号键 / Cookie 头 / CSRF（`credential.ts`）、core 里原有的合集与小节解析两个模块；六个调用包（app / cli / orchestrator / zero-upload / bilibili-upload / hub-compose）改从新包导入；tsconfig / vitest 别名、layering RANKS、gen-architecture 与生成文档、README 包数（19 → 20）同步；测试的 mock 目标从 core 内部函数改为新模块。
   **为什么**: 审计 P1-6「通用层里的 B 站代码」——`core` 是全体共用的契约层，B 站的账号键与合集语义塞在里面，等于让平台知识渗进所有包；搬成叶子包后，「B 站知识只在 `bilibili-api` 与传输包」这条边界可以被 grep 与层守护测试验证。
   **验收**: 纯搬迁、行为不变——`rg -ni "bili|biliup|upos" packages/core/src` 只剩注释、测试夹具字符串与两类登记例外（能力字符串 `BILIUP_*_CAPABILITY`、标题清洗 `formatBiliTitle`）；`pnpm test` 5319 passed / 0 failed、`pnpm typecheck` 0 错、`arch:check` 20 包一致、`pnpm bundle` 0.0.384；兼容壳（`orchestrator/src/upload-limits.ts`、`bilibili-upload/src/run-biliup.ts`）保留一个发布周期。
   **现状（2026-11-13）**: 代码与文档改完，全量验证已跑过；PR 待提交（阶段 4 单独一个 PR）。详见 plans/049 §8.4。
