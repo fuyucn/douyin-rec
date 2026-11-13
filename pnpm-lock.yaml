@@ -109,6 +109,9 @@ importers:
       '@drec/processors':
         specifier: workspace:*
         version: link:../processors
+      '@drec/zero-upload':
+        specifier: workspace:*
+        version: link:../zero-upload
 
   packages/cli:
     dependencies:

@@ -112,6 +112,7 @@ flowchart TB
   engine --> extra
   bup --> core
   bup --> procs
+  bup --> zeroup
   observ --> core
   uprt --> core
   procs --> core
