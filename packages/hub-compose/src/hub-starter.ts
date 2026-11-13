@@ -14,10 +14,8 @@ import {
 import type { HubStarter } from "@drec/app";
 import type { PipelineCfg } from "@drec/orchestrator";
 import { createBiliupFileTarget } from "@drec/bilibili-upload";
-import {
-  isUploadingMode, listProcessors, normalizeSeasonSectionId, platformForRoom, registerChild,
-  resolveDiskMinGB, resolveJobLogPath, resolveSeasonSectionId, throwIfAborted, ttlMemoAsync,
-} from "@drec/core";
+import { isUploadingMode, listProcessors, platformForRoom, registerChild, resolveDiskMinGB, resolveJobLogPath, throwIfAborted, ttlMemoAsync } from "@drec/core";
+import { normalizeSeasonSectionId, resolveSeasonSectionId } from "@drec/bilibili-api";
 import type { EnqueueRequest, HubResources, RecordingWorkerStatusDTO, RemoteTaskSpec, RollingDeliveryDTO, WorkerStatus } from "@drec/core";
 import {
   fleetLink, fleetUpgrade, getReceiptSettings, hubSyncGate, PROBE_CACHE_MS, readBlockedBroadcasts,

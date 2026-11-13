@@ -1,10 +1,10 @@
 // biliup process helpers shared by app and processors (plan 038 T05).
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { biliupCookieHeader } from "@drec/bilibili-api";
 import {
   APPEND_AMBIGUOUS_MARKER,
   PLAIN_NO_BV_MARKER,
-  biliupCookieHeader,
   registerChild,
   throwIfAborted,
   type UploadLine,
@@ -19,7 +19,7 @@ export type { UploadLine, UploadOpts } from "@drec/core";
  * Cookie 头提取已下沉 core(单一真理源,0 落盘直传包也要用,不能让 L4 反向依赖)。
  * 阶段 1b 步 1 起实现归属本包；`@drec/processors` 不再 re-export 它,调用点统一从 @drec/bilibili-upload 取。
  */
-export { biliupCookieHeader } from "@drec/core";
+export { biliupCookieHeader } from "@drec/bilibili-api";
 
 /**
  * Read biliup's Bilibili login cookies as a request Cookie header (default path for callers).

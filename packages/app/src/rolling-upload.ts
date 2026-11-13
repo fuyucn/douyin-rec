@@ -37,36 +37,8 @@ import {
   existsSync,
 } from "node:fs";
 import path, { join } from "node:path";
-import {
-  canDeleteRollingSource,
-  isSameBroadcast,
-  isSameBroadcastGap,
-  resolveSubmissionTitle,
-  processTimeZone,
-  zonedStamp,
-  DEFAULT_TITLE_TEMPLATE,
-  formatPartTitle,
-  sanitizeStem,
-  headOfLineFilter,
-  planRollingUploads,
-  resolveOutputStem,
-  sealedSegmentIndices,
-  segmentSessionBase,
-  stripVideoExt,
-  withFileLockSync,
-  UploadGate,
-  noteRecorderProgress,
-  recorderIsFinalizing,
-  isSlotBusy,
-  SLOT_BUSY_MARKER,
-  addArchiveToSeasonIfConfigured,
-  seasonCheckpointState,
-  resolveSeasonSectionId,
-  isValidPartSizeMiB,
-  type UploadSlot,
-  type RollingSegment,
-  type UploadOwner,
-} from "@drec/core";
+import { canDeleteRollingSource, isSameBroadcast, isSameBroadcastGap, resolveSubmissionTitle, processTimeZone, zonedStamp, DEFAULT_TITLE_TEMPLATE, formatPartTitle, sanitizeStem, headOfLineFilter, planRollingUploads, resolveOutputStem, sealedSegmentIndices, segmentSessionBase, stripVideoExt, withFileLockSync, UploadGate, noteRecorderProgress, recorderIsFinalizing, isSlotBusy, SLOT_BUSY_MARKER, isValidPartSizeMiB, type UploadSlot, type RollingSegment, type UploadOwner } from "@drec/core";
+import { addArchiveToSeasonIfConfigured, resolveSeasonSectionId, seasonCheckpointState } from "@drec/bilibili-api";
 import { appendArchive, createArchive, type UploadTarget } from "@drec/core";
 import { countVideoParts, createBiliupFileTarget, type BiliupHooks } from "./upload/biliup.js";
 import { readTcpAckedAsync, type AckSample } from "@drec/bilibili-upload";

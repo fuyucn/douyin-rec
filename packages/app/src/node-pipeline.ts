@@ -16,11 +16,8 @@
  */
 import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, openSync, closeSync, fsyncSync, renameSync } from "node:fs";
 import path from "node:path";
-import {
-  addArchiveToSeasonIfConfigured, seasonCheckpointState, linkOrCopy, biliAccountKey, biliAccountKeyFromCookiesJson, resolveSubmissionTitle, formatPartTitle, isAppendAmbiguous,
-  isUploadRateLimited, createArchive, appendArchive, normalizeNodeResultFile, openUploadLimitStore, openUploadSlot, resolveOutputStem, resolvePartAliasStem, sanitizeStreamKey, stageSessionDir,
-  processTimeZone, stampedSessionBaseOf as sessionBaseOfFile, STAGE_EXT_ALT, UploadGate, freeGBOf, type UploadSlot, type NodePipelineResult, type NodePipelineResultFile, type NodePipelineSpec, type NodeUploadStep, type UploadGateStore,
-} from "@drec/core";
+import { linkOrCopy, resolveSubmissionTitle, formatPartTitle, isAppendAmbiguous, isUploadRateLimited, createArchive, appendArchive, normalizeNodeResultFile, openUploadLimitStore, openUploadSlot, resolveOutputStem, resolvePartAliasStem, sanitizeStreamKey, stageSessionDir, processTimeZone, stampedSessionBaseOf as sessionBaseOfFile, STAGE_EXT_ALT, UploadGate, freeGBOf, type UploadSlot, type NodePipelineResult, type NodePipelineResultFile, type NodePipelineSpec, type NodeUploadStep, type UploadGateStore } from "@drec/core";
+import { addArchiveToSeasonIfConfigured, seasonCheckpointState, biliAccountKey, biliAccountKeyFromCookiesJson } from "@drec/bilibili-api";
 import { ffprobeDuration, mergeSession, planSegmentGroups, remuxSegment, unreadableParts } from "@drec/post-process";
 import { countVideoParts, createBiliupFileTarget, isAllFilesUploadedLine } from "./upload/biliup.js";
 import { procQueueDbPath, rootBiliupCookies, rootDbPath, rootStageDir, readOutputLayout } from "./paths.js";

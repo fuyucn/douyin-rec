@@ -66,12 +66,16 @@ flowchart TB
   subgraph L02["rank 0.2"]
     post["<b>post-process</b><br/>concat / burn / ass / merge / ffmpeg / fonts"]
   end
+  subgraph L01["rank 0.1"]
+    bapi["<b>bilibili-api</b><br/>B 站 HTTP 助手<br/>(登录态解析 + 合集关联;无传输)"]
+  end
   subgraph L0["L0 · 基础叶子"]
     core["<b>core</b><br/>Platform / DownloadEngine 契约<br/>+ 注册表 + types/config/notify/api-types"]
     extra["<b>ffmpeg-recorder-extra</b><br/>logStreamMeta + detectDevice"]
   end
 
   cli --> app
+  cli --> bapi
   cli --> bilibili
   cli --> bup
   cli --> core
@@ -86,13 +90,16 @@ flowchart TB
   cli --> engine
   cli --> zeroup
   hubc --> app
+  hubc --> bapi
   hubc --> bup
   hubc --> core
   hubc --> observ
   hubc --> orch
   hubc --> post
+  orch --> bapi
   orch --> core
   orch --> post
+  app --> bapi
   app --> bup
   app --> core
   app --> douyin
@@ -110,6 +117,7 @@ flowchart TB
   kuaishou --> core
   engine --> core
   engine --> extra
+  bup --> bapi
   bup --> core
   bup --> procs
   bup --> zeroup
@@ -118,6 +126,7 @@ flowchart TB
   procs --> core
   procs --> post
   procs --> zeroup
+  zeroup --> bapi
   zeroup --> core
   zeroup --> post
   procq --> core

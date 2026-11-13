@@ -11,10 +11,8 @@ import { NODE_COMMANDS, localRoomProbes, notifyOutboxArgs, runNodeCommandCli } f
 import { registerRecoverOrderCommands } from "./hub-recover-order-commands.js";
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import {
-  ZERO_DISK_DELIVERY_ENV, biliAccountKey, effectiveStageFormat, loadConfig,
-  parseOutputFormat, stageExt,
-} from "@drec/core";
+import { ZERO_DISK_DELIVERY_ENV, effectiveStageFormat, loadConfig, parseOutputFormat, stageExt } from "@drec/core";
+import { biliAccountKey } from "@drec/bilibili-api";
 import { parseDanmuFlag, parseRollingUploadFlag, parseStreamUploadFlag, rejectsNoSpoolFlag } from "./cli-flags.js";
 import type { OutputFormat, StageFormat } from "@drec/core";
 import { RecordingSession, XmlDanmuWriter } from "@drec/manager";

@@ -8,7 +8,7 @@
  * uploads private drafts by default, so the season call runs exactly in that window.
  */
 import { readFileSync } from "node:fs";
-import { biliupCookieHeader, biliupCsrf } from "./upload-gate.js";
+import { biliupCookieHeader, biliupCsrf } from "./credential.js";
 import {
   SEASON_ID_HINT,
   SEASON_RESOLVE_TIMEOUT_MS,
@@ -16,7 +16,7 @@ import {
   rememberConfiguredSeasonSection,
   resolveConfiguredSeasonSection,
   type SeasonSectionLookup,
-} from "./bili-season-resolve.js";
+} from "./season-resolve.js";
 
 const MEMBER = "https://member.bilibili.com";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";

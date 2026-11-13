@@ -5,8 +5,6 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   UploadGate,
-  biliAccountKey,
-  biliAccountKeyFromCookiesJson,
   openUploadLimitStore,
   type UploadGateStore,
   type UploadLimitState,
@@ -42,30 +40,6 @@ function memStore(): UploadGateStore & { data: Map<string, UploadLimitState>; fa
   };
   return s;
 }
-
-describe("账号键(唯一真理)", () => {
-  it("DedeUserID → bilibili:<mid>", () => {
-    expect(biliAccountKey("12345")).toBe("bilibili:12345");
-    expect(biliAccountKey(12345)).toBe("bilibili:12345");
-    expect(biliAccountKey(" 12345 ")).toBe("bilibili:12345");
-  });
-  it("缺 mid → bilibili:unknown(保守并桶)", () => {
-    expect(biliAccountKey(null)).toBe("bilibili:unknown");
-    expect(biliAccountKey("  ")).toBe("bilibili:unknown");
-    expect(biliAccountKey()).toBe("bilibili:unknown");
-  });
-  it("从 cookies.json 解析(两种结构)", () => {
-    const a = JSON.stringify({ cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "DedeUserID", value: "999" }] } });
-    const b = JSON.stringify({ cookies: [{ name: "dedeuserid", value: "888" }] });
-    expect(biliAccountKeyFromCookiesJson(a)).toBe("bilibili:999");
-    expect(biliAccountKeyFromCookiesJson(b)).toBe("bilibili:888");
-  });
-  it("坏 JSON / 无该 cookie / 空 → unknown,不抛", () => {
-    expect(biliAccountKeyFromCookiesJson("{oops")).toBe("bilibili:unknown");
-    expect(biliAccountKeyFromCookiesJson(null)).toBe("bilibili:unknown");
-    expect(biliAccountKeyFromCookiesJson(JSON.stringify({ cookies: [{ name: "SESSDATA", value: "x" }] }))).toBe("bilibili:unknown");
-  });
-});
 
 describe("UploadGate 窗口限速", () => {
   it("窗口内超 rateLimit → 睡到最早一次滑出窗口", async () => {

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, type Mock } from "vitest";
-import { JobAbortedError, USER_STOP, abortJob, runWithJob, throwIfAborted, addArchiveToSeasonIfConfigured } from "@drec/core";
+import { JobAbortedError, USER_STOP, abortJob, runWithJob, throwIfAborted } from "@drec/core";
+import { addArchiveToSeasonIfConfigured } from "@drec/bilibili-api";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,8 +19,8 @@ import type { PipelineDeps } from "./pipeline.js";
 import { fakeUploadTarget } from "@drec/core";
 import type { UploadTarget } from "@drec/core";
 
-vi.mock("@drec/core", async (orig) => {
-  const m = await orig<typeof import("@drec/core")>();
+vi.mock("@drec/bilibili-api", async (orig) => {
+  const m = await orig<typeof import("@drec/bilibili-api")>();
   return {
     ...m,
     addArchiveToSeasonIfConfigured: vi.fn(async () => ({ status: "added", sectionId: 1, aid: 1, cid: 1, title: "t" })),

@@ -20,13 +20,8 @@
  */
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, isAbsolute } from "node:path";
-import {
-  APPEND_AMBIGUOUS_MARKER, PART_KINDS, PART_WORKFLOW_TEMPLATES, isAppendAmbiguous,
-  isSlotBusy, SLOT_BUSY_MARKER, RETRY_BACKOFF_MS, isVideoFileName, assertJobInvariants,
-  addArchiveToSeasonIfConfigured, seasonCheckpointState, writeFileAtomicSync, withFileLockSync,
-  rollingSidecarPathOf,
-  type PartCtx, type ProcessContext, type ProcessJob, type ProcessResult, type Processor,
-} from "@drec/core";
+import { APPEND_AMBIGUOUS_MARKER, PART_KINDS, PART_WORKFLOW_TEMPLATES, isAppendAmbiguous, isSlotBusy, SLOT_BUSY_MARKER, RETRY_BACKOFF_MS, isVideoFileName, assertJobInvariants, writeFileAtomicSync, withFileLockSync, rollingSidecarPathOf, type PartCtx, type ProcessContext, type ProcessJob, type ProcessResult, type Processor } from "@drec/core";
+import { addArchiveToSeasonIfConfigured, seasonCheckpointState } from "@drec/bilibili-api";
 import { appendGroup, isAllFilesUploadedLine, uploadPlain } from "./run-biliup.js";
 import { BILIUP_TARGET_ID } from "./target-id.js";
 import {

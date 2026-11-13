@@ -5,16 +5,17 @@ import { FULL_CLEANUP, ROOM, Scenario } from "./harness/scenario.js";
 import { pastStartMs } from "./harness/fake-recordings.js";
 import { expectHealthyDone } from "./harness/invariants.js";
 import { segWorkPath } from "../../packages/orchestrator/src/session-plan.js";
-import { addArchiveToSeasonIfConfigured } from "@drec/core";
+import { addArchiveToSeasonIfConfigured } from "@drec/bilibili-api";
 import { fakeUploadTarget } from "@drec/core";
 
-vi.mock("@drec/core", async (orig) => {
-  const m = await orig<typeof import("@drec/core")>();
+vi.mock("@drec/bilibili-api", async (orig) => {
+  const b = await orig<typeof import("@drec/bilibili-api")>();
   return {
-    ...m,
+    ...b,
     addArchiveToSeasonIfConfigured: vi.fn(async () => ({ status: "added", sectionId: 1, aid: 1, cid: 1, title: "t" })),
   };
 });
+
 
 let s: Scenario;
 afterEach(() => s?.dispose());

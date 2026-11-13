@@ -20,6 +20,7 @@
       "@drec/post-process": ["./packages/post-process/src/index.ts"],
       "@drec/upload-runtime": ["./packages/upload-runtime/src/index.ts"],
       "@drec/bilibili-upload": ["./packages/bilibili-upload/src/index.ts"],
+      "@drec/bilibili-api": ["./packages/bilibili-api/src/index.ts"],
       "@drec/hub-compose": ["./packages/hub-compose/src/index.ts"],
       "@drec/douyin-live": ["./packages/douyin-live/src/index.ts"],
       "@drec/record-engine": ["./packages/record-engine/src/index.ts"],

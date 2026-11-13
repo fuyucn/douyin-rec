@@ -1,24 +1,25 @@
 {
-  "name": "@drec/cli",
-  "version": "0.0.0",
-  "private": true,
-  "type": "module",
-  "main": "./src/cli.ts",
-  "dependencies": {
-    "@drec/core": "workspace:*",
-    "@drec/observability": "workspace:*",
-    "@drec/manager": "workspace:*",
-    "@drec/post-process": "workspace:*",
-    "@drec/proc-queue": "workspace:*",
-    "@drec/processors": "workspace:*",
-    "@drec/zero-upload": "workspace:*",
-    "@drec/app": "workspace:*",
-    "@drec/record-engine": "workspace:*",
-    "commander": "^12.0.0",
-    "@drec/douyin-live": "workspace:*",
-    "@drec/bilibili-live": "workspace:*",
-    "@drec/kuaishou-live": "workspace:*",
-    "@drec/orchestrator": "workspace:*",
-    "@drec/bilibili-upload": "workspace:*"
-  }
+ "name": "@drec/cli",
+ "version": "0.0.0",
+ "private": true,
+ "type": "module",
+ "main": "./src/cli.ts",
+ "dependencies": {
+  "@drec/core": "workspace:*",
+  "@drec/observability": "workspace:*",
+  "@drec/manager": "workspace:*",
+  "@drec/post-process": "workspace:*",
+  "@drec/proc-queue": "workspace:*",
+  "@drec/processors": "workspace:*",
+  "@drec/zero-upload": "workspace:*",
+  "@drec/app": "workspace:*",
+  "@drec/record-engine": "workspace:*",
+  "commander": "^12.0.0",
+  "@drec/douyin-live": "workspace:*",
+  "@drec/bilibili-live": "workspace:*",
+  "@drec/kuaishou-live": "workspace:*",
+  "@drec/orchestrator": "workspace:*",
+  "@drec/bilibili-upload": "workspace:*",
+  "@drec/bilibili-api": "workspace:*"
+ }
 }

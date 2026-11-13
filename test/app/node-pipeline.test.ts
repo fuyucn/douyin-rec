@@ -11,7 +11,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSy
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { deriveTitles } from "../../packages/app/src/node-pipeline.js";
-import { UploadGate, openUploadLimitStore, biliAccountKeyFromCookiesJson, stageSessionDir, addArchiveToSeasonIfConfigured } from "@drec/core";
+import { UploadGate, openUploadLimitStore, stageSessionDir } from "@drec/core";
+import { biliAccountKeyFromCookiesJson, addArchiveToSeasonIfConfigured } from "@drec/bilibili-api";
 import { tryDirectTsLink, nodeStageCleanupTargets, openNodeUploadGate, planGroups, prepareNodeUploadAlias, readNodeResult, resolveUploadAccountKey, runNodeSidePipeline, splitGroupsBySession, writeNodeResult, abortNodeExecutor, isExecutorCmdline, nodeExecutorPidPath } from "../../packages/app/src/node-pipeline.js";
 import { remuxSegment, ffprobeDuration } from "@drec/post-process";
 import { uploadPlain, appendGroup, countVideoParts, runBiliup } from "../../packages/app/src/upload/biliup.js";
@@ -24,12 +25,11 @@ vi.mock("node:fs", { spy: true });
 const linkFail = vi.hoisted(() => ({ on: false }));
 const seasonSpy = vi.hoisted(() => ({ calls: [] as Array<{ bvid?: string; persistedBv?: string; fail?: boolean }> }));
 const seasonHook = vi.hoisted(() => ({ onCall: undefined as undefined | ((o: { bvid?: string }) => void) }));
-vi.mock("@drec/core", async (orig) => {
-  const m = await orig<typeof import("@drec/core")>();
-  const fs = await import("node:fs");
+vi.mock("@drec/bilibili-api", async (orig) => {
+  const b = await orig<typeof import("@drec/bilibili-api")>();
   return {
-    ...m,
-    addArchiveToSeasonIfConfigured: async (o: Parameters<typeof m.addArchiveToSeasonIfConfigured>[0]) => {
+    ...b,
+    addArchiveToSeasonIfConfigured: async (o: Parameters<typeof b.addArchiveToSeasonIfConfigured>[0]) => {
       seasonSpy.calls.push({ bvid: o.bvid });
       seasonHook.onCall?.(o);
       if (seasonSpy.calls.at(-1)?.fail) {
@@ -39,6 +39,14 @@ vi.mock("@drec/core", async (orig) => {
       }
       return { status: "added", sectionId: o.sectionId ?? 1, aid: 1, cid: 1, title: "t" } as const;
     },
+  };
+});
+
+vi.mock("@drec/core", async (orig) => {
+  const m = await orig<typeof import("@drec/core")>();
+  const fs = await import("node:fs");
+  return {
+    ...m,
     linkOrCopy: (s: string, d: string, o?: Parameters<typeof m.linkOrCopy>[2]) =>
       m.linkOrCopy(s, d, linkFail.on ? {
         ...o,

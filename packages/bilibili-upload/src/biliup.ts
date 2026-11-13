@@ -4,10 +4,8 @@
  */
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
-import {
-  addArchiveToSeasonIfConfigured, seasonCheckpointState, APPEND_AMBIGUOUS_MARKER, BILIUP_QUEUE_CAPABILITY, BILIUP_SLOT_CAPABILITY, isSlotBusy, SLOT_BUSY_MARKER, normalizeSeasonSectionId, UncertainOutcome, formatPartTitle, linkOrCopy, resolvePartAliasStem, probeChild, retryBackoffMs, RETRY_BACKOFF_MS,
-  type ProcessContext, type ProcessJob, type ProcessResult, type Processor, type TitleContext, type UploadProgress, type UploadSlot,
-} from "@drec/core";
+import { APPEND_AMBIGUOUS_MARKER, BILIUP_QUEUE_CAPABILITY, BILIUP_SLOT_CAPABILITY, isSlotBusy, SLOT_BUSY_MARKER, UncertainOutcome, formatPartTitle, linkOrCopy, resolvePartAliasStem, probeChild, retryBackoffMs, RETRY_BACKOFF_MS, type ProcessContext, type ProcessJob, type ProcessResult, type Processor, type TitleContext, type UploadProgress, type UploadSlot } from "@drec/core";
+import { addArchiveToSeasonIfConfigured, normalizeSeasonSectionId, seasonCheckpointState } from "@drec/bilibili-api";
 import { appendGroup, countVideoParts, isAllFilesUploadedLine, runBiliup, uploadPlain, type BiliupHooks } from "./run-biliup.js";
 import { TransferWatch, readTcpAcked, watchConfigOf, type AckSample } from "./biliup-progress.js";
 import { findRecentArchive, type ArchiveQuery } from "@drec/processors";
