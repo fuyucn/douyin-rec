@@ -61,6 +61,9 @@ import {
   noteRecorderProgress,
   type DanmuMessage,
   type LivePumpReporter,
+  type PartSubmitter,
+  type UploadFile,
+  type UploadPolicy,
 } from "@drec/core";
 import { ffprobeDuration, ffprobeDtsGap, type DtsGap } from "@drec/post-process";
 import { TsCutter, type CutterEvent, type PartTiming } from "./ts-cutter.js";
@@ -582,6 +585,10 @@ export interface LivePumpSessionOpts {
   cleanupConfirmedSpool?: boolean;
   /** Sleep seam for rate-limit backoff (tests). */
   sleep?: (ms: number) => Promise<void>;
+  /** Injected upload submitter (plans/049 stage 2b); absent = the legacy in-process path. */
+  submitter?: PartSubmitter;
+  /** Target id the submitter owns; defaults to the in-process UPOS target. */
+  submitterTargetId?: string;
   /** First cooldown for submission rate limits (default 60s). */
   rateLimitBaseMs?: number;
   /** Max submit attempts including the first one (default 5). */
@@ -625,6 +632,16 @@ export interface SubmitGate {
  * appended to that same archive before recording continues. State is fsynced before and after
  * each irreversible request so a restart can recover instead of creating a second archive.
  */
+/** The six fields submitPart and recordConfirmed agree on. */
+type PartSubmitInput = {
+  index: number;
+  spoolPath: string;
+  stem: string;
+  title: string;
+  bytes: number;
+  durationSec: number;
+};
+
 export class LivePumpSession {
   private readonly statePath: string;
   private state: LivePumpState;
@@ -1109,7 +1126,7 @@ export class LivePumpSession {
     title: string;
     bytes: number;
     durationSec: number;
-  }, signal?: AbortSignal): Promise<{ ok: boolean; bvid?: string; aid?: number; error?: string }> {
+  }, signal?: AbortSignal): Promise<{ ok: boolean; bvid?: string; aid?: number; error?: string; needsManual?: boolean }> {
     if (this.stateUntrusted) {
       return { ok: false, error: "state sidecar is untrusted; refusing to submit (manual recovery required)" };
     }
@@ -1125,6 +1142,7 @@ export class LivePumpSession {
     }
     const existing = this.state.parts.find((p) => p.index === input.index);
     if (existing?.confirmed) return { ok: true, bvid: this.state.bvid, aid: this.state.aid };
+    if (this.o.submitter) return this.submitPartViaSubmitter(input, existing);
     const doFetch = this.o.fetchImpl ?? fetch;
     // Bilibili part titles are capped; long filenames otherwise make the whole edit fail.
     const video: StudioVideo = { filename: input.stem, title: input.title.slice(0, 80) };
@@ -1146,13 +1164,29 @@ export class LivePumpSession {
 
     const result = await this.submitWithRateLimitRetry(pending, video, doFetch, signal);
     if (!result.ok) return { ok: false, error: result.error };
+    return this.recordConfirmed(input, existing, pending.kind, result.bvid, result.aid);
+  }
+
+  /**
+   * Persist one confirmed part and run the post-submit bookkeeping.
+   *
+   * Shared by the legacy submit path and the injected-submitter path: the confirmation record is
+   * the WAL recovery reads, so both paths must write it identically.
+   */
+  private recordConfirmed(
+    input: PartSubmitInput,
+    existing: LivePumpState["parts"][number] | undefined,
+    kind: "create" | "append",
+    bvid?: string,
+    aid?: number,
+  ): { ok: boolean; bvid?: string; aid?: number; error?: string } {
     this.state = {
       ...this.state,
-      bvid: result.bvid ?? this.state.bvid,
-      aid: result.aid ?? this.state.aid,
+      bvid: bvid ?? this.state.bvid,
+      aid: aid ?? this.state.aid,
       // P1 create: the season call has NOT run yet. Persist "pending" now so a kill before it
       // completes is reconciled on restart instead of silently skipping the association.
-      ...(pending.kind === "create" && this.o.seasonSectionId ? { seasonState: "pending" as const } : {}),
+      ...(kind === "create" && this.o.seasonSectionId ? { seasonState: "pending" as const } : {}),
       parts: existing
         ? this.state.parts.map((p) => p.index === input.index ? {
           ...p,
@@ -1171,20 +1205,95 @@ export class LivePumpSession {
         }],
       pending: undefined,
     };
-    if (pending.kind === "create" && this.o.seasonSectionId) {
+    if (kind === "create" && this.o.seasonSectionId) {
       try { this.o.reporter?.event({ at: Date.now(), kind: "season_pending", part: input.index }); } catch { /* observability */ }
     }
     try {
       this.persist();
     } catch (e) {
-      return { ok: false, error: `cannot persist confirmation: ${String((e as Error)?.message ?? e).slice(0, 200)}` };
+      return { ok: false, error: "cannot persist confirmation: " + String((e as Error)?.message ?? e).slice(0, 200) };
     }
     noteRecorderProgress(); // a confirmed part is progress for the finalizing stall judge (plans/044)
     this.cleanupConfirmed();
-    if (pending.kind === "create" && this.o.seasonSectionId) {
-      this.queueSeason(doFetch, false);
+    if (kind === "create" && this.o.seasonSectionId) {
+      this.queueSeason(this.o.fetchImpl ?? fetch, false);
     }
     return { ok: true, bvid: this.state.bvid, aid: this.state.aid };
+  }
+
+  /**
+   * Submit a completed part through the injected PartSubmitter (plans/049 stage 2b).
+   *
+   * The submitter owns dedupe, rate limits and the never-retry-after-unknown rule; this method
+   * owns the streaming WAL: it writes the intent first, then records only the confirmation the
+   * submitter proved. A failure leaves the intent in place so a restart reconciles instead of
+   * appending the same part twice.
+   */
+  private async submitPartViaSubmitter(
+    input: PartSubmitInput,
+    existing: LivePumpState["parts"][number] | undefined,
+  ): Promise<{ ok: boolean; bvid?: string; aid?: number; error?: string; needsManual?: boolean }> {
+    const submitter = this.o.submitter;
+    if (!submitter) return { ok: false, error: "submitter missing" };
+    const hadArchive = !!(this.state.bvid || this.state.aid);
+    const kind: "create" | "append" = hadArchive ? "append" : "create";
+    const policy: UploadPolicy = {
+      visibility: this.state.private ? "private" : "public",
+      watermark: false,
+      copyright: "self",
+    };
+    const file: UploadFile = {
+      path: input.spoolPath,
+      title: input.title.slice(0, 80),
+      size: input.bytes,
+      mtimeMs: 0,
+    };
+    this.state = {
+      ...this.state,
+      pending: {
+        kind,
+        partIndex: input.index,
+        stem: input.stem,
+        title: input.title,
+        bytes: input.bytes,
+        durationSec: input.durationSec,
+        spoolPath: input.spoolPath,
+      },
+    };
+    try {
+      this.persist();
+    } catch (e) {
+      return { ok: false, error: "cannot persist upload intent: " + String((e as Error)?.message ?? e).slice(0, 200) };
+    }
+    let bvid: string | undefined = this.state.bvid;
+    let aid: number | undefined = this.state.aid;
+    try {
+      if (hadArchive) {
+        await submitter.appendParts({
+          ref: { targetId: this.o.submitterTargetId ?? "bilibili-upos", id: this.state.bvid ?? String(this.state.aid) },
+          files: [file],
+          policy,
+        });
+      } else {
+        const out = await submitter.ensureArchive({
+          title: this.state.title,
+          files: [file],
+          policy,
+          ...(input.durationSec > 0 ? { expectedDurationSec: Math.round(input.durationSec) } : {}),
+        });
+        bvid = out.ref.id;
+        aid = undefined;
+      }
+    } catch (e) {
+      const err = e as { name?: string; failure?: string; message?: string };
+      const needsManual = err?.name === "UploadDriverError" && err.failure === "needs-manual";
+      return {
+        ok: false,
+        error: String(err?.message ?? e).slice(0, 300),
+        ...(needsManual ? { needsManual: true } : {}),
+      };
+    }
+    return this.recordConfirmed(input, existing, kind, bvid, aid);
   }
 
   /**
