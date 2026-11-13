@@ -296,7 +296,7 @@ verify
 |---|---|---|---|
 | 0 | core 契约 + 注册表 + `upload-runtime` 空驱动 + 假 target 测试 | 无 | `test/arch` 通过；fake target 一行注册；app/web/orchestrator 零改动 |
 | 1 | `bilibili-upload` 包装 biliup；`run-biliup` 纯搬迁；orchestrator 合并/分段先接驱动 | 无（对拍） | 现有 upload/append 用例全绿；argv/输出与旧实现逐字一致 |
-| 2 | UPOS 传输接入（2a 已完成：`bilibili-upos` 目标）；上传驱动实现完成（2b-1，0.0.378，零接入）；`live-pump` / `rolling-upload` 改走驱动（2b-2a 接缝 0.0.379；2b-2b 流式发布契约 0.0.380；2b-2c 装配 0.0.381，默认关闭；待真实直播验证） | 无（对拍） | 分 P 数/文件名/可见性一致；cover 行为单独验证 |
+| 2 | UPOS 传输接入（2a 已完成：`bilibili-upos` 目标）；上传驱动实现完成（2b-1，0.0.378，零接入）；`live-pump` 改走驱动（2b-2a 接缝 0.0.379；2b-2b 流式发布契约 0.0.380；2b-2c 装配 0.0.381，默认关闭；**2b-2c 于 2026-11-12 实机验证通过，见 §8.3**）；`rolling-upload` 走驱动单独拆为 **2d（未开始，needs-decision）** | 无（对拍） | 分 P 数/文件名/可见性一致；cover 行为单独验证 |
 | 3 | `proc-queue` `targetState` dual-write + 读取回退 | 无 | 新旧 bundle 互读；回滚演练 |
 | 4 | 删 core 的 B 站代码、更新架构文档/守护 | 无 | `core` grep `bili|biliup|upos` 只剩注释；`pnpm arch:check` 绿 |
 
@@ -399,6 +399,37 @@ live-pump 的顺序是**先传字节、再交元数据**：每段在 `runSegment
 - live-pump：注入 submitter 时改调这两个方法，字节与元数据仍由它自己掌管。
 
 这一步会翻转「拿不到稿件号」的行为（重试开第二个稿 → `needs-manual`），所以仍需单独 PR + 一场真实直播验证。
+
+
+### 8.3 阶段 2b 实机验证（2026-11-12）
+
+0.0.383 的 `_live-pump` 在真实直播上跑通了一次完整的「先传字节、再发布」。命令（用生产镜像跑新 bundle，
+绕开宿主机 ffmpeg 的 ABI 问题，见文末）：
+
+```
+docker run --rm --network host --entrypoint node \
+  -v $PWD/dist:/app/dist:ro -v <cookies.json>:/cookies.json \
+  -e DREC_LIVE_PUMP_DRIVER=1 douyin-rec:latest dist/douyin-rec.mjs _live-pump \
+  https://live.douyin.com/<房间> --cookies /cookies.json --size 10MiB \
+  --segments 2 --max-sec 20 --submit --title 测试-driver-065059
+```
+
+结果：`ok:true`，稿件 `BV1xx`（aid <aid>），两段日志都是
+`[直播直传] confirmed part N, removed spool`；建稿走 `add/v3`、追 P 走 `edit`，**整条链没有第二次上传字节**。
+
+对稿核验（`member.bilibili.com/x/vupre/web/archive/view?bvid=BV1xx`）：
+
+- 分 P 数 = 2；标题 `<stem>_000` / `<stem>_001`，即两个封口分段的 stem，与旧路径一致；
+- `is_only_self = 1`（默认私有，只有显式 public 才打开）、`copyright = 1`、`tid = 21`，与旧路径一致；
+- 封面是 B 站自动生成的默认封面：直播直传从不提交封面，旧路径也一样，所以「cover 行为单独验证」这一项
+  在直播直传上没有差异可验（文件型路径的封面行为仍由既有用例覆盖）。
+
+**环境事实（会被误判成代码问题，写下来）**：宿主机 `/opt/homebrew/bin/ffmpeg` 链接的 `libx265` 是 4.2
+（`libx265.216.dylib`），而装的是 4.3（`libx265.217.dylib`），所以本机跑 `_live-pump` 会在 ~50ms 内报
+`流比声明的 <size>B 短:第 0 块没有数据`。同一个 FLV URL `curl` 实测 `http=200`、1.36MB 正常下发，
+说明 CDN 与 URL 都没问题。要么在容器里跑（上面的命令），要么 `brew reinstall ffmpeg`。
+
+`_live-pump` 的失败 JSON 目前不带子进程 stderr，这类失败只能靠猜，排查成本很高——记为一个优化项。
 
 ## §9 验收清单（对应审计「复审验收点」）
 

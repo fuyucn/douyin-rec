@@ -105,6 +105,18 @@
   **验收**: 4 条接缝用例改为断言 stem 与 archive 元数据（含 private 与 tid）、needs-manual 仍保留 spool 且分 P 不确认、被拒只调一次；新增 2 条装配用例（开关关闭返回 null、打开只暴露三个操作）；live-pump 既有 224 条全绿；`pnpm typecheck` 0 错、`arch:check` 一致、`pnpm bundle` 0.0.381-39e9b1；版本 0.0.380→0.0.381。
   **现状（2026-11-12）**: issue [#676](https://github.com/fuyucn/douyin-rec/issues/676) → PR [#677](https://github.com/fuyucn/douyin-rec/pull/677) 已合并（merge 55fa9188，0.0.381，CI 全绿）；默认走原路径，线上行为不变；打开开关 + 一场真实直播验证后才能部署。
 
+[x] **T-214 直播直传验证夹具的两处补齐（plans/049 阶段 2b 收尾，2026-11-12）**
+  — **做什么**: ① `_live-pump` 夹具在 `DREC_LIVE_PUMP_DRIVER=1` 时真的注入 submitter；② 夹具把 cli 归一后的 `pumpRoom` 传下去，不再透传原始房间号。
+  **为什么**: 夹具不覆盖新路径，「夹具能跑」就等于「老路径能跑」，验证是假的；原始长房间号会被抖音当非法，每段 `code 10011`，让人以为「流拿不到」和「接口报错」是同一个故障。
+  **验收**: 夹具用例与全量 vitest 绿；`pnpm bundle` 0.0.382 / 0.0.383。
+  **现状（2026-11-12）**: PR [#678](https://github.com/fuyucn/douyin-rec/pull/678)（0.0.382，merge 585499c4）与 PR [#679](https://github.com/fuyucn/douyin-rec/pull/679)（0.0.383，merge 99167d68）已合并，CI 全绿；`code 10011` 在实机复现后由 #679 修掉。
+
+[x] **T-215 阶段 2b 实机验证（2026-11-12）**
+  — **做什么**: 用 0.0.383 的 bundle 在生产镜像里跑一场真实直播的零落盘直传，核对阶段 2 的四条验收：分 P 数、文件名、可见性、字节只传一次。
+  **为什么**: 阶段 2 的验收是「对拍一致」，纸上用例只证明判定逻辑，证明不了 B 站真的接受「只发元数据」。
+  **验收**: `ok:true`，`BV1xx`（aid <aid>）两个分 P；分 P 标题 = 封口分段 stem；`is_only_self=1`、`copyright=1`、`tid=21`；两段日志均 `confirmed part N, removed spool`；建稿 `add/v3`、追 P `edit`，全程没有第二次上传字节。详见 plans/049 §8.3。
+  **现状（2026-11-12）**: 通过。附带确认宿主机 ffmpeg 的 `libx265` ABI 对不上（4.2 vs 4.3），本机跑 `_live-pump` 必须走容器；测试稿件 `BV1xx` 是私有的，等人工删。开关仍默认关闭，未部署。
+
 [~] **T-198 直播直传同场判定以真实进度为准（issue [#642](https://github.com/fuyucn/douyin-rec/issues/642)，2026-11-12）**
   — **做什么**: `rolloverStaleState` 的最后活动取 `max(state.updatedAt, 未确认分 P 的 spool mtime, 恢复进度标记)`；新增 `<state>.activity` 标记，只在恢复重传的**真实块进度**上写（每分钟节流，重试/定时心跳不写）；启动恢复把 `o.signal` 传入 `resubmitAllUnconfirmed`，取消后不再发起新的不可逆请求；重传按 10% 输出进度日志；归档时删掉标记。
   **为什么**: 长分 P 录制或大文件重传期间没有状态写入，`updatedAt` 停在 54 分钟前；重启被误判为“换场”，把仍可恢复的分 P 与 archive 身份拆到归档（#642 现场证据：chunk 98 三次 PUT 重试耗尽，下一次启动归档了未确认状态）。
