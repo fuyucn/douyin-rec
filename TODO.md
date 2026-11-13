@@ -91,7 +91,7 @@
   — **做什么**: `@drec/core` 新增 `PartSubmitter` 接口（`ensureArchive` / `appendParts` / `verify`，凭据在装配层绑定，runner 无法按分 P 换账号）；`LivePumpSession` 接受注入的 `submitter`，`submitPart` 在它存在时改走驱动判定，未注入时走原路径；确认落盘抽成 `recordConfirmed`，两条路径共用同一份 WAL 写法；驱动 `needs-manual` 时返回 `needsManual: true`，分 P 保持未确认、spool 不删。
   **为什么**: `@drec/zero-upload`（L0.35）不能依赖 `@drec/upload-runtime`（L0.5），分层不允许向上依赖；接缝放 core、实现由装配层注入，流式迁移才不会反向污染录制主干。
   **验收**: 4 条新用例（P1 走 ensureArchive 并记下返回的稿件号、P2 用同一稿件号 append、needs-manual 保留 spool 且分 P 不确认、被拒一次不再重试）；live-pump 既有 224 条全绿；`pnpm typecheck` 0 错、`arch:check` 通过、`pnpm bundle` 0.0.379-50c314；版本 0.0.378→0.0.379。
-  **现状（2026-11-12）**: 零接入——cli 尚未注入 submitter，线上仍走原路径；把装配接上并观察一场零落盘直播是 2b-2b（needs-decision）。
+  **现状（2026-11-12）**: issue [#672](https://github.com/fuyucn/douyin-rec/issues/672) → PR [#673](https://github.com/fuyucn/douyin-rec/pull/673) 已合并（merge 10d9edd4，0.0.379，CI 全绿：typecheck + 全量 vitest + bundle + web build）；仍零接入——cli 尚未注入 submitter，线上仍走原路径；把装配接上并观察一场零落盘直播是 2b-2b（needs-decision）。
 
 [~] **T-198 直播直传同场判定以真实进度为准（issue [#642](https://github.com/fuyucn/douyin-rec/issues/642)，2026-11-12）**
   — **做什么**: `rolloverStaleState` 的最后活动取 `max(state.updatedAt, 未确认分 P 的 spool mtime, 恢复进度标记)`；新增 `<state>.activity` 标记，只在恢复重传的**真实块进度**上写（每分钟节流，重试/定时心跳不写）；启动恢复把 `o.signal` 传入 `resubmitAllUnconfirmed`，取消后不再发起新的不可逆请求；重传按 10% 输出进度日志；归档时删掉标记。
