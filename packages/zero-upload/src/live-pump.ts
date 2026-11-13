@@ -62,7 +62,6 @@ import {
   type DanmuMessage,
   type LivePumpReporter,
   type PartSubmitter,
-  type UploadFile,
   type UploadPolicy,
 } from "@drec/core";
 import { ffprobeDuration, ffprobeDtsGap, type DtsGap } from "@drec/post-process";
@@ -1242,12 +1241,6 @@ export class LivePumpSession {
       watermark: false,
       copyright: "self",
     };
-    const file: UploadFile = {
-      path: input.spoolPath,
-      title: input.title.slice(0, 80),
-      size: input.bytes,
-      mtimeMs: 0,
-    };
     this.state = {
       ...this.state,
       pending: {
@@ -1269,16 +1262,24 @@ export class LivePumpSession {
     let aid: number | undefined = this.state.aid;
     try {
       if (hadArchive) {
-        await submitter.appendParts({
+        // Bytes are already on the archive: publish metadata only, never upload them again.
+        await submitter.appendStreamedPart({
           ref: { targetId: this.o.submitterTargetId ?? "bilibili-upos", id: this.state.bvid ?? String(this.state.aid) },
-          files: [file],
-          policy,
+          name: input.stem,
+          ...(input.title ? { title: input.title.slice(0, 80) } : {}),
+          size: input.bytes,
         });
       } else {
-        const out = await submitter.ensureArchive({
-          title: this.state.title,
-          files: [file],
-          policy,
+        const out = await submitter.ensureStreamedArchive({
+          archive: {
+            title: this.state.title,
+            tid: this.state.tid,
+            ...(this.state.tag ? { tags: this.state.tag.split(",").filter(Boolean) } : {}),
+            ...(this.state.desc ? { desc: this.state.desc } : {}),
+            policy,
+          },
+          name: input.stem,
+          ...(input.title ? { title: input.title.slice(0, 80) } : {}),
           ...(input.durationSec > 0 ? { expectedDurationSec: Math.round(input.durationSec) } : {}),
         });
         bvid = out.ref.id;

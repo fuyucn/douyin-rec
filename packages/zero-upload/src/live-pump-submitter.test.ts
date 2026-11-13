@@ -1,22 +1,22 @@
 /**
- * live-pump submitter seam (plans/049 stage 2b): the streaming runner must hand its parts to an
- * injected PartSubmitter when one is configured, and must keep the WAL honest when it refuses.
+ * live-pump submitter seam (plans/049 stage 2b-2c): the streaming runner hands its parts to an
+ * injected PartSubmitter, which only publishes metadata - the bytes are already on the archive.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ArchiveRef, PartSubmitter, UploadFile, UploadPolicy } from "@drec/core";
+import type { ArchiveRef, PartSubmitter, SubmitArchiveMeta } from "@drec/core";
 import { LivePumpSession } from "./live-pump.js";
 
 const REF: ArchiveRef = { targetId: "bilibili-upos", id: "BILIfake1" };
 
 interface Calls {
-  ensure: Array<{ title: string; files: UploadFile[]; policy: UploadPolicy }>;
-  append: Array<{ ref: ArchiveRef; files: UploadFile[] }>;
+  ensure: Array<{ archive: SubmitArchiveMeta; name: string; title?: string }>;
+  append: Array<{ ref: ArchiveRef; name: string; title?: string }>;
 }
 
-function fakeSubmitter(mode: "ok" | "needs-manual" | "transient" = "ok"): { submitter: PartSubmitter; calls: Calls } {
+function fakeSubmitter(mode: "ok" | "needs-manual" = "ok"): { submitter: PartSubmitter; calls: Calls } {
   const calls: Calls = { ensure: [], append: [] };
   const fail = (): never => {
     const err = new Error("archive outcome unknown") as Error & { failure?: string };
@@ -27,12 +27,12 @@ function fakeSubmitter(mode: "ok" | "needs-manual" | "transient" = "ok"): { subm
   return {
     calls,
     submitter: {
-      ensureArchive: async (req) => {
+      ensureStreamedArchive: async (req) => {
         calls.ensure.push(req);
         if (mode !== "ok") fail();
         return { ref: REF, reused: false };
       },
-      appendParts: async (req) => {
+      appendStreamedPart: async (req) => {
         calls.append.push(req);
         if (mode !== "ok") fail();
         return { confirmed: [1] };
@@ -59,7 +59,7 @@ describe("live-pump -> PartSubmitter seam", () => {
     cleanupConfirmedSpool: true,
   });
 
-  it("P1 creates through the submitter and records the returned archive id", async () => {
+  it("P1 publishes the stem through ensureStreamedArchive and records the archive id", async () => {
     const { submitter, calls } = fakeSubmitter();
     const s = session(submitter);
     const spool = join(dir, "p0.ts");
@@ -69,7 +69,9 @@ describe("live-pump -> PartSubmitter seam", () => {
     expect(s.bvid).toBe("BILIfake1");
     expect(calls.ensure).toHaveLength(1);
     expect(calls.append).toHaveLength(0);
-    expect(calls.ensure[0]!.policy.visibility).toBe("private");
+    expect(calls.ensure[0]!.name).toBe("stem0");
+    expect(calls.ensure[0]!.archive.policy?.visibility).toBe("private");
+    expect(calls.ensure[0]!.archive.tid).toBe(21);
     expect(s.parts.map((p) => p.confirmed)).toEqual([true]);
     expect(existsSync(spool)).toBe(false);
   });
@@ -86,6 +88,7 @@ describe("live-pump -> PartSubmitter seam", () => {
     expect(calls.ensure).toHaveLength(1);
     expect(calls.append).toHaveLength(1);
     expect(calls.append[0]!.ref).toEqual(REF);
+    expect(calls.append[0]!.name).toBe("stem1");
     expect(s.parts.map((p) => p.confirmed)).toEqual([true, true]);
   });
 
@@ -103,8 +106,8 @@ describe("live-pump -> PartSubmitter seam", () => {
     expect(s.bvid).toBeUndefined();
   });
 
-  it("a refused submit is never retried by the runner", async () => {
-    const { submitter, calls } = fakeSubmitter("transient");
+  it("a refused publish is never retried by the runner", async () => {
+    const { submitter, calls } = fakeSubmitter("needs-manual");
     const s = session(submitter);
     const spool = join(dir, "p0.ts");
     writeFileSync(spool, "part-0");

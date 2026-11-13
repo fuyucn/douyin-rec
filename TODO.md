@@ -99,6 +99,12 @@
   **验收**: 9 条驱动用例 + 3 条 UPOS 用例（复用命中不发布、列表不可读不建稿、无稿件号只发一次、追加续号、只有 `confirmed-not-submitted` 重试、无能力目标 fatal；UPOS 侧断言整条链没有 preupload/PUT）；`pnpm typecheck` 0 错、`arch:check` 一致、`pnpm bundle` 0.0.380-bc00fa；版本 0.0.379→0.0.380。
   **现状（2026-11-12）**: issue [#674](https://github.com/fuyucn/douyin-rec/issues/674) → PR [#675](https://github.com/fuyucn/douyin-rec/pull/675) 已合并（merge 17d4b589，0.0.380，CI 全绿）；仍未接入 live-pump——PartSubmitter 还没暴露这两个方法，cli 也没注入；翻转线上行为是 2b-2c。
 
+[x] **T-213 直播直传改走流式发布（plans/049 阶段 2b-2c，2026-11-12）**
+  — **做什么**: `PartSubmitter` 只剩流式语义（`ensureStreamedArchive` / `appendStreamedPart` / `verify`），文件型 `ensureArchive` / `appendParts` 从接缝里删掉；live-pump 的 `submitPart` 注入时传 stem 与分 P 标题，不再构造 `UploadFile`；新增 `packages/cli/src/live-pump-submitter.ts`，用 UPOS 目标 + 驱动 + 以 pump state 文件为底稿的 checkpoint 装配，**默认关闭**（`DREC_LIVE_PUMP_DRIVER=1` 才生效）。
+  **为什么**: 字节在分段录制时就传完了，接缝必须是「只发布元数据」；保留文件型入口等于留了一条会重传的路径，装配层迟早会踩。默认关闭是因为翻转后「拿不到稿件号」从重试第二个稿变成 needs-manual，必须先在一场真实直播上验证。
+  **验收**: 4 条接缝用例改为断言 stem 与 archive 元数据（含 private 与 tid）、needs-manual 仍保留 spool 且分 P 不确认、被拒只调一次；新增 2 条装配用例（开关关闭返回 null、打开只暴露三个操作）；live-pump 既有 224 条全绿；`pnpm typecheck` 0 错、`arch:check` 一致、`pnpm bundle` 0.0.381-39e9b1；版本 0.0.380→0.0.381。
+  **现状（2026-11-12）**: 默认走原路径，线上行为不变；打开开关 + 一场真实直播验证后才能部署。
+
 [~] **T-198 直播直传同场判定以真实进度为准（issue [#642](https://github.com/fuyucn/douyin-rec/issues/642)，2026-11-12）**
   — **做什么**: `rolloverStaleState` 的最后活动取 `max(state.updatedAt, 未确认分 P 的 spool mtime, 恢复进度标记)`；新增 `<state>.activity` 标记，只在恢复重传的**真实块进度**上写（每分钟节流，重试/定时心跳不写）；启动恢复把 `o.signal` 传入 `resubmitAllUnconfirmed`，取消后不再发起新的不可逆请求；重传按 10% 输出进度日志；归档时删掉标记。
   **为什么**: 长分 P 录制或大文件重传期间没有状态写入，`updatedAt` 停在 54 分钟前；重启被误判为“换场”，把仍可恢复的分 P 与 archive 身份拆到归档（#642 现场证据：chunk 98 三次 PUT 重试耗尽，下一次启动归档了未确认状态）。

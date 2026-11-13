@@ -3,6 +3,7 @@ import { createHubStarter } from "@drec/hub-compose";
 import { streamPartMaxMs } from "./stream-part-duration.js";
 import { zeroDiskSpoolName, zeroDiskXmlPath } from "./zero-disk-room.js";
 import { zeroDiskUploadCookie } from "./zero-disk-upload-cookie.js";
+import { buildLivePumpSubmitter } from "./live-pump-submitter.js";
 import { runWithUploadQuota } from "./upload-quota.js";
 import { Command } from "commander";
 import { applyNodeDataRoot, registerNodePipelineCommands } from "./node-pipeline-commands.js";
@@ -578,7 +579,16 @@ program
         noteRecorderDraining();
         drain.abort();
       });
+      // Stage 2b-2c: metadata-only publish for the parts this pump already uploaded. Off unless
+      // DREC_LIVE_PUMP_DRIVER=1, so the legacy in-process submit stays the default path.
+      const pumpSubmitter = buildLivePumpSubmitter({
+        cookiesPath: uploadCookies,
+        spoolDir: pumpFilesDir,
+        pumpRoom,
+        log: console.log,
+      });
       const run = runLivePump({
+        ...(pumpSubmitter ? { submitter: pumpSubmitter } : {}),
         cookiesPath: uploadCookies,
         room: pumpRoom,
         fetch: async (r, q) => {
