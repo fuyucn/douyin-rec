@@ -115,7 +115,7 @@
   — **做什么**: 用 0.0.383 的 bundle 在生产镜像里跑一场真实直播的零落盘直传，核对阶段 2 的四条验收：分 P 数、文件名、可见性、字节只传一次。
   **为什么**: 阶段 2 的验收是「对拍一致」，纸上用例只证明判定逻辑，证明不了 B 站真的接受「只发元数据」。
   **验收**: `ok:true`，`BV1xx`（aid <aid>）两个分 P；分 P 标题 = 封口分段 stem；`is_only_self=1`、`copyright=1`、`tid=21`；两段日志均 `confirmed part N, removed spool`；建稿 `add/v3`、追 P `edit`，全程没有第二次上传字节。详见 plans/049 §8.3。
-  **现状（2026-11-12）**: 通过。附带确认宿主机 ffmpeg 的 `libx265` ABI 对不上（4.2 vs 4.3），本机跑 `_live-pump` 必须走容器；测试稿件 `BV1xx` 是私有的，等人工删。开关仍默认关闭，未部署。
+  **现状（2026-11-12）**: 通过。附带确认宿主机 ffmpeg 的 `libx265` ABI 对不上（4.2 vs 4.3），本机跑 `_live-pump` 必须走容器；测试稿件 `BV1xx` 是私有的，等人工删。开关仍默认关闭。**已部署 master 与一台节点（`0.0.383-bd1d55`，bundle md5 `eef4b6effdc5` 一致）；另一台因任务 #30 在录按 guard 跳过，仍是 `0.0.376-063584`。**
 
 [~] **T-198 直播直传同场判定以真实进度为准（issue [#642](https://github.com/fuyucn/douyin-rec/issues/642)，2026-11-12）**
   — **做什么**: `rolloverStaleState` 的最后活动取 `max(state.updatedAt, 未确认分 P 的 spool mtime, 恢复进度标记)`；新增 `<state>.activity` 标记，只在恢复重传的**真实块进度**上写（每分钟节流，重试/定时心跳不写）；启动恢复把 `o.signal` 传入 `resubmitAllUnconfirmed`，取消后不再发起新的不可逆请求；重传按 10% 输出进度日志；归档时删掉标记。

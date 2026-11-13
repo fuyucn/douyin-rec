@@ -430,6 +430,13 @@ docker run --rm --network host --entrypoint node \
 说明 CDN 与 URL 都没问题。要么在容器里跑（上面的命令），要么 `brew reinstall ffmpeg`。
 
 `_live-pump` 的失败 JSON 目前不带子进程 stderr，这类失败只能靠猜，排查成本很高——记为一个优化项。
+**部署（2026-11-12，分批）**：第一批只更新 master（等不到空闲的那台节点被跳过），第二次单独跑节点批次
+更新另一台空闲节点；两端报同一版本 `0.0.383-bd1d55`，bundle md5 一致（`eef4b6effdc5`）。第三台当时有任务
+在录（#30），按 guard 跳过，仍是 `0.0.376-063584`——线上是「新 master + 新节点 + 旧节点」的混合态，在本
+次改动范围内安全（只动上传包，没碰节点同步协议，也没改 DB schema）。更新前把旧 bundle 备份成
+`dist/douyin-rec.mjs.bak-<旧版本>`，回滚 = `cp` 回去 + `systemctl restart video-screenshot`。worker id 已经是
+nodeId，迁移步不用再跑。
+
 
 ## §9 验收清单（对应审计「复审验收点」）
 
