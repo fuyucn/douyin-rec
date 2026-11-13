@@ -16,13 +16,6 @@ vi.mock("@drec/bilibili-api", async (orig) => {
   };
 });
 
-vi.mock("@drec/core", async (orig) => {
-  const m = await orig<typeof import("@drec/core")>();
-  return {
-    ...m,
-
-  };
-});
 
 let s: Scenario;
 afterEach(() => s?.dispose());

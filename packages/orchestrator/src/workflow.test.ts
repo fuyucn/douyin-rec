@@ -19,14 +19,6 @@ import type { PipelineDeps } from "./pipeline.js";
 import { fakeUploadTarget } from "@drec/core";
 import type { UploadTarget } from "@drec/core";
 
-vi.mock("@drec/core", async (orig) => {
-  const m = await orig<typeof import("@drec/core")>();
-  return {
-    ...m,
-
-  };
-});
-
 vi.mock("@drec/bilibili-api", async (orig) => {
   const m = await orig<typeof import("@drec/bilibili-api")>();
   return {
