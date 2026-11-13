@@ -79,7 +79,7 @@
   — **做什么**: `@drec/bilibili-upload` 新增 `upos-target.ts`（`id=bilibili-upos`）：建稿/追 P 走进程内 UPOS（preupload → 分块 PUT → complete → member web 提交），只做契约映射，协议仍由 `@drec/zero-upload` 拥有；`UploadFile` 增加可选 `source`（内存字节按块读取），零落盘路径不必落盘也能用同一契约；`credential.ts` 抽出凭据定位/账号键，biliup 与 UPOS 两个目标共用一份实现；biliup 目标显式拒绝 `source`（外部子进程读不到内存字节）。
   **为什么**: 零落盘直播直传没有可读文件，biliup 目标服务不了它；两套传输此前各写一遍建稿/追加/重试。阶段 2 先把第二种传输变成契约实现，live-pump / rolling-upload 接线是 2b。
   **验收**: 17 条新用例（提交的是 `complete()` 的 stem 而不是声明名、`is_only_self` 只由显式 public 打开、ok 但无 bvid → unknown 且不重试、限流码 → rate-limited、分块失败不进提交、内存字节不读盘、追 P 合并旧列表/幂等/传输失败 unknown/已落地后拒稿 unknown、inspect 与 findRecent 的 none/one/many/unknown、凭据优先级与账号键）；两处变异分别变红（stem→声明名 3 红、强制走文件读取 1 红）；`pnpm typecheck` 0 错、`arch:check` 通过、`pnpm bundle` 0.0.377-d97083；版本 0.0.376→0.0.377。
-  **现状（2026-11-12）**: 零生产接入——未注册到 cli 的目标表，`forPlatform("bilibili")` 仍只命中 biliup 目标，线上行为无变化。
+  **现状（2026-11-12）**: issue [#668](https://github.com/fuyucn/douyin-rec/issues/668) → PR [#669](https://github.com/fuyucn/douyin-rec/pull/669) 已合并（merge 83b3927b，0.0.377，CI 全绿：typecheck + 全量 vitest + bundle + web build）；零生产接入——未注册到 cli 的目标表，`forPlatform("bilibili")` 仍只命中 biliup 目标，线上行为无变化，尚未部署。2b（live-pump / rolling-upload 改走驱动）未开始。
 
 [~] **T-198 直播直传同场判定以真实进度为准（issue [#642](https://github.com/fuyucn/douyin-rec/issues/642)，2026-11-12）**
   — **做什么**: `rolloverStaleState` 的最后活动取 `max(state.updatedAt, 未确认分 P 的 spool mtime, 恢复进度标记)`；新增 `<state>.activity` 标记，只在恢复重传的**真实块进度**上写（每分钟节流，重试/定时心跳不写）；启动恢复把 `o.signal` 传入 `resubmitAllUnconfirmed`，取消后不再发起新的不可逆请求；重传按 10% 输出进度日志；归档时删掉标记。
