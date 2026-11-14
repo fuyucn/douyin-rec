@@ -40,6 +40,15 @@ export interface EnqueueLivePumpResult {
   queued: number;
   already: number;
   failed: number;
+  /**
+   * T-221 (sol P1-4): WHY a row was refused, split by whether a human must act. `needsManual`
+   * (truncated / missing spool, terminal-failed queue row) can never settle by retrying, so the
+   * CLI classifier must report `blocked` and let the pump KEEP RECORDING. `deferred` (still
+   * unsealed, missing the positive marker, pending submit intent, blocked behind an earlier row)
+   * may settle on a later round, so a zero-take result is worth the exit-75 retry.
+   */
+  needsManual?: number;
+  deferred?: number;
   error?: string;
 }
 
@@ -86,6 +95,8 @@ export function enqueueLivePumpPending(input: EnqueueLivePumpInput): EnqueueLive
     const rows: ProcessJob[] = [];
     let already = state.parts.filter((p) => p.confirmed).length + state.parts.filter((p) => !p.confirmed && journal.has(p.index)).length;
     let failed = 0;
+    let needsManual = 0;
+    let deferred = 0;
 
     // Queue order is the FULL state's sorted position, not the pending subset: a just-confirmed
     // earlier part must keep its seq reserved, otherwise the next part would collide with its
@@ -108,6 +119,7 @@ export function enqueueLivePumpPending(input: EnqueueLivePumpInput): EnqueueLive
         if (active) { already++; continue; }
         // failed / cancelled / uncertain: retrying it would only spam; leave it visible for a human.
         failed++;
+        needsManual++;
         log("[live-queue] 分 P " + part.index + " 已有终态失败行(" + existing.map((r) => r.state).join(",") + "),不再入队;后续分 P 暂缓以保分 P 顺序");
         orderBlocked = true;
         continue;
@@ -117,6 +129,7 @@ export function enqueueLivePumpPending(input: EnqueueLivePumpInput): EnqueueLive
         // must not blindly repeat it (duplicate draft / duplicate P). The pump's recover() or the
         // next run disambiguates it first.
         failed++;
+        deferred++;
         log("[live-queue] 分 P " + part.index + " 有未决提交意图(pending),先由 pump 消歧,暂不入队;后续分 P 暂缓以保分 P 顺序");
         orderBlocked = true;
         continue;
@@ -124,8 +137,10 @@ export function enqueueLivePumpPending(input: EnqueueLivePumpInput): EnqueueLive
       // T-221 (sol P1-2): DEFAULT-DENY on the POSITIVE marker. A seal-time WAL row has real
       // bytes/duration but was never probed + DTS-scanned; a SIGKILL before finalize must not
       // make it look deliverable. The legacy negative marker stays an extra blocker.
-      if (part.sealed === false || part.spoolIncomplete || part.validated !== true || part.needsValidation || !eligible(part.spoolPath)) {
+      const humanBlocked = part.spoolIncomplete === true || !eligible(part.spoolPath);
+      if (part.sealed === false || humanBlocked || part.validated !== true || part.needsValidation) {
         failed++;
+        if (humanBlocked) needsManual++; else deferred++;
         log("[live-queue] 分 P " + part.index + (part.sealed === false
           ? " 尚未封口(正在录制),不入队;后续分 P 暂缓以保分 P 顺序"
           : part.validated !== true || part.needsValidation
@@ -138,6 +153,7 @@ export function enqueueLivePumpPending(input: EnqueueLivePumpInput): EnqueueLive
       }
       if (orderBlocked) {
         failed++;
+        deferred++; // the blocker itself already counted its (human or deferred) reason
         log("[live-queue] 分 P " + part.index + " 因前序分 P 受阻暂不入队(下一轮重试)");
         continue;
       }
@@ -175,7 +191,7 @@ export function enqueueLivePumpPending(input: EnqueueLivePumpInput): EnqueueLive
       // Nothing new to hand over. The marker is NEVER invented here (review P2): active/done rows
       // were created by a previous enqueue that already set it; confirmed/journal-settled parts
       // do not need it. Leave the state file untouched in this branch.
-      return { queued: 0, already, failed };
+      return { queued: 0, already, failed, ...(needsManual ? { needsManual } : {}), ...(deferred ? { deferred } : {}) };
     }
 
     // Fail-closed ordering: marker first, then the atomic batch. The pump will not resubmit during
@@ -195,7 +211,7 @@ export function enqueueLivePumpPending(input: EnqueueLivePumpInput): EnqueueLive
       return { queued: 0, already, failed, error: "queue enqueue rejected: " + String((e as Error)?.message ?? e) };
     }
     log("[live-queue] 已入队 " + rows.length + " 个直传分 P (" + orderKey + ")");
-    return { queued: rows.length, already, failed };
+    return { queued: rows.length, already, failed, ...(needsManual ? { needsManual } : {}), ...(deferred ? { deferred } : {}) };
   } finally {
     store.close();
   }

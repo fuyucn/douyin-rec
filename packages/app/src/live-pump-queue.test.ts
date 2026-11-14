@@ -1,7 +1,7 @@
 // T-220: zero-disk upload-pending handoff must be durable, idempotent, and must not duplicate
 // a part that the queue already owns.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PART_KINDS } from "@drec/core";
@@ -192,12 +192,49 @@ describe("enqueueLivePumpPending", () => {
     const r = enqueueLivePumpPending({ statePath, cookiesPath: join(root, "cookies.json") });
     // Order hole: the unvalidated part 0 blocks the validated part 1 from jumping the queue.
     expect(r).toMatchObject({ queued: 0, failed: 2, already: 0 });
+    // sol P1-4: both rows are merely deferred (part 1 is only blocked behind part 0), so the CLI
+    // classifier can retry — a needs-manual count here would wrongly pin the task in exit 75.
+    expect(r.deferred).toBe(2);
+    expect(r.needsManual ?? 0).toBe(0);
     expect(readLivePumpState(statePath)?.queueManaged).toBeUndefined();
     const store = new ProcQueueStore(procQueueDbPath(root));
     try {
       expect(store.rowsForOrderSeq("q:1000", 1, PART_KINDS.upload, 1)).toHaveLength(0);
       expect(store.rowsForOrderSeq("q:1000", 2, PART_KINDS.upload, 1)).toHaveLength(0);
     } finally { store.close(); }
+  });
+
+  it("T-221 (sol P1-4): a truncated spool is reported as needs-manual, not merely deferred", () => {
+    // A truncated spool can never settle by retrying. The classifier must see needsManual > 0 so
+    // it reports `blocked` and the pump KEEPS RECORDING instead of exiting 75 on a loop no retry
+    // can clear.
+    const dir = join(root, "recordings", "q");
+    const p0 = join(dir, "a_000.live.ts");
+    writeFileSync(p0, "truncated-bytes");
+    const statePath = livePumpStatePath(dir, "q");
+    const st = stateWith([{ index: 0, spoolPath: p0 }]);
+    const s0 = st.parts[0]!;
+    writeLivePumpState(statePath, { ...st, parts: [{ ...s0, spoolIncomplete: true }] });
+    const r = enqueueLivePumpPending({ statePath, cookiesPath: join(root, "cookies.json") });
+    expect(r).toMatchObject({ queued: 0, failed: 1, already: 0 });
+    expect(r.needsManual).toBe(1);
+    expect(r.deferred ?? 0).toBe(0);
+  });
+
+  it("T-221 (sol P1-4): a missing spool is needs-manual; a missing validated marker is deferred", () => {
+    const dir = join(root, "recordings", "q");
+    const missing = join(dir, "gone_000.live.ts");
+    const unvalidated = join(dir, "uv_000.live.ts");
+    writeFileSync(unvalidated, "bytes");
+    const statePath = livePumpStatePath(dir, "q");
+    writeLivePumpState(statePath, stateWith([
+      { index: 0, spoolPath: missing },
+      { index: 1, spoolPath: unvalidated, validated: false },
+    ]));
+    const r = enqueueLivePumpPending({ statePath, cookiesPath: join(root, "cookies.json") });
+    expect(r.queued).toBe(0);
+    expect(r.needsManual).toBe(1); // index 0 spool is gone
+    expect(r.deferred).toBe(1); // index 1 only lacks the marker (and is blocked by index 0)
   });
 
   it("T-221: a journal-confirmed part is `already`, not re-enqueued", () => {
@@ -255,5 +292,34 @@ describe("confirmLivePumpPart", () => {
     expect(confirmLivePumpPart(statePath, 0, "BV1", { size: 3, mtimeMs: 1 })).toMatchObject({ ok: false });
     expect(confirmLivePumpPart(statePath, 0, "BV1", { size: 3, mtimeMs: statSync(p0).mtimeMs })).toEqual({ ok: true });
     expect(confirmLivePumpPart(statePath, 0, "BV2", { size: 3, mtimeMs: statSync(p0).mtimeMs })).toMatchObject({ ok: false });
+  });
+
+  it("T-221 (sol P1-2): a journal-only hit re-syncs durably instead of approving the cleanup", () => {
+    // The earlier confirmation may have returned FAILURE after its record already became
+    // readable (its fsync / trailing-newline write failed). A retry that only saw journal.has()
+    // used to return ok without any new durable write, letting cleanup delete the spool while the
+    // only confirmation still lived in the page cache. The state-confirmed case is already
+    // durable; the journal-only case must write+fsync again.
+    const dir = join(root, "recordings", "q");
+    const p0 = join(dir, "a_000.live.ts");
+    writeFileSync(p0, "aaa");
+    const statePath = livePumpStatePath(dir, "q");
+    writeLivePumpState(statePath, stateWith([{ index: 0, spoolPath: p0 }]));
+    const journal = `${statePath}.confirmed`;
+    appendConfirmedJournal(statePath, { index: 0, bv: "BV1", at: 5, createdAt: 1_000 });
+    const before = readFileSync(journal, "utf-8").split("\n").filter(Boolean).length;
+    const fp = { size: 3, mtimeMs: statSync(p0).mtimeMs };
+    expect(confirmLivePumpPart(statePath, 0, "BV1", fp)).toEqual({ ok: true });
+    const after = readFileSync(journal, "utf-8").split("\n").filter(Boolean).length;
+    expect(after).toBe(before + 1); // re-appended: the retry performed a real durable write
+    expect(readConfirmedJournal(statePath, 1_000).get(0)?.bv).toBe("BV1");
+
+    // A state-confirmed row is durable already: no extra journal line is written.
+    const st2 = readLivePumpState(statePath)!;
+    writeLivePumpState(statePath, { ...st2, parts: st2.parts.map((p) => ({ ...p, confirmed: true })) });
+    const before2 = readFileSync(journal, "utf-8").split("\n").filter(Boolean).length;
+    expect(confirmLivePumpPart(statePath, 0, "BV1", fp)).toEqual({ ok: true });
+    const after2 = readFileSync(journal, "utf-8").split("\n").filter(Boolean).length;
+    expect(after2).toBe(before2);
   });
 });

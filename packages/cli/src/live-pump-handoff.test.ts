@@ -29,4 +29,15 @@ describe("livePumpHandoffReceipt", () => {
     expect(livePumpHandoffReceipt({ queued: 1, already: 0, failed: 1 }).status).toBe("blocked");
     expect(livePumpHandoffReceipt({ queued: 0, already: 2, failed: 1 }).status).toBe("blocked");
   });
+
+  it("T-221 (sol P1-4): an all-needs-manual backlog is blocked, never a zero-take retry", () => {
+    // A truncated / missing spool cannot settle by retrying. If this were classified retryable the
+    // pump would exit 75 immediately instead of entering its recording wait, and TaskManager would
+    // restart it forever without ever recording.
+    expect(livePumpHandoffReceipt({ queued: 0, already: 0, failed: 3, needsManual: 3 }).status).toBe("blocked");
+    // Even when some rows were taken, a human-blocked row keeps the receipt blocked.
+    expect(livePumpHandoffReceipt({ queued: 1, already: 0, failed: 1, needsManual: 1 }).status).toBe("blocked");
+    // Pure deferred rows (no human reason) stay retryable when nothing was taken.
+    expect(livePumpHandoffReceipt({ queued: 0, already: 0, failed: 2, deferred: 2 }).status).toBe("retryable");
+  });
 });

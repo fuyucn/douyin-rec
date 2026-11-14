@@ -483,6 +483,21 @@ export function readConfirmedJournal(statePath: string, expectedCreatedAt?: numb
   return map;
 }
 
+/**
+ * T-221 (sol P1-2/P1-4): decide whether a separator newline is required before the next journal
+ * record. Fail-closed: only a PROVEN trailing `\n` lets us skip it. An unterminated torn tail
+ * and an unreadable journal both mean "unknown", so a separator is written anyway — readers skip
+ * empty lines, so a redundant separator is harmless while a missing one would glue the new valid
+ * JSON onto a partial line and make the reader drop BOTH.
+ *
+ * `undefined` = the tail could not be inspected (fstat/open/read failure of any kind).
+ */
+export function needsConfirmedJournalSeparator(probe: { size: number; lastByte: number | undefined } | undefined): boolean {
+  if (!probe) return true; // could not inspect the journal: fail-closed
+  if (!(probe.size > 0)) return false; // empty journal: nothing to terminate
+  return probe.lastByte !== 0x0a;
+}
+
 /** Append one queue-proven confirmation to `<state>.confirmed` (T-221). Exported for tests. */
 export function appendConfirmedJournal(statePath: string, entry: ConfirmedJournalEntry): void {
   mkdirSync(dirname(statePath), { recursive: true });
@@ -509,19 +524,22 @@ export function appendConfirmedJournal(statePath: string, entry: ConfirmedJourna
     // has one writer (the queue lease holder), so terminating the tail here is race-free.
     // A complete record that merely lacked its trailing newline becomes its own valid line; a
     // partial record becomes one skipped bad line. Both keep the NEW record readable.
-    let size = 0;
-    try { size = fstatSync(fd).size; } catch { /* unstat-able: proceed with the append */ }
-    if (size > 0) {
-      let last = 0x0a;
-      try {
+    let probe: { size: number; lastByte: number | undefined } | undefined;
+    try {
+      const size = fstatSync(fd).size;
+      if (size > 0) {
+        let lastByte: number | undefined;
         const rfd = openSync(journal, "r");
         try {
           const tail = Buffer.alloc(1);
-          if (readSync(rfd, tail, 0, 1, size - 1) === 1) last = tail[0]!;
+          if (readSync(rfd, tail, 0, 1, size - 1) === 1) lastByte = tail[0];
         } finally { closeSync(rfd); }
-      } catch { last = 0x0a; /* unreadable tail: do not invent a separator */ }
-      if (last !== 0x0a) writeAll(Buffer.from("\n", "utf-8"));
-    }
+        probe = { size, lastByte };
+      } else {
+        probe = { size, lastByte: 0x0a };
+      }
+    } catch { probe = undefined; /* unreadable tail → separator (fail-closed) */ }
+    if (needsConfirmedJournalSeparator(probe)) writeAll(Buffer.from("\n", "utf-8"));
     writeAll(Buffer.from(JSON.stringify(entry) + "\n", "utf-8"));
     fsyncSync(fd);
   } finally {
@@ -565,6 +583,20 @@ export function confirmLivePumpPart(
     const prev = journal.get(index);
     if (prev && prev.bv !== bv) {
       return { ok: false, error: "live part already confirmed under another bv: " + prev.bv + " vs " + bv };
+    }
+    if (!part.confirmed) {
+      // T-221 (sol P1-2): the state row is NOT confirmed, so this hit is journal-only. The
+      // earlier confirmation may have returned FAILURE after its record became readable from the
+      // page cache (fsync / trailing-newline write failed). Reporting success here without a new
+      // durable sync could let the chained cleanup delete the spool before the only confirmation
+      // reaches disk: a power loss then leaves "queue done, state unconfirmed, spool gone".
+      // Re-append the same entry (readers take the last line per index) and fsync again; a
+      // failure keeps failing instead of approving the cleanup.
+      try {
+        appendConfirmedJournal(statePath, { index, bv, at: prev?.at ?? Date.now(), createdAt: prev?.createdAt ?? state.createdAt });
+      } catch (e) {
+        return { ok: false, error: "confirmation journal re-sync failed: " + String((e as Error)?.message ?? e) };
+      }
     }
     return { ok: true };
   }

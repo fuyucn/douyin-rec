@@ -42,6 +42,7 @@ import {
   runLivePump,
   appendConfirmedJournal,
   readConfirmedJournal,
+  needsConfirmedJournalSeparator,
   finalizeRecordedPart,
   segmentResultOf,
   setSpawnForTest,
@@ -5593,6 +5594,17 @@ describe("T-221 spool-mode continuation", () => {
     expect(st?.queueManaged).toBe(true);
     expect(readConfirmedJournal(statePath).size).toBe(1);
   }, 30_000);
+
+  it("sol P1-1: journal separator decision is fail-closed when the tail cannot be inspected", () => {
+    // The reader skips empty lines, so an extra separator is harmless while a MISSING one glues
+    // the next valid record onto a torn tail and loses it. Only a PROVEN trailing newline on a
+    // non-empty journal lets us skip it; anything unknown must write one.
+    expect(needsConfirmedJournalSeparator(undefined)).toBe(true); // fstat/open/read failed
+    expect(needsConfirmedJournalSeparator({ size: 5, lastByte: undefined })).toBe(true); // short read
+    expect(needsConfirmedJournalSeparator({ size: 5, lastByte: 0x31 })).toBe(true); // torn tail
+    expect(needsConfirmedJournalSeparator({ size: 5, lastByte: 0x0a })).toBe(false); // proven newline
+    expect(needsConfirmedJournalSeparator({ size: 0, lastByte: undefined })).toBe(false); // empty file
+  });
 
   it("sol P1-2: a torn unterminated journal tail cannot swallow the next confirmation", async () => {
     // A short write followed by a failed write (or a crash between writes) leaves an incomplete

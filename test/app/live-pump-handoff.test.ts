@@ -15,6 +15,7 @@ import {
   setSpawnForTest, type LivePumpState, type LivePumpHandoffReceipt,
 } from "../../packages/zero-upload/src/live-pump.js";
 import { enqueueLivePumpPending } from "../../packages/app/src/live-pump-queue.js";
+import { livePumpHandoffReceipt } from "../../packages/cli/src/live-pump-handoff.js";
 
 let root: string;
 let oldRoot: string | undefined;
@@ -98,5 +99,43 @@ describe("T-221 startup handoff into the real node queue", () => {
     expect(st?.parts[0]?.confirmed).toBe(false);
     expect(r.uploadPending).toBe(true);
     expect(r.error).toBe("queued uploads pending");
+  }, 30_000);
+
+  it("sol P1-4: an all-needs-manual backlog goes through the REAL classifier and keeps recording", async () => {
+    // The pump-side test used a hand-written `blocked` receipt, which bypasses the production
+    // classifier. Here the truncation goes through the REAL enqueue helper AND the REAL receipt
+    // classifier: a needs-manual row must be `blocked` (keep recording/waiting), not `retryable`
+    // (immediate exit 75 queued forever on a condition no retry can settle).
+    const dir = join(root, "recordings", "t221");
+    const p0 = join(dir, "a_000.live.ts");
+    writeFileSync(p0, "truncated-bytes");
+    const statePath = livePumpStatePath(dir, "t221");
+    writeLivePumpState(statePath, {
+      schemaVersion: 1, room: "t221", createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
+      updatedAt: Date.now(), bvid: "BV1", queueManaged: true,
+      parts: [{
+        index: 0, spoolPath: p0, filename: "a_000.live.ts", stem: "s0", title: "P1",
+        bytes: 15, durationSec: 2, confirmed: false, spoolIncomplete: true,
+      }],
+    });
+
+    let polls = 0;
+    const r = await runLivePump({
+      cookiesPath: join(root, "cookies.json"), room: "t221", spoolDir: dir,
+      title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: 10 * 1024 * 1024, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      waitForBroadcast: true, idlePollMs: 1,
+      fetchImpl: archiveFetch, fetch: async () => ({ living: false }),
+      sleep: async () => { polls++; }, shouldStop: () => polls >= 2,
+      onHandoff: (sp) => livePumpHandoffReceipt(enqueueLivePumpPending({
+        statePath: sp, cookiesPath: join(root, "cookies.json"), log: () => {},
+      })),
+      probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
+    });
+
+    expect(polls).toBeGreaterThan(0); // entered the recording wait instead of exiting immediately
+    expect(r.uploadPending).toBe(true);
+    expect(r.error).toBe("queued uploads pending");
+    expect(readLivePumpState(statePath)?.parts[0]?.confirmed).toBe(false);
   }, 30_000);
 });
