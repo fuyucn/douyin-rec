@@ -101,3 +101,5 @@ export {
   enabledHubRuleForTask, uploadOwnerForTask, shouldDecideUploadOwner, masterOwnedWithoutRule,
 } from "./hub-rule-match.js";
 export { enqueueHubOwnedSkip } from "./hub-owner.js";
+export { enqueueLivePumpPending } from "./live-pump-queue.js";
+export type { EnqueueLivePumpInput, EnqueueLivePumpResult } from "./live-pump-queue.js";

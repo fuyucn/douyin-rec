@@ -330,6 +330,78 @@ describe("TaskManager", () => {
     expect(store.getTask(id)!.status).toBe("stopped"); // not "error"
   });
 
+  it("zero-disk exit 75 (upload pending) waits with its own backoff, never the crash budget", () => {
+    // The pump emits 75 only when the spool is intact and an upload failed; treating it as a
+    // crash burned the recording restart budget and produced the "录制中断" alert.
+    const id = addTask({ streamUpload: true });
+    const spawner = new MockSpawner();
+    const delays: number[] = [];
+    const timers: (() => void)[] = [];
+    const mgr = new TaskManager(store, spawner, {
+      autoRestart: true,
+      maxRestarts: 0, // a crash would give up immediately; exit 75 must not.
+      uploadPendingDelayMs: 1000,
+      uploadPendingMaxDelayMs: 2500,
+      schedule: (cb, ms) => { delays.push(ms); timers.push(cb); },
+      log: () => {},
+    });
+    mgr.start(id);
+    spawner.last(id).emitExit({ code: 75, signal: null, expected: false });
+
+    expect(spawner.spawned).toHaveLength(1); // no immediate restart
+    expect(store.getTask(id)!.status).toBe("pending");
+    expect(delays).toEqual([1000]);
+
+    timers[0]!();
+    expect(spawner.spawned).toHaveLength(2);
+    expect(store.getTask(id)!.status).toBe("running");
+  });
+
+  it("zero-disk exit 75 backoff grows across repeated pending exits", () => {
+    const id = addTask({ streamUpload: true });
+    const spawner = new MockSpawner();
+    const delays: number[] = [];
+    const timers: (() => void)[] = [];
+    const mgr = new TaskManager(store, spawner, {
+      autoRestart: true,
+      maxRestarts: 0,
+      uploadPendingDelayMs: 1000,
+      uploadPendingMaxDelayMs: 2500,
+      schedule: (cb, ms) => { delays.push(ms); timers.push(cb); },
+      log: () => {},
+    });
+    mgr.start(id);
+    spawner.last(id).emitExit({ code: 75, signal: null, expected: false });
+    expect(delays).toEqual([1000]);
+
+    timers.shift()!();
+    spawner.last(id).emitExit({ code: 75, signal: null, expected: false });
+    expect(delays).toEqual([1000, 2000]);
+
+    timers.shift()!();
+    spawner.last(id).emitExit({ code: 75, signal: null, expected: false });
+    expect(delays).toEqual([1000, 2000, 2500]); // capped
+    expect(store.getTask(id)!.status).toBe("pending");
+  });
+
+  it("zero-disk exit 75 on a disabled task stops instead of scheduling a retry", () => {
+    const id = addTask({ streamUpload: true });
+    const spawner = new MockSpawner();
+    let scheduled = 0;
+    const mgr = new TaskManager(store, spawner, {
+      autoRestart: true,
+      uploadPendingDelayMs: 1000,
+      schedule: () => { scheduled++; },
+      log: () => {},
+    });
+    mgr.start(id);
+    store.setEnabled(id, false);
+    spawner.last(id).emitExit({ code: 75, signal: null, expected: false });
+
+    expect(scheduled).toBe(0);
+    expect(store.getTask(id)!.status).toBe("stopped");
+  });
+
   it("普通录制任务 exit 0 仍按崩溃处理(不放宽到全部任务)", () => {
     // The relaxation is scoped to stream uploads: a plain recorder exits only on a stop signal,
     // so its exit code is not its own verdict and must keep resuming a genuine crash.

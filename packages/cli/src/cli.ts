@@ -4,6 +4,7 @@ import { streamPartMaxMs } from "./stream-part-duration.js";
 import { zeroDiskSpoolName, zeroDiskXmlPath } from "./zero-disk-room.js";
 import { zeroDiskUploadCookie } from "./zero-disk-upload-cookie.js";
 import { buildLivePumpSubmitter } from "./live-pump-submitter.js";
+import { isUploadPendingResult } from "./live-pump-exit.js";
 import { runWithUploadQuota } from "./upload-quota.js";
 import { Command } from "commander";
 import { applyNodeDataRoot, registerNodePipelineCommands } from "./node-pipeline-commands.js";
@@ -716,6 +717,33 @@ program
         // idle task as a crash and restart it in a loop. `no-stream` (gave up, non-waiting
         // callers only) stays a failure as a backstop (review #280 P1).
         // An `ok:false` run may already have delivered parts, so only its error text is logged.
+        // Upload-only failures are not recording crashes: keep the spool, exit 75 so TaskManager
+        // can queue a retry, and never consume the recording restart budget.
+        const uploadPending = isUploadPendingResult(res);
+        if (uploadPending) {
+          // T-220: the pump only stops for a retryable upload failure and leaves the sealed spool
+          // intact. Hand those parts to the node's existing upload-part queue, then exit 75 so
+          // TaskManager backs off without consuming the recording restart budget. A queue
+          // enqueue failure is logged but must not turn into a local-failure exit: the spool is
+          // still the source of truth and the next pump attempt can settle it.
+          try {
+            const { enqueueLivePumpPending } = await import("@drec/app");
+            const queued = enqueueLivePumpPending({
+              statePath: res.statePath,
+              cookiesPath: uploadCookies,
+              ...(o.taskId !== undefined && /^\d+$/.test(o.taskId) ? { taskId: Number(o.taskId) } : {}),
+              ...(streamMeta.seasonSectionId ? { seasonSectionId: streamMeta.seasonSectionId } : {}),
+              log: console.log,
+            });
+            if (queued.error) console.error(`[直播直传] 待补上传入队失败(保留 spool,将在下次尝试重试): ${queued.error}`);
+            else console.log(`[直播直传] 待补上传已交给节点队列: 新入队 ${queued.queued},已在队 ${queued.already},不可入队 ${queued.failed}`);
+          } catch (e) {
+            console.error(`[直播直传] 待补上传入队异常(保留 spool,将在下次尝试重试): ${String((e as Error)?.message ?? e)}`);
+          }
+          console.error(`[直播直传] 上传待补(保留 spool,稍后重试): ${res.error ?? "upload pending"}`);
+          liveReporter.event({ at: Date.now(), kind: "run_end", outcome: "failed", ...(res.error ? { message: res.error } : {}) });
+          process.exit(75);
+        }
         const clean = res.ok && res.outcome !== "no-stream";
         const outcome = clean ? "finished" : abort.signal.aborted || drain.signal.aborted ? "stopped" : "failed";
         liveReporter.event({ at: Date.now(), kind: "run_end", outcome, ...(res.error ? { message: res.error } : {}) });
