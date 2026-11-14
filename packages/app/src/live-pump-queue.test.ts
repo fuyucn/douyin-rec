@@ -12,12 +12,15 @@ import { enqueueLivePumpPending } from "./live-pump-queue.js";
 let root: string;
 let oldRoot: string | undefined;
 
-function stateWith(parts: Array<{ index: number; spoolPath: string; confirmed?: boolean; sealed?: boolean }>): LivePumpState {
+function stateWith(parts: Array<{ index: number; spoolPath: string; confirmed?: boolean; sealed?: boolean; validated?: boolean }>): LivePumpState {
   return {
     schemaVersion: 1, room: "q", createdAt: 1_000, title: "t", tid: 21, tag: "x", private: true, updatedAt: Date.now(),
     parts: parts.map((p) => ({
       index: p.index, spoolPath: p.spoolPath, filename: p.spoolPath.split("/").pop()!,
       stem: "s", title: "P" + (p.index + 1), bytes: 1, durationSec: 2, confirmed: p.confirmed ?? false,
+      // T-221 (sol P1-2): the positive gate marker is REQUIRED for a deliverable row. An
+      // open-time placeholder (sealed:false) never has one.
+      ...(p.sealed === false || p.validated === false ? {} : { validated: true }),
       ...(p.sealed === false ? { sealed: false as const } : {}),
     })),
   };
@@ -163,6 +166,33 @@ describe("enqueueLivePumpPending", () => {
     // Part 0's submit intent is unresolved; part 1 must NOT jump the order (the runner appends
     // in seq order — a later part appended first would be permanently out of order).
     expect(r).toMatchObject({ queued: 0, failed: 2, already: 0 });
+    const store = new ProcQueueStore(procQueueDbPath(root));
+    try {
+      expect(store.rowsForOrderSeq("q:1000", 1, PART_KINDS.upload, 1)).toHaveLength(0);
+      expect(store.rowsForOrderSeq("q:1000", 2, PART_KINDS.upload, 1)).toHaveLength(0);
+    } finally { store.close(); }
+  });
+
+  it("T-221 (sol P1-2): a sealed row without the positive validated marker is default-denied", () => {
+    // A SIGKILL between noteSealed (real bytes + estimated duration hit the WAL) and the
+    // background finalize leaves a perfectly ordinary-looking row. It must NOT be enqueued:
+    // probe/DTS never ran on that file. Startup revalidation adopts it only after the gates pass.
+    const dir = join(root, "recordings", "q");
+    const p0 = join(dir, "a_000.live.ts");
+    const p1 = join(dir, "b_000.live.ts");
+    writeFileSync(p0, "unvalidated-sealed-bytes");
+    writeFileSync(p1, "validated-bytes");
+    const statePath = livePumpStatePath(dir, "q");
+    const st = stateWith([
+      { index: 0, spoolPath: p0, validated: false },
+      { index: 1, spoolPath: p1 },
+    ]);
+    writeLivePumpState(statePath, st);
+
+    const r = enqueueLivePumpPending({ statePath, cookiesPath: join(root, "cookies.json") });
+    // Order hole: the unvalidated part 0 blocks the validated part 1 from jumping the queue.
+    expect(r).toMatchObject({ queued: 0, failed: 2, already: 0 });
+    expect(readLivePumpState(statePath)?.queueManaged).toBeUndefined();
     const store = new ProcQueueStore(procQueueDbPath(root));
     try {
       expect(store.rowsForOrderSeq("q:1000", 1, PART_KINDS.upload, 1)).toHaveLength(0);

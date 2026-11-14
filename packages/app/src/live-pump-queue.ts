@@ -121,13 +121,18 @@ export function enqueueLivePumpPending(input: EnqueueLivePumpInput): EnqueueLive
         orderBlocked = true;
         continue;
       }
-      if (part.sealed === false || part.spoolIncomplete || part.needsValidation || !eligible(part.spoolPath)) {
+      // T-221 (sol P1-2): DEFAULT-DENY on the POSITIVE marker. A seal-time WAL row has real
+      // bytes/duration but was never probed + DTS-scanned; a SIGKILL before finalize must not
+      // make it look deliverable. The legacy negative marker stays an extra blocker.
+      if (part.sealed === false || part.spoolIncomplete || part.validated !== true || part.needsValidation || !eligible(part.spoolPath)) {
         failed++;
         log("[live-queue] 分 P " + part.index + (part.sealed === false
           ? " 尚未封口(正在录制),不入队;后续分 P 暂缓以保分 P 顺序"
-          : part.needsValidation
-            ? " 未过本地产物校验,不入队(下次启动补验);后续分 P 暂缓以保分 P 顺序"
-            : " spool 缺失/截断,不入队(需人工);后续分 P 暂缓以保分 P 顺序"));
+          : part.validated !== true || part.needsValidation
+            ? " 未通过本地产物校验(缺 validated 标记),不入队(下次启动补验);后续分 P 暂缓以保分 P 顺序"
+            : part.spoolIncomplete
+              ? " spool 截断,不入队(需人工);后续分 P 暂缓以保分 P 顺序"
+              : " spool 缺失,不入队(需人工);后续分 P 暂缓以保分 P 顺序"));
         orderBlocked = true;
         continue;
       }

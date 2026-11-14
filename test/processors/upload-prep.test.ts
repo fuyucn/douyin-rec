@@ -27,6 +27,15 @@ describe("upload-prep (plan 038 T04)", () => {
     expect(segs.map((f) => [statSync(f).ino, statSync(f).size])).toEqual(before);
   });
 
+  it("T-221: an un-stat-able input estimates NaN, never 0 (low-watermark drain stays fail-closed)", () => {
+    // The runner admits `estimate === 0` below the disk watermark on purpose (upload-part /
+    // cleanup-part consume no new bytes). A stat failure must not masquerade as that exception.
+    const missing = join(tmpdir(), "upload-prep-missing-input-does-not-exist.ts");
+    const estimate = uploadPrepProcessor.estimateDiskBytes({ inputs: [missing], params: {} } as never);
+    expect(Number.isNaN(estimate)).toBe(true);
+    expect(estimate).not.toBe(0);
+  });
+
   it("processor: replaceInputs=true is refused; missing stageDir errors; run returns outputs", async () => {
     const { segs, stage } = scene();
     expect(uploadPrepProcessor.validate({ inputs: segs, replaceInputs: true } as never)).toMatch(/must not replace/);

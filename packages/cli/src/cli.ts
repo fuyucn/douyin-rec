@@ -610,6 +610,24 @@ program
       } catch (e) {
         console.warn(`[直播直传] 磁盘水位读取失败,pump 使用默认闸门: ${String((e as Error)?.message ?? e)}`);
       }
+      // T-221 (sol P1-3): one idempotent handoff used BOTH at openSession (before the idle wait,
+      // so a room that never goes live again cannot strand crash-time parts) and at run end.
+      const enqueuePumpPending = async (statePath: string): Promise<void> => {
+        try {
+          const { enqueueLivePumpPending } = await import("@drec/app");
+          const queued = enqueueLivePumpPending({
+            statePath,
+            cookiesPath: uploadCookies,
+            ...(o.taskId !== undefined && /^\d+$/.test(o.taskId) ? { taskId: Number(o.taskId) } : {}),
+            ...(streamMeta.seasonSectionId ? { seasonSectionId: streamMeta.seasonSectionId } : {}),
+            log: console.log,
+          });
+          if (queued.error) console.error(`[直播直传] 待补上传入队失败(保留 spool,将在下次尝试重试): ${queued.error}`);
+          else console.log(`[直播直传] 待补上传已交给节点队列: 新入队 ${queued.queued},已在队 ${queued.already},不可入队 ${queued.failed}`);
+        } catch (e) {
+          console.error(`[直播直传] 待补上传入队异常(保留 spool,将在下次尝试重试): ${String((e as Error)?.message ?? e)}`);
+        }
+      };
       const run = runLivePump({
         ...(pumpSubmitter ? { submitter: pumpSubmitter } : {}),
         ...(pumpDiskMinGB !== undefined ? { diskMinGB: pumpDiskMinGB } : {}),
@@ -680,6 +698,10 @@ program
         drainSignal: drain.signal,
         // Wait in-process for the next broadcast instead of exiting (issue #308).
         waitForBroadcast: true,
+        // T-221 (sol P1-3): hand the existing backlog to the queue as soon as the spool-only
+        // session opens, not only when the run ends. Idempotent: after the early handoff the pump
+        // adopts the queue marker, and the run-end enqueue sees the rows as `already`.
+        onHandoff: enqueuePumpPending,
         onPhase: (p) => setRecorderPhase(p),
         danmu,
         log: (m) => console.log(m),
@@ -743,20 +765,7 @@ program
           // TaskManager backs off without consuming the recording restart budget. A queue
           // enqueue failure is logged but must not turn into a local-failure exit: the spool is
           // still the source of truth and the next pump attempt can settle it.
-          try {
-            const { enqueueLivePumpPending } = await import("@drec/app");
-            const queued = enqueueLivePumpPending({
-              statePath: res.statePath,
-              cookiesPath: uploadCookies,
-              ...(o.taskId !== undefined && /^\d+$/.test(o.taskId) ? { taskId: Number(o.taskId) } : {}),
-              ...(streamMeta.seasonSectionId ? { seasonSectionId: streamMeta.seasonSectionId } : {}),
-              log: console.log,
-            });
-            if (queued.error) console.error(`[直播直传] 待补上传入队失败(保留 spool,将在下次尝试重试): ${queued.error}`);
-            else console.log(`[直播直传] 待补上传已交给节点队列: 新入队 ${queued.queued},已在队 ${queued.already},不可入队 ${queued.failed}`);
-          } catch (e) {
-            console.error(`[直播直传] 待补上传入队异常(保留 spool,将在下次尝试重试): ${String((e as Error)?.message ?? e)}`);
-          }
+          await enqueuePumpPending(res.statePath);
           console.error(`[直播直传] 上传待补(保留 spool,稍后重试): ${res.error ?? "upload pending"}`);
           liveReporter.event({ at: Date.now(), kind: "run_end", outcome: "failed", ...(res.error ? { message: res.error } : {}) });
           process.exit(75);

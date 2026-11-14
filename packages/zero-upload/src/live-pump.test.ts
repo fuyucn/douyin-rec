@@ -2634,6 +2634,34 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "live-pump-session-")); });
   afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
 
+  it("T-221 (sol P1-3): adoptQueueManaged survives the pump's next state write", () => {
+    const statePath = livePumpStatePath(dir, "r2");
+    const spool = join(dir, "p0.ts");
+    writeFileSync(spool, "part-0");
+    writeLivePumpState(statePath, {
+      schemaVersion: 1, room: "r2", createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
+      updatedAt: Date.now(),
+      parts: [{ index: 0, spoolPath: spool, filename: "p0.ts", stem: "s0", title: "P1", bytes: 6, durationSec: 10, confirmed: false }],
+    } as never);
+    const session = new LivePumpSession({
+      cookiesPath: COOKIES, room: "r2", spoolDir: dir, title: "t",
+      tid: 21, tag: "x", private: true, fetchImpl: makeSessionFetch().impl, cleanupConfirmedSpool: false,
+    });
+    // The CLI's early handoff writes `queueManaged` to the state file WHILE this pump is alive.
+    const onDisk = readLivePumpState(statePath)!;
+    writeLivePumpState(statePath, { ...onDisk, queueManaged: true });
+    session.adoptQueueManaged();
+    // A later pump persist must not erase the queue's ownership, and markValidated must patch
+    // the row in place rather than rebuild it (stem/title are archive identity).
+    expect(session.markValidated(0).ok).toBe(true);
+    const after = readLivePumpState(statePath);
+    expect(after?.queueManaged).toBe(true);
+    expect(after?.parts[0]?.validated).toBe(true);
+    expect(after?.parts[0]?.stem).toBe("s0");
+    expect(after?.parts[0]?.title).toBe("P1");
+    expect(session.markValidated(99).ok).toBe(false); // missing WAL row is a hard failure
+  });
+
   const makeSessionFetch = () => {
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
     const archive = {
@@ -5415,13 +5443,16 @@ describe("T-221 spool-mode continuation", () => {
     return { fake, events, get preuploadCalls() { return preuploadCalls; }, archive };
   }
 
-  const seedState = (parts: Array<{ index: number; spoolPath: string; confirmed?: boolean; sealed?: boolean }>, extra: Partial<Record<string, unknown>> = {}): string => {
+  const seedState = (parts: Array<{ index: number; spoolPath: string; confirmed?: boolean; sealed?: boolean; validated?: boolean }>, extra: Partial<Record<string, unknown>> = {}): string => {
     const statePath = livePumpStatePath(dir, "t221");
     writeLivePumpState(statePath, {
       schemaVersion: 1, room: "t221", createdAt: 1, title: "t", tid: 21, tag: "x", private: true, updatedAt: Date.now(),
       parts: parts.map((p) => ({
         index: p.index, spoolPath: p.spoolPath, filename: p.spoolPath.split("/").pop()!,
         stem: `stem${p.index}`, title: "P" + (p.index + 1), bytes: 3, durationSec: 2, confirmed: p.confirmed ?? false,
+        // T-221 (sol P1-2): the positive gate marker is REQUIRED for a deliverable row. An
+        // open-time placeholder (sealed:false) never has one — that is exactly the crash window.
+        ...(p.sealed === false || p.validated === false ? {} : { validated: true }),
         ...(p.sealed === false ? { sealed: false as const } : {}),
       })),
       ...extra,
@@ -5612,10 +5643,11 @@ describe("T-221 spool-mode continuation", () => {
       { index: 0, spoolPath: spoolPathOf(0), sealed: false },
       { index: 1, spoolPath: spoolPathOf(1) },
     ], { queueManaged: true });
-    // Review F2: a stop-timeout row persisted WITHOUT the local gates must also be re-validated.
+    // sol P1-2: a stop-timeout row persisted WITHOUT the local gates has no POSITIVE marker and
+    // must be re-validated (default-deny rather than a negative flag that a write path can forget).
     {
       const st0 = readLivePumpState(statePath)!;
-      writeLivePumpState(statePath, { ...st0, parts: st0.parts.map((p) => p.index === 1 ? { ...p, needsValidation: true } : p) });
+      writeLivePumpState(statePath, { ...st0, parts: st0.parts.map((p) => p.index === 1 ? { ...p, validated: undefined } : p) });
     }
     const f = makeFake();
     installFakeFfmpeg(Buffer.alloc(CHUNK, 0x5a));
@@ -5632,16 +5664,17 @@ describe("T-221 spool-mode continuation", () => {
     expect(st?.parts[0]?.sealed).not.toBe(false);
     expect(st?.parts[0]?.bytes).toBe(3);
     expect(st?.parts[0]?.durationSec).toBe(60);
-    expect(st?.parts[1]?.needsValidation).toBeUndefined();
+    expect(st?.parts[1]?.validated).toBe(true);
     expect(st?.parts[1]?.sealed).not.toBe(false);
     expect(st?.parts).toHaveLength(3);
     expect(st?.parts[2]?.index).toBe(2);
   }, 30_000);
 
-  it("finalizeRecordedPart(submit:false) drops transport uploadError but keeps local findings", async () => {
-    // Review F7: a part that was mid-upload when the run switched to spool may carry a transport
-    // failure (chunk PUT / backpressure) on an otherwise intact file — the queue must still take
-    // it. Only local-gate findings (probe unreadable, DTS gap, truncation) mark it needs-manual.
+  it("sol P1-1: local gate verdict is explicit, independent of a simultaneous transport error", async () => {
+    // The old code sniffed `uploadError` strings. A chunk PUT failure AND a failed local probe
+    // on the same part made the string look transport-only, cleared the finding and returned a
+    // zero duration — a corrupt file could then be enqueued and its spool cleaned up. The
+    // explicit flag and a positive duration gate close that intersection.
     const spool = join(dir, "v.ts");
     writeFileSync(spool, "intact-bytes");
     const opts = {
@@ -5649,20 +5682,78 @@ describe("T-221 spool-mode continuation", () => {
       fileName: "v.ts", spoolPath: spool, spoolMode: "full" as const, cookiesPath: COOKIES,
       scanDtsGap: async () => null, keepSpool: true, submit: false as const,
     };
-    const transport = {
+    // finalizeRecordedPart mutates `rec` in place, so every case needs a FRESH object.
+    const transport = () => ({
       sealedBy: "cut", spooledBytes: 12, chunksUploaded: 2, streamedBytes: 12, exit: { code: 0 },
       uploadError: "chunk 3 PUT failed: boom",
-    } as unknown as Parameters<typeof finalizeRecordedPart>[0]["rec"];
-    const r1 = await finalizeRecordedPart({ ...opts, rec: transport, probeDuration: async () => 30 });
+    } as unknown as Parameters<typeof finalizeRecordedPart>[0]["rec"]);
+    const r1 = await finalizeRecordedPart({ ...opts, rec: transport(), probeDuration: async () => 30 });
     expect(r1.uploadError).toBeUndefined();
     expect(r1.spoolDurationSec).toBe(30);
-    // A local finding survives (probe unreadable).
+    expect(r1.localValidationFailed).toBeUndefined();
+
+    // Local finding alone (probe unreadable) still survives.
     const r2 = await finalizeRecordedPart({
       ...opts,
-      rec: { ...transport, uploadError: undefined } as Parameters<typeof finalizeRecordedPart>[0]["rec"],
+      rec: { ...transport(), uploadError: undefined } as Parameters<typeof finalizeRecordedPart>[0]["rec"],
       probeDuration: async () => { throw new Error("no ts"); },
     });
     expect(r2.uploadError ?? "").toContain("产物自检失败");
+    expect(r2.localValidationFailed).toBe(true);
+    expect(r2.spoolDurationSec).toBe(0);
+
+    // THE INTERSECTION: transport error ALREADY present + probe returns 0. The transport string
+    // must not hide the local finding, and no caller may treat this as a deliverable part.
+    const r3 = await finalizeRecordedPart({ ...opts, rec: transport(), probeDuration: async () => 0 });
+    expect(r3.localValidationFailed).toBe(true);
+    expect(r3.spoolDurationSec).toBe(0);
+    expect(r3.uploadError ?? "").toContain("chunk 3 PUT failed");
+    expect(r3.uploadError ?? "").toContain("产物自检失败");
+
+    // ... and the same intersection with a THROWN probe.
+    const r4 = await finalizeRecordedPart({
+      ...opts, rec: transport(),
+      probeDuration: async () => { throw new Error("ffprobe exploded"); },
+    });
+    expect(r4.localValidationFailed).toBe(true);
+    expect(r4.spoolDurationSec).toBe(0);
+    expect(r4.uploadError ?? "").toContain("产物自检失败");
+
+    // The declared-size overflow is an explicit flag too: a transport error plus an oversized
+    // spool must still be refused (the sink's old `??=` could not record this reason at all).
+    const r5 = await finalizeRecordedPart({
+      ...opts,
+      rec: { ...transport(), sizeOverflow: true } as Parameters<typeof finalizeRecordedPart>[0]["rec"],
+      probeDuration: async () => 30,
+    });
+    expect(r5.localValidationFailed).toBe(true);
+    expect(r5.uploadError ?? "").toContain("chunk 3 PUT failed");
+
+    // A truncated spool with a valid probe is still a local failure.
+    const r6 = await finalizeRecordedPart({
+      ...opts,
+      rec: { ...transport(), spoolIncomplete: true } as Parameters<typeof finalizeRecordedPart>[0]["rec"],
+      probeDuration: async () => 30,
+    });
+    expect(r6.localValidationFailed).toBe(true);
+  }, 30_000);
+
+  it("sol P1-1: a DTS scan that throws is a failed local gate in spool mode", async () => {
+    const spool = join(dir, "v.ts");
+    writeFileSync(spool, "intact-bytes");
+    const opts = {
+      session: undefined, line: "txa", fileName: "v.ts", spoolPath: spool,
+      spoolMode: "full" as const, cookiesPath: COOKIES, keepSpool: true, submit: false as const,
+      probeDuration: async () => 30,
+      scanDtsGap: async () => { throw new Error("ffprobe dts exploded"); },
+    };
+    const rec = () => ({
+      sealedBy: "cut", spooledBytes: 12, chunksUploaded: 2, streamedBytes: 12, exit: { code: 0 },
+      uploadError: "chunk 3 PUT failed: boom",
+    } as unknown as Parameters<typeof finalizeRecordedPart>[0]["rec"]);
+    const r = await finalizeRecordedPart({ ...opts, rec: rec() });
+    expect(r.localValidationFailed).toBe(true);
+    expect(r.uploadError ?? "").toContain("chunk 3 PUT failed");
   }, 30_000);
 
   it("a truncated crash row stays needs-manual even when a probe reads a duration", async () => {
@@ -5749,5 +5840,84 @@ describe("T-221 spool-mode continuation", () => {
     expect(st?.parts.map((p) => p.confirmed)).toEqual([true, true]);
     expect(st?.queueManaged).toBeUndefined();
     expect(existsSync(spoolPathOf(0))).toBe(false); // confirmed and cleaned up
+  }, 30_000);
+
+  it("sol P1-2: SIGKILL after the seal but before validation leaves a bad file unvalidated", async () => {
+    // noteSealed writes real bytes + an estimated duration the moment a part is sealed. The
+    // background finalize (probe + DTS) has NOT run. Simulate that crash window with exactly that
+    // WAL row and a file the probe cannot read: startup must mark it needs-manual and it must keep
+    // NO positive `validated` marker, so `enqueueLivePumpPending` default-denies it (see the
+    // matching queue-level test). The spool is kept for a human.
+    writeFileSync(spoolPathOf(0), "sealed-but-never-probed");
+    const statePath = seedState([{ index: 0, spoolPath: spoolPathOf(0), validated: false }], { queueManaged: true, bvid: "BV1" });
+    const f = makeFake();
+    installFakeFfmpeg(Buffer.alloc(CHUNK, 0x5a));
+    await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxMs: 100, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      fetchImpl: f.fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+      probeDuration: async () => 0, scanDtsGap: async () => null, log: () => {},
+    });
+    const st = readLivePumpState(statePath);
+    expect(st?.parts[0]?.validated).toBeUndefined();
+    expect(st?.parts[0]?.spoolIncomplete).toBe(true);
+    expect(st?.parts[0]?.confirmed).toBe(false);
+    expect(existsSync(spoolPathOf(0))).toBe(true);
+  }, 30_000);
+
+  it("sol P1-3: an offline room hands off crash-time parts BEFORE waiting; stop returns pending", async () => {
+    // A queue-managed session that recorded new spool parts and was SIGKILLed before the show
+    // ended restarts into spool mode. If the room never goes live again, enqueueing only at run
+    // end would strand those parts forever. The early handoff and the idle-exit pending shape
+    // close both halves of that window.
+    writeFileSync(spoolPathOf(0), "aaa");
+    writeFileSync(spoolPathOf(1), "bbb");
+    const statePath = seedState([
+      { index: 0, spoolPath: spoolPathOf(0) },
+      { index: 1, spoolPath: spoolPathOf(1), validated: false }, // crash-time new part
+    ], { queueManaged: true, bvid: "BV1" });
+    const handoffs: string[] = [];
+    let polls = 0;
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      waitForBroadcast: true, idlePollMs: 1,
+      fetchImpl: makeFake().fake, fetch: async () => ({ living: false }), sleep: async () => {},
+      shouldStop: () => ++polls >= 3,
+      onHandoff: (p) => { handoffs.push(p); },
+      probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
+    });
+    expect(handoffs).toEqual([statePath]);
+    // Startup revalidation adopted the crash-time part with the positive marker.
+    expect(readLivePumpState(statePath)?.parts[1]?.validated).toBe(true);
+    expect(r.ok).toBe(false);
+    expect(r.uploadPending).toBe(true);
+    expect(r.outcome).not.toBe("idle");
+    expect(r.error).toBe("queued uploads pending");
+  }, 30_000);
+
+  it("sol P1-3: a SIGUSR2 drain while waiting offline returns uploadPending, not bare idle", async () => {
+    writeFileSync(spoolPathOf(0), "aaa");
+    const statePath = seedState([{ index: 0, spoolPath: spoolPathOf(0) }], { queueManaged: true, bvid: "BV1" });
+    const drain = new AbortController();
+    const handoffs: string[] = [];
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      waitForBroadcast: true, idlePollMs: 1, drainSignal: drain.signal,
+      fetchImpl: makeFake().fake, fetch: async () => ({ living: false }),
+      // Abort the drain only once the wait has begun (after the early handoff), never during
+      // openSession's own recovery sleeps.
+      sleep: async () => { if (handoffs.length) drain.abort(); },
+      onHandoff: (p) => { handoffs.push(p); },
+      probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
+    });
+    expect(handoffs).toEqual([statePath]);
+    expect(r.ok).toBe(false);
+    expect(r.uploadPending).toBe(true);
+    expect(r.outcome).not.toBe("idle");
+    expect(r.error).toBe("queued uploads pending");
+    // The queue marker must survive the pump's in-memory session (adoptQueueManaged).
+    expect(readLivePumpState(statePath)?.queueManaged).toBe(true);
   }, 30_000);
 });

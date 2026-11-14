@@ -265,6 +265,14 @@ export interface SegmentRunResult {
   degradedReason?: string;
   /** Spool write failed mid-part: the file on disk is truncated (issue #579); see {@link PartSinkResult.spoolIncomplete}. */
   spoolIncomplete?: boolean;
+  /** T-221 (sol P1-1): explicit LOCAL gate set when the spool exceeded the declared size cap. */
+  sizeOverflow?: boolean;
+  /**
+   * T-221 (sol P1-1): explicit, transport-independent LOCAL gate verdict from
+   * `finalizeRecordedPart` (probe / DTS / truncation / size). A chunk PUT failure and a local
+   * gate failure can coexist on one part; relying on `uploadError` string sniffing conflates them.
+   */
+  localValidationFailed?: boolean;
   /** Wall-clock recording duration of this part (ms). In zero-disk mode this is the only
    *  duration source, since there is no local file to probe. */
   sealedMs?: number;
@@ -339,10 +347,14 @@ export interface LivePumpState {
      */
     sealed?: boolean;
     /**
-     * T-221 (review): the row was persisted WITHOUT passing the local product gates (probe/DTS) —
-     * e.g. a stop-timeout keepOrLose in spool mode. The queue must not take it; the startup
-     * validation either promotes it (gates pass) or marks it needs-manual.
+     * T-221 (sol P1-2): POSITIVE local-gate marker. Only a row whose spool passed the FULL
+     * probe-duration + DTS gates carries this; `enqueueLivePumpPending` DEFAULT-DENIES rows
+     * without it. The seal-time WAL row (`noteSealed`) has real bytes/duration but no marker, so
+     * a SIGKILL between the seal and the finalize can never make an unvalidated file look
+     * deliverable. Startup revalidation either promotes it (gates pass) or marks it needs-manual.
      */
+    validated?: boolean;
+    /** Deprecated negative marker kept for pre-T-221 state files; still blocks enqueue. */
     needsValidation?: boolean;
   }>;
   /**
@@ -643,7 +655,9 @@ function rolloverStaleState(path: string, room: string, nowMs: number, log: (msg
   const unconfirmed = livePumpHasUnconfirmed(path);
   // T-220: a queue-managed state is active work, not a finished broadcast. Ageing it out would
   // archive the very state the queue is about to confirm (and lose the association mid-upload).
-  if (state.queueManaged && unconfirmed) return undefined;
+  // T-221 (sol P1-3): `deliveryDeferred` means the queue has NOT taken these parts yet (a mid-run
+  // flip whose enqueue produced zero rows). Archiving that state would orphan the only spool copies.
+  if ((state.queueManaged || state.deliveryDeferred) && unconfirmed) return undefined;
   let lastActivity = state.updatedAt;
   if (typeof lastActivity !== "number" || !Number.isFinite(lastActivity) || lastActivity <= 0) {
     if (unconfirmed) return archive("缺少最后活动时间且有未确认分 P,无法判断是否同一场", true) || undefined;
@@ -1080,7 +1094,9 @@ export class LivePumpSession {
     spoolIncomplete?: boolean;
     /** `false` = the open-time placeholder for a part not yet sealed (issue #581); absent = sealed. */
     sealed?: boolean;
-    /** T-221: the row never passed the local product gates; the queue must not take it (review F2). */
+    /** T-221 (sol P1-2): set ONLY after the full local probe + DTS gates passed. */
+    validated?: boolean;
+    /** Deprecated negative marker (legacy rows); preserved so old WAL entries stay blocked. */
     needsValidation?: boolean;
   }): { ok: boolean; error?: string } {
     if (this.stateUntrusted) return { ok: false, error: "state sidecar is untrusted" };
@@ -1099,6 +1115,7 @@ export class LivePumpSession {
       durationSec: input.durationSec,
       confirmed: false,
       ...(input.spoolIncomplete ? { spoolIncomplete: true } : {}),
+      ...(input.validated ? { validated: true } : {}),
       ...(input.needsValidation ? { needsValidation: true } : {}),
       // Only the open-time note sets this. Re-noting at seal (noteSealed/keepOrLose/persistUnconfirmed)
       // rebuilds the row without it, so `sealed` naturally flips false→absent(=true) once sealed.
@@ -1130,6 +1147,29 @@ export class LivePumpSession {
     if (!row || row.confirmed || row.spoolIncomplete) return;
     this.state = { ...this.state, parts: this.state.parts.map((p) => p.index === index ? { ...p, spoolIncomplete: true } : p) };
     try { this.persist(); } catch { /* the write-failure alert already surfaced the truncation */ }
+  }
+
+  /**
+   * T-221 (sol P1-2): mark the positive local-gate marker on an EXISTING WAL row WITHOUT
+   * rebuilding it — `noteUnconfirmedPart` reconstructs the whole row from a field whitelist, and
+   * dropping `stem`/`title` here would lose archive identity. Called only after the full probe +
+   * DTS gates passed in `finalizeOne`; a failed write is a hard stop (the F3 state-write red
+   * line), so no `part_deferred` is ever emitted for a row the queue cannot deliver.
+   */
+  markValidated(index: number): { ok: boolean; error?: string } {
+    if (this.stateUntrusted) return { ok: false, error: "state sidecar is untrusted" };
+    const row = this.state.parts.find((p) => p.index === index);
+    // No WAL row means there is nothing for the queue to pick up: emitting a deferred part then
+    // would silently lose it. Treat it as a state-write failure and let the F3 latch stop the run.
+    if (!row) return { ok: false, error: `cannot mark part validated: no WAL row for index ${index}` };
+    if (row.confirmed || row.validated) return { ok: true };
+    this.state = { ...this.state, parts: this.state.parts.map((p) => p.index === index ? { ...p, validated: true, needsValidation: undefined } : p) };
+    try {
+      this.persist();
+    } catch (e) {
+      return { ok: false, error: `cannot mark part validated: ${String((e as Error)?.message ?? e).slice(0, 200)}` };
+    }
+    return { ok: true };
   }
 
   /**
@@ -1194,6 +1234,19 @@ export class LivePumpSession {
     } catch (e) {
       this.log(`[直播直传] ⚠️ 无法持久化落盘续录意图(下次切换时重试): ${String((e as Error)?.message ?? e)}`);
     }
+  }
+
+  /**
+   * T-221 (sol P1-3): the CLI's enqueue writes `queueManaged: true` to the state file while this
+   * pump is still alive. Adopt that single field into the in-memory snapshot so the next
+   * `persist()` cannot silently erase the queue's ownership (which would send a later restart
+   * into direct recovery and risk a duplicate upload). Only adopts a marker from THIS session.
+   */
+  adoptQueueManaged(): void {
+    if (this.stateUntrusted || this.state.queueManaged) return;
+    const onDisk = readLivePumpState(this.statePath);
+    if (!onDisk?.queueManaged || onDisk.createdAt !== this.state.createdAt) return;
+    this.state = { ...this.state, queueManaged: true };
   }
 
   /**
@@ -1817,6 +1870,8 @@ export interface PartSinkResult {
    * fallback-uploaded as if it were complete (issue #579); the (partial) spool is kept for a human.
    */
   spoolIncomplete: boolean;
+  /** Explicit LOCAL gate: the spool exceeded the size declared to UPOS (T-221 sol P1-1). */
+  sizeOverflow?: boolean;
   /** Why streaming degraded; see {@link PartSinkOpts.onDegrade}. Survives a successful fallback. */
   degradedReason?: string;
   sessionLeaked: boolean;
@@ -1883,6 +1938,8 @@ export class PartSink {
    * part is never completed), so finalize neither completes nor whole-file-fallbacks it.
    */
   private spoolIncomplete = false;
+  /** T-221 (sol P1-1): explicit LOCAL gate — the spool exceeded the declared UPOS size. */
+  private sizeOverflow = false;
   private sealed = false;
   /** Test seam: the spool write syscall (default writeSync); see {@link PartSinkOpts.writeSpool}. */
   private readonly writeSpoolFn: (fd: number, buf: Buffer) => number;
@@ -1975,7 +2032,11 @@ export class PartSink {
     if (this.spooled > this.o.sizeCap) {
       // The cutter bounds every part to the declared size; reaching this is a bug, and a part
       // larger than what was declared to UPOS must not be completed as if it were fine.
-      this.uploadError ??= `分 P 超出声明大小 ${this.o.sizeCap}B(${this.spooled}B)`;
+      // T-221 (sol P1-1): keep an explicit LOCAL flag. A transport error may already occupy
+      // uploadError, and `??=` would hide this finding from the spool-mode local-gate verdict.
+      this.sizeOverflow = true;
+      const why = `分 P 超出声明大小 ${this.o.sizeCap}B(${this.spooled}B)`;
+      this.uploadError = this.uploadError ? `${this.uploadError};${why}` : why;
     }
     if (this.uploadError || this.overflow) return;
     // T-221 spool mode (review P2): no upload session is coming — the bytes are already on the
@@ -2219,6 +2280,7 @@ export class PartSink {
       streamedBytes: this.streamed,
       spooledBytes: this.spooled,
       spoolIncomplete: this.spoolIncomplete,
+      ...(this.sizeOverflow ? { sizeOverflow: true } : {}),
       uploadError: this.uploadError,
       ...(this.degradedReason ? { degradedReason: this.degradedReason } : {}),
       // "Half session" = bytes PUT but the part can neither complete nor abort (UPOS has no
@@ -2521,6 +2583,7 @@ function segmentResultOf(part: SealedPart, sink: PartSinkResult, exit: SegmentEx
     uploadError: sink.uploadError,
     ...(sink.degradedReason ? { degradedReason: sink.degradedReason } : {}),
     ...(sink.spoolIncomplete ? { spoolIncomplete: true } : {}),
+    ...(sink.sizeOverflow ? { sizeOverflow: true } : {}),
     sessionLeaked: sink.sessionLeaked,
     backpressured: sink.backpressured,
     sealedMs: part.sealedMs,
@@ -2711,6 +2774,10 @@ export async function finalizeRecordedPart(o: {
   // Duration. PTS is the cheap source, but a PTS reset (CDN timestamp jump) can make it lie, so it is
   // sanity-checked against the wall-clock time the part was open (only meaningful for long parts).
   let durationSec = 0;
+  // T-221 (sol P1-1): explicit LOCAL gate findings, independent of any transport failure that
+  // may already be sitting in `rec.uploadError`.
+  let localProbeFailed = false;
+  let localGapScanFailed = false;
   const pts = rec.ptsDurationSec ?? 0;
   const wallSec = (rec.sealedMs ?? 0) / 1000;
   let ptsTrusted = pts > 0;
@@ -2722,10 +2789,14 @@ export async function finalizeRecordedPart(o: {
     // T-53 readability check: runs on the finished spool in the background (it no longer blocks the
     // pull). The ffprobe duration wins; a spool ffprobe cannot read is not submitted.
     const probe = o.probeDuration ?? ffprobeDuration;
-    try { durationSec = await probe(spoolPath); } catch { durationSec = 0; }
+    try { durationSec = await probe(spoolPath); } catch { durationSec = 0; localProbeFailed = true; }
     if (!(durationSec > 0)) {
       durationSec = 0;
-      rec.uploadError = rec.uploadError ?? `产物自检失败(TS 读不出 duration,不可投): ${spoolPath}`;
+      localProbeFailed = true;
+      const why = `产物自检失败(TS 读不出 duration,不可投): ${spoolPath}`;
+      // Append, never `??=`: a transport error already on this part must not hide the local
+      // finding (sol P1-1). The explicit `localProbeFailed` flag carries the verdict regardless.
+      rec.uploadError = rec.uploadError ? `${rec.uploadError};${why}` : why;
     }
   } else {
     // Zero-disk: no local file to probe; the uploaded bytes are validated by UPOS `complete`.
@@ -2745,7 +2816,7 @@ export async function finalizeRecordedPart(o: {
   // when the chunk upload already failed, for the same reason.
   if (spoolMode === "full" && rec.spooledBytes > 0 && durationSec > 0) {
     let gap: DtsGap | null | undefined;
-    try { gap = await (o.scanDtsGap ?? defaultScanDtsGap)(spoolPath); } catch { gap = undefined; }
+    try { gap = await (o.scanDtsGap ?? defaultScanDtsGap)(spoolPath); } catch { gap = undefined; localGapScanFailed = true; }
     if (gap) {
       rec.tsGap = gap;
       // Rename so the orphan sweep (which only matches the plain spool name) keeps the sample.
@@ -2765,12 +2836,21 @@ export async function finalizeRecordedPart(o: {
       // Chunks may already be on UPOS but this part will never complete.
       if (rec.chunksUploaded > 0) rec.sessionLeaked = true;
     } else if (gap === undefined) {
-      o.log?.(`[直播直传] ⚠️ ${o.fileName}: 时间戳扫描无法判定,按原流程继续`);
+      // The direct path keeps its historical "cannot judge, continue" behaviour; spool mode
+      // treats a *thrown* scan as a failed local gate (see localValidationFailed below).
+      o.log?.(`[直播直传] ⚠️ ${o.fileName}: 时间戳扫描无法判定,${o.submit === false && localGapScanFailed ? "本地校验按未通过处理" : "按原流程继续"}`);
     }
   }
 
   let stem: string | undefined;
   let usedFallback = false;
+
+  // T-221 (sol P1-1): an explicit, transport-independent verdict for the LOCAL product gates.
+  // A chunk PUT / preupload failure and a local gate failure can coexist on the same part; the
+  // old string sniff on `uploadError` could not tell them apart and cleared the local finding.
+  const localValidationFailed = rec.spoolIncomplete === true || rec.tsGap !== undefined
+    || rec.sizeOverflow === true || localProbeFailed || localGapScanFailed;
+  rec.localValidationFailed = localValidationFailed || undefined;
 
   // T-221 spool mode: validation is done, delivery belongs to the queue. Skip the complete and
   // the whole-file fallback entirely (they would touch Bilibili), keep the spool.
@@ -2778,11 +2858,8 @@ export async function finalizeRecordedPart(o: {
     // Review F7: transport errors the sink recorded mid-part (chunk PUT failure, backpressure,
     // an in-flight session when the run switched to spool) say nothing about the FILE — the queue
     // uploads the whole file fresh. Only local-gate findings may mark it needs-manual.
-    const localOnly = rec.spoolIncomplete
-      || rec.tsGap
-      || (rec.uploadError !== undefined
-        && (rec.uploadError.startsWith("产物自检失败") || rec.uploadError.includes("分 P 超出声明大小")));
-    if (!localOnly) rec.uploadError = undefined;
+    if (!localValidationFailed) rec.uploadError = undefined;
+    else if (!rec.uploadError) rec.uploadError = "本地产物校验未通过(不可投)";
     return withSession({ ...rec, spoolDurationSec: durationSec });
   }
 
@@ -3152,6 +3229,14 @@ export interface RunLivePumpOptions {
    */
   submitMode?: "direct" | "spool";
   /**
+   * T-221 (sol P1-3): called ONCE when a spool-only session opens with unconfirmed parts,
+   * BEFORE the pump waits for the next broadcast. The CLI uses it to hand the existing,
+   * now-validated backlog to the node queue immediately: a room that never goes live again must
+   * not strand the parts recorded after a crash, and a stop/drain during the wait must still
+   * deliver them. Exceptions are logged and retried at run end.
+   */
+  onHandoff?: (statePath: string) => void | Promise<void>;
+  /**
    * Spool-mode disk watermark in GB (same caliber as `resources.diskMinGB`); below it the pump
    * stops opening new parts (sealed parts still enqueue). `0` disables the gate.
    */
@@ -3440,6 +3525,9 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
    * rule (#293) against the current time. Returns a failure result instead of a session when
    * the archive is in a state that must not collect more parts.
    */
+  // T-221 (sol P1-3): the early handoff must run exactly once even though openSession is called
+  // twice on the waitForBroadcast path (pre-recovery and the real recording session).
+  let handoffDone = false;
   const openSession = async (): Promise<{ session: LivePumpSession; spoolOnlyRun?: boolean } | { fail: RunLivePumpResult } | { pending: RunLivePumpResult }> => {
     const session = new LivePumpSession({
       cookiesPath: o.cookiesPath,
@@ -3503,12 +3591,12 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       }
       if (spoolOnlyRun) {
         session.dropUnrecoverableUnsealed();
-        // Review P1: a SIGKILL mid-part leaves a sealed:false row whose spool has bytes. Neither
-        // recover() (only knows pending) nor the enqueue (skips unsealed rows) can ever settle
-        // it — the row would keep queueManaged on forever. Validate the file locally NOW:
-        // readable → promote to a sealed deliverable row (real bytes/duration); unreadable or
-        // DTS-gapped → needs-manual. Either way the limbo is resolved at startup.
-        for (const row of session.parts.filter((x) => (x.sealed === false || x.needsValidation) && !x.confirmed)) {
+        // T-221 (sol P1-2): DEFAULT-DENY. Every row without the POSITIVE `validated` marker is
+        // revalidated here — seal-time WAL rows (a SIGKILL between noteSealed and finalize has
+        // real bytes/duration but no marker), legacy negative-marker rows, and pre-T-221 rows.
+        // No new write path can forget to add a "not validated" flag and accidentally become
+        // deliverable. Readable → promote with `validated:true`; otherwise needs-manual.
+        for (const row of session.parts.filter((x) => !x.validated && !x.confirmed)) {
           let bytes = 0;
           try { bytes = statSync(row.spoolPath).size; } catch { /* dropped above if missing */ }
           if (!(bytes > 0)) continue;
@@ -3526,12 +3614,15 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
           // Same DTS gate as the normal finalize path (review F4): production does not inject
           // scanDtsGap, so the default scan must apply here too.
           if (dur > 0) {
-            try { dur = (await (o.scanDtsGap ?? defaultScanDtsGap)(row.spoolPath)) ? 0 : dur; } catch { /* keep dur */ }
+            // Fail closed: an unjudgeable DTS scan is NOT a pass. The old `catch { keep dur }`
+            // promoted a row whose timestamp integrity was never established.
+            try { dur = (await (o.scanDtsGap ?? defaultScanDtsGap)(row.spoolPath)) ? 0 : dur; } catch { dur = 0; }
           }
           if (dur > 0) {
             const note = session.noteUnconfirmedPart({
               index: row.index, spoolPath: row.spoolPath, title, bytes, durationSec: dur,
               ...(row.stem ? { stem: row.stem } : {}),
+              validated: true,
             });
             if (note.ok) log(`[直播直传] 分 P ${row.index} 未过校验的存量分 P,本地校验通过(${(bytes / MiB).toFixed(1)}MiB),已转可交付,收播后由队列补传`);
             else log(`[直播直传] ⚠️ 分 P ${row.index} 未过校验转可交付失败: ${note.error ?? "?"}`);
@@ -3623,10 +3714,27 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       }
       }
     }
+    // T-221 (sol P1-3): hand the existing, now-validated backlog to the node queue BEFORE the
+    // idle wait. openSession has already rolled over stale state, reconciled the journal and
+    // revalidated unvalidated rows, so this statePath belongs to THIS session. The callback is
+    // awaited so the queue's ownership marker is durable before the pump adopts it.
+    if (spoolOnlyRun && o.onHandoff && !handoffDone) {
+      const handoffPath = livePumpStatePath(o.spoolDir, o.room);
+      if (livePumpHasUnconfirmed(handoffPath)) {
+        handoffDone = true;
+        try {
+          await o.onHandoff(handoffPath);
+          session.adoptQueueManaged();
+        } catch (e) {
+          log(`[直播直传] ⚠️ 待补分 P 提前交接失败(收播时重试): ${String((e as Error)?.message ?? e)}`);
+        }
+      }
+    }
     return { session, spoolOnlyRun };
   };
 
   let preRecoveryOpened = false;
+  let preRecoverySpoolOnlyRun = false;
   if (o.waitForBroadcast) {
     // A previous run may have left a pending/unconfirmed part (e.g. the last part's submit failed
     // as the show ended). Settle it now, while its archive is still "this broadcast", instead of
@@ -3640,6 +3748,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       if ("pending" in pre) return pre.pending;
       if ("fail" in pre) return pre.fail;
       preRecoveryOpened = true;
+      preRecoverySpoolOnlyRun = pre.spoolOnlyRun === true;
     }
     if (preRecoveryOpened) emit({ at: Date.now(), kind: "waiting" });
     // Wait BEFORE opening the session for recording. The session decides "same broadcast or a
@@ -3648,9 +3757,23 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     // probe result is dropped on purpose: the loop below fetches a fresh URL.
     const first = await waitForBroadcast();
     if (!first) {
+      const idleStatePath = livePumpStatePath(o.spoolDir, o.room);
+      // T-221 (sol P1-3): a stop / SIGUSR2 drain while waiting must not silently drop the
+      // unconfirmed backlog. The handoff already ran at openSession; return the structured
+      // upload-pending shape so the CLI enqueues (idempotent) and exits 75, instead of a bare
+      // `ok:true, outcome:"idle"` that skips both the enqueue and the retry.
+      if (preRecoveryOpened && preRecoverySpoolOnlyRun && livePumpHasUnconfirmed(idleStatePath)) {
+        const idleState = readLivePumpState(idleStatePath);
+        return {
+          ok: false, uploadPending: true, error: "queued uploads pending",
+          ...(idleState?.bvid ? { bvid: idleState.bvid } : {}),
+          ...(idleState?.aid ? { aid: idleState.aid } : {}),
+          title: o.title, segments: [], spoolDir: o.spoolDir, statePath: idleStatePath,
+        };
+      }
       return {
         ok: true, outcome: "idle", title: o.title, segments: [], spoolDir: o.spoolDir,
-        statePath: livePumpStatePath(o.spoolDir, o.room),
+        statePath: idleStatePath,
       };
     }
   }
@@ -3883,7 +4006,10 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         recoveryDeadline = part.final ? recoveryDeadlineAfterPart(part.sealedBy, Date.now(), recoverWindowMs) : undefined;
         return part.final || part.sealedBy === "abort" ? { kind: "ended" } : { kind: "continue" };
       }
-      if (r.uploadError || r.spoolIncomplete) {
+      // T-221 (sol P1-1): an explicit local-gate verdict, plus a POSITIVE duration as defense
+      // in depth. A part whose probe returned 0 / threw must never be handed to the queue even
+      // when a transport error was the only surviving uploadError string.
+      if (r.localValidationFailed || r.uploadError || r.spoolIncomplete || !((r.spoolDurationSec ?? 0) > 0)) {
         // Mark the row needs-manual (unless the seal-time note already did): the enqueue must
         // never take a file that failed the same gates the direct path enforces before submit.
         if (!spoolIncomplete) {
@@ -3901,11 +4027,27 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
             });
           }
         }
-        const msg = `段${seg + 1} 产物自检未过(${r.uploadError ?? "spool 截断"}),spool 保留需人工处理,录制继续`;
+        const msg = `段${seg + 1} 产物自检未过(${r.uploadError ?? "spool 截断/无有效时长"}),spool 保留需人工处理,录制继续`;
         log(`[直播直传] ⚠️ ${msg}`);
         try { o.onAlert?.(msg); } catch { /* alert channel must not break the run */ }
         recoveryDeadline = part.final ? recoveryDeadlineAfterPart(part.sealedBy, Date.now(), recoverWindowMs) : undefined;
         return part.final || part.sealedBy === "abort" ? { kind: "ended" } : { kind: "continue" };
+      }
+      // T-221 (sol P1-2): only a row carrying the POSITIVE gate marker may be enqueued. The
+      // seal-time WAL row has real bytes/duration but no marker, so a SIGKILL between noteSealed
+      // and here leaves it un-validated (startup revalidates) instead of looking deliverable.
+      // markValidated patches the existing row in place, preserving stem/title.
+      const validated = session.markValidated(index);
+      if (!validated.ok) {
+        // Same F3 red line as every other WAL write: a state file that cannot be trusted leaves
+        // the spool unprotected (the orphan sweep would delete it). Stop recording immediately
+        // instead of emitting a deferred part the queue can never deliver.
+        return failRun({
+          ok: false, error: `恢复状态写入失败,本地校验通过标记无法持久化,停止录制: ${validated.error}`,
+          bvid: session.bvid, aid: session.aid, title: session.archiveTitle,
+          segments: [...segments], spoolDir: o.spoolDir,
+          statePath: livePumpStatePath(o.spoolDir, o.room),
+        });
       }
       pushSegment({
         seg: seg + 1, chunks: 0, bytes: spooled, spooled,
@@ -3997,6 +4139,9 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         durationSec: r.spoolDurationSec ?? 0,
         ...(r.stemOfCompleted ? { stem: r.stemOfCompleted } : {}),
         ...(r.spoolIncomplete ? { spoolIncomplete: true } : {}),
+        // T-221 (sol P1-2): the direct path ran the FULL local gates in finalizeRecordedPart.
+        // Only an explicit pass gets the positive marker; a local failure stays default-denied.
+        ...(!r.localValidationFailed && !r.spoolIncomplete && (r.spoolDurationSec ?? 0) > 0 ? { validated: true } : {}),
       });
       if (note.ok) emit({ at: Date.now(), kind: "part_unconfirmed", part: unconfirmedIndex, bytes: r.spooledBytes });
       return note.ok ? undefined : (note.error ?? "无法记录未确认分 P");
@@ -4348,10 +4493,10 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       index: ctx.index, spoolPath: ctx.spoolPath, title: titleOf(ctx), bytes, durationSec,
       ...(row?.stem ? { stem: row.stem } : {}),
       ...(sinkIncomplete ? { spoolIncomplete: true } : {}),
-      // Review F2: keepOrLose with probe=false persisted the row WITHOUT the local product gates
-      // (stop-timeout path). In spool mode the queue would take it at exit 75 — mark it so the
-      // enqueue skips it and the next startup validates it first.
-      ...(spoolOnlyRun && !probe ? { needsValidation: true } : {}),
+      // T-221 (sol P1-2): DEFAULT-DENY. This row never passed the full probe + DTS gates (a
+      // stop-timeout path at best runs probeDuration), so leaving `validated` ABSENT is enough:
+      // the queue refuses it until the startup revalidation adopts it. Dropping any stale marker
+      // on a rewrite is fail-closed, not a loss of a validated delivery.
     });
     if (note.ok) {
       if (!row) emit({ at: Date.now(), kind: "part_unconfirmed", part: ctx.index, bytes });
