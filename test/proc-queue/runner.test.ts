@@ -184,6 +184,58 @@ describe("磁盘准入", () => {
     const r2 = mkRunner("A2", { diskMinGB: () => 10, freeBytes: () => null });
     expect(r2).toBeTruthy();
   });
+
+  it("T-221 (sol review): only an exact finite 0 estimate drains below the watermark", async () => {
+    // NaN / negative estimates are UNKNOWN, not "no new disk usage": admitting them below the
+    // watermark would let upload-part/cleanup-part deadlock the low-watermark drain.
+    // JSON.stringify(NaN) === "null" on the way into proc_jobs.params; map it back so the test
+    // really exercises a NaN estimate rather than the null branch of the same guard.
+    registerProcessor(fakeProcessor({
+      estimateDiskBytes: (j) => {
+        const need = (j.params as { need: number | null }).need;
+        return need === null ? Number.NaN : need;
+      },
+    }));
+    const r = mkRunner("A", { diskMinGB: () => 10, freeBytes: () => 10.5e9 });
+    const s = env.open();
+    const enq = (name: string, need: number): string =>
+      s.enqueue(env.job(name, { params: { need } }), allowed()).jobId;
+    const zero = enq("zero.ts", 0);
+    const small = enq("small.ts", 0.4e9);
+    const nan = enq("nan.ts", Number.NaN);
+    const negative = enq("negative.ts", -1);
+    const big = enq("big.ts", 2e9);
+    // claimLoop's slot limiter only frees a slot once a claimed run settles, so let each
+    // admitted job finish before the next tick instead of firing ticks synchronously.
+    r.tick();
+    await vi.waitFor(() => expect(s.get(zero)?.state).toBe("done"));
+    r.tick();
+    await vi.waitFor(() => expect(s.get(small)?.state).toBe("done"));
+    r.tick(); r.tick(); r.tick();
+    expect(s.get(nan)?.state).toBe("pending");
+    expect(s.get(negative)?.state).toBe("pending");
+    expect(s.get(big)?.state).toBe("pending");
+  });
+
+  it("T-221 (sol review): a zero estimate still drains when free space is BELOW the watermark", async () => {
+    // The real deadlock case: the disk is already under the watermark and only upload-part /
+    // cleanup-part (which need no new bytes) remain. A zero estimate must be admitted even
+    // though 9GB < 10GB; an unknown estimate must still be denied so the queue cannot wedge.
+    registerProcessor(fakeProcessor({
+      estimateDiskBytes: (j) => {
+        const need = (j.params as { need: number | null }).need;
+        return need === null ? Number.NaN : need;
+      },
+    }));
+    const r = mkRunner("A", { diskMinGB: () => 10, freeBytes: () => 9e9 });
+    const s = env.open();
+    const zero = s.enqueue(env.job("zero.ts", { params: { need: 0 } }), allowed()).jobId;
+    const unknown = s.enqueue(env.job("unknown.ts", { params: { need: Number.NaN } }), allowed()).jobId;
+    r.tick();
+    await vi.waitFor(() => expect(s.get(zero)?.state).toBe("done"));
+    r.tick(); r.tick();
+    expect(s.get(unknown)?.state).toBe("pending");
+  });
 });
 
 describe("handover(交接)", () => {

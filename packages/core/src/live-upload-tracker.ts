@@ -33,6 +33,9 @@ function phaseFor(kind: LiveEvent["kind"], prev?: LivePartPhase): LivePartPhase 
     case "part_retry": return "submitting";
     case "part_confirmed": return "confirmed";
     case "part_unconfirmed": return "unconfirmed";
+    // T-221: a deferred part is sealed on disk, delivery owned by the queue — same ledger row
+    // as an unconfirmed part (it will arrive via the queue or the next run).
+    case "part_deferred": return "unconfirmed";
     case "part_failed": return "failed";
     default: return prev;
   }

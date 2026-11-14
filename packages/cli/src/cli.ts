@@ -38,12 +38,13 @@ import {
   buildTaskCommand, buildCookieCommand, zeroDiskStreamMeta, APP_VERSION, syncDbPathFor,
   hubStageDir, hubLogsDir,
 } from "@drec/app";
-import type { HubStarter, TaskStore } from "@drec/app";
+import type { HubStarter, TaskStore, EnqueueLivePumpResult } from "@drec/app";
 import { applyTimezoneFromDb, dbPathForDataRoot } from "@drec/app";
 import { zeroDiskStreamKey } from "@drec/core";
 import { recordStreamUpload, deleteHubHistory } from "@drec/orchestrator";
 import { reportStreamUploadLedgerResult } from "./stream-upload-ledger-report.js";
-import { DEFAULT_SEGMENT_CAP } from "@drec/zero-upload";
+import { DEFAULT_SEGMENT_CAP, type LivePumpHandoffReceipt } from "@drec/zero-upload";
+import { livePumpHandoffReceipt } from "./live-pump-handoff.js";
 
 
 
@@ -527,8 +528,11 @@ program
       let rootSafe = true;
       try {
         for (const f of readdirSync(opts.outDir)) {
-          if (!/^live-pump-.+\.state\.json(?:\..*)?$/.test(f)) continue;
+          if (!/^live-pump-.+\.state\.json(?:\..+)?$/.test(f)) continue;
           if (f.includes(".tmp.")) continue; // a crash leftover, not a state
+          // T-221 sidecars of the state file, not states themselves (a parse failure here would
+          // permanently disable the sweep via rootSafe=false).
+          if (f.endsWith(".confirmed") || f.endsWith(".activity")) continue;
           const st2 = readLivePumpState(join(opts.outDir, f));
           if (!st2) { rootSafe = false; break; }
           rootKeep.push(...spoolPathsToKeep(st2));
@@ -594,8 +598,49 @@ program
         ...(nodeSubmitGate ? { submitGate: nodeSubmitGate } : {}),
         log: console.log,
       });
+      // T-221: the spool-mode disk gate shares the hub-config watermark with the daemon's gates
+      // (explicit 0 keeps it off; unreadable config falls back to the same default, never silent-off).
+      let pumpDiskMinGB: number | undefined;
+      try {
+        const { effectiveHubConfig, resolveDiskWatermark } = await import("@drec/app");
+        const effHub = effectiveHubConfig();
+        // A file-sourced config comes back with json:undefined — read the file (review P2),
+        // otherwise an explicit threshold in a config file would silently fall back to the default.
+        const hubJson = effHub.json ?? readFileSync(effHub.path, "utf-8");
+        pumpDiskMinGB = resolveDiskWatermark(hubJson, (m) => console.warn(m)).bytes / 1e9;
+      } catch (e) {
+        console.warn(`[直播直传] 磁盘水位读取失败,pump 使用默认闸门: ${String((e as Error)?.message ?? e)}`);
+      }
+      // T-221 (sol P1-3/P1-4): one idempotent handoff used BOTH at openSession (before the idle
+      // wait, so a room that never goes live again cannot strand crash-time parts) and at run end.
+      // The receipt is mandatory: the pump must distinguish "queue owns it" from a transient
+      // cookie/SQLite failure or an order hole. Errors are never swallowed as success.
+      const enqueuePumpPending = async (statePath: string): Promise<LivePumpHandoffReceipt> => {
+        let queued: EnqueueLivePumpResult | undefined;
+        try {
+          const { enqueueLivePumpPending } = await import("@drec/app");
+          queued = enqueueLivePumpPending({
+            statePath,
+            cookiesPath: uploadCookies,
+            ...(o.taskId !== undefined && /^\d+$/.test(o.taskId) ? { taskId: Number(o.taskId) } : {}),
+            ...(streamMeta.seasonSectionId ? { seasonSectionId: streamMeta.seasonSectionId } : {}),
+            log: console.log,
+          });
+        } catch (e) {
+          console.error(`[直播直传] 待补上传入队异常(保留 spool,交回上传待补流程重试): ${String((e as Error)?.message ?? e)}`);
+          return livePumpHandoffReceipt(undefined, e);
+        }
+        const receipt = livePumpHandoffReceipt(queued);
+        if (receipt.status === "owned") {
+          console.log(`[直播直传] 待补上传已交给节点队列: 新入队 ${queued.queued},已在队 ${queued.already},不可入队 ${queued.failed}`);
+        } else {
+          console.error(`[直播直传] 待补分 P 未全部接管(${receipt.status},保留 spool): ${receipt.detail}`);
+        }
+        return receipt;
+      };
       const run = runLivePump({
         ...(pumpSubmitter ? { submitter: pumpSubmitter } : {}),
+        ...(pumpDiskMinGB !== undefined ? { diskMinGB: pumpDiskMinGB } : {}),
         cookiesPath: uploadCookies,
         room: pumpRoom,
         fetch: async (r, q) => {
@@ -663,6 +708,10 @@ program
         drainSignal: drain.signal,
         // Wait in-process for the next broadcast instead of exiting (issue #308).
         waitForBroadcast: true,
+        // T-221 (sol P1-3): hand the existing backlog to the queue as soon as the spool-only
+        // session opens, not only when the run ends. Idempotent: after the early handoff the pump
+        // adopts the queue marker, and the run-end enqueue sees the rows as `already`.
+        onHandoff: enqueuePumpPending,
         onPhase: (p) => setRecorderPhase(p),
         danmu,
         log: (m) => console.log(m),
@@ -726,20 +775,7 @@ program
           // TaskManager backs off without consuming the recording restart budget. A queue
           // enqueue failure is logged but must not turn into a local-failure exit: the spool is
           // still the source of truth and the next pump attempt can settle it.
-          try {
-            const { enqueueLivePumpPending } = await import("@drec/app");
-            const queued = enqueueLivePumpPending({
-              statePath: res.statePath,
-              cookiesPath: uploadCookies,
-              ...(o.taskId !== undefined && /^\d+$/.test(o.taskId) ? { taskId: Number(o.taskId) } : {}),
-              ...(streamMeta.seasonSectionId ? { seasonSectionId: streamMeta.seasonSectionId } : {}),
-              log: console.log,
-            });
-            if (queued.error) console.error(`[直播直传] 待补上传入队失败(保留 spool,将在下次尝试重试): ${queued.error}`);
-            else console.log(`[直播直传] 待补上传已交给节点队列: 新入队 ${queued.queued},已在队 ${queued.already},不可入队 ${queued.failed}`);
-          } catch (e) {
-            console.error(`[直播直传] 待补上传入队异常(保留 spool,将在下次尝试重试): ${String((e as Error)?.message ?? e)}`);
-          }
+          await enqueuePumpPending(res.statePath);
           console.error(`[直播直传] 上传待补(保留 spool,稍后重试): ${res.error ?? "upload pending"}`);
           liveReporter.event({ at: Date.now(), kind: "run_end", outcome: "failed", ...(res.error ? { message: res.error } : {}) });
           process.exit(75);

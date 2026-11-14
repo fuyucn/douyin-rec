@@ -29,6 +29,7 @@ export type LiveEventKind =
   | "part_submit"
   | "part_confirmed"
   | "part_unconfirmed"
+  | "part_deferred"
   | "part_retry"
   | "part_failed"
   | "recovered"
@@ -127,8 +128,8 @@ const PHASES: readonly LivePartPhase[] = ["streaming", "sealing", "submitting", 
 const STATES: readonly LiveUploadState[] = ["waiting", "streaming", "submitting", "finished", "failed", "stopped"];
 const KINDS: readonly LiveEventKind[] = [
   "run_start", "run_resume", "waiting", "live", "part_streaming", "part_sealed", "part_submit",
-  "part_confirmed", "part_unconfirmed", "part_retry", "part_failed", "recovered", "stalled",
-  "season_pending", "season_done", "season_failed", "run_end",
+  "part_confirmed", "part_unconfirmed", "part_deferred", "part_retry", "part_failed", "recovered",
+  "stalled", "season_pending", "season_done", "season_failed", "run_end",
 ];
 
 const num = (x: unknown): x is number => typeof x === "number" && Number.isFinite(x);

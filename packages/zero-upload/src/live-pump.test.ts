@@ -40,6 +40,11 @@ import {
   runStream,
   PartSink,
   runLivePump,
+  appendConfirmedJournal,
+  readConfirmedJournal,
+  needsConfirmedJournalSeparator,
+  finalizeRecordedPart,
+  segmentResultOf,
   setSpawnForTest,
   sleepUnlessAborted,
   type ChildProcessLike,
@@ -2630,6 +2635,54 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
   let dir: string;
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "live-pump-session-")); });
   afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
+
+  it("T-221 (sol P1-3): adoptQueueManaged survives the pump's next state write", () => {
+    const statePath = livePumpStatePath(dir, "r2");
+    const spool = join(dir, "p0.ts");
+    writeFileSync(spool, "part-0");
+    writeLivePumpState(statePath, {
+      schemaVersion: 1, room: "r2", createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
+      updatedAt: Date.now(),
+      parts: [{ index: 0, spoolPath: spool, filename: "p0.ts", stem: "s0", title: "P1", bytes: 6, durationSec: 10, confirmed: false }],
+    } as never);
+    const session = new LivePumpSession({
+      cookiesPath: COOKIES, room: "r2", spoolDir: dir, title: "t",
+      tid: 21, tag: "x", private: true, fetchImpl: makeSessionFetch().impl, cleanupConfirmedSpool: false,
+    });
+    // The CLI's early handoff writes `queueManaged` to the state file WHILE this pump is alive.
+    const onDisk = readLivePumpState(statePath)!;
+    writeLivePumpState(statePath, { ...onDisk, queueManaged: true });
+    session.adoptQueueManaged();
+    // A later pump persist must not erase the queue's ownership, and markValidated must patch
+    // the row in place rather than rebuild it (stem/title are archive identity).
+    expect(session.markValidated(0).ok).toBe(true);
+    const after = readLivePumpState(statePath);
+    expect(after?.queueManaged).toBe(true);
+    expect(after?.parts[0]?.validated).toBe(true);
+    expect(after?.parts[0]?.stem).toBe("s0");
+    expect(after?.parts[0]?.title).toBe("P1");
+    expect(session.markValidated(99).ok).toBe(false); // missing WAL row is a hard failure
+  });
+
+  it("T-221 (sol P1-2): a seal-time WAL row carries NO positive validated marker", () => {
+    // noteSealed / keepOrLose call noteUnconfirmedPart WITHOUT `validated`. A SIGKILL between
+    // sealing and finalize must leave a row the queue default-denies; only markValidated() may
+    // add the marker. This pins the WRITE path, not just a hand-seeded test fixture.
+    const statePath = livePumpStatePath(dir, "r3");
+    const spool = join(dir, "p0.ts");
+    writeFileSync(spool, "part-0");
+    const session = new LivePumpSession({
+      cookiesPath: COOKIES, room: "r3", spoolDir: dir, title: "t",
+      tid: 21, tag: "x", private: true, fetchImpl: makeSessionFetch().impl, cleanupConfirmedSpool: false,
+    });
+    const note = session.noteUnconfirmedPart({
+      index: 0, spoolPath: spool, title: "P1", bytes: 6, durationSec: 10,
+    });
+    expect(note.ok).toBe(true);
+    expect(readLivePumpState(statePath)?.parts[0]?.validated).toBeUndefined();
+    expect(session.markValidated(0).ok).toBe(true);
+    expect(readLivePumpState(statePath)?.parts[0]?.validated).toBe(true);
+  });
 
   const makeSessionFetch = () => {
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
@@ -5352,5 +5405,731 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  }, 30_000);
+});
+
+describe("T-221 spool-mode continuation", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "live-pump-t221-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  interface FakeOpts {
+    /** `complete` answers OK:0 for this 1-based session number. */
+    failComplete?: (n: number) => boolean;
+    /** The studio create/edit answers code 406 (the production rate-limit failure, T-219). */
+    rateLimitedSubmit?: boolean;
+  }
+  /** Minimal UPOS + studio fake (session numbers come from the upos path). */
+  function makeFake(opts: FakeOpts = {}) {
+    let preuploadCalls = 0;
+    const events: string[] = [];
+    const sessions = new Map<number, Array<{ partNumber: number; body: Buffer }>>();
+    let archive: string[] = [];
+    const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
+    const sessionOf = (u: URL): number => Number(/p(\d+)\.ts/.exec(u.pathname)?.[1] ?? 0);
+    const fake = (async (input: string | URL | Request, init?: RequestInit) => {
+      const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      const m = (init?.method ?? "GET").toUpperCase();
+      if (u.pathname === "/preupload") {
+        preuploadCalls++;
+        const n = sessionOf(u) || preuploadCalls;
+        return json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: `upos://b/p${n}.ts` });
+      }
+      if (m === "POST" && u.searchParams.has("uploads")) return json({ upload_id: `uid-${sessionOf(u)}` });
+      if (m === "PUT") {
+        const n = sessionOf(u);
+        const list = sessions.get(n) ?? [];
+        list.push({ partNumber: Number(u.searchParams.get("partNumber")), body: Buffer.from(init!.body as ArrayBuffer) });
+        sessions.set(n, list);
+        return new Response("", { status: 200 });
+      }
+      if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) {
+        const n = sessionOf(u);
+        if (opts.failComplete?.(n)) { events.push(`complete-fail ${n}`); return json({ OK: 0, message: "complete boom" }); }
+        events.push(`complete ${n}`);
+        return json({ OK: 1, key: `b/p${n}.ts` });
+      }
+      if (u.pathname === "/x/vu/web/add/v3" || u.pathname === "/x/vu/web/edit") {
+        const body = JSON.parse(String(init!.body)) as { videos: Array<{ filename: string }> };
+        if (opts.rateLimitedSubmit) { events.push("submit-406"); return json({ code: 406, message: "too fast" }); }
+        archive = body.videos.map((v) => v.filename);
+        events.push(`submit ${archive.join(",")}`);
+        return json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } });
+      }
+      if (u.pathname === "/x/vupre/web/archive/view") {
+        return json({ code: 0, data: { archive: { aid: 7, bvid: "BILIfake1", title: "t", tid: 21 }, videos: archive.map((f, i) => ({ cid: i + 1, filename: f })) } });
+      }
+      if (u.pathname === "/x/web/archives") return json({ code: 0, data: { arc_audits: [] } });
+      return json({ code: 0, data: {} });
+    }) as unknown as typeof fetch;
+    return { fake, events, get preuploadCalls() { return preuploadCalls; }, archive };
+  }
+
+  const seedState = (parts: Array<{ index: number; spoolPath: string; confirmed?: boolean; sealed?: boolean; validated?: boolean }>, extra: Partial<Record<string, unknown>> = {}): string => {
+    const statePath = livePumpStatePath(dir, "t221");
+    writeLivePumpState(statePath, {
+      schemaVersion: 1, room: "t221", createdAt: 1, title: "t", tid: 21, tag: "x", private: true, updatedAt: Date.now(),
+      parts: parts.map((p) => ({
+        index: p.index, spoolPath: p.spoolPath, filename: p.spoolPath.split("/").pop()!,
+        stem: `stem${p.index}`, title: "P" + (p.index + 1), bytes: 3, durationSec: 2, confirmed: p.confirmed ?? false,
+        // T-221 (sol P1-2): the positive gate marker is REQUIRED for a deliverable row. An
+        // open-time placeholder (sealed:false) never has one — that is exactly the crash window.
+        ...(p.sealed === false || p.validated === false ? {} : { validated: true }),
+        ...(p.sealed === false ? { sealed: false as const } : {}),
+      })),
+      ...extra,
+    } as never);
+    return statePath;
+  };
+
+  const spoolPathOf = (index: number): string => join(dir, `${String.fromCharCode(97 + index)}_000.live.ts`);
+
+  it("submit failure mid-run hands the rest of the show to the queue and keeps recording", async () => {
+    // Session 1's studio submit hits the real production failure (406 rate limit): the run must
+    // NOT end, must not contact Bilibili for later parts, must keep both spools, and must end
+    // with the queue-handoff shape.
+    const f = makeFake({ rateLimitedSubmit: true });
+    installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 0x5a));
+    const alerts: string[] = [];
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxMs: 100, maxSegments: 2, submit: true, spoolMode: "full", quality: "origin",
+      fetchImpl: f.fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+      probeDuration: async () => 60, scanDtsGap: async () => null,
+      onAlert: (m) => alerts.push(m), log: () => {},
+    });
+    expect(r.segments[1]?.uploadError).toBeUndefined();
+    expect(r.ok).toBe(false);
+    expect(r.uploadPending).toBe(true);
+    expect(r.error).toBe("queued uploads pending");
+    // Bilibili contact stops at the handoff: part 1's session plus its (already fired) prefetch
+    // for part 2 — no further preuploads, and no successful studio submit afterwards.
+    expect(f.preuploadCalls).toBe(2);
+    expect(f.events.filter((e) => e.startsWith("submit-406")).length).toBeGreaterThan(0);
+    expect(f.events.some((e) => e.startsWith("submit "))).toBe(false);
+    const statePath = livePumpStatePath(dir, "t221");
+    const st = readLivePumpState(statePath);
+    expect(st?.parts).toHaveLength(2);
+    expect(st?.parts[0]?.confirmed).toBe(false);
+    expect(st?.parts[0]?.sealed).not.toBe(false);
+    expect(st?.parts[1]?.sealed).not.toBe(false);
+    expect(st?.pending).toBeUndefined();
+    expect(st?.parts.every((p) => !p.confirmed)).toBe(true);
+    expect(r.segments[0]?.uploadError).toBeTruthy();
+    expect(readConfirmedJournal(statePath).size).toBe(0);
+    // Both spools are on disk: the queue can deliver them after the run ends.
+    expect(st?.parts.every((p) => existsSync(p.spoolPath))).toBe(true);
+    expect(alerts.some((m) => m.includes("改为落盘"))).toBe(true);
+  }, 30_000);
+
+  it("spool submit mode records sealed parts without any Bilibili contact", async () => {
+    const f = makeFake();
+    installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 0x5a));
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxMs: 100, maxSegments: 2, submit: true, spoolMode: "full", quality: "origin",
+      submitMode: "spool",
+      fetchImpl: f.fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+      probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
+    });
+    expect(r.ok).toBe(false);
+    expect(r.uploadPending, JSON.stringify(r)).toBe(true);
+    expect(r.error).toBe("queued uploads pending");
+    expect(f.preuploadCalls).toBe(0);
+    const statePath = livePumpStatePath(dir, "t221");
+    const st = readLivePumpState(statePath);
+    expect(st?.parts).toHaveLength(2);
+    expect(st?.parts.every((p) => p.sealed !== false && !p.confirmed)).toBe(true);
+    expect(readConfirmedJournal(statePath).size).toBe(0);
+    expect(st?.parts.every((p) => existsSync(p.spoolPath))).toBe(true);
+  }, 30_000);
+
+  it("the disk watermark hard-stops a spool-only run before the first part opens", async () => {
+    const f = makeFake();
+    installFakeFfmpeg(Buffer.alloc(CHUNK * 5, 0x5a));
+    // Below the watermark from the very start: nothing may be recorded (a part that cannot be
+    // delivered must not be started), the run is a plain failure, and the alert carries the reason.
+    const lowStat = { bsize: 512, frsize: 512, blocks: 100n, bfree: 1n, bavail: 1n, files: 100n, ffree: 1n } as unknown as ReturnType<typeof import("node:fs").statfsSync>;
+    const alerts: string[] = [];
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxMs: 100, maxSegments: 5, submit: true, spoolMode: "full", quality: "origin",
+      submitMode: "spool", statfsImpl: (() => lowStat) as unknown as typeof import("node:fs").statfsSync,
+      fetchImpl: f.fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+      probeDuration: async () => 60, scanDtsGap: async () => null,
+      onAlert: (m) => alerts.push(m), log: () => {},
+    });
+    expect(r.ok).toBe(false);
+    expect(r.error ?? "").toContain("低于水位");
+    expect(r.uploadPending).toBeUndefined();
+    const st = readLivePumpState(livePumpStatePath(dir, "t221"));
+    expect(st?.parts ?? []).toHaveLength(0);
+    expect(alerts.some((m) => m.includes("低于水位"))).toBe(true);
+  }, 30_000);
+
+  it("queue confirmations in the journal are folded in at open; recording continues at the right index", async () => {
+    writeFileSync(spoolPathOf(0), "aaa");
+    writeFileSync(spoolPathOf(1), "bbb");
+    const statePath = seedState([{ index: 0, spoolPath: spoolPathOf(0) }, { index: 1, spoolPath: spoolPathOf(1) }], { queueManaged: true });
+    appendConfirmedJournal(statePath, { index: 0, bv: "BV1", at: 1, createdAt: 1 });
+    const f = makeFake();
+    installFakeFfmpeg(Buffer.alloc(CHUNK, 0x5a));
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxMs: 100, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      fetchImpl: f.fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+      log: () => {},
+    });
+    expect(r.uploadPending, JSON.stringify(r)).toBe(true);
+    // No Bilibili contact: part 1 is still the queue's, and the new part spools only.
+    expect(f.preuploadCalls).toBe(0);
+    const st = readLivePumpState(statePath);
+    expect(st?.parts[0]?.confirmed).toBe(true);
+    expect(st?.parts[1]?.confirmed).toBe(false);
+    // The new part continues at index 2 (no re-indexing over the queue-owned part).
+    expect(st?.parts).toHaveLength(3);
+    expect(st?.parts[2]?.index).toBe(2);
+    expect(st?.parts[2] ? existsSync(st.parts[2].spoolPath) : false).toBe(true);
+    expect(st?.bvid).toBe("BV1");
+    expect(st?.queueManaged).toBe(true);
+    expect(readConfirmedJournal(statePath).size).toBe(1);
+  }, 30_000);
+
+  it("sol P1-1: journal separator decision is fail-closed when the tail cannot be inspected", () => {
+    // The reader skips empty lines, so an extra separator is harmless while a MISSING one glues
+    // the next valid record onto a torn tail and loses it. Only a PROVEN trailing newline on a
+    // non-empty journal lets us skip it; anything unknown must write one.
+    expect(needsConfirmedJournalSeparator(undefined)).toBe(true); // fstat/open/read failed
+    expect(needsConfirmedJournalSeparator({ size: 5, lastByte: undefined })).toBe(true); // short read
+    expect(needsConfirmedJournalSeparator({ size: 5, lastByte: 0x31 })).toBe(true); // torn tail
+    expect(needsConfirmedJournalSeparator({ size: 5, lastByte: 0x0a })).toBe(false); // proven newline
+    expect(needsConfirmedJournalSeparator({ size: 0, lastByte: undefined })).toBe(false); // empty file
+  });
+
+  it("sol P1-2: a torn unterminated journal tail cannot swallow the next confirmation", async () => {
+    // A short write followed by a failed write (or a crash between writes) leaves an incomplete
+    // JSON line with NO trailing newline. Appending straight after it glues the next valid JSON
+    // onto the same line: the reader skips both, yet append/fsync returns ok and the chained
+    // cleanup deletes the spool — the state would show this part unconfirmed forever. The single
+    // writer must terminate that tail first so the NEW record is readable.
+    const statePath = livePumpStatePath(dir, "t221");
+    seedState([], { createdAt: 1 });
+    const journal = `${statePath}.confirmed`;
+    const good = { index: 0, bv: "BV1", at: 1, createdAt: 1 };
+    const torn = JSON.stringify({ index: 1, bv: "BV2", at: 2, createdAt: 1 }).slice(0, 18);
+    writeFileSync(journal, JSON.stringify(good) + "\n" + torn);
+    expect(readConfirmedJournal(statePath, 1).has(0)).toBe(true);
+    expect(readConfirmedJournal(statePath, 1).has(2)).toBe(false);
+
+    appendConfirmedJournal(statePath, { index: 2, bv: "BV3", at: 3, createdAt: 1 });
+
+    const after = readConfirmedJournal(statePath, 1);
+    expect(after.get(0)?.bv).toBe("BV1"); // the earlier complete record survives
+    expect(after.get(2)?.bv).toBe("BV3"); // the NEW confirmation is readable
+    expect(readFileSync(journal, "utf-8").endsWith("\n")).toBe(true);
+
+    // A complete record that merely lacked its newline must also survive (no gratuitous split).
+    writeFileSync(journal, JSON.stringify(good));
+    appendConfirmedJournal(statePath, { index: 3, bv: "BV4", at: 4, createdAt: 1 });
+    const after2 = readConfirmedJournal(statePath, 1);
+    expect(after2.get(0)?.bv).toBe("BV1");
+    expect(after2.get(3)?.bv).toBe("BV4");
+  });
+
+  it("journal entries from another session never confirm this session's parts", async () => {
+    // Same path, same indexes, previous broadcast: the journal must be session-scoped
+    // (createdAt), or a rolled-over session's confirmations would skip the new parts' enqueue
+    // and delete their spools (review P1).
+    writeFileSync(spoolPathOf(0), "aaa");
+    writeFileSync(spoolPathOf(1), "bbb");
+    const statePath = seedState([{ index: 0, spoolPath: spoolPathOf(0) }, { index: 1, spoolPath: spoolPathOf(1) }], { queueManaged: true });
+    appendConfirmedJournal(statePath, { index: 0, bv: "BVold", at: 1, createdAt: 999 });
+    appendConfirmedJournal(statePath, { index: 1, bv: "BVold", at: 1, createdAt: 999 });
+    const f = makeFake();
+    installFakeFfmpeg(Buffer.alloc(CHUNK, 0x5a));
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxMs: 100, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      fetchImpl: f.fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+      probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
+    });
+    // The stale journal did NOT settle this session: spool mode stays on, parts stay unconfirmed,
+    // the state never adopts the old bv.
+    expect(r.uploadPending).toBe(true);
+    expect(f.preuploadCalls).toBe(0);
+    const st = readLivePumpState(statePath);
+    expect(st?.parts.every((p) => !p.confirmed)).toBe(true);
+    expect(st?.bvid).toBeUndefined();
+  }, 30_000);
+
+  it("the watermark firing mid-run ends via the pending path (sealed parts enqueue), not a bare failure", async () => {
+    const f = makeFake();
+    installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 0x5a));
+    const lowStat = { bsize: 512, frsize: 512, blocks: 100n, bfree: 1n, bavail: 1n, files: 100n, ffree: 1n } as unknown as ReturnType<typeof import("node:fs").statfsSync>;
+    const okStat = { bsize: 4096, frsize: 4096, blocks: 10_000_000n, bfree: 9_000_000n, bavail: 9_000_000n, files: 1000n, ffree: 900n } as unknown as ReturnType<typeof import("node:fs").statfsSync>;
+    let statfsCalls = 0;
+    // Call 1: the pre-first-part gate (plenty of room). From call 2 on (the first cut) the disk
+    // is "full": the run must latch the stop, end via run-end, and exit 75 with the sealed part.
+    const statfsImpl = (): ReturnType<typeof import("node:fs").statfsSync> => (++statfsCalls === 1 ? okStat : lowStat) as ReturnType<typeof import("node:fs").statfsSync>;
+    const alerts: string[] = [];
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxMs: 100, maxSegments: 5, submit: true, spoolMode: "full", quality: "origin",
+      submitMode: "spool", statfsImpl: statfsImpl as unknown as typeof import("node:fs").statfsSync,
+      fetchImpl: f.fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+      probeDuration: async () => 60, scanDtsGap: async () => null,
+      onAlert: (m) => alerts.push(m), log: () => {},
+    });
+    expect(r.ok).toBe(false);
+    expect(r.uploadPending, JSON.stringify(r)).toBe(true);
+    expect(r.error).toBe("queued uploads pending");
+    const st = readLivePumpState(livePumpStatePath(dir, "t221"));
+    expect(st?.parts).toHaveLength(1);
+    expect(st?.parts[0]?.sealed).not.toBe(false);
+    expect(alerts.some((m) => m.includes("低于水位"))).toBe(true);
+  }, 30_000);
+
+  it("submitMode spool with zero-disk is refused (nothing to defer)", async () => {
+    await expect(runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, submit: true, spoolMode: "none", quality: "origin", submitMode: "spool",
+      fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+    })).rejects.toThrow(/spoolMode/);
+  });
+
+  it("a SIGKILL-mid-part unsealed row is validated at startup and promoted, not stuck forever", async () => {
+    // Non-empty spool, sealed:false, no pending: recover() cannot settle it and the enqueue skips
+    // it — without the startup promotion the row would keep queueManaged on forever (review P1).
+    writeFileSync(spoolPathOf(0), "aaa");
+    writeFileSync(spoolPathOf(1), "bbb");
+    const statePath = seedState([
+      { index: 0, spoolPath: spoolPathOf(0), sealed: false },
+      { index: 1, spoolPath: spoolPathOf(1) },
+    ], { queueManaged: true });
+    // sol P1-2: a stop-timeout row persisted WITHOUT the local gates has no POSITIVE marker and
+    // must be re-validated (default-deny rather than a negative flag that a write path can forget).
+    {
+      const st0 = readLivePumpState(statePath)!;
+      writeLivePumpState(statePath, { ...st0, parts: st0.parts.map((p) => p.index === 1 ? { ...p, validated: undefined } : p) });
+    }
+    const f = makeFake();
+    installFakeFfmpeg(Buffer.alloc(CHUNK, 0x5a));
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxMs: 100, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      fetchImpl: f.fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+      probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
+    });
+    expect(r.uploadPending).toBe(true);
+    const st = readLivePumpState(statePath);
+    // Part 0 was promoted to a deliverable sealed row with its REAL bytes; part 1 stayed the
+    // queue's; the new part continued at index 2.
+    expect(st?.parts[0]?.sealed).not.toBe(false);
+    expect(st?.parts[0]?.bytes).toBe(3);
+    expect(st?.parts[0]?.durationSec).toBe(60);
+    expect(st?.parts[1]?.validated).toBe(true);
+    expect(st?.parts[1]?.sealed).not.toBe(false);
+    expect(st?.parts).toHaveLength(3);
+    expect(st?.parts[2]?.index).toBe(2);
+  }, 30_000);
+
+  it("sol P1-1: local gate verdict is explicit, independent of a simultaneous transport error", async () => {
+    // The old code sniffed `uploadError` strings. A chunk PUT failure AND a failed local probe
+    // on the same part made the string look transport-only, cleared the finding and returned a
+    // zero duration — a corrupt file could then be enqueued and its spool cleaned up. The
+    // explicit flag and a positive duration gate close that intersection.
+    const spool = join(dir, "v.ts");
+    writeFileSync(spool, "intact-bytes");
+    const opts = {
+      session: undefined, line: "txa",
+      fileName: "v.ts", spoolPath: spool, spoolMode: "full" as const, cookiesPath: COOKIES,
+      scanDtsGap: async () => null, keepSpool: true, submit: false as const,
+    };
+    // finalizeRecordedPart mutates `rec` in place, so every case needs a FRESH object.
+    const transport = () => ({
+      sealedBy: "cut", spooledBytes: 12, chunksUploaded: 2, streamedBytes: 12, exit: { code: 0 },
+      uploadError: "chunk 3 PUT failed: boom",
+    } as unknown as Parameters<typeof finalizeRecordedPart>[0]["rec"]);
+    const r1 = await finalizeRecordedPart({ ...opts, rec: transport(), probeDuration: async () => 30 });
+    expect(r1.uploadError).toBeUndefined();
+    expect(r1.spoolDurationSec).toBe(30);
+    expect(r1.localValidationFailed).toBeUndefined();
+
+    // Local finding alone (probe unreadable) still survives.
+    const r2 = await finalizeRecordedPart({
+      ...opts,
+      rec: { ...transport(), uploadError: undefined } as Parameters<typeof finalizeRecordedPart>[0]["rec"],
+      probeDuration: async () => { throw new Error("no ts"); },
+    });
+    expect(r2.uploadError ?? "").toContain("产物自检失败");
+    expect(r2.localValidationFailed).toBe(true);
+    expect(r2.spoolDurationSec).toBe(0);
+
+    // THE INTERSECTION: transport error ALREADY present + probe returns 0. The transport string
+    // must not hide the local finding, and no caller may treat this as a deliverable part.
+    const r3 = await finalizeRecordedPart({ ...opts, rec: transport(), probeDuration: async () => 0 });
+    expect(r3.localValidationFailed).toBe(true);
+    expect(r3.spoolDurationSec).toBe(0);
+    expect(r3.uploadError ?? "").toContain("chunk 3 PUT failed");
+    expect(r3.uploadError ?? "").toContain("产物自检失败");
+
+    // ... and the same intersection with a THROWN probe.
+    const r4 = await finalizeRecordedPart({
+      ...opts, rec: transport(),
+      probeDuration: async () => { throw new Error("ffprobe exploded"); },
+    });
+    expect(r4.localValidationFailed).toBe(true);
+    expect(r4.spoolDurationSec).toBe(0);
+    expect(r4.uploadError ?? "").toContain("产物自检失败");
+
+    // The declared-size overflow is an explicit flag too: a transport error plus an oversized
+    // spool must still be refused (the sink's old `??=` could not record this reason at all).
+    const r5 = await finalizeRecordedPart({
+      ...opts,
+      rec: { ...transport(), sizeOverflow: true } as Parameters<typeof finalizeRecordedPart>[0]["rec"],
+      probeDuration: async () => 30,
+    });
+    expect(r5.localValidationFailed).toBe(true);
+    expect(r5.uploadError ?? "").toContain("chunk 3 PUT failed");
+
+    // A truncated spool with a valid probe is still a local failure.
+    const r6 = await finalizeRecordedPart({
+      ...opts,
+      rec: { ...transport(), spoolIncomplete: true } as Parameters<typeof finalizeRecordedPart>[0]["rec"],
+      probeDuration: async () => 30,
+    });
+    expect(r6.localValidationFailed).toBe(true);
+  }, 30_000);
+
+  it("sol P1-1: a REAL oversized sink sets sizeOverflow and segmentResultOf propagates it", async () => {
+    // The earlier test injected `sizeOverflow: true` into `rec`, so reverting either the sink's
+    // assignment OR segmentResultOf's propagation would still leave it green. Drive the real
+    // write path: a spool larger than the UPOS-declared cap must surface both flags.
+    const spool = join(dir, "overflow.ts");
+    const sink = new PartSink({
+      sizeCap: 4, spoolPath: spool, spoolMode: "full", queueCapacity: 64,
+      fetchImpl: makeFetch().fake,
+    });
+    sink.write(Buffer.from("abcdefghij"));
+    sink.seal();
+    const sr = await sink.finished;
+    expect(sr.sizeOverflow).toBe(true);
+    expect(sr.uploadError ?? "").toContain("超出声明大小");
+    const seg = segmentResultOf(
+      { tsDiscontinuities: 0 } as unknown as Parameters<typeof segmentResultOf>[0],
+      sr,
+      { code: 0 } as unknown as Parameters<typeof segmentResultOf>[2],
+    );
+    expect(seg.sizeOverflow).toBe(true);
+    expect(seg.uploadError ?? "").toContain("超出声明大小");
+  }, 30_000);
+
+  it("sol P1-1: a DTS scan that throws is a failed local gate in spool mode", async () => {
+    const spool = join(dir, "v.ts");
+    writeFileSync(spool, "intact-bytes");
+    const opts = {
+      session: undefined, line: "txa", fileName: "v.ts", spoolPath: spool,
+      spoolMode: "full" as const, cookiesPath: COOKIES, keepSpool: true, submit: false as const,
+      probeDuration: async () => 30,
+      scanDtsGap: async () => { throw new Error("ffprobe dts exploded"); },
+    };
+    const rec = () => ({
+      sealedBy: "cut", spooledBytes: 12, chunksUploaded: 2, streamedBytes: 12, exit: { code: 0 },
+      uploadError: "chunk 3 PUT failed: boom",
+    } as unknown as Parameters<typeof finalizeRecordedPart>[0]["rec"]);
+    const r = await finalizeRecordedPart({ ...opts, rec: rec() });
+    expect(r.localValidationFailed).toBe(true);
+    expect(r.uploadError ?? "").toContain("chunk 3 PUT failed");
+  }, 30_000);
+
+  it("sol P1-1: an unjudgeable DTS scan (undefined) is a failed local gate, not a pass", async () => {
+    // Production `ffprobeDtsGap()` returns null for clean, a gap object for a real jump, and
+    // undefined when it COULD NOT judge (timeout / non-zero exit / no scannable packets). A
+    // successful duration probe plus an indeterminate scan must never be marked validated,
+    // especially when a transport error is also present (the old string sniff could hide it).
+    const spool = join(dir, "v.ts");
+    writeFileSync(spool, "intact-bytes");
+    const base = {
+      session: undefined, line: "txa", fileName: "v.ts", spoolPath: spool,
+      spoolMode: "full" as const, cookiesPath: COOKIES, keepSpool: true, submit: false as const,
+      probeDuration: async () => 30,
+      scanDtsGap: async () => undefined as null | undefined,
+    };
+    const rec = () => ({
+      sealedBy: "cut", spooledBytes: 12, chunksUploaded: 2, streamedBytes: 12, exit: { code: 0 },
+      uploadError: "chunk 3 PUT failed: boom",
+    } as unknown as Parameters<typeof finalizeRecordedPart>[0]["rec"]);
+    const r = await finalizeRecordedPart({ ...base, rec: rec() });
+    expect(r.localValidationFailed).toBe(true);
+    expect(r.spoolDurationSec).toBe(30); // the probe DID succeed; the DTS verdict is what fails
+    // The transport string is preserved (it is real), but the AUTHORITATIVE verdict is the
+    // explicit flag — no string sniffing, no clearing the local finding.
+    expect(r.uploadError ?? "").toContain("chunk 3 PUT failed");
+    expect(r.localValidationFailed).toBe(true);
+
+    // Only `null` is a pass: the same file with a clean scan is deliverable.
+    const clean = await finalizeRecordedPart({
+      ...base, scanDtsGap: async () => null,
+      rec: { ...rec(), uploadError: undefined } as Parameters<typeof finalizeRecordedPart>[0]["rec"],
+    });
+    expect(clean.localValidationFailed).toBeUndefined();
+    expect(clean.spoolDurationSec).toBe(30);
+    expect(clean.uploadError).toBeUndefined();
+  }, 30_000);
+
+  it("sol P1-1: startup revalidation also rejects an unjudgeable DTS scan", async () => {
+    writeFileSync(spoolPathOf(0), "sealed-but-never-probed");
+    const statePath = seedState([{ index: 0, spoolPath: spoolPathOf(0), validated: false }], { queueManaged: true, bvid: "BV1" });
+    const f = makeFake();
+    installFakeFfmpeg(Buffer.alloc(CHUNK, 0x5a));
+    await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxMs: 100, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      fetchImpl: f.fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+      probeDuration: async () => 60, scanDtsGap: async () => undefined, log: () => {},
+    });
+    const st = readLivePumpState(statePath);
+    expect(st?.parts[0]?.validated).toBeUndefined();
+    expect(st?.parts[0]?.spoolIncomplete).toBe(true);
+    expect(st?.parts[0]?.confirmed).toBe(false);
+    expect(existsSync(spoolPathOf(0))).toBe(true);
+  }, 30_000);
+
+  it("a truncated crash row stays needs-manual even when a probe reads a duration", async () => {
+    // Review F1: sealed:false + spoolIncomplete must never be promoted — a truncated TS can
+    // still carry a positive duration, and promoting it would enqueue garbage.
+    writeFileSync(spoolPathOf(0), "truncated-but-probeable");
+    const statePath = seedState([
+      { index: 0, spoolPath: spoolPathOf(0), sealed: false },
+    ], { queueManaged: true });
+    {
+      const st0 = readLivePumpState(statePath)!;
+      writeLivePumpState(statePath, { ...st0, parts: st0.parts.map((p) => p.index === 0 ? { ...p, spoolIncomplete: true } : p) });
+    }
+    const f = makeFake();
+    installFakeFfmpeg(Buffer.alloc(CHUNK, 0x5a));
+    await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxMs: 100, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      fetchImpl: f.fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+      probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
+    });
+    const st = readLivePumpState(statePath);
+    expect(st?.parts[0]?.spoolIncomplete).toBe(true);
+    expect(st?.parts[0]?.durationSec).toBe(2); // the seed's declared duration: NOT the probe's 60
+  }, 30_000);
+
+  it("deliveryDeferred alone (no queue rows yet) keeps the next run in spool mode", async () => {
+    // Review F5: a mid-run handoff whose enqueue produced zero rows must not lose the intent —
+    // the next run keeps recording (spool mode) instead of direct recovery.
+    writeFileSync(spoolPathOf(0), "aaa");
+    const statePath = seedState([{ index: 0, spoolPath: spoolPathOf(0) }], { deliveryDeferred: true });
+    const f = makeFake();
+    installFakeFfmpeg(Buffer.alloc(CHUNK, 0x5a));
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxMs: 100, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      fetchImpl: f.fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+      probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
+    });
+    expect(r.uploadPending).toBe(true);
+    expect(f.preuploadCalls).toBe(0);
+    const st = readLivePumpState(statePath);
+    expect(st?.deliveryDeferred).toBe(true);
+    expect(st?.parts).toHaveLength(2);
+  }, 30_000);
+
+  it("a startup low watermark with undelivered parts hands them off instead of bare-failing", async () => {
+    // Review F6: below-watermark at startup + undelivered spools → the pending shape (the CLI
+    // enqueues), never a bare failure that would strand the only copies.
+    writeFileSync(spoolPathOf(0), "aaa");
+    const statePath = seedState([{ index: 0, spoolPath: spoolPathOf(0) }], { queueManaged: true });
+    const lowStat = { bsize: 512, frsize: 512, blocks: 100n, bfree: 1n, bavail: 1n, files: 100n, ffree: 1n } as unknown as ReturnType<typeof import("node:fs").statfsSync>;
+    const alerts: string[] = [];
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      submitMode: "spool", statfsImpl: (() => lowStat) as unknown as typeof import("node:fs").statfsSync,
+      fetchImpl: makeFake().fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+      probeDuration: async () => 60, scanDtsGap: async () => null,
+      onAlert: (m) => alerts.push(m), log: () => {},
+    });
+    expect(r.ok).toBe(false);
+    expect(r.uploadPending).toBe(true);
+    expect(r.error).toBe("queued uploads pending");
+    expect(alerts.some((m) => m.includes("低于水位"))).toBe(true);
+    expect(existsSync(spoolPathOf(0))).toBe(true);
+  }, 30_000);
+
+  it("a fully journal-settled session returns to direct mode", async () => {
+    writeFileSync(spoolPathOf(0), "aaa");
+    const statePath = seedState([{ index: 0, spoolPath: spoolPathOf(0) }], { queueManaged: true });
+    appendConfirmedJournal(statePath, { index: 0, bv: "BV1", at: 1, createdAt: 1 });
+    const f = makeFake();
+    installFakeFfmpeg(Buffer.alloc(CHUNK, 0x5a));
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxMs: 100, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      fetchImpl: f.fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+      probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
+    });
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(f.preuploadCalls).toBe(1);
+    const st = readLivePumpState(statePath);
+    expect(st?.parts.map((p) => p.confirmed)).toEqual([true, true]);
+    expect(st?.queueManaged).toBeUndefined();
+    expect(existsSync(spoolPathOf(0))).toBe(false); // confirmed and cleaned up
+  }, 30_000);
+
+  it("sol P1-2: SIGKILL after the seal but before validation leaves a bad file unvalidated", async () => {
+    // noteSealed writes real bytes + an estimated duration the moment a part is sealed. The
+    // background finalize (probe + DTS) has NOT run. Simulate that crash window with exactly that
+    // WAL row and a file the probe cannot read: startup must mark it needs-manual and it must keep
+    // NO positive `validated` marker, so `enqueueLivePumpPending` default-denies it (see the
+    // matching queue-level test). The spool is kept for a human.
+    writeFileSync(spoolPathOf(0), "sealed-but-never-probed");
+    const statePath = seedState([{ index: 0, spoolPath: spoolPathOf(0), validated: false }], { queueManaged: true, bvid: "BV1" });
+    const f = makeFake();
+    installFakeFfmpeg(Buffer.alloc(CHUNK, 0x5a));
+    await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxMs: 100, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      fetchImpl: f.fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+      probeDuration: async () => 0, scanDtsGap: async () => null, log: () => {},
+    });
+    const st = readLivePumpState(statePath);
+    expect(st?.parts[0]?.validated).toBeUndefined();
+    expect(st?.parts[0]?.spoolIncomplete).toBe(true);
+    expect(st?.parts[0]?.confirmed).toBe(false);
+    expect(existsSync(spoolPathOf(0))).toBe(true);
+  }, 30_000);
+
+  it("sol P1-3: an offline room hands off crash-time parts BEFORE waiting; stop returns pending", async () => {
+    // A queue-managed session that recorded new spool parts and was SIGKILLed before the show
+    // ended restarts into spool mode. If the room never goes live again, enqueueing only at run
+    // end would strand those parts forever. The early handoff and the idle-exit pending shape
+    // close both halves of that window.
+    writeFileSync(spoolPathOf(0), "aaa");
+    writeFileSync(spoolPathOf(1), "bbb");
+    const statePath = seedState([
+      { index: 0, spoolPath: spoolPathOf(0) },
+      { index: 1, spoolPath: spoolPathOf(1), validated: false }, // crash-time new part
+    ], { queueManaged: true, bvid: "BV1" });
+    const handoffs: string[] = [];
+    let polls = 0;
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      waitForBroadcast: true, idlePollMs: 1,
+      fetchImpl: makeFake().fake, fetch: async () => ({ living: false }), sleep: async () => {},
+      shouldStop: () => ++polls >= 3,
+      onHandoff: (p) => { handoffs.push(p); return { status: "owned" as const }; },
+      probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
+    });
+    expect(handoffs).toEqual([statePath]);
+    // Startup revalidation adopted the crash-time part with the positive marker.
+    expect(readLivePumpState(statePath)?.parts[1]?.validated).toBe(true);
+    expect(r.ok).toBe(false);
+    expect(r.uploadPending).toBe(true);
+    expect(r.outcome).not.toBe("idle");
+    expect(r.error).toBe("queued uploads pending");
+  }, 30_000);
+
+  it("sol P1-3: a SIGUSR2 drain while waiting offline returns uploadPending, not bare idle", async () => {
+    writeFileSync(spoolPathOf(0), "aaa");
+    const statePath = seedState([{ index: 0, spoolPath: spoolPathOf(0) }], { queueManaged: true, bvid: "BV1" });
+    const drain = new AbortController();
+    const handoffs: string[] = [];
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      waitForBroadcast: true, idlePollMs: 1, drainSignal: drain.signal,
+      fetchImpl: makeFake().fake, fetch: async () => ({ living: false }),
+      // Abort the drain only once the wait has begun (after the early handoff), never during
+      // openSession's own recovery sleeps.
+      sleep: async () => { if (handoffs.length) drain.abort(); },
+      onHandoff: (p) => { handoffs.push(p); return { status: "owned" as const }; },
+      probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
+    });
+    expect(handoffs).toEqual([statePath]);
+    expect(r.ok).toBe(false);
+    expect(r.uploadPending).toBe(true);
+    expect(r.outcome).not.toBe("idle");
+    expect(r.error).toBe("queued uploads pending");
+    // The queue marker must survive the pump's in-memory session (adoptQueueManaged).
+    expect(readLivePumpState(statePath)?.queueManaged).toBe(true);
+  }, 30_000);
+
+  it("sol P1-4: a retryable handoff failure returns uploadPending instead of waiting forever", async () => {
+    // A transient SQLite / cookie failure on the FIRST early enqueue must not be logged and
+    // forgotten while the pump waits (potentially forever) for a broadcast that never comes.
+    // The receipt goes back through the structured uploadPending / exit-75 / TaskManager path.
+    writeFileSync(spoolPathOf(0), "aaa");
+    const statePath = seedState([{ index: 0, spoolPath: spoolPathOf(0) }], { queueManaged: true, bvid: "BV1" });
+    const alerts: string[] = [];
+    let polls = 0;
+    let handoffs = 0;
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      waitForBroadcast: true, idlePollMs: 1,
+      fetchImpl: makeFake().fake, fetch: async () => ({ living: false }),
+      sleep: async () => { polls++; }, shouldStop: () => polls >= 3,
+      onHandoff: () => { handoffs++; return { status: "retryable" as const, detail: "sqlite is locked" }; },
+      onAlert: (m) => alerts.push(m),
+      probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
+    });
+    expect(handoffs).toBe(1);
+    expect(polls).toBe(0); // never entered the offline wait
+    expect(r.ok).toBe(false);
+    expect(r.uploadPending).toBe(true);
+    expect(r.outcome).not.toBe("idle");
+    expect(r.error).toBe("queued uploads pending");
+    expect(r.statePath).toBe(statePath);
+    expect(existsSync(spoolPathOf(0))).toBe(true); // spool + intent preserved
+    expect(alerts.some((m) => m.includes("sqlite is locked"))).toBe(true);
+  }, 30_000);
+
+  it("sol P1-4: a throwing handoff is a retryable receipt, not a swallowed success", async () => {
+    writeFileSync(spoolPathOf(0), "aaa");
+    seedState([{ index: 0, spoolPath: spoolPathOf(0) }], { queueManaged: true, bvid: "BV1" });
+    let polls = 0;
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      waitForBroadcast: true, idlePollMs: 1,
+      fetchImpl: makeFake().fake, fetch: async () => ({ living: false }),
+      sleep: async () => { polls++; }, shouldStop: () => polls >= 3,
+      onHandoff: async () => { throw new Error("cookies unreadable"); },
+      probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
+    });
+    expect(polls).toBe(0);
+    expect(r.uploadPending).toBe(true);
+    expect(r.error).toBe("queued uploads pending");
+  }, 30_000);
+
+  it("sol P1-4: a human-blocked handoff keeps recording wait but never claims delivery", async () => {
+    writeFileSync(spoolPathOf(0), "aaa");
+    const statePath = seedState([{ index: 0, spoolPath: spoolPathOf(0) }], { queueManaged: true, bvid: "BV1" });
+    const alerts: string[] = [];
+    let polls = 0;
+    let handoffs = 0;
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      waitForBroadcast: true, idlePollMs: 1,
+      fetchImpl: makeFake().fake, fetch: async () => ({ living: false }),
+      sleep: async () => { polls++; }, shouldStop: () => polls >= 3,
+      onHandoff: () => { handoffs++; return { status: "blocked" as const, detail: "needs-manual row" }; },
+      onAlert: (m) => alerts.push(m),
+      probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
+    });
+    expect(handoffs).toBe(1);
+    expect(polls).toBeGreaterThan(0); // the T-221 recording wait still runs
+    expect(r.uploadPending).toBe(true); // an idle exit still hands the backlog back
+    expect(r.outcome).not.toBe("idle");
+    expect(existsSync(spoolPathOf(0))).toBe(true);
+    expect(alerts.some((m) => m.includes("需人工"))).toBe(true);
+    expect(readLivePumpState(statePath)?.parts[0]?.confirmed).toBe(false);
   }, 30_000);
 });
