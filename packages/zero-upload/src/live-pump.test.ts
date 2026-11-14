@@ -5798,7 +5798,7 @@ describe("T-221 spool-mode continuation", () => {
       sizeCap: 4, spoolPath: spool, spoolMode: "full", queueCapacity: 64,
       fetchImpl: makeFetch().fake,
     });
-    sink.write(Buffer.from("0123456789"));
+    sink.write(Buffer.from("abcdefghij"));
     sink.seal();
     const sr = await sink.finished;
     expect(sr.sizeOverflow).toBe(true);
