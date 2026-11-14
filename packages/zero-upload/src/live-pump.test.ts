@@ -40,6 +40,9 @@ import {
   runStream,
   PartSink,
   runLivePump,
+  appendConfirmedJournal,
+  readConfirmedJournal,
+  finalizeRecordedPart,
   setSpawnForTest,
   sleepUnlessAborted,
   type ChildProcessLike,
@@ -5352,5 +5355,399 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  }, 30_000);
+});
+
+describe("T-221 spool-mode continuation", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "live-pump-t221-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  interface FakeOpts {
+    /** `complete` answers OK:0 for this 1-based session number. */
+    failComplete?: (n: number) => boolean;
+    /** The studio create/edit answers code 406 (the production rate-limit failure, T-219). */
+    rateLimitedSubmit?: boolean;
+  }
+  /** Minimal UPOS + studio fake (session numbers come from the upos path). */
+  function makeFake(opts: FakeOpts = {}) {
+    let preuploadCalls = 0;
+    const events: string[] = [];
+    const sessions = new Map<number, Array<{ partNumber: number; body: Buffer }>>();
+    let archive: string[] = [];
+    const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
+    const sessionOf = (u: URL): number => Number(/p(\d+)\.ts/.exec(u.pathname)?.[1] ?? 0);
+    const fake = (async (input: string | URL | Request, init?: RequestInit) => {
+      const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      const m = (init?.method ?? "GET").toUpperCase();
+      if (u.pathname === "/preupload") {
+        preuploadCalls++;
+        const n = sessionOf(u) || preuploadCalls;
+        return json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: `upos://b/p${n}.ts` });
+      }
+      if (m === "POST" && u.searchParams.has("uploads")) return json({ upload_id: `uid-${sessionOf(u)}` });
+      if (m === "PUT") {
+        const n = sessionOf(u);
+        const list = sessions.get(n) ?? [];
+        list.push({ partNumber: Number(u.searchParams.get("partNumber")), body: Buffer.from(init!.body as ArrayBuffer) });
+        sessions.set(n, list);
+        return new Response("", { status: 200 });
+      }
+      if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) {
+        const n = sessionOf(u);
+        if (opts.failComplete?.(n)) { events.push(`complete-fail ${n}`); return json({ OK: 0, message: "complete boom" }); }
+        events.push(`complete ${n}`);
+        return json({ OK: 1, key: `b/p${n}.ts` });
+      }
+      if (u.pathname === "/x/vu/web/add/v3" || u.pathname === "/x/vu/web/edit") {
+        const body = JSON.parse(String(init!.body)) as { videos: Array<{ filename: string }> };
+        if (opts.rateLimitedSubmit) { events.push("submit-406"); return json({ code: 406, message: "too fast" }); }
+        archive = body.videos.map((v) => v.filename);
+        events.push(`submit ${archive.join(",")}`);
+        return json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } });
+      }
+      if (u.pathname === "/x/vupre/web/archive/view") {
+        return json({ code: 0, data: { archive: { aid: 7, bvid: "BILIfake1", title: "t", tid: 21 }, videos: archive.map((f, i) => ({ cid: i + 1, filename: f })) } });
+      }
+      if (u.pathname === "/x/web/archives") return json({ code: 0, data: { arc_audits: [] } });
+      return json({ code: 0, data: {} });
+    }) as unknown as typeof fetch;
+    return { fake, events, get preuploadCalls() { return preuploadCalls; }, archive };
+  }
+
+  const seedState = (parts: Array<{ index: number; spoolPath: string; confirmed?: boolean; sealed?: boolean }>, extra: Partial<Record<string, unknown>> = {}): string => {
+    const statePath = livePumpStatePath(dir, "t221");
+    writeLivePumpState(statePath, {
+      schemaVersion: 1, room: "t221", createdAt: 1, title: "t", tid: 21, tag: "x", private: true, updatedAt: Date.now(),
+      parts: parts.map((p) => ({
+        index: p.index, spoolPath: p.spoolPath, filename: p.spoolPath.split("/").pop()!,
+        stem: `stem${p.index}`, title: "P" + (p.index + 1), bytes: 3, durationSec: 2, confirmed: p.confirmed ?? false,
+        ...(p.sealed === false ? { sealed: false as const } : {}),
+      })),
+      ...extra,
+    } as never);
+    return statePath;
+  };
+
+  const spoolPathOf = (index: number): string => join(dir, `${String.fromCharCode(97 + index)}_000.live.ts`);
+
+  it("submit failure mid-run hands the rest of the show to the queue and keeps recording", async () => {
+    // Session 1's studio submit hits the real production failure (406 rate limit): the run must
+    // NOT end, must not contact Bilibili for later parts, must keep both spools, and must end
+    // with the queue-handoff shape.
+    const f = makeFake({ rateLimitedSubmit: true });
+    installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 0x5a));
+    const alerts: string[] = [];
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxMs: 100, maxSegments: 2, submit: true, spoolMode: "full", quality: "origin",
+      fetchImpl: f.fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+      probeDuration: async () => 60, scanDtsGap: async () => null,
+      onAlert: (m) => alerts.push(m), log: () => {},
+    });
+    expect(r.segments[1]?.uploadError).toBeUndefined();
+    expect(r.ok).toBe(false);
+    expect(r.uploadPending).toBe(true);
+    expect(r.error).toBe("queued uploads pending");
+    // Bilibili contact stops at the handoff: part 1's session plus its (already fired) prefetch
+    // for part 2 — no further preuploads, and no successful studio submit afterwards.
+    expect(f.preuploadCalls).toBe(2);
+    expect(f.events.filter((e) => e.startsWith("submit-406")).length).toBeGreaterThan(0);
+    expect(f.events.some((e) => e.startsWith("submit "))).toBe(false);
+    const statePath = livePumpStatePath(dir, "t221");
+    const st = readLivePumpState(statePath);
+    expect(st?.parts).toHaveLength(2);
+    expect(st?.parts[0]?.confirmed).toBe(false);
+    expect(st?.parts[0]?.sealed).not.toBe(false);
+    expect(st?.parts[1]?.sealed).not.toBe(false);
+    expect(st?.pending).toBeUndefined();
+    expect(st?.parts.every((p) => !p.confirmed)).toBe(true);
+    expect(r.segments[0]?.uploadError).toBeTruthy();
+    expect(readConfirmedJournal(statePath).size).toBe(0);
+    // Both spools are on disk: the queue can deliver them after the run ends.
+    expect(st?.parts.every((p) => existsSync(p.spoolPath))).toBe(true);
+    expect(alerts.some((m) => m.includes("改为落盘"))).toBe(true);
+  }, 30_000);
+
+  it("spool submit mode records sealed parts without any Bilibili contact", async () => {
+    const f = makeFake();
+    installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 0x5a));
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxMs: 100, maxSegments: 2, submit: true, spoolMode: "full", quality: "origin",
+      submitMode: "spool",
+      fetchImpl: f.fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+      probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
+    });
+    expect(r.ok).toBe(false);
+    expect(r.uploadPending, JSON.stringify(r)).toBe(true);
+    expect(r.error).toBe("queued uploads pending");
+    expect(f.preuploadCalls).toBe(0);
+    const statePath = livePumpStatePath(dir, "t221");
+    const st = readLivePumpState(statePath);
+    expect(st?.parts).toHaveLength(2);
+    expect(st?.parts.every((p) => p.sealed !== false && !p.confirmed)).toBe(true);
+    expect(readConfirmedJournal(statePath).size).toBe(0);
+    expect(st?.parts.every((p) => existsSync(p.spoolPath))).toBe(true);
+  }, 30_000);
+
+  it("the disk watermark hard-stops a spool-only run before the first part opens", async () => {
+    const f = makeFake();
+    installFakeFfmpeg(Buffer.alloc(CHUNK * 5, 0x5a));
+    // Below the watermark from the very start: nothing may be recorded (a part that cannot be
+    // delivered must not be started), the run is a plain failure, and the alert carries the reason.
+    const lowStat = { bsize: 512, frsize: 512, blocks: 100n, bfree: 1n, bavail: 1n, files: 100n, ffree: 1n } as unknown as ReturnType<typeof import("node:fs").statfsSync>;
+    const alerts: string[] = [];
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxMs: 100, maxSegments: 5, submit: true, spoolMode: "full", quality: "origin",
+      submitMode: "spool", statfsImpl: (() => lowStat) as unknown as typeof import("node:fs").statfsSync,
+      fetchImpl: f.fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+      probeDuration: async () => 60, scanDtsGap: async () => null,
+      onAlert: (m) => alerts.push(m), log: () => {},
+    });
+    expect(r.ok).toBe(false);
+    expect(r.error ?? "").toContain("低于水位");
+    expect(r.uploadPending).toBeUndefined();
+    const st = readLivePumpState(livePumpStatePath(dir, "t221"));
+    expect(st?.parts ?? []).toHaveLength(0);
+    expect(alerts.some((m) => m.includes("低于水位"))).toBe(true);
+  }, 30_000);
+
+  it("queue confirmations in the journal are folded in at open; recording continues at the right index", async () => {
+    writeFileSync(spoolPathOf(0), "aaa");
+    writeFileSync(spoolPathOf(1), "bbb");
+    const statePath = seedState([{ index: 0, spoolPath: spoolPathOf(0) }, { index: 1, spoolPath: spoolPathOf(1) }], { queueManaged: true });
+    appendConfirmedJournal(statePath, { index: 0, bv: "BV1", at: 1, createdAt: 1 });
+    const f = makeFake();
+    installFakeFfmpeg(Buffer.alloc(CHUNK, 0x5a));
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxMs: 100, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      fetchImpl: f.fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+      log: () => {},
+    });
+    expect(r.uploadPending, JSON.stringify(r)).toBe(true);
+    // No Bilibili contact: part 1 is still the queue's, and the new part spools only.
+    expect(f.preuploadCalls).toBe(0);
+    const st = readLivePumpState(statePath);
+    expect(st?.parts[0]?.confirmed).toBe(true);
+    expect(st?.parts[1]?.confirmed).toBe(false);
+    // The new part continues at index 2 (no re-indexing over the queue-owned part).
+    expect(st?.parts).toHaveLength(3);
+    expect(st?.parts[2]?.index).toBe(2);
+    expect(st?.parts[2] ? existsSync(st.parts[2].spoolPath) : false).toBe(true);
+    expect(st?.bvid).toBe("BV1");
+    expect(st?.queueManaged).toBe(true);
+    expect(readConfirmedJournal(statePath).size).toBe(1);
+  }, 30_000);
+
+  it("journal entries from another session never confirm this session's parts", async () => {
+    // Same path, same indexes, previous broadcast: the journal must be session-scoped
+    // (createdAt), or a rolled-over session's confirmations would skip the new parts' enqueue
+    // and delete their spools (review P1).
+    writeFileSync(spoolPathOf(0), "aaa");
+    writeFileSync(spoolPathOf(1), "bbb");
+    const statePath = seedState([{ index: 0, spoolPath: spoolPathOf(0) }, { index: 1, spoolPath: spoolPathOf(1) }], { queueManaged: true });
+    appendConfirmedJournal(statePath, { index: 0, bv: "BVold", at: 1, createdAt: 999 });
+    appendConfirmedJournal(statePath, { index: 1, bv: "BVold", at: 1, createdAt: 999 });
+    const f = makeFake();
+    installFakeFfmpeg(Buffer.alloc(CHUNK, 0x5a));
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxMs: 100, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      fetchImpl: f.fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+      probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
+    });
+    // The stale journal did NOT settle this session: spool mode stays on, parts stay unconfirmed,
+    // the state never adopts the old bv.
+    expect(r.uploadPending).toBe(true);
+    expect(f.preuploadCalls).toBe(0);
+    const st = readLivePumpState(statePath);
+    expect(st?.parts.every((p) => !p.confirmed)).toBe(true);
+    expect(st?.bvid).toBeUndefined();
+  }, 30_000);
+
+  it("the watermark firing mid-run ends via the pending path (sealed parts enqueue), not a bare failure", async () => {
+    const f = makeFake();
+    installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 0x5a));
+    const lowStat = { bsize: 512, frsize: 512, blocks: 100n, bfree: 1n, bavail: 1n, files: 100n, ffree: 1n } as unknown as ReturnType<typeof import("node:fs").statfsSync>;
+    const okStat = { bsize: 4096, frsize: 4096, blocks: 10_000_000n, bfree: 9_000_000n, bavail: 9_000_000n, files: 1000n, ffree: 900n } as unknown as ReturnType<typeof import("node:fs").statfsSync>;
+    let statfsCalls = 0;
+    // Call 1: the pre-first-part gate (plenty of room). From call 2 on (the first cut) the disk
+    // is "full": the run must latch the stop, end via run-end, and exit 75 with the sealed part.
+    const statfsImpl = (): ReturnType<typeof import("node:fs").statfsSync> => (++statfsCalls === 1 ? okStat : lowStat) as ReturnType<typeof import("node:fs").statfsSync>;
+    const alerts: string[] = [];
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxMs: 100, maxSegments: 5, submit: true, spoolMode: "full", quality: "origin",
+      submitMode: "spool", statfsImpl: statfsImpl as unknown as typeof import("node:fs").statfsSync,
+      fetchImpl: f.fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+      probeDuration: async () => 60, scanDtsGap: async () => null,
+      onAlert: (m) => alerts.push(m), log: () => {},
+    });
+    expect(r.ok).toBe(false);
+    expect(r.uploadPending, JSON.stringify(r)).toBe(true);
+    expect(r.error).toBe("queued uploads pending");
+    const st = readLivePumpState(livePumpStatePath(dir, "t221"));
+    expect(st?.parts).toHaveLength(1);
+    expect(st?.parts[0]?.sealed).not.toBe(false);
+    expect(alerts.some((m) => m.includes("低于水位"))).toBe(true);
+  }, 30_000);
+
+  it("submitMode spool with zero-disk is refused (nothing to defer)", async () => {
+    await expect(runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, submit: true, spoolMode: "none", quality: "origin", submitMode: "spool",
+      fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+    })).rejects.toThrow(/spoolMode/);
+  });
+
+  it("a SIGKILL-mid-part unsealed row is validated at startup and promoted, not stuck forever", async () => {
+    // Non-empty spool, sealed:false, no pending: recover() cannot settle it and the enqueue skips
+    // it — without the startup promotion the row would keep queueManaged on forever (review P1).
+    writeFileSync(spoolPathOf(0), "aaa");
+    writeFileSync(spoolPathOf(1), "bbb");
+    const statePath = seedState([
+      { index: 0, spoolPath: spoolPathOf(0), sealed: false },
+      { index: 1, spoolPath: spoolPathOf(1) },
+    ], { queueManaged: true });
+    // Review F2: a stop-timeout row persisted WITHOUT the local gates must also be re-validated.
+    {
+      const st0 = readLivePumpState(statePath)!;
+      writeLivePumpState(statePath, { ...st0, parts: st0.parts.map((p) => p.index === 1 ? { ...p, needsValidation: true } : p) });
+    }
+    const f = makeFake();
+    installFakeFfmpeg(Buffer.alloc(CHUNK, 0x5a));
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxMs: 100, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      fetchImpl: f.fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+      probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
+    });
+    expect(r.uploadPending).toBe(true);
+    const st = readLivePumpState(statePath);
+    // Part 0 was promoted to a deliverable sealed row with its REAL bytes; part 1 stayed the
+    // queue's; the new part continued at index 2.
+    expect(st?.parts[0]?.sealed).not.toBe(false);
+    expect(st?.parts[0]?.bytes).toBe(3);
+    expect(st?.parts[0]?.durationSec).toBe(60);
+    expect(st?.parts[1]?.needsValidation).toBeUndefined();
+    expect(st?.parts[1]?.sealed).not.toBe(false);
+    expect(st?.parts).toHaveLength(3);
+    expect(st?.parts[2]?.index).toBe(2);
+  }, 30_000);
+
+  it("finalizeRecordedPart(submit:false) drops transport uploadError but keeps local findings", async () => {
+    // Review F7: a part that was mid-upload when the run switched to spool may carry a transport
+    // failure (chunk PUT / backpressure) on an otherwise intact file — the queue must still take
+    // it. Only local-gate findings (probe unreadable, DTS gap, truncation) mark it needs-manual.
+    const spool = join(dir, "v.ts");
+    writeFileSync(spool, "intact-bytes");
+    const opts = {
+      session: undefined, line: "txa",
+      fileName: "v.ts", spoolPath: spool, spoolMode: "full" as const, cookiesPath: COOKIES,
+      scanDtsGap: async () => null, keepSpool: true, submit: false as const,
+    };
+    const transport = {
+      sealedBy: "cut", spooledBytes: 12, chunksUploaded: 2, streamedBytes: 12, exit: { code: 0 },
+      uploadError: "chunk 3 PUT failed: boom",
+    } as unknown as Parameters<typeof finalizeRecordedPart>[0]["rec"];
+    const r1 = await finalizeRecordedPart({ ...opts, rec: transport, probeDuration: async () => 30 });
+    expect(r1.uploadError).toBeUndefined();
+    expect(r1.spoolDurationSec).toBe(30);
+    // A local finding survives (probe unreadable).
+    const r2 = await finalizeRecordedPart({
+      ...opts,
+      rec: { ...transport, uploadError: undefined } as Parameters<typeof finalizeRecordedPart>[0]["rec"],
+      probeDuration: async () => { throw new Error("no ts"); },
+    });
+    expect(r2.uploadError ?? "").toContain("产物自检失败");
+  }, 30_000);
+
+  it("a truncated crash row stays needs-manual even when a probe reads a duration", async () => {
+    // Review F1: sealed:false + spoolIncomplete must never be promoted — a truncated TS can
+    // still carry a positive duration, and promoting it would enqueue garbage.
+    writeFileSync(spoolPathOf(0), "truncated-but-probeable");
+    const statePath = seedState([
+      { index: 0, spoolPath: spoolPathOf(0), sealed: false },
+    ], { queueManaged: true });
+    {
+      const st0 = readLivePumpState(statePath)!;
+      writeLivePumpState(statePath, { ...st0, parts: st0.parts.map((p) => p.index === 0 ? { ...p, spoolIncomplete: true } : p) });
+    }
+    const f = makeFake();
+    installFakeFfmpeg(Buffer.alloc(CHUNK, 0x5a));
+    await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxMs: 100, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      fetchImpl: f.fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+      probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
+    });
+    const st = readLivePumpState(statePath);
+    expect(st?.parts[0]?.spoolIncomplete).toBe(true);
+    expect(st?.parts[0]?.durationSec).toBe(2); // the seed's declared duration: NOT the probe's 60
+  }, 30_000);
+
+  it("deliveryDeferred alone (no queue rows yet) keeps the next run in spool mode", async () => {
+    // Review F5: a mid-run handoff whose enqueue produced zero rows must not lose the intent —
+    // the next run keeps recording (spool mode) instead of direct recovery.
+    writeFileSync(spoolPathOf(0), "aaa");
+    const statePath = seedState([{ index: 0, spoolPath: spoolPathOf(0) }], { deliveryDeferred: true });
+    const f = makeFake();
+    installFakeFfmpeg(Buffer.alloc(CHUNK, 0x5a));
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxMs: 100, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      fetchImpl: f.fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+      probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
+    });
+    expect(r.uploadPending).toBe(true);
+    expect(f.preuploadCalls).toBe(0);
+    const st = readLivePumpState(statePath);
+    expect(st?.deliveryDeferred).toBe(true);
+    expect(st?.parts).toHaveLength(2);
+  }, 30_000);
+
+  it("a startup low watermark with undelivered parts hands them off instead of bare-failing", async () => {
+    // Review F6: below-watermark at startup + undelivered spools → the pending shape (the CLI
+    // enqueues), never a bare failure that would strand the only copies.
+    writeFileSync(spoolPathOf(0), "aaa");
+    const statePath = seedState([{ index: 0, spoolPath: spoolPathOf(0) }], { queueManaged: true });
+    const lowStat = { bsize: 512, frsize: 512, blocks: 100n, bfree: 1n, bavail: 1n, files: 100n, ffree: 1n } as unknown as ReturnType<typeof import("node:fs").statfsSync>;
+    const alerts: string[] = [];
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      submitMode: "spool", statfsImpl: (() => lowStat) as unknown as typeof import("node:fs").statfsSync,
+      fetchImpl: makeFake().fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+      probeDuration: async () => 60, scanDtsGap: async () => null,
+      onAlert: (m) => alerts.push(m), log: () => {},
+    });
+    expect(r.ok).toBe(false);
+    expect(r.uploadPending).toBe(true);
+    expect(r.error).toBe("queued uploads pending");
+    expect(alerts.some((m) => m.includes("低于水位"))).toBe(true);
+    expect(existsSync(spoolPathOf(0))).toBe(true);
+  }, 30_000);
+
+  it("a fully journal-settled session returns to direct mode", async () => {
+    writeFileSync(spoolPathOf(0), "aaa");
+    const statePath = seedState([{ index: 0, spoolPath: spoolPathOf(0) }], { queueManaged: true });
+    appendConfirmedJournal(statePath, { index: 0, bv: "BV1", at: 1, createdAt: 1 });
+    const f = makeFake();
+    installFakeFfmpeg(Buffer.alloc(CHUNK, 0x5a));
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxMs: 100, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      fetchImpl: f.fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+      probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
+    });
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(f.preuploadCalls).toBe(1);
+    const st = readLivePumpState(statePath);
+    expect(st?.parts.map((p) => p.confirmed)).toEqual([true, true]);
+    expect(st?.queueManaged).toBeUndefined();
+    expect(existsSync(spoolPathOf(0))).toBe(false); // confirmed and cleaned up
   }, 30_000);
 });

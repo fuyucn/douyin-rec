@@ -110,7 +110,11 @@ export const uploadPrepProcessor: Processor = {
       let total = 0;
       for (const f of job.inputs) total += statSync(f).size;
       return total;
-    } catch { return 0; }
+    } catch {
+      // Unknown estimate must NOT read as zero: the runner treats exact 0 as "no new disk usage"
+      // and admits the job below the watermark (T-221 drain exception). Fail closed instead.
+      return Number.NaN;
+    }
   },
   async run(job: ProcessJob, ctx: ProcessContext): Promise<ProcessResult> {
     const specs = job.params as Partial<PrepSpec>;

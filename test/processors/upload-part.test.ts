@@ -7,7 +7,7 @@ import {
   APPEND_AMBIGUOUS_MARKER, PART_KINDS, jobIdOf, type ProcessContext, type ProcessJob, type PartCtx,
 } from "@drec/core";
 import { makeUploadPartProcessor, shouldChainCleanup, PART_WORKFLOW_PARAM, uploadPartProcessor } from "@drec/bilibili-upload";
-import { livePumpStatePath, readLivePumpState, writeLivePumpState, type LivePumpState } from "@drec/zero-upload";
+import { livePumpStatePath, readConfirmedJournal, readLivePumpState, writeLivePumpState, type LivePumpState } from "@drec/zero-upload";
 import type { BiliupHooks } from "../../packages/bilibili-upload/src/run-biliup.js";
 import { parseSsAcked } from "../../packages/bilibili-upload/src/biliup-progress.js";
 
@@ -373,10 +373,12 @@ describe("upload-part processor", () => {
       const jobLive = job(f, { params: { [PART_WORKFLOW_PARAM]: "live-pump", liveStatePath: statePath } });
       expect(p.validate(jobLive)).toBeNull();
       await p.run(jobLive, pc());
+      // T-221: the confirmation lands in the journal, not in the state (the pump owns the state
+      // file while it keeps recording). Cleanup may chain, but the state is untouched.
       const after = readLivePumpState(statePath);
-      expect(after?.parts[0]?.confirmed).toBe(true);
-      expect(after?.bvid).toBe(BV);
-      expect(after?.queueManaged).toBeUndefined(); // no later unconfirmed part is waiting
+      expect(after?.parts[0]?.confirmed).toBe(false);
+      expect(after?.bvid).toBeUndefined();
+      expect(readConfirmedJournal(statePath).get(0)?.bv).toBe(BV);
       expect(existsSync(join(dir, "a_000.rolling.json"))).toBe(false);
       // The untrusted path rule is enforced before the transfer starts.
       expect(p.validate(job(f, { params: { [PART_WORKFLOW_PARAM]: "live-pump", liveStatePath: "/tmp/nope.json" } }))).toMatch(/state/);

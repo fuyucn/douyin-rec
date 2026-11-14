@@ -25,6 +25,7 @@
  */
 import { spawn } from "node:child_process";
 import {
+  appendFileSync,
   closeSync,
   existsSync,
   fsyncSync,
@@ -35,6 +36,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  statfsSync,
   unlinkSync,
   writeFileSync,
   writeSync,
@@ -53,7 +55,7 @@ import {
   type UposPart,
   type StudioVideo,
 } from "./upos-stream.js";
-import { isSameBroadcastGap, isUploadRateLimited, noteRecorderProgress, type DanmuMessage, type LivePumpReporter, type PartSubmitter, type UploadPolicy } from "@drec/core";
+import { freeGBOf, isSameBroadcastGap, isUploadRateLimited, noteRecorderProgress, resolveDiskMinGB, type DanmuMessage, type LivePumpReporter, type PartSubmitter, type UploadPolicy } from "@drec/core";
 import { addArchiveToSeasonIfConfigured, seasonCheckpointState } from "@drec/bilibili-api";
 import { ffprobeDuration, ffprobeDtsGap, type DtsGap } from "@drec/post-process";
 import { TsCutter, type CutterEvent, type PartTiming } from "./ts-cutter.js";
@@ -336,7 +338,21 @@ export interface LivePumpState {
      * schemaVersion stays 1 on purpose — a version bump would make every existing state unreadable.
      */
     sealed?: boolean;
+    /**
+     * T-221 (review): the row was persisted WITHOUT passing the local product gates (probe/DTS) —
+     * e.g. a stop-timeout keepOrLose in spool mode. The queue must not take it; the startup
+     * validation either promotes it (gates pass) or marks it needs-manual.
+     */
+    needsValidation?: boolean;
   }>;
+  /**
+   * T-221 (review F5): the run degraded to spool-only delivery mid-flight (a submit failure handed
+   * the rest of the show to the queue) but the enqueue produced zero rows (e.g. the pending index
+   * is still an order hole). Unlike `queueManaged` this does NOT mean the queue owns anything —
+   * it only tells the next run to keep recording in spool mode instead of entering direct
+   * recovery (which would consume restart budget without recording).
+   */
+  deliveryDeferred?: boolean;
   /**
    * The node proc-queue owns the remaining sealed parts (T-220). A restart must not whole-file
    * resubmit them: the queue may still be uploading them. The queue helper clears this once every
@@ -399,13 +415,93 @@ export function livePumpHasUnconfirmed(path: string): boolean {
   if (!existsSync(path)) return false;
   const state = readLivePumpState(path);
   if (!state) return true;
-  return !!state.pending || state.parts.some((p) => !p?.confirmed);
+  // T-221: the queue records confirmations in the journal, not in the state (the pump owns the
+  // state file while it keeps recording). A part the journal already confirmed is settled even
+  // though the state row still says unconfirmed.
+  const journal = readConfirmedJournal(path, state.createdAt);
+  return !!(state.pending && !journal.has(state.pending.partIndex))
+    || state.parts.some((p) => !p?.confirmed && !journal.has(p.index));
+}
+
+/** One queue-proven confirmation, appended to `<state>.confirmed` (T-221). */
+export interface ConfirmedJournalEntry {
+  index: number;
+  bv: string;
+  at: number;
+  /** The session the entry belongs to (`state.createdAt`). A rolled-over session must never
+   * have its journal confirm a NEW session's parts (same indexes, same path, new broadcast). */
+  createdAt: number;
+}
+
+/** The confirmation journal lives beside the state; each line is one confirmed part. */
+export function confirmedJournalPath(statePath: string): string {
+  return `${statePath}.confirmed`;
 }
 
 /**
- * T-220 queue adapter: mark one sealed live-pump part confirmed after the node proc-queue's
- * `upload-part` (biliup transport) proved it. The queue may still be uploading later parts, so
- * this does not clear `queueManaged` until every part and the WAL are settled.
+ * Read the journal as index → entry (last line wins). A missing/corrupt file yields an empty map:
+ * the journal is an appendix, and a corrupt line must not make confirmed parts look unconfirmed
+ * (that would re-upload them). Unparseable lines are skipped individually.
+ */
+export function readConfirmedJournal(statePath: string, expectedCreatedAt?: number): Map<number, ConfirmedJournalEntry> {
+  const map = new Map<number, ConfirmedJournalEntry>();
+  const file = confirmedJournalPath(statePath);
+  if (!existsSync(file)) return map;
+  let raw: string;
+  try {
+    raw = readFileSync(file, "utf-8");
+  } catch {
+    return map;
+  }
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const e = JSON.parse(trimmed) as ConfirmedJournalEntry;
+      if (typeof e?.index !== "number" || typeof e?.bv !== "string" || !e.bv) continue;
+      // Session isolation (review P1): entries from a previous session (rolled-over state,
+      // same path, same indexes) must not confirm this session's parts. Entries written before
+      // this field existed are ignored as well — never claim an unproven part.
+      if (expectedCreatedAt !== undefined && e.createdAt !== expectedCreatedAt) continue;
+      map.set(e.index, e);
+    } catch { /* skip the bad line; the rest of the journal stays valid */ }
+  }
+  return map;
+}
+
+/** Append one confirmation. Single line per write so concurrent appends cannot interleave. */
+/** Append one queue-proven confirmation to `<state>.confirmed` (T-221). Exported for tests. */
+export function appendConfirmedJournal(statePath: string, entry: ConfirmedJournalEntry): void {
+  mkdirSync(dirname(statePath), { recursive: true });
+  // fsync before returning: the caller deletes the spool right after (cleanup chain), so a
+  // lost page cache would leave a confirmed-in-queue part that nothing can settle again.
+  const fd = openSync(confirmedJournalPath(statePath), "a");
+  try {
+    // POSIX writeSync may return a short count without throwing (review P2): a partial line that
+    // survives fsync would be skipped by the reader and the confirmation lost. Write to completion.
+    const data = Buffer.from(JSON.stringify(entry) + "\n", "utf-8");
+    let off = 0;
+    while (off < data.length) {
+      const n = writeSync(fd, data.subarray(off));
+      if (!(n > 0)) throw new Error(`journal writeSync 返回 ${n},写入未推进`);
+      off += n;
+    }
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * T-220 queue adapter, T-221 journal form: mark one sealed live-pump part confirmed after the
+ * node proc-queue's `upload-part` (biliup transport) proved it.
+ *
+ * The confirmation lands in the append-only journal (`<state>.confirmed`), NOT in the state
+ * file: since T-221 the pump keeps recording while the queue uploads, so the state file has a
+ * live writer (the pump's own persist) and must not be rewritten from the queue process. The
+ * pump reconciles the journal into the state at open and at run end. The journal is the queue's
+ * single-writer record; the spool is deleted by the chained `cleanup-part` only after this
+ * returns ok.
  *
  * Inputs are already validated by the processor: `index` is the live state's 0-based part index,
  * `bv` an explicit archive id, `fp` the in-queue fingerprint. Any mismatch is a hard error: the
@@ -422,12 +518,16 @@ export function confirmLivePumpPart(
   if (!state) return { ok: false, error: "live state missing or unreadable: " + statePath };
   const part = state.parts.find((p) => p.index === index);
   if (!part) return { ok: false, error: "live state has no part index " + index };
+  const journal = readConfirmedJournal(statePath, state.createdAt);
   if (state.bvid && state.bvid !== bv) {
     return { ok: false, error: "live state bvid does not match the queue result: " + state.bvid + " vs " + bv };
   }
-  if (part.confirmed) {
-    if (state.bvid && state.bvid !== bv) {
-      return { ok: false, error: "live part already confirmed under another bv: " + state.bvid + " vs " + bv };
+  if (part.confirmed || journal.has(index)) {
+    // Idempotent re-confirm: the same part proven twice (queue retry after a lost ack) must not
+    // duplicate the journal line's effect. A DIFFERENT bv for the same index is still an error.
+    const prev = journal.get(index);
+    if (prev && prev.bv !== bv) {
+      return { ok: false, error: "live part already confirmed under another bv: " + prev.bv + " vs " + bv };
     }
     return { ok: true };
   }
@@ -441,21 +541,11 @@ export function confirmLivePumpPart(
   if (now.size !== fp.size || now.mtimeMs !== fp.mtimeMs) {
     return { ok: false, error: "live part fingerprint changed after queue upload" };
   }
-  const parts = state.parts.map((p) => p.index === index ? { ...p, confirmed: true } : p);
-  const pending = state.pending && state.pending.partIndex === index ? undefined : state.pending;
-  const settled = !pending && parts.every((p) => p.confirmed);
-  const next: LivePumpState = {
-    ...state,
-    bvid: state.bvid ?? bv,
-    parts,
-    ...(pending ? { pending } : { pending: undefined }),
-    ...(settled ? { queueManaged: undefined } : { queueManaged: true }),
-  };
   try {
-    writeLivePumpState(statePath, next);
+    appendConfirmedJournal(statePath, { index, bv, at: Date.now(), createdAt: state.createdAt });
     return { ok: true };
   } catch (e) {
-    return { ok: false, error: "live state write failed: " + String((e as Error)?.message ?? e) };
+    return { ok: false, error: "confirmation journal append failed: " + String((e as Error)?.message ?? e) };
   }
 }
 
@@ -533,6 +623,13 @@ function rolloverStaleState(path: string, room: string, nowMs: number, log: (msg
     let archived = `${path}${ARCHIVED_SUFFIX}${nowMs}`;
     for (let n = 1; existsSync(archived); n++) archived = `${path}${ARCHIVED_SUFFIX}${nowMs}-${n}`; // rename would overwrite
     renameSync(path, archived);
+    // T-221 (review P1): the confirmation journal belongs to THIS session. A new broadcast reuses
+    // the same path and the same part indexes — a stale journal left in place would make the new
+    // session's parts look confirmed (skip enqueue / delete spools). Archive it beside the state.
+    const journalFile = confirmedJournalPath(path);
+    if (existsSync(journalFile)) {
+      try { renameSync(journalFile, `${archived}.confirmed`); } catch { /* best effort */ }
+    }
     try { unlinkSync(activityPathOf(path)); } catch { /* marker is disposable */ }
     const msg = `直播直传旧状态${reason},已原样归档到 ${archived}(含未确认分 P 与暂存文件),本场开新稿件继续录制,需人工核对旧稿件`;
     log(`[直播直传] ${reason}; archived old state to ${archived}, starting a new submission`);
@@ -541,7 +638,9 @@ function rolloverStaleState(path: string, room: string, nowMs: number, log: (msg
   const state = readLivePumpState(path);
   if (!state) return archive("无法读取或已损坏", true) || undefined;
   if (state.room !== room) return archive(`房间不匹配(${state.room})`, true) || undefined;
-  const unconfirmed = !!state.pending || state.parts.some((p) => !p.confirmed);
+  // T-221: journal-aware — a part the queue already confirmed (journal entry, state row still
+  // unconfirmed) is settled, so a fully-delivered queue-managed state ages out normally.
+  const unconfirmed = livePumpHasUnconfirmed(path);
   // T-220: a queue-managed state is active work, not a finished broadcast. Ageing it out would
   // archive the very state the queue is about to confirm (and lose the association mid-upload).
   if (state.queueManaged && unconfirmed) return undefined;
@@ -574,7 +673,10 @@ export function spoolSweepSafe(spoolDir: string, room: string): boolean {
   const base = basename(live) + ARCHIVED_SUFFIX;
   try {
     for (const f of readdirSync(spoolDir)) {
-      if (f.startsWith(base) && !readLivePumpState(join(spoolDir, f))) return false;
+      // T-221 sidecars ride on archived names too (`…archived-123.confirmed`); they are not
+      // states and a parse failure here would disable the sweep forever (review P2).
+      if (!f.startsWith(base) || f.endsWith(".confirmed") || f.endsWith(".activity")) continue;
+      if (!readLivePumpState(join(spoolDir, f))) return false;
     }
   } catch { /* spool dir missing: nothing to protect */ }
   return true;
@@ -586,7 +688,8 @@ export function archivedSpoolPathsToKeep(spoolDir: string, room: string): string
   const out: string[] = [];
   try {
     for (const f of readdirSync(spoolDir)) {
-      if (f.startsWith(base)) out.push(...spoolPathsToKeep(readLivePumpState(join(spoolDir, f))));
+      if (!f.startsWith(base) || f.endsWith(".confirmed") || f.endsWith(".activity")) continue;
+      out.push(...spoolPathsToKeep(readLivePumpState(join(spoolDir, f))));
     }
   } catch { /* spool dir missing: nothing archived */ }
   return out;
@@ -736,6 +839,14 @@ export class LivePumpSession {
       // A resumed session belongs to the archive created by the original title. Keep that
       // identity, but record the caller's current options for diagnostics.
       this.log(`[直播直传] resumed state ${this.statePath} (${loaded.parts.length} parts, title=${loaded.title})`);
+      // T-221: fold the queue's confirmation journal in at construction, so every downstream
+      // judgment (hasUnconfirmed, recover, head-of-line) sees journal-confirmed parts as settled.
+      const rec = this.reconcileConfirmedJournal();
+      if (rec.changed) {
+        this.log(rec.unconfirmedRemain
+          ? "[直播直传] 已收编队列确认日志(仍有未确认分 P 待队列补传)"
+          : "[直播直传] 已收编队列确认日志(全部分 P 已确认)");
+      }
     }
   }
 
@@ -969,6 +1080,8 @@ export class LivePumpSession {
     spoolIncomplete?: boolean;
     /** `false` = the open-time placeholder for a part not yet sealed (issue #581); absent = sealed. */
     sealed?: boolean;
+    /** T-221: the row never passed the local product gates; the queue must not take it (review F2). */
+    needsValidation?: boolean;
   }): { ok: boolean; error?: string } {
     if (this.stateUntrusted) return { ok: false, error: "state sidecar is untrusted" };
     // A pending request belongs to one part; recording a different part's bytes does not conflict
@@ -986,6 +1099,7 @@ export class LivePumpSession {
       durationSec: input.durationSec,
       confirmed: false,
       ...(input.spoolIncomplete ? { spoolIncomplete: true } : {}),
+      ...(input.needsValidation ? { needsValidation: true } : {}),
       // Only the open-time note sets this. Re-noting at seal (noteSealed/keepOrLose/persistUnconfirmed)
       // rebuilds the row without it, so `sealed` naturally flips false→absent(=true) once sealed.
       ...(input.sealed === false ? { sealed: false } : {}),
@@ -1065,6 +1179,65 @@ export class LivePumpSession {
     if (now - this.lastActivityMarkMs < 60_000) return;
     this.lastActivityMarkMs = now;
     markActivity(this.statePath, now);
+  }
+
+  /**
+   * T-221 (review F5): persist the spool-only delivery intent when a mid-run handoff produced no
+   * queue rows. Without it the next run would enter direct recovery (which exits without
+   * recording when disambiguation fails) instead of continuing the spool-only recording.
+   */
+  markDeliveryDeferred(): void {
+    if (this.state.deliveryDeferred) return;
+    this.state = { ...this.state, deliveryDeferred: true };
+    try {
+      this.persist();
+    } catch (e) {
+      this.log(`[直播直传] ⚠️ 无法持久化落盘续录意图(下次切换时重试): ${String((e as Error)?.message ?? e)}`);
+    }
+  }
+
+  /**
+   * T-221: merge the queue's confirmation journal into the in-memory state and persist it once.
+   * The pump is the state file's ONLY writer while it keeps recording; the queue appends to the
+   * journal instead, so this read-and-merge is the reconciliation point. Derived fields are
+   * recomputed from the merged result (never unioned with the stale snapshot): `queueManaged` and
+   * `deliveryDeferred` survive only while unconfirmed parts remain, and a pending request whose
+   * part the journal confirmed is resolved rather than resurrected.
+   */
+  reconcileConfirmedJournal(): { changed: boolean; unconfirmedRemain: boolean } {
+    const journal = readConfirmedJournal(this.statePath, this.state.createdAt);
+    let changed = false;
+    let bvid = this.state.bvid;
+    const parts = this.state.parts.map((p) => {
+      if (p.confirmed) return p;
+      const j = journal.get(p.index);
+      if (!j) return p;
+      changed = true;
+      if (!bvid && j.bv) bvid = j.bv;
+      return { ...p, confirmed: true };
+    });
+    const pending = this.state.pending && journal.has(this.state.pending.partIndex) ? undefined : this.state.pending;
+    const unconfirmedRemain = parts.some((p) => !p.confirmed) || !!pending;
+    const settled = !unconfirmedRemain;
+    // Reconcile never INVENTS the marker: only the CLI's enqueue sets it (a direct-mode state
+    // with recoverable parts is not queue-managed). Reconcile only clears it once everything
+    // the queue owned is settled.
+    const markerChanged = settled && (!!this.state.queueManaged || !!this.state.deliveryDeferred);
+    if (!changed && !markerChanged && pending === this.state.pending) return { changed: false, unconfirmedRemain };
+    this.state = {
+      ...this.state,
+      ...(bvid ? { bvid } : {}),
+      parts,
+      ...(pending ? { pending } : { pending: undefined }),
+      ...(markerChanged ? { queueManaged: undefined, deliveryDeferred: undefined } : {}),
+    };
+    try {
+      this.persist();
+    } catch (e) {
+      // The journal itself still holds every confirmation; the next reconcile retries the merge.
+      this.log(`[直播直传] ⚠️ 无法持久化确认日志收编结果(下次启动重试): ${String((e as Error)?.message ?? e)}`);
+    }
+    return { changed: true, unconfirmedRemain };
   }
 
   /**
@@ -1579,8 +1752,10 @@ export interface PartSinkOpts {
   /**
    * The UPOS session. May still be in flight (a prefetched preupload): bytes written before it
    * resolves are held in a bounded buffer and replayed, so the stream never waits for it.
+   * Undefined (T-221 spool mode): the sink never uploads — bytes go to the spool only, no
+   * carry buffer, no bounded queue, no overflow semantics.
    */
-  session: PreuploadResult | Promise<PreuploadResult>;
+  session?: PreuploadResult | Promise<PreuploadResult>;
   /** Override the chunk size (default: the session's). */
   chunkSize?: number;
   fetchImpl?: typeof fetch;
@@ -1669,6 +1844,8 @@ export class PartSink {
   private readonly fd: number | undefined;
   private readonly queue: BoundedQueue<Uint8Array>;
   private readonly spoolOnly: boolean;
+  /** True when the sink was constructed without a session: spool only, no upload ever. */
+  private readonly sessionPlanned: boolean;
   private readonly waitingLimit: number;
   private session: PreuploadResult | undefined;
   private chunkSize = 0;
@@ -1727,8 +1904,13 @@ export class PartSink {
     this.settledP = new Promise<void>((r) => { this.markSettled = r; });
     this.sealedP = new Promise<void>((r) => { this.markSealed = r; });
     this.writeSpoolFn = o.writeSpool ?? ((fd, buf) => writeSync(fd, buf));
+    this.sessionPlanned = o.session !== undefined;
     const s = o.session;
-    if (typeof (s as Promise<PreuploadResult>).then === "function") {
+    if (s === undefined) {
+      // T-221 spool mode: no session is coming. The spool is the deliverable; settle immediately
+      // so `finished` resolves as soon as the part is sealed and the run never waits on uploads.
+      this.markSettled();
+    } else if (typeof (s as Promise<PreuploadResult>).then === "function") {
       (s as Promise<PreuploadResult>).then((v) => this.attach(v), (e: unknown) => this.sessionFailed(e));
     } else {
       this.attach(s as PreuploadResult);
@@ -1796,6 +1978,10 @@ export class PartSink {
       this.uploadError ??= `分 P 超出声明大小 ${this.o.sizeCap}B(${this.spooled}B)`;
     }
     if (this.uploadError || this.overflow) return;
+    // T-221 spool mode (review P2): no upload session is coming — the bytes are already on the
+    // spool above. Never enter the wait-buffer: it would fill to the limit and fire bogus
+    // "session not ready" degradations for every large part.
+    if (!this.sessionPlanned) return;
     if (!this.ready) {
       if (!this.lateNotified) {
         this.lateNotified = true;
@@ -1912,7 +2098,7 @@ export class PartSink {
 
   /** Slice residue into full chunks and queue them; a full queue means the uploader fell behind. */
   private feed(buf: Buffer): void {
-    if (this.uploadError || this.overflow) return;
+    if (this.uploadError || this.overflow || !this.sessionPlanned) return;
     this.carryList.push(buf);
     this.carryLen += buf.length;
     if (this.carryLen < this.chunkSize) return;
@@ -2482,7 +2668,8 @@ async function preuploadWithBackoff(o: {
  * spool stays unless `keepSpool` is false and the part was completed (the caller owns the file until
  * the archive acknowledges the part).
  */
-async function finalizeRecordedPart(o: {
+/** Exported for tests: the validate-only (submit:false) mode's local-vs-transport gate. */
+export async function finalizeRecordedPart(o: {
   rec: SegmentRunResult;
   session: PreuploadResult | undefined;
   cookiesPath: string;
@@ -2504,6 +2691,9 @@ async function finalizeRecordedPart(o: {
   /** Called when that rename failed: the row must stay and a human must be told. */
   onHoldFailed?: (detail: string) => void;
   keepSpool?: boolean;
+  /** `false` = validate only (T-221 spool mode): probe duration + DTS gate, NO upload/fallback.
+   * The caller owns delivery through the queue and needs the same local gates the direct path has. */
+  submit?: boolean;
 }): Promise<SegmentRunResult & { session?: PreuploadResult }> {
   const { rec, session, spoolPath, spoolMode } = o;
   const withSession = <T extends object>(x: T): T & { session?: PreuploadResult } => ({ ...x, ...(session ? { session } : {}) });
@@ -2581,6 +2771,20 @@ async function finalizeRecordedPart(o: {
 
   let stem: string | undefined;
   let usedFallback = false;
+
+  // T-221 spool mode: validation is done, delivery belongs to the queue. Skip the complete and
+  // the whole-file fallback entirely (they would touch Bilibili), keep the spool.
+  if (o.submit === false) {
+    // Review F7: transport errors the sink recorded mid-part (chunk PUT failure, backpressure,
+    // an in-flight session when the run switched to spool) say nothing about the FILE — the queue
+    // uploads the whole file fresh. Only local-gate findings may mark it needs-manual.
+    const localOnly = rec.spoolIncomplete
+      || rec.tsGap
+      || (rec.uploadError !== undefined
+        && (rec.uploadError.startsWith("产物自检失败") || rec.uploadError.includes("分 P 超出声明大小")));
+    if (!localOnly) rec.uploadError = undefined;
+    return withSession({ ...rec, spoolDurationSec: durationSec });
+  }
 
   // issue #579: the spool itself is truncated (a write failed mid-part). The #574 entry point
   // already keeps the part from being completed (the sink set `uploadError` at the failure), but
@@ -2940,6 +3144,20 @@ export interface RunLivePumpOptions {
   line?: string;
   /** Submit every completed part to the archive. Default true. */
   submit?: boolean;
+  /**
+   * T-221: `"spool"` records without any Bilibili contact — no preupload, no submit; every
+   * sealed part only lands in the WAL/spool and the run ends with an upload-pending result for
+   * the queue handoff. Used when the node queue is already delivering this session's parts and
+   * when a submit failure hands the rest of the show over mid-run. Default `"direct"`.
+   */
+  submitMode?: "direct" | "spool";
+  /**
+   * Spool-mode disk watermark in GB (same caliber as `resources.diskMinGB`); below it the pump
+   * stops opening new parts (sealed parts still enqueue). `0` disables the gate.
+   */
+  diskMinGB?: number;
+  /** Test seam: overrides statfs for the spool disk watermark. */
+  statfsImpl?: typeof statfsSync;
   /** Render a part title from its 1-based index; null = keep the generated stem. */
   partTitle?: (partIndex: number, liveTitle?: string) => string | null;
   log?: (msg: string) => void;
@@ -3163,6 +3381,11 @@ export async function sleepUnlessAborted(
  * production streaming-upload path, so behavior cannot drift between the two.
  */
 export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpResult> {
+  // T-221 (review P2): spool mode parks bytes on disk for the queue — with zero-disk there is
+  // nothing to defer and everything recorded would be silently dropped. Refuse the combination.
+  if (o.submitMode === "spool" && (o.spoolMode ?? "full") === "none") {
+    throw new Error("submitMode 'spool' 需要 spoolMode 'full':零落盘没有可托管的本地字节");
+  }
   const log = o.log ?? ((m: string) => process.stderr.write(`${m}\n`));
   const sleep = o.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
   const maxSegments = Math.max(0, o.maxSegments ?? 0);
@@ -3217,7 +3440,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
    * rule (#293) against the current time. Returns a failure result instead of a session when
    * the archive is in a state that must not collect more parts.
    */
-  const openSession = async (): Promise<{ session: LivePumpSession } | { fail: RunLivePumpResult } | { pending: RunLivePumpResult }> => {
+  const openSession = async (): Promise<{ session: LivePumpSession; spoolOnlyRun?: boolean } | { fail: RunLivePumpResult } | { pending: RunLivePumpResult }> => {
     const session = new LivePumpSession({
       cookiesPath: o.cookiesPath,
       room: o.room,
@@ -3249,22 +3472,88 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       session: info,
     });
 
+    // T-221: spool-only recording (no Bilibili contact) when the caller asks for it, or when a
+    // previous exit handed this session's parts to the queue and it has not settled them yet.
+    let spoolOnlyRun = o.submitMode === "spool";
     if (o.submit !== false) {
-      // T-220: a previous exit handed the remaining sealed parts to the node proc-queue. Do not
-      // recover/resubmit them (the queue may be mid-upload) and do not contact Bilibili for an
-      // ambiguous create: keep the run pending and let the queue settle them. This check must run
-      // before recover(), which may itself confirm or query an archive.
-      const queued = readLivePumpState(livePumpStatePath(o.spoolDir, o.room));
-      if (queued?.queueManaged && (queued.pending || queued.parts.some((p) => !p.confirmed))) {
-        log("[直播直传] 未确认分 P 已交给节点上传队列,本次不重传;等待队列确认");
-        return { pending: {
-          ok: false, uploadPending: true, error: "queued uploads pending",
-          title: session.archiveTitle, segments: [], spoolDir: o.spoolDir,
-          statePath: livePumpStatePath(o.spoolDir, o.room),
-          ...(queued.bvid ? { bvid: queued.bvid } : {}),
-          ...(queued.aid ? { aid: queued.aid } : {}),
-        } };
+      // T-220/T-221: a previous exit handed sealed parts to the node proc-queue. The queue
+      // records confirmations in the journal, NOT in the state (the pump owns the state file
+      // while it keeps recording). Reconcile the journal first, then either keep recording in
+      // spool mode (queue still working) or resume the normal direct path.
+      const statePath = livePumpStatePath(o.spoolDir, o.room);
+      const queued = readLivePumpState(statePath);
+      if ((queued?.queueManaged || queued?.deliveryDeferred) && livePumpHasUnconfirmed(statePath)) {
+        const rec = session.reconcileConfirmedJournal();
+        if (rec.unconfirmedRemain && o.spoolMode === "none") {
+          // Zero-disk records no local bytes: there is nothing the queue could deliver later and
+          // new parts would hit the head-of-line guard, so recording waits for the queue (T-220).
+          log("[直播直传] 未确认分 P 已交给节点上传队列,本次不重传;等待队列确认");
+          return { pending: {
+            ok: false, uploadPending: true, error: "queued uploads pending",
+            title: session.archiveTitle, segments: [], spoolDir: o.spoolDir,
+            statePath: livePumpStatePath(o.spoolDir, o.room),
+            ...(queued.bvid ? { bvid: queued.bvid } : {}),
+            ...(queued.aid ? { aid: queued.aid } : {}),
+          } };
+        }
+        if (rec.unconfirmedRemain) {
+          spoolOnlyRun = true;
+          log("[直播直传] 未确认分 P 由节点队列补传;本场继续录制但不再直传(封口落盘,收播后一次性入队)");
+        }
       }
+      if (spoolOnlyRun) {
+        session.dropUnrecoverableUnsealed();
+        // Review P1: a SIGKILL mid-part leaves a sealed:false row whose spool has bytes. Neither
+        // recover() (only knows pending) nor the enqueue (skips unsealed rows) can ever settle
+        // it — the row would keep queueManaged on forever. Validate the file locally NOW:
+        // readable → promote to a sealed deliverable row (real bytes/duration); unreadable or
+        // DTS-gapped → needs-manual. Either way the limbo is resolved at startup.
+        for (const row of session.parts.filter((x) => (x.sealed === false || x.needsValidation) && !x.confirmed)) {
+          let bytes = 0;
+          try { bytes = statSync(row.spoolPath).size; } catch { /* dropped above if missing */ }
+          if (!(bytes > 0)) continue;
+          const title = row.title || o.partTitle?.(row.index + 1) || `P${row.index + 1}`;
+          // A truncated spool stays needs-manual no matter what a probe reads from it (review F1):
+          // a truncated TS can still carry a positive duration, and promoting it would enqueue
+          // garbage. Rebuild the row sealed-but-incomplete so it blocks the queue in order.
+          if (row.spoolIncomplete) {
+            session.noteUnconfirmedPart({ index: row.index, spoolPath: row.spoolPath, title, bytes, durationSec: row.durationSec, ...(row.stem ? { stem: row.stem } : {}), spoolIncomplete: true });
+            continue;
+          }
+          const probe = o.probeDuration ?? ffprobeDuration;
+          let dur = 0;
+          try { dur = await probe(row.spoolPath); } catch { dur = 0; }
+          // Same DTS gate as the normal finalize path (review F4): production does not inject
+          // scanDtsGap, so the default scan must apply here too.
+          if (dur > 0) {
+            try { dur = (await (o.scanDtsGap ?? defaultScanDtsGap)(row.spoolPath)) ? 0 : dur; } catch { /* keep dur */ }
+          }
+          if (dur > 0) {
+            const note = session.noteUnconfirmedPart({
+              index: row.index, spoolPath: row.spoolPath, title, bytes, durationSec: dur,
+              ...(row.stem ? { stem: row.stem } : {}),
+            });
+            if (note.ok) log(`[直播直传] 分 P ${row.index} 未过校验的存量分 P,本地校验通过(${(bytes / MiB).toFixed(1)}MiB),已转可交付,收播后由队列补传`);
+            else log(`[直播直传] ⚠️ 分 P ${row.index} 未过校验转可交付失败: ${note.error ?? "?"}`);
+          } else {
+            session.noteUnconfirmedPart({ index: row.index, spoolPath: row.spoolPath, title, bytes, durationSec: 0, spoolIncomplete: true });
+            const msg = `分 P ${row.index} 未过校验且本地校验未过,spool 保留需人工处理`;
+            log(`[直播直传] ⚠️ ${msg}`);
+            try { o.onAlert?.(msg); } catch { /* alert channel must not break the run */ }
+          }
+        }
+        // Disambiguate a pending submit intent once (archive query only, never a submit). A
+        // failure is non-fatal here: the enqueue step skips pending-index parts and the next
+        // run retries the disambiguation.
+        if (session.hasUnconfirmed) {
+          try {
+            const recovered = await session.recover();
+            if (!recovered.ok) log(`[直播直传] ⚠️ 待决提交意图无法消歧(继续录制,该分 P 暂不入队): ${recovered.reason}`);
+          } catch (e) {
+            log(`[直播直传] ⚠️ 待决提交意图消歧失败(继续录制): ${String((e as Error)?.message ?? e)}`);
+          }
+        }
+      } else {
       // Whenever this child owns unconfirmed upload work the phase is `finalizing` (plans/044): WAL recovery and
       // the whole-file re-upload of a previous run's parts must never look like "idle, waiting for a broadcast".
       phase("finalizing");
@@ -3332,8 +3621,9 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       } finally {
         phase(idlePhase(session));
       }
+      }
     }
-    return { session };
+    return { session, spoolOnlyRun };
   };
 
   let preRecoveryOpened = false;
@@ -3368,6 +3658,9 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
   if ("pending" in opened) return opened.pending;
   if ("fail" in opened) return opened.fail;
   const session = opened.session;
+  // T-221: recording without uploading (queue owns the old parts, new parts spool to disk).
+  // Flips on mid-run when a submit failure hands the rest of the show to the queue (below).
+  let spoolOnlyRun = opened.spoolOnlyRun === true;
 
   // Danmu is the one artifact that still hits disk on the zero-disk path. It starts only once a
   // stream is actually live (never while waiting): connecting before the broadcast resolves a
@@ -3513,6 +3806,123 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         session.dropPart(index);
       }
       return part.sealedBy === "stalled" ? { kind: "stall-empty" } : { kind: "ended" };
+    }
+    // T-221 spool mode: the queue owns archive delivery; the pump only records. Empty-part
+    // semantics mirror the direct path; everything else runs the SAME local validation gates as
+    // the direct path (readability/duration probe, DTS gap) with submit:false — a file the queue
+    // would biliup must pass them first (review P1: validation was previously bypassed here).
+    if (spoolOnlyRun) {
+      // Review F3: a state-write failure anywhere makes every later spool unprotected (the orphan
+      // sweep would delete it). Check the latch BEFORE any branch that could return a "deferred"
+      // or "needs-manual" outcome, and stop the recording as a local failure.
+      if (spoolWalBroken) {
+        return failRun({
+          ok: false, error: `恢复状态写入失败,spool 失去状态保护,停止录制: ${spoolWalBroken}`,
+          bvid: session.bvid, aid: session.aid, title: session.archiveTitle,
+          segments: [...segments], spoolDir: o.spoolDir,
+          statePath: livePumpStatePath(o.spoolDir, o.room),
+        });
+      }
+      const spooled = sinkRes.spooledBytes;
+      if (spooled === 0) {
+        if (part.sealedBy === "stalled" && !spoolIncomplete) { session.dropPart(index); return { kind: "stall-empty" }; }
+        if (!sinkRes.uploadError) {
+          log("[直播直传] 本段没有写入,判定已收播");
+          session.dropPart(index);
+          return { kind: "ended" };
+        }
+        // A real source failure with zero bytes is not an upload problem: fail the run like the
+        // direct path does, so TaskManager's own crash handling takes over.
+        return failRun({
+          ok: false, error: sinkRes.uploadError, bvid: session.bvid, aid: session.aid,
+          title: session.archiveTitle, segments: [...segments], spoolDir: o.spoolDir,
+          statePath: livePumpStatePath(o.spoolDir, o.room),
+        });
+      }
+      const heldPath = heldGapPath(spoolPath);
+      const r = await finalizeRecordedPart({
+        rec: segmentResultOf(part, sinkRes, exit ?? NO_EXIT),
+        session: undefined,
+        cookiesPath: o.cookiesPath, fileName, spoolPath, spoolMode,
+        line: o.line ?? "txa",
+        fetchImpl: o.fetchImpl, signal: sig,
+        probeDuration: o.probeDuration, scanDtsGap: o.scanDtsGap,
+        ...(o.sleep ? { sleep: o.sleep } : {}),
+        submit: false, keepSpool: true,
+        // finalize renamed the spool to its .held-gap sample; repoint the WAL row so the state
+        // never references a missing file and a human can find the kept bytes.
+        onHold: () => {
+          session.noteUnconfirmedPart({
+            index, spoolPath: heldPath,
+            title: o.partTitle?.(index + 1, liveTitle) ?? fileName.replace(/\.live(?=\.[^.]+$)/, "").replace(/\.[^.]+$/, ""),
+            bytes: sinkRes.spooledBytes, durationSec: 0, spoolIncomplete: true,
+          });
+        },
+      });
+      // A file that fails the local gates is a needs-manual row, never a deliverable part: mark
+      // the row (spoolIncomplete ⇒ the enqueue blocks on it, in order) and keep recording.
+      if (r.tsGap) {
+        const gap = r.tsGap;
+        const gapTitle = o.partTitle?.(index + 1, liveTitle) ?? fileName.replace(/\.live(?=\.[^.]+$)/, "").replace(/\.[^.]+$/, "");
+        const gapNote = existsSync(heldPath)
+          ? session.noteUnconfirmedPart({ index, spoolPath: heldPath, title: gapTitle, bytes: r.spooledBytes, durationSec: r.spoolDurationSec ?? 0, spoolIncomplete: true })
+          : session.noteUnconfirmedPart({ index, spoolPath, title: gapTitle, bytes: r.spooledBytes, durationSec: r.spoolDurationSec ?? 0, spoolIncomplete: true });
+        if (!gapNote.ok) {
+          // Review F3: the needs-manual marker could not be persisted — the queue's own view (the
+          // seal-time row) would still take the bad file. Stop as a local failure.
+          return failRun({
+            ok: false, error: `恢复状态写入失败,DTS 跳变分 P 无法标记需人工,停止录制: ${gapNote.error}`,
+            bvid: session.bvid, aid: session.aid, title: session.archiveTitle,
+            segments: [...segments], spoolDir: o.spoolDir,
+            statePath: livePumpStatePath(o.spoolDir, o.room),
+          });
+        }
+        const msg = `段${seg + 1} 时间戳跳变(流${gap.streamIndex}: ${gap.fromSec.toFixed(1)}s → ${gap.toSec.toFixed(1)}s),不交队列,spool 保留需人工处理`;
+        log(`[直播直传] ⚠️ ${msg}`);
+        try { o.onAlert?.(msg); } catch { /* alert channel must not break the run */ }
+        recoveryDeadline = part.final ? recoveryDeadlineAfterPart(part.sealedBy, Date.now(), recoverWindowMs) : undefined;
+        return part.final || part.sealedBy === "abort" ? { kind: "ended" } : { kind: "continue" };
+      }
+      if (r.uploadError || r.spoolIncomplete) {
+        // Mark the row needs-manual (unless the seal-time note already did): the enqueue must
+        // never take a file that failed the same gates the direct path enforces before submit.
+        if (!spoolIncomplete) {
+          const note = session.noteUnconfirmedPart({
+            index, spoolPath,
+            title: o.partTitle?.(index + 1, liveTitle) ?? fileName.replace(/\.live(?=\.[^.]+$)/, "").replace(/\.[^.]+$/, ""),
+            bytes: r.spooledBytes, durationSec: r.spoolDurationSec ?? 0, spoolIncomplete: true,
+          });
+          if (!note.ok) {
+            return failRun({
+              ok: false, error: `恢复状态写入失败,自检未过分 P 无法标记需人工,停止录制: ${note.error}`,
+              bvid: session.bvid, aid: session.aid, title: session.archiveTitle,
+              segments: [...segments], spoolDir: o.spoolDir,
+              statePath: livePumpStatePath(o.spoolDir, o.room),
+            });
+          }
+        }
+        const msg = `段${seg + 1} 产物自检未过(${r.uploadError ?? "spool 截断"}),spool 保留需人工处理,录制继续`;
+        log(`[直播直传] ⚠️ ${msg}`);
+        try { o.onAlert?.(msg); } catch { /* alert channel must not break the run */ }
+        recoveryDeadline = part.final ? recoveryDeadlineAfterPart(part.sealedBy, Date.now(), recoverWindowMs) : undefined;
+        return part.final || part.sealedBy === "abort" ? { kind: "ended" } : { kind: "continue" };
+      }
+      pushSegment({
+        seg: seg + 1, chunks: 0, bytes: spooled, spooled,
+        ms: Date.now() - ctx.openedAt, exit: exit?.code ?? null,
+        backpressured: false, sessionLeaked: false,
+        ...(r.spoolDurationSec ? { spoolDurationSec: r.spoolDurationSec } : {}),
+      });
+      log(`[直播直传] 段${seg + 1} 已封口落盘(${(spooled / MiB).toFixed(1)}MiB),收播后由节点队列补传`);
+      emit({ at: Date.now(), kind: "part_deferred", part: index, bytes: spooled });
+      recoveryDeadline = part.final ? recoveryDeadlineAfterPart(part.sealedBy, Date.now(), recoverWindowMs) : undefined;
+      if (!part.final) return { kind: "continue" };
+      if (part.sealedBy === "abort") return { kind: "ended" };
+      if (spooled < MIN_PART_BYTES && part.sealedBy !== "stalled" && !part.stopped) {
+        log("[直播直传] 本段 < 1MiB,判定已收播");
+        return { kind: "ended" };
+      }
+      return { kind: "continue" };
     }
     const r = await finalizeRecordedPart({
       rec: segmentResultOf(part, sinkRes, exit ?? NO_EXIT),
@@ -3740,6 +4150,40 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       if (!submitted.ok) {
         log(`[直播直传] 段${seg + 1} 稿件提交失败${spoolMode === "none" ? "(无本地副本)" : ",保留 spool"}: ${submitted.error}`);
         emit({ at: Date.now(), kind: "part_failed", part: index, message: submitted.error });
+        // T-221: a retryable submit failure must not kill the recording. Disambiguate the pending
+        // intent once (archive query only; the part may have actually landed), then either keep
+        // the direct path (landed) or hand the rest of the show to the queue: sealed parts record
+        // to disk only, and the run ends with an upload-pending result for the enqueue step.
+        if (spoolMode !== "none" && existsSync(spoolPath) && submitted.retryable === true) {
+          try {
+            const rec = await session.recover();
+            if (!rec.ok) log(`[直播直传] ⚠️ 提交意图无法消歧(该分 P 收播后由队列补传或下次运行消歧): ${rec.reason}`);
+          } catch (e) {
+            log(`[直播直传] ⚠️ 提交意图消歧失败(继续录制): ${String((e as Error)?.message ?? e)}`);
+          }
+          if (session.parts.find((p) => p.index === index)?.confirmed) {
+            // The submit actually landed: keep the direct path, no spool detour needed.
+            pushSegment(report);
+            log(`[直播直传] 段${seg + 1} 实际已入稿(消歧确认)`);
+            emit({ at: Date.now(), kind: "part_confirmed", part: index, ...(session.bvid ? { bvid: session.bvid } : {}) });
+            try {
+              o.onPartConfirmed?.({ count: session.parts.filter((p) => p.confirmed).length, ...(session.bvid ? { bvid: session.bvid } : {}) });
+            } catch { /* progress reporting must never fail an upload */ }
+            recoveryDeadline = part.final ? recoveryDeadlineAfterPart(part.sealedBy, Date.now(), recoverWindowMs) : undefined;
+            return part.final ? { kind: "ended" } : { kind: "continue" };
+          }
+          if (!spoolOnlyRun) {
+            spoolOnlyRun = true;
+            const handoffMsg = `段${seg + 1} 提交失败,本场剩余分 P 改为落盘,收播后由节点队列补传;录制继续`;
+            log(`[直播直传] ⚠️ ${handoffMsg}`);
+            try { o.onAlert?.(handoffMsg); } catch { /* alert channel must not break the run */ }
+            // Review F5: the intent must survive a crash/restart — otherwise the next run enters
+            // direct recovery and, if disambiguation fails again, stops recording entirely.
+            session.markDeliveryDeferred();
+          }
+          pushSegment({ ...report, uploadError: submitted.error });
+          return part.final || sig.aborted ? { kind: "ended" } : { kind: "continue" };
+        }
         return failRun({
           ok: false, error: submitted.error, bvid: session.bvid, aid: session.aid,
           uploadPending: submitted.retryable === true && spoolMode !== "none" && existsSync(spoolPath),
@@ -3848,7 +4292,10 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       index: ctx.index, spoolPath: ctx.spoolPath, title: titleOf(ctx), bytes, durationSec: estimateDuration(part),
       ...(part.sink.incomplete ? { spoolIncomplete: true } : {}),
     });
-    if (!note.ok) log(`[直播直传] ⚠️ 段${ctx.seg + 1} 无法提前记入恢复状态: ${note.error}`);
+    if (!note.ok) {
+      log(`[直播直传] ⚠️ 段${ctx.seg + 1} 无法提前记入恢复状态: ${note.error}`);
+      if (spoolOnlyRun) spoolWalBroken = note.error;
+    }
   };
 
   /**
@@ -3901,6 +4348,10 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       index: ctx.index, spoolPath: ctx.spoolPath, title: titleOf(ctx), bytes, durationSec,
       ...(row?.stem ? { stem: row.stem } : {}),
       ...(sinkIncomplete ? { spoolIncomplete: true } : {}),
+      // Review F2: keepOrLose with probe=false persisted the row WITHOUT the local product gates
+      // (stop-timeout path). In spool mode the queue would take it at exit 75 — mark it so the
+      // enqueue skips it and the next startup validates it first.
+      ...(spoolOnlyRun && !probe ? { needsValidation: true } : {}),
     });
     if (note.ok) {
       if (!row) emit({ at: Date.now(), kind: "part_unconfirmed", part: ctx.index, bytes });
@@ -3978,6 +4429,12 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       }
     }
   };
+  // T-221: latched once the spool disk watermark fires; read at the loop top to end the run via
+  // the normal pending path (see the break below). The WAL flag is set when a state write fails
+  // in spool mode: spools written afterwards are unprotected (the orphan sweep would delete
+  // them), so the run must stop recording instead of piling them up.
+  let spoolDiskStopReason: string | undefined;
+  let spoolWalBroken: string | undefined;
   try {
   let drainLogged = false;
   for (;;) {
@@ -4001,6 +4458,10 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       }
       break;
     }
+    // T-221 (review P1): the spool disk watermark latched during the last connection. With bytes
+    // already recorded, end via the normal run-end path (sealed parts enqueue at exit 75) instead
+    // of falling into the pre-first gate's bare failure below.
+    if (spoolDiskStopReason) break;
     // With `waitForBroadcast` the waiting already happened before the session was opened, so the
     // room was just seen live: fetch a fresh URL with the normal backoff. If it is gone again,
     // ending here (exit 0) is safe — the next run waits in-process and re-decides the session.
@@ -4069,7 +4530,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     /** Allocate the part index and open its sink; the index is fixed here, not at submit time. */
     // NOTE: the parameter is the UPOS preupload (named `preupload`), NOT the LivePumpSession — the
     // outer `session` must stay reachable for the open-time WAL write and markSpoolIncomplete below.
-    const openPart = (preupload: PreuploadResult | Promise<PreuploadResult>, fileName: string, sessionAbort?: AbortController): PartSink => {
+    const openPart = (preupload: PreuploadResult | Promise<PreuploadResult> | undefined, fileName: string, sessionAbort?: AbortController): PartSink => {
       const seg = partSeq++;
       const index = nextIndex++;
       partsOpened++;
@@ -4088,7 +4549,10 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
           title: o.partTitle?.(index + 1, liveTitle) ?? fileName.replace(/\.live(?=\.[^.]+$)/, "").replace(/\.[^.]+$/, ""),
           bytes: 0, durationSec: 0, sealed: false,
         });
-        if (!note.ok) log(`[直播直传] ⚠️ 段${seg + 1} 无法在 open 时写 WAL: ${note.error}`);
+        if (!note.ok) {
+          log(`[直播直传] ⚠️ 段${seg + 1} 无法在 open 时写 WAL: ${note.error}`);
+          if (spoolOnlyRun) spoolWalBroken = note.error;
+        }
       }
       emit({ at: Date.now(), kind: "part_streaming", part: index });
       const onChunk = (b: number, n: number): void => {
@@ -4144,6 +4608,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     };
     const openNext = (): PartSink => {
       const fileName = fileNameFor(partSeq);
+      if (spoolOnlyRun) return openPart(undefined, fileName);
       const pre = prefetch;
       prefetch = undefined;
       if (pre) return openPart(pre.promise, fileName, pre.abort);
@@ -4152,7 +4617,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     };
     /** At ~80% of the size/duration threshold: get the next part's session ready before the cut. */
     const onPrefetch = (): void => {
-      if (prefetch || fatal || fatalThrown) return;
+      if (prefetch || fatal || fatalThrown || spoolOnlyRun) return;
       if (o.drainSignal?.aborted || (maxSegments > 0 && partsOpened >= maxSegments)) return;
       const ac = new AbortController();
       prefetch = {
@@ -4160,17 +4625,57 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         abort: ac,
       };
     };
+    // T-221: spool mode parks every undelivered part on disk, so disk exhaustion would truncate
+    // them one by one (each truncated spool is then un-deliverable, #579). Stop opening new parts
+    // at the watermark instead — already-sealed spools stay intact and are handed off at run end.
+    // (The latch itself lives OUTSIDE the loop: it must survive into the next iteration's checks.)
+    const spoolDiskGate = (): boolean => {
+      if (spoolDiskStopReason) return true;
+      if (!spoolOnlyRun) return false;
+      const minGB = resolveDiskMinGB(o.diskMinGB).gb;
+      if (minGB <= 0) return false;
+      try {
+        const free = freeGBOf((o.statfsImpl ?? statfsSync)(o.spoolDir));
+        if (free >= minGB) return false;
+        spoolDiskStopReason = `spool 盘剩余 ${free.toFixed(1)}GB,低于水位 ${minGB}GB`;
+        log(`[直播直传] ⚠️ ${spoolDiskStopReason},停止开新分 P(已封口分 P 收播后仍入队)`);
+        try { o.onAlert?.(spoolDiskStopReason); } catch { /* alert channel must not break the run */ }
+        return true;
+      } catch { /* statfs failure is not a stop reason */ }
+      return false;
+    };
     const stopAtCut = async (): Promise<boolean> =>
       !!o.signal?.aborted || !!o.drainSignal?.aborted || (maxSegments > 0 && partsOpened >= maxSegments)
+      || spoolDiskGate()
       || !!(await o.shouldStop?.());
 
     // The first part's preupload happens before ffmpeg starts (no bytes exist yet); a failure here
     // propagates exactly as it did when preupload lived inside the per-part call.
     const firstName = fileNameFor(partSeq);
-    const firstSession = await preuploadWithBackoff({
-      cookiesPath: o.cookiesPath, fileName: firstName, sizeCap: o.sizeCap, line: o.line ?? "txa",
-      fetchImpl: o.fetchImpl, signal: connSignal, log, sleep: o.sleep,
-    });
+    if (spoolOnlyRun && spoolDiskGate()) {
+      const pendingStatePath = livePumpStatePath(o.spoolDir, o.room);
+      // Review F6: with undelivered parts on disk a bare failure would strand them (the CLI does
+      // not enqueue on a plain exit 1, and nothing else would free the disk). Hand them off.
+      if (livePumpHasUnconfirmed(pendingStatePath)) {
+        const qs = readLivePumpState(pendingStatePath);
+        return {
+          ok: false, uploadPending: true, error: "queued uploads pending",
+          title: session.archiveTitle, segments: [...segments], spoolDir: o.spoolDir, statePath: pendingStatePath,
+          ...(qs?.bvid ? { bvid: qs.bvid } : {}), ...(qs?.aid ? { aid: qs.aid } : {}),
+        };
+      }
+      return {
+        ok: false, error: spoolDiskStopReason, bvid: session.bvid, aid: session.aid,
+        title: session.archiveTitle, segments: [...segments], spoolDir: o.spoolDir,
+        statePath: livePumpStatePath(o.spoolDir, o.room),
+      };
+    }
+    const firstSession = spoolOnlyRun
+      ? undefined
+      : await preuploadWithBackoff({
+          cookiesPath: o.cookiesPath, fileName: firstName, sizeCap: o.sizeCap, line: o.line ?? "txa",
+          fetchImpl: o.fetchImpl, signal: connSignal, log, sleep: o.sleep,
+        });
     const firstSink = openPart(firstSession, firstName);
     let stream: StreamRunResult;
     try {
@@ -4255,6 +4760,19 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
   // Suppressed ratio alerts must not vanish: the count rides in the next alert when one fires,
   // and in this end-of-run line when none does.
   logSuppressedRatioAlerts();
+
+  // T-221: a spool-mode run ends with parts the queue still has to deliver. Return the upload-
+  // pending shape so the CLI enqueues (idempotent) and exits 75 — TaskManager keeps its
+  // independent retry/backoff, and the recording itself never stopped.
+  if (spoolOnlyRun && livePumpHasUnconfirmed(livePumpStatePath(o.spoolDir, o.room))) {
+    return {
+      ok: false, uploadPending: true, error: "queued uploads pending",
+      bvid: session.bvid, aid: session.aid, title: session.archiveTitle,
+      segments: [...segments], spoolDir: o.spoolDir, statePath: livePumpStatePath(o.spoolDir, o.room),
+      ...(stopLost.length ? { lostParts: stopLost.length } : {}),
+      ...(stopUnknown.length ? { unknownParts: stopUnknown.length } : {}),
+    };
+  }
 
   if (recoveryTimedOut && segments.length === 0) {
     return {

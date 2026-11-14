@@ -507,7 +507,10 @@ export class ProcRunner {
     }
   }
 
-  /** 磁盘准入(纯判定):`free − estimate ≥ diskMinGB` → null;不足 → 返回告警文案(保持 pending)。 */
+  /** 磁盘准入(纯判定):`free − estimate ≥ diskMinGB` → null;不足 → 返回告警文案(保持 pending)。
+   * T-221 (review P1): 预计不占新磁盘的任务(`estimate === 0`,如 spool 直传的 upload-part、不
+   * 产生新文件的 cleanup-part)在低水位下仍放行 —— 它们正是释放磁盘的工作,拦住会形成
+   * "水位低 → 不上传/不清理 → 永不释放"的循环等待。 */
   private diskDenied(p: Processor, job: ProcJobRecord): string | null {
     const minGB = this.o.diskMinGB();
     if (!(minGB > 0)) return null;
@@ -515,7 +518,11 @@ export class ProcRunner {
     const free = this.freeBytes(dir);
     if (free == null) return null;
     const need = p.estimateDiskBytes(job);
-    if (free - need >= minGB * 1e9) return null;
+    // T-221 (review F9): only an exact, finite zero estimate counts as "no new disk usage" (the
+    // drain exception). Unknown/NaN/negative estimates must NOT bypass the watermark: deny.
+    if (need === 0) return null;
+    const bounded = Number.isFinite(need) && need > 0 ? need : Number.MAX_SAFE_INTEGER;
+    if (free - bounded >= minGB * 1e9) return null;
     return `磁盘剩余 ${(free / 1e9).toFixed(1)}GB,预计需 ${(need / 1e9).toFixed(1)}GB,低于水位 ${minGB}GB —— ${p.kind} 任务保持排队`;
   }
 

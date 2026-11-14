@@ -23,7 +23,7 @@ import {
 } from "@drec/core";
 import { biliupCookieHeader } from "@drec/bilibili-api";
 import { ProcQueueStore, procQueueDbPath } from "@drec/proc-queue";
-import { readLivePumpState, writeLivePumpState } from "@drec/zero-upload";
+import { readConfirmedJournal, readLivePumpState, writeLivePumpState } from "@drec/zero-upload";
 import { drecRoot } from "./paths.js";
 import { nodeAllowedRoots } from "./node-enqueue.js";
 
@@ -69,22 +69,22 @@ export function enqueueLivePumpPending(input: EnqueueLivePumpInput): EnqueueLive
   }
   if (!cookieHeader) return { queued: 0, already: 0, failed: 0, error: "cookies have no usable pairs" };
 
-  // A queue row can only carry a complete sealed video. If any unconfirmed row is not eligible
-  // (open-time placeholder, truncated spool, missing file), enqueue NOTHING: the pump's normal
-  // recovery/fail path owns that state and a mixed handoff would either duplicate or strand parts.
-  const blocked = state.parts.filter((p) => !p.confirmed
-    && (p.sealed === false || p.spoolIncomplete || !eligible(p.spoolPath)));
-  if (blocked.length > 0) {
-    return { queued: 0, already: state.parts.filter((p) => p.confirmed).length, failed: blocked.length,
-      error: "a sealed part is missing/incomplete; leaving the state to the pump's recovery path" };
-  }
+  // T-221: enqueue is per-index, not all-or-nothing. While the pump keeps recording (spool
+  // mode) the state ALWAYS holds an open placeholder (the part being recorded) and possibly a
+  // pending submit intent — a whole-batch block would leave the queue permanently idle. Each
+  // rule below skips exactly the rows it names and hands the rest to the queue.
+  const journal = readConfirmedJournal(input.statePath, state.createdAt);
+  const pendingIndex = state.pending?.partIndex;
+  const unconfirmedParts = [...state.parts]
+    .sort((a, b) => a.index - b.index)
+    .filter((p) => !p.confirmed && !journal.has(p.index));
 
   const orderKey = `${state.room}:${state.createdAt}`;
   const store = new ProcQueueStore(procQueueDbPath(drecRoot()));
   try {
     const generation = store.currentOrderGeneration(orderKey);
     const rows: ProcessJob[] = [];
-    let already = state.parts.filter((p) => p.confirmed).length;
+    let already = state.parts.filter((p) => p.confirmed).length + state.parts.filter((p) => !p.confirmed && journal.has(p.index)).length;
     let failed = 0;
 
     // Queue order is the FULL state's sorted position, not the pending subset: a just-confirmed
@@ -92,8 +92,12 @@ export function enqueueLivePumpPending(input: EnqueueLivePumpInput): EnqueueLive
     // done row and be treated as "already queued". `liveStateIndex` carries the real state index
     // for the confirmation write.
     const orderedParts = [...state.parts].sort((a, b) => a.index - b.index);
-    const pendingParts = orderedParts.filter((p) => !p.confirmed);
-    for (const part of pendingParts) {
+    // Order hole (review P1): a part the queue cannot take YET (pending intent, still unsealed,
+    // failed row, truncated spool) must block every LATER part from entering the queue now —
+    // the runner appends in seq order, and a later part appended first would produce a
+    // permanently out-of-order draft. Blocked parts stay unconfirmed; the next exit-75 retries.
+    let orderBlocked = false;
+    for (const part of unconfirmedParts) {
       const seq = orderedParts.findIndex((p) => p.index === part.index) + 1;
       const logicalKey = partLogicalKey(orderKey, seq);
       const existing = store.rowsForOrderSeq(orderKey, seq, PART_KINDS.upload, generation);
@@ -104,7 +108,32 @@ export function enqueueLivePumpPending(input: EnqueueLivePumpInput): EnqueueLive
         if (active) { already++; continue; }
         // failed / cancelled / uncertain: retrying it would only spam; leave it visible for a human.
         failed++;
-        log("[live-queue] 分 P " + part.index + " 已有终态失败行(" + existing.map((r) => r.state).join(",") + "),不再入队");
+        log("[live-queue] 分 P " + part.index + " 已有终态失败行(" + existing.map((r) => r.state).join(",") + "),不再入队;后续分 P 暂缓以保分 P 顺序");
+        orderBlocked = true;
+        continue;
+      }
+      if (part.index === pendingIndex) {
+        // An irreversible submit (create/append) is still unresolved for this part: the queue
+        // must not blindly repeat it (duplicate draft / duplicate P). The pump's recover() or the
+        // next run disambiguates it first.
+        failed++;
+        log("[live-queue] 分 P " + part.index + " 有未决提交意图(pending),先由 pump 消歧,暂不入队;后续分 P 暂缓以保分 P 顺序");
+        orderBlocked = true;
+        continue;
+      }
+      if (part.sealed === false || part.spoolIncomplete || part.needsValidation || !eligible(part.spoolPath)) {
+        failed++;
+        log("[live-queue] 分 P " + part.index + (part.sealed === false
+          ? " 尚未封口(正在录制),不入队;后续分 P 暂缓以保分 P 顺序"
+          : part.needsValidation
+            ? " 未过本地产物校验,不入队(下次启动补验);后续分 P 暂缓以保分 P 顺序"
+            : " spool 缺失/截断,不入队(需人工);后续分 P 暂缓以保分 P 顺序"));
+        orderBlocked = true;
+        continue;
+      }
+      if (orderBlocked) {
+        failed++;
+        log("[live-queue] 分 P " + part.index + " 因前序分 P 受阻暂不入队(下一轮重试)");
         continue;
       }
 
@@ -138,21 +167,26 @@ export function enqueueLivePumpPending(input: EnqueueLivePumpInput): EnqueueLive
     }
 
     if (rows.length === 0) {
-      // Active/done rows already prove the queue owns this part; keep the pump from resubmitting it.
-      if (already > 0) writeLivePumpState(input.statePath, { ...state, queueManaged: true });
+      // Nothing new to hand over. The marker is NEVER invented here (review P2): active/done rows
+      // were created by a previous enqueue that already set it; confirmed/journal-settled parts
+      // do not need it. Leave the state file untouched in this branch.
       return { queued: 0, already, failed };
     }
 
     // Fail-closed ordering: marker first, then the atomic batch. The pump will not resubmit during
-    // the queue's work; if the batch is rejected we clear the marker before returning.
-    writeLivePumpState(input.statePath, { ...state, queueManaged: true });
+    // the queue's work. If the batch is rejected, only undo a marker WE set in this call (review
+    // P1): an existing marker means earlier parts are already queue-owned and must stay owned.
+    const hadMarker = state.queueManaged === true;
+    if (!hadMarker) writeLivePumpState(input.statePath, { ...state, queueManaged: true });
     try {
       store.enqueueBatch(rows, { allowedRoots: nodeAllowedRoots(drecRoot()) });
     } catch (e) {
-      try {
-        const cur = readLivePumpState(input.statePath);
-        if (cur) writeLivePumpState(input.statePath, { ...cur, queueManaged: undefined });
-      } catch { /* the original error is the useful one */ }
+      if (!hadMarker) {
+        try {
+          const cur = readLivePumpState(input.statePath);
+          if (cur) writeLivePumpState(input.statePath, { ...cur, queueManaged: undefined });
+        } catch { /* the original error is the useful one */ }
+      }
       return { queued: 0, already, failed, error: "queue enqueue rejected: " + String((e as Error)?.message ?? e) };
     }
     log("[live-queue] 已入队 " + rows.length + " 个直传分 P (" + orderKey + ")");

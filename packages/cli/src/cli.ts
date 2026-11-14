@@ -527,8 +527,11 @@ program
       let rootSafe = true;
       try {
         for (const f of readdirSync(opts.outDir)) {
-          if (!/^live-pump-.+\.state\.json(?:\..*)?$/.test(f)) continue;
+          if (!/^live-pump-.+\.state\.json(?:\..+)?$/.test(f)) continue;
           if (f.includes(".tmp.")) continue; // a crash leftover, not a state
+          // T-221 sidecars of the state file, not states themselves (a parse failure here would
+          // permanently disable the sweep via rootSafe=false).
+          if (f.endsWith(".confirmed") || f.endsWith(".activity")) continue;
           const st2 = readLivePumpState(join(opts.outDir, f));
           if (!st2) { rootSafe = false; break; }
           rootKeep.push(...spoolPathsToKeep(st2));
@@ -594,8 +597,22 @@ program
         ...(nodeSubmitGate ? { submitGate: nodeSubmitGate } : {}),
         log: console.log,
       });
+      // T-221: the spool-mode disk gate shares the hub-config watermark with the daemon's gates
+      // (explicit 0 keeps it off; unreadable config falls back to the same default, never silent-off).
+      let pumpDiskMinGB: number | undefined;
+      try {
+        const { effectiveHubConfig, resolveDiskWatermark } = await import("@drec/app");
+        const effHub = effectiveHubConfig();
+        // A file-sourced config comes back with json:undefined — read the file (review P2),
+        // otherwise an explicit threshold in a config file would silently fall back to the default.
+        const hubJson = effHub.json ?? readFileSync(effHub.path, "utf-8");
+        pumpDiskMinGB = resolveDiskWatermark(hubJson, (m) => console.warn(m)).bytes / 1e9;
+      } catch (e) {
+        console.warn(`[直播直传] 磁盘水位读取失败,pump 使用默认闸门: ${String((e as Error)?.message ?? e)}`);
+      }
       const run = runLivePump({
         ...(pumpSubmitter ? { submitter: pumpSubmitter } : {}),
+        ...(pumpDiskMinGB !== undefined ? { diskMinGB: pumpDiskMinGB } : {}),
         cookiesPath: uploadCookies,
         room: pumpRoom,
         fetch: async (r, q) => {
