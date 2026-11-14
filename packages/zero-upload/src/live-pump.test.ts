@@ -43,6 +43,7 @@ import {
   appendConfirmedJournal,
   readConfirmedJournal,
   finalizeRecordedPart,
+  segmentResultOf,
   setSpawnForTest,
   sleepUnlessAborted,
   type ChildProcessLike,
@@ -2660,6 +2661,26 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
     expect(after?.parts[0]?.stem).toBe("s0");
     expect(after?.parts[0]?.title).toBe("P1");
     expect(session.markValidated(99).ok).toBe(false); // missing WAL row is a hard failure
+  });
+
+  it("T-221 (sol P1-2): a seal-time WAL row carries NO positive validated marker", () => {
+    // noteSealed / keepOrLose call noteUnconfirmedPart WITHOUT `validated`. A SIGKILL between
+    // sealing and finalize must leave a row the queue default-denies; only markValidated() may
+    // add the marker. This pins the WRITE path, not just a hand-seeded test fixture.
+    const statePath = livePumpStatePath(dir, "r3");
+    const spool = join(dir, "p0.ts");
+    writeFileSync(spool, "part-0");
+    const session = new LivePumpSession({
+      cookiesPath: COOKIES, room: "r3", spoolDir: dir, title: "t",
+      tid: 21, tag: "x", private: true, fetchImpl: makeSessionFetch().impl, cleanupConfirmedSpool: false,
+    });
+    const note = session.noteUnconfirmedPart({
+      index: 0, spoolPath: spool, title: "P1", bytes: 6, durationSec: 10,
+    });
+    expect(note.ok).toBe(true);
+    expect(readLivePumpState(statePath)?.parts[0]?.validated).toBeUndefined();
+    expect(session.markValidated(0).ok).toBe(true);
+    expect(readLivePumpState(statePath)?.parts[0]?.validated).toBe(true);
   });
 
   const makeSessionFetch = () => {
@@ -5573,6 +5594,36 @@ describe("T-221 spool-mode continuation", () => {
     expect(readConfirmedJournal(statePath).size).toBe(1);
   }, 30_000);
 
+  it("sol P1-2: a torn unterminated journal tail cannot swallow the next confirmation", async () => {
+    // A short write followed by a failed write (or a crash between writes) leaves an incomplete
+    // JSON line with NO trailing newline. Appending straight after it glues the next valid JSON
+    // onto the same line: the reader skips both, yet append/fsync returns ok and the chained
+    // cleanup deletes the spool — the state would show this part unconfirmed forever. The single
+    // writer must terminate that tail first so the NEW record is readable.
+    const statePath = livePumpStatePath(dir, "t221");
+    seedState([], { createdAt: 1 });
+    const journal = `${statePath}.confirmed`;
+    const good = { index: 0, bv: "BV1", at: 1, createdAt: 1 };
+    const torn = JSON.stringify({ index: 1, bv: "BV2", at: 2, createdAt: 1 }).slice(0, 18);
+    writeFileSync(journal, JSON.stringify(good) + "\n" + torn);
+    expect(readConfirmedJournal(statePath, 1).has(0)).toBe(true);
+    expect(readConfirmedJournal(statePath, 1).has(2)).toBe(false);
+
+    appendConfirmedJournal(statePath, { index: 2, bv: "BV3", at: 3, createdAt: 1 });
+
+    const after = readConfirmedJournal(statePath, 1);
+    expect(after.get(0)?.bv).toBe("BV1"); // the earlier complete record survives
+    expect(after.get(2)?.bv).toBe("BV3"); // the NEW confirmation is readable
+    expect(readFileSync(journal, "utf-8").endsWith("\n")).toBe(true);
+
+    // A complete record that merely lacked its newline must also survive (no gratuitous split).
+    writeFileSync(journal, JSON.stringify(good));
+    appendConfirmedJournal(statePath, { index: 3, bv: "BV4", at: 4, createdAt: 1 });
+    const after2 = readConfirmedJournal(statePath, 1);
+    expect(after2.get(0)?.bv).toBe("BV1");
+    expect(after2.get(3)?.bv).toBe("BV4");
+  });
+
   it("journal entries from another session never confirm this session's parts", async () => {
     // Same path, same indexes, previous broadcast: the journal must be session-scoped
     // (createdAt), or a rolled-over session's confirmations would skip the new parts' enqueue
@@ -5738,6 +5789,29 @@ describe("T-221 spool-mode continuation", () => {
     expect(r6.localValidationFailed).toBe(true);
   }, 30_000);
 
+  it("sol P1-1: a REAL oversized sink sets sizeOverflow and segmentResultOf propagates it", async () => {
+    // The earlier test injected `sizeOverflow: true` into `rec`, so reverting either the sink's
+    // assignment OR segmentResultOf's propagation would still leave it green. Drive the real
+    // write path: a spool larger than the UPOS-declared cap must surface both flags.
+    const spool = join(dir, "overflow.ts");
+    const sink = new PartSink({
+      sizeCap: 4, spoolPath: spool, spoolMode: "full", queueCapacity: 64,
+      fetchImpl: makeFetch().fake,
+    });
+    sink.write(Buffer.from("0123456789"));
+    sink.seal();
+    const sr = await sink.finished;
+    expect(sr.sizeOverflow).toBe(true);
+    expect(sr.uploadError ?? "").toContain("超出声明大小");
+    const seg = segmentResultOf(
+      { tsDiscontinuities: 0 } as unknown as Parameters<typeof segmentResultOf>[0],
+      sr,
+      { code: 0 } as unknown as Parameters<typeof segmentResultOf>[2],
+    );
+    expect(seg.sizeOverflow).toBe(true);
+    expect(seg.uploadError ?? "").toContain("超出声明大小");
+  }, 30_000);
+
   it("sol P1-1: a DTS scan that throws is a failed local gate in spool mode", async () => {
     const spool = join(dir, "v.ts");
     writeFileSync(spool, "intact-bytes");
@@ -5754,6 +5828,59 @@ describe("T-221 spool-mode continuation", () => {
     const r = await finalizeRecordedPart({ ...opts, rec: rec() });
     expect(r.localValidationFailed).toBe(true);
     expect(r.uploadError ?? "").toContain("chunk 3 PUT failed");
+  }, 30_000);
+
+  it("sol P1-1: an unjudgeable DTS scan (undefined) is a failed local gate, not a pass", async () => {
+    // Production `ffprobeDtsGap()` returns null for clean, a gap object for a real jump, and
+    // undefined when it COULD NOT judge (timeout / non-zero exit / no scannable packets). A
+    // successful duration probe plus an indeterminate scan must never be marked validated,
+    // especially when a transport error is also present (the old string sniff could hide it).
+    const spool = join(dir, "v.ts");
+    writeFileSync(spool, "intact-bytes");
+    const base = {
+      session: undefined, line: "txa", fileName: "v.ts", spoolPath: spool,
+      spoolMode: "full" as const, cookiesPath: COOKIES, keepSpool: true, submit: false as const,
+      probeDuration: async () => 30,
+      scanDtsGap: async () => undefined as null | undefined,
+    };
+    const rec = () => ({
+      sealedBy: "cut", spooledBytes: 12, chunksUploaded: 2, streamedBytes: 12, exit: { code: 0 },
+      uploadError: "chunk 3 PUT failed: boom",
+    } as unknown as Parameters<typeof finalizeRecordedPart>[0]["rec"]);
+    const r = await finalizeRecordedPart({ ...base, rec: rec() });
+    expect(r.localValidationFailed).toBe(true);
+    expect(r.spoolDurationSec).toBe(30); // the probe DID succeed; the DTS verdict is what fails
+    // The transport string is preserved (it is real), but the AUTHORITATIVE verdict is the
+    // explicit flag — no string sniffing, no clearing the local finding.
+    expect(r.uploadError ?? "").toContain("chunk 3 PUT failed");
+    expect(r.localValidationFailed).toBe(true);
+
+    // Only `null` is a pass: the same file with a clean scan is deliverable.
+    const clean = await finalizeRecordedPart({
+      ...base, scanDtsGap: async () => null,
+      rec: { ...rec(), uploadError: undefined } as Parameters<typeof finalizeRecordedPart>[0]["rec"],
+    });
+    expect(clean.localValidationFailed).toBeUndefined();
+    expect(clean.spoolDurationSec).toBe(30);
+    expect(clean.uploadError).toBeUndefined();
+  }, 30_000);
+
+  it("sol P1-1: startup revalidation also rejects an unjudgeable DTS scan", async () => {
+    writeFileSync(spoolPathOf(0), "sealed-but-never-probed");
+    const statePath = seedState([{ index: 0, spoolPath: spoolPathOf(0), validated: false }], { queueManaged: true, bvid: "BV1" });
+    const f = makeFake();
+    installFakeFfmpeg(Buffer.alloc(CHUNK, 0x5a));
+    await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxMs: 100, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      fetchImpl: f.fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+      probeDuration: async () => 60, scanDtsGap: async () => undefined, log: () => {},
+    });
+    const st = readLivePumpState(statePath);
+    expect(st?.parts[0]?.validated).toBeUndefined();
+    expect(st?.parts[0]?.spoolIncomplete).toBe(true);
+    expect(st?.parts[0]?.confirmed).toBe(false);
+    expect(existsSync(spoolPathOf(0))).toBe(true);
   }, 30_000);
 
   it("a truncated crash row stays needs-manual even when a probe reads a duration", async () => {
@@ -5884,7 +6011,7 @@ describe("T-221 spool-mode continuation", () => {
       waitForBroadcast: true, idlePollMs: 1,
       fetchImpl: makeFake().fake, fetch: async () => ({ living: false }), sleep: async () => {},
       shouldStop: () => ++polls >= 3,
-      onHandoff: (p) => { handoffs.push(p); },
+      onHandoff: (p) => { handoffs.push(p); return { status: "owned" as const }; },
       probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
     });
     expect(handoffs).toEqual([statePath]);
@@ -5909,7 +6036,7 @@ describe("T-221 spool-mode continuation", () => {
       // Abort the drain only once the wait has begun (after the early handoff), never during
       // openSession's own recovery sleeps.
       sleep: async () => { if (handoffs.length) drain.abort(); },
-      onHandoff: (p) => { handoffs.push(p); },
+      onHandoff: (p) => { handoffs.push(p); return { status: "owned" as const }; },
       probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
     });
     expect(handoffs).toEqual([statePath]);
@@ -5919,5 +6046,78 @@ describe("T-221 spool-mode continuation", () => {
     expect(r.error).toBe("queued uploads pending");
     // The queue marker must survive the pump's in-memory session (adoptQueueManaged).
     expect(readLivePumpState(statePath)?.queueManaged).toBe(true);
+  }, 30_000);
+
+  it("sol P1-4: a retryable handoff failure returns uploadPending instead of waiting forever", async () => {
+    // A transient SQLite / cookie failure on the FIRST early enqueue must not be logged and
+    // forgotten while the pump waits (potentially forever) for a broadcast that never comes.
+    // The receipt goes back through the structured uploadPending / exit-75 / TaskManager path.
+    writeFileSync(spoolPathOf(0), "aaa");
+    const statePath = seedState([{ index: 0, spoolPath: spoolPathOf(0) }], { queueManaged: true, bvid: "BV1" });
+    const alerts: string[] = [];
+    let polls = 0;
+    let handoffs = 0;
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      waitForBroadcast: true, idlePollMs: 1,
+      fetchImpl: makeFake().fake, fetch: async () => ({ living: false }),
+      sleep: async () => { polls++; }, shouldStop: () => polls >= 3,
+      onHandoff: () => { handoffs++; return { status: "retryable" as const, detail: "sqlite is locked" }; },
+      onAlert: (m) => alerts.push(m),
+      probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
+    });
+    expect(handoffs).toBe(1);
+    expect(polls).toBe(0); // never entered the offline wait
+    expect(r.ok).toBe(false);
+    expect(r.uploadPending).toBe(true);
+    expect(r.outcome).not.toBe("idle");
+    expect(r.error).toBe("queued uploads pending");
+    expect(r.statePath).toBe(statePath);
+    expect(existsSync(spoolPathOf(0))).toBe(true); // spool + intent preserved
+    expect(alerts.some((m) => m.includes("sqlite is locked"))).toBe(true);
+  }, 30_000);
+
+  it("sol P1-4: a throwing handoff is a retryable receipt, not a swallowed success", async () => {
+    writeFileSync(spoolPathOf(0), "aaa");
+    seedState([{ index: 0, spoolPath: spoolPathOf(0) }], { queueManaged: true, bvid: "BV1" });
+    let polls = 0;
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      waitForBroadcast: true, idlePollMs: 1,
+      fetchImpl: makeFake().fake, fetch: async () => ({ living: false }),
+      sleep: async () => { polls++; }, shouldStop: () => polls >= 3,
+      onHandoff: async () => { throw new Error("cookies unreadable"); },
+      probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
+    });
+    expect(polls).toBe(0);
+    expect(r.uploadPending).toBe(true);
+    expect(r.error).toBe("queued uploads pending");
+  }, 30_000);
+
+  it("sol P1-4: a human-blocked handoff keeps recording wait but never claims delivery", async () => {
+    writeFileSync(spoolPathOf(0), "aaa");
+    const statePath = seedState([{ index: 0, spoolPath: spoolPathOf(0) }], { queueManaged: true, bvid: "BV1" });
+    const alerts: string[] = [];
+    let polls = 0;
+    let handoffs = 0;
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      waitForBroadcast: true, idlePollMs: 1,
+      fetchImpl: makeFake().fake, fetch: async () => ({ living: false }),
+      sleep: async () => { polls++; }, shouldStop: () => polls >= 3,
+      onHandoff: () => { handoffs++; return { status: "blocked" as const, detail: "needs-manual row" }; },
+      onAlert: (m) => alerts.push(m),
+      probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
+    });
+    expect(handoffs).toBe(1);
+    expect(polls).toBeGreaterThan(0); // the T-221 recording wait still runs
+    expect(r.uploadPending).toBe(true); // an idle exit still hands the backlog back
+    expect(r.outcome).not.toBe("idle");
+    expect(existsSync(spoolPathOf(0))).toBe(true);
+    expect(alerts.some((m) => m.includes("需人工"))).toBe(true);
+    expect(readLivePumpState(statePath)?.parts[0]?.confirmed).toBe(false);
   }, 30_000);
 });

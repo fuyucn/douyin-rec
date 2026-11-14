@@ -28,11 +28,13 @@ import {
   appendFileSync,
   closeSync,
   existsSync,
+  fstatSync,
   fsyncSync,
   mkdirSync,
   openSync,
-  readdirSync,
   readFileSync,
+  readSync,
+  readdirSync,
   renameSync,
   rmSync,
   statSync,
@@ -481,23 +483,46 @@ export function readConfirmedJournal(statePath: string, expectedCreatedAt?: numb
   return map;
 }
 
-/** Append one confirmation. Single line per write so concurrent appends cannot interleave. */
 /** Append one queue-proven confirmation to `<state>.confirmed` (T-221). Exported for tests. */
 export function appendConfirmedJournal(statePath: string, entry: ConfirmedJournalEntry): void {
   mkdirSync(dirname(statePath), { recursive: true });
+  const journal = confirmedJournalPath(statePath);
   // fsync before returning: the caller deletes the spool right after (cleanup chain), so a
   // lost page cache would leave a confirmed-in-queue part that nothing can settle again.
-  const fd = openSync(confirmedJournalPath(statePath), "a");
-  try {
+  const fd = openSync(journal, "a");
+  const writeAll = (data: Buffer): void => {
     // POSIX writeSync may return a short count without throwing (review P2): a partial line that
     // survives fsync would be skipped by the reader and the confirmation lost. Write to completion.
-    const data = Buffer.from(JSON.stringify(entry) + "\n", "utf-8");
     let off = 0;
     while (off < data.length) {
       const n = writeSync(fd, data.subarray(off));
       if (!(n > 0)) throw new Error(`journal writeSync 返回 ${n},写入未推进`);
       off += n;
     }
+  };
+  try {
+    // T-221 (sol P1-2): a torn previous append can leave an unterminated tail (short write
+    // followed by a failed write, or a crash between writes). Appending straight after it glues
+    // the new valid JSON onto that partial line, so the reader skips BOTH; the append/fsync still
+    // succeeds, `confirmLivePumpPart()` returns ok, the queue completes and the chained cleanup
+    // deletes the spool — the only copy of a part the state still calls unconfirmed. The journal
+    // has one writer (the queue lease holder), so terminating the tail here is race-free.
+    // A complete record that merely lacked its trailing newline becomes its own valid line; a
+    // partial record becomes one skipped bad line. Both keep the NEW record readable.
+    let size = 0;
+    try { size = fstatSync(fd).size; } catch { /* unstat-able: proceed with the append */ }
+    if (size > 0) {
+      let last = 0x0a;
+      try {
+        const rfd = openSync(journal, "r");
+        try {
+          const tail = Buffer.alloc(1);
+          if (readSync(rfd, tail, 0, 1, size - 1) === 1) last = tail[0]!;
+        } finally { closeSync(rfd); }
+      } catch { last = 0x0a; /* unreadable tail: do not invent a separator */ }
+      if (last !== 0x0a) writeAll(Buffer.from("\n", "utf-8"));
+    }
+    writeAll(Buffer.from(JSON.stringify(entry) + "\n", "utf-8"));
     fsyncSync(fd);
   } finally {
     closeSync(fd);
@@ -2572,8 +2597,8 @@ export async function runStream(o: RunStreamOpts): Promise<StreamRunResult> {
   };
 }
 
-/** Per-part result as the old one-ffmpeg-per-part code reported it. */
-function segmentResultOf(part: SealedPart, sink: PartSinkResult, exit: SegmentExit): SegmentRunResult {
+/** Per-part result as the old one-ffmpeg-per-part code reported it. Exported for tests. */
+export function segmentResultOf(part: SealedPart, sink: PartSinkResult, exit: SegmentExit): SegmentRunResult {
   return {
     exit,
     tsDiscontinuities: part.tsDiscontinuities,
@@ -2817,6 +2842,10 @@ export async function finalizeRecordedPart(o: {
   if (spoolMode === "full" && rec.spooledBytes > 0 && durationSec > 0) {
     let gap: DtsGap | null | undefined;
     try { gap = await (o.scanDtsGap ?? defaultScanDtsGap)(spoolPath); } catch { gap = undefined; localGapScanFailed = true; }
+    // sol P1-1: `ffprobeDtsGap()` returns null for a clean scan but undefined when it COULD NOT
+    // judge (timeout, non-zero exit, no scannable packets). Only null is a pass for a part that
+    // will be handed to the queue; an indeterminate scan must not be called "validated".
+    if (gap === undefined) localGapScanFailed = true;
     if (gap) {
       rec.tsGap = gap;
       // Rename so the orphan sweep (which only matches the plain spool name) keeps the sample.
@@ -2837,8 +2866,9 @@ export async function finalizeRecordedPart(o: {
       if (rec.chunksUploaded > 0) rec.sessionLeaked = true;
     } else if (gap === undefined) {
       // The direct path keeps its historical "cannot judge, continue" behaviour; spool mode
-      // treats a *thrown* scan as a failed local gate (see localValidationFailed below).
-      o.log?.(`[直播直传] ⚠️ ${o.fileName}: 时间戳扫描无法判定,${o.submit === false && localGapScanFailed ? "本地校验按未通过处理" : "按原流程继续"}`);
+      // treats both a thrown and an unjudgeable scan as a failed local gate (see
+      // localValidationFailed below).
+      o.log?.(`[直播直传] ⚠️ ${o.fileName}: 时间戳扫描无法判定,${o.submit === false ? "本地校验按未通过处理" : "按原流程继续"}`);
     }
   }
 
@@ -3178,6 +3208,17 @@ export interface LivePumpSegmentReport {
   spoolIncomplete?: boolean;
 }
 
+/**
+ * T-221 (sol P1-4): the early handoff must be able to say that the queue did NOT take the
+ * backlog. `owned` is the only status that lets the pump adopt queue ownership; `retryable`
+ * goes back through the existing uploadPending / exit-75 / TaskManager backoff; `blocked`
+ * means rows need a human, so the run keeps recording but never claims delivery.
+ */
+export type LivePumpHandoffReceipt =
+  | { status: "owned" }
+  | { status: "retryable"; detail: string }
+  | { status: "blocked"; detail: string };
+
 export interface RunLivePumpOptions {
   /** Error-level alert channel for conditions a human must act on (e.g. old state archived at start). */
   onAlert?: (message: string) => void;
@@ -3229,13 +3270,15 @@ export interface RunLivePumpOptions {
    */
   submitMode?: "direct" | "spool";
   /**
-   * T-221 (sol P1-3): called ONCE when a spool-only session opens with unconfirmed parts,
+   * T-221 (sol P1-3/P1-4): called when a spool-only session opens with unconfirmed parts,
    * BEFORE the pump waits for the next broadcast. The CLI uses it to hand the existing,
    * now-validated backlog to the node queue immediately: a room that never goes live again must
    * not strand the parts recorded after a crash, and a stop/drain during the wait must still
-   * deliver them. Exceptions are logged and retried at run end.
+   * deliver them. The receipt must say whether the queue actually owns the backlog: a transient
+   * enqueue failure is retried via the existing uploadPending / exit-75 path, never silently
+   * treated as success.
    */
-  onHandoff?: (statePath: string) => void | Promise<void>;
+  onHandoff?: (statePath: string) => LivePumpHandoffReceipt | Promise<LivePumpHandoffReceipt>;
   /**
    * Spool-mode disk watermark in GB (same caliber as `resources.diskMinGB`); below it the pump
    * stops opening new parts (sealed parts still enqueue). `0` disables the gate.
@@ -3590,6 +3633,21 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         }
       }
       if (spoolOnlyRun) {
+        // sol P1-3: disambiguate the pending submit intent BEFORE revalidating. `recover()`
+        // only queries the archive (never a submit) and clears `pending`; `noteUnconfirmedPart`
+        // refuses to rewrite a row whose index still has a pending intent. Validating first
+        // therefore silently failed to write `validated` on that row, and once recover() cleared
+        // the intent nothing revalidated it — the queue default-denied it and every later part,
+        // stranding a valid backlog in the offline wait. This order also keeps the retry on the
+        // next startup if disambiguation itself fails.
+        if (session.hasUnconfirmed) {
+          try {
+            const recovered = await session.recover();
+            if (!recovered.ok) log(`[直播直传] ⚠️ 待决提交意图无法消歧(继续录制,该分 P 暂不入队): ${recovered.reason}`);
+          } catch (e) {
+            log(`[直播直传] ⚠️ 待决提交意图消歧失败(继续录制): ${String((e as Error)?.message ?? e)}`);
+          }
+        }
         session.dropUnrecoverableUnsealed();
         // T-221 (sol P1-2): DEFAULT-DENY. Every row without the POSITIVE `validated` marker is
         // revalidated here — seal-time WAL rows (a SIGKILL between noteSealed and finalize has
@@ -3614,9 +3672,13 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
           // Same DTS gate as the normal finalize path (review F4): production does not inject
           // scanDtsGap, so the default scan must apply here too.
           if (dur > 0) {
-            // Fail closed: an unjudgeable DTS scan is NOT a pass. The old `catch { keep dur }`
-            // promoted a row whose timestamp integrity was never established.
-            try { dur = (await (o.scanDtsGap ?? defaultScanDtsGap)(row.spoolPath)) ? 0 : dur; } catch { dur = 0; }
+            // sol P1-1: the full local gate accepts ONLY `null`. `undefined` (ffprobe timeout /
+            // non-zero exit / no packets) and a real gap both leave the row unvalidated, so the
+            // queue helper default-denies it instead of uploading an unverified file.
+            try {
+              const gap = await (o.scanDtsGap ?? defaultScanDtsGap)(row.spoolPath);
+              if (gap !== null) dur = 0;
+            } catch { dur = 0; }
           }
           if (dur > 0) {
             const note = session.noteUnconfirmedPart({
@@ -3631,17 +3693,6 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
             const msg = `分 P ${row.index} 未过校验且本地校验未过,spool 保留需人工处理`;
             log(`[直播直传] ⚠️ ${msg}`);
             try { o.onAlert?.(msg); } catch { /* alert channel must not break the run */ }
-          }
-        }
-        // Disambiguate a pending submit intent once (archive query only, never a submit). A
-        // failure is non-fatal here: the enqueue step skips pending-index parts and the next
-        // run retries the disambiguation.
-        if (session.hasUnconfirmed) {
-          try {
-            const recovered = await session.recover();
-            if (!recovered.ok) log(`[直播直传] ⚠️ 待决提交意图无法消歧(继续录制,该分 P 暂不入队): ${recovered.reason}`);
-          } catch (e) {
-            log(`[直播直传] ⚠️ 待决提交意图消歧失败(继续录制): ${String((e as Error)?.message ?? e)}`);
           }
         }
       } else {
@@ -3714,19 +3765,43 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       }
       }
     }
-    // T-221 (sol P1-3): hand the existing, now-validated backlog to the node queue BEFORE the
-    // idle wait. openSession has already rolled over stale state, reconciled the journal and
-    // revalidated unvalidated rows, so this statePath belongs to THIS session. The callback is
-    // awaited so the queue's ownership marker is durable before the pump adopts it.
+    // T-221 (sol P1-3/P1-4): hand the existing, now-validated backlog to the node queue BEFORE
+    // the idle wait. openSession has already rolled over stale state, reconciled the journal,
+    // disambiguated pending submits and revalidated unvalidated rows, so this statePath belongs
+    // to THIS session. Only an `owned` receipt adopts queue ownership; a transient failure
+    // returns uploadPending immediately (CLI enqueues again + exit 75 + TaskManager backoff)
+    // instead of waiting forever offline for a retry that never comes.
     if (spoolOnlyRun && o.onHandoff && !handoffDone) {
       const handoffPath = livePumpStatePath(o.spoolDir, o.room);
       if (livePumpHasUnconfirmed(handoffPath)) {
-        handoffDone = true;
+        let receipt: LivePumpHandoffReceipt;
         try {
-          await o.onHandoff(handoffPath);
-          session.adoptQueueManaged();
+          receipt = await o.onHandoff(handoffPath) ?? { status: "blocked", detail: "handoff 未返回回执" };
         } catch (e) {
-          log(`[直播直传] ⚠️ 待补分 P 提前交接失败(收播时重试): ${String((e as Error)?.message ?? e)}`);
+          receipt = { status: "retryable", detail: String((e as Error)?.message ?? e) };
+        }
+        if (receipt.status === "owned") {
+          handoffDone = true;
+          session.adoptQueueManaged();
+        } else if (receipt.status === "retryable") {
+          const msg = `待补分 P 提前交接失败,交回上传待补流程重试: ${receipt.detail}`;
+          log(`[直播直传] ⚠️ ${msg}`);
+          try { o.onAlert?.(msg); } catch { /* alert channel must not break the handoff */ }
+          const st = readLivePumpState(handoffPath);
+          return { pending: {
+            ok: false, uploadPending: true, error: "queued uploads pending",
+            title: session.archiveTitle, segments: [], spoolDir: o.spoolDir,
+            statePath: handoffPath,
+            ...(st?.bvid ? { bvid: st.bvid } : {}),
+            ...(st?.aid ? { aid: st.aid } : {}),
+          } };
+        } else {
+          // Human-blocked rows: keep recording (T-221) but never claim the backlog was
+          // delivered. handoffDone stays false, so the next openSession retries the handoff,
+          // and an idle/stop exit still returns uploadPending because the rows remain.
+          const msg = `待补分 P 提前交接未全部接管(需人工): ${receipt.detail}`;
+          log(`[直播直传] ⚠️ ${msg}`);
+          try { o.onAlert?.(msg); } catch { /* alert channel must not break the handoff */ }
         }
       }
     }

@@ -38,12 +38,13 @@ import {
   buildTaskCommand, buildCookieCommand, zeroDiskStreamMeta, APP_VERSION, syncDbPathFor,
   hubStageDir, hubLogsDir,
 } from "@drec/app";
-import type { HubStarter, TaskStore } from "@drec/app";
+import type { HubStarter, TaskStore, EnqueueLivePumpResult } from "@drec/app";
 import { applyTimezoneFromDb, dbPathForDataRoot } from "@drec/app";
 import { zeroDiskStreamKey } from "@drec/core";
 import { recordStreamUpload, deleteHubHistory } from "@drec/orchestrator";
 import { reportStreamUploadLedgerResult } from "./stream-upload-ledger-report.js";
-import { DEFAULT_SEGMENT_CAP } from "@drec/zero-upload";
+import { DEFAULT_SEGMENT_CAP, type LivePumpHandoffReceipt } from "@drec/zero-upload";
+import { livePumpHandoffReceipt } from "./live-pump-handoff.js";
 
 
 
@@ -610,23 +611,32 @@ program
       } catch (e) {
         console.warn(`[直播直传] 磁盘水位读取失败,pump 使用默认闸门: ${String((e as Error)?.message ?? e)}`);
       }
-      // T-221 (sol P1-3): one idempotent handoff used BOTH at openSession (before the idle wait,
-      // so a room that never goes live again cannot strand crash-time parts) and at run end.
-      const enqueuePumpPending = async (statePath: string): Promise<void> => {
+      // T-221 (sol P1-3/P1-4): one idempotent handoff used BOTH at openSession (before the idle
+      // wait, so a room that never goes live again cannot strand crash-time parts) and at run end.
+      // The receipt is mandatory: the pump must distinguish "queue owns it" from a transient
+      // cookie/SQLite failure or an order hole. Errors are never swallowed as success.
+      const enqueuePumpPending = async (statePath: string): Promise<LivePumpHandoffReceipt> => {
+        let queued: EnqueueLivePumpResult | undefined;
         try {
           const { enqueueLivePumpPending } = await import("@drec/app");
-          const queued = enqueueLivePumpPending({
+          queued = enqueueLivePumpPending({
             statePath,
             cookiesPath: uploadCookies,
             ...(o.taskId !== undefined && /^\d+$/.test(o.taskId) ? { taskId: Number(o.taskId) } : {}),
             ...(streamMeta.seasonSectionId ? { seasonSectionId: streamMeta.seasonSectionId } : {}),
             log: console.log,
           });
-          if (queued.error) console.error(`[直播直传] 待补上传入队失败(保留 spool,将在下次尝试重试): ${queued.error}`);
-          else console.log(`[直播直传] 待补上传已交给节点队列: 新入队 ${queued.queued},已在队 ${queued.already},不可入队 ${queued.failed}`);
         } catch (e) {
-          console.error(`[直播直传] 待补上传入队异常(保留 spool,将在下次尝试重试): ${String((e as Error)?.message ?? e)}`);
+          console.error(`[直播直传] 待补上传入队异常(保留 spool,交回上传待补流程重试): ${String((e as Error)?.message ?? e)}`);
+          return livePumpHandoffReceipt(undefined, e);
         }
+        const receipt = livePumpHandoffReceipt(queued);
+        if (receipt.status === "owned") {
+          console.log(`[直播直传] 待补上传已交给节点队列: 新入队 ${queued.queued},已在队 ${queued.already},不可入队 ${queued.failed}`);
+        } else {
+          console.error(`[直播直传] 待补分 P 未全部接管(${receipt.status},保留 spool): ${receipt.detail}`);
+        }
+        return receipt;
       };
       const run = runLivePump({
         ...(pumpSubmitter ? { submitter: pumpSubmitter } : {}),

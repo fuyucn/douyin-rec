@@ -216,6 +216,26 @@ describe("磁盘准入", () => {
     expect(s.get(negative)?.state).toBe("pending");
     expect(s.get(big)?.state).toBe("pending");
   });
+
+  it("T-221 (sol review): a zero estimate still drains when free space is BELOW the watermark", async () => {
+    // The real deadlock case: the disk is already under the watermark and only upload-part /
+    // cleanup-part (which need no new bytes) remain. A zero estimate must be admitted even
+    // though 9GB < 10GB; an unknown estimate must still be denied so the queue cannot wedge.
+    registerProcessor(fakeProcessor({
+      estimateDiskBytes: (j) => {
+        const need = (j.params as { need: number | null }).need;
+        return need === null ? Number.NaN : need;
+      },
+    }));
+    const r = mkRunner("A", { diskMinGB: () => 10, freeBytes: () => 9e9 });
+    const s = env.open();
+    const zero = s.enqueue(env.job("zero.ts", { params: { need: 0 } }), allowed()).jobId;
+    const unknown = s.enqueue(env.job("unknown.ts", { params: { need: Number.NaN } }), allowed()).jobId;
+    r.tick();
+    await vi.waitFor(() => expect(s.get(zero)?.state).toBe("done"));
+    r.tick(); r.tick();
+    expect(s.get(unknown)?.state).toBe("pending");
+  });
 });
 
 describe("handover(交接)", () => {
