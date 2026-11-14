@@ -531,10 +531,15 @@ transient → 再建一次稿（当前无生产调用者，但 `ensureArchive` �
 服务端回读 3 个分 P、cid 不同、`is_only_self=1`、stem 与三段一致，`checkArchivePartsWarn` 未触发，确认后 spool 清空。
 state 无 `aid`（driver 建稿只回 bvid）确认走的是 driver 路径。同一 spool/room 又续跑两轮，累计 12 个已确认分 P、cid 全不同；
 3s 分段的压力轮命中 **preupload 601**（不是提交层的 21540），退避 30/60/120/240/300s，最坏约 48 分钟，停止后未确认分 P 与 spool 均保留（测试数据随后手工清理，未走恢复）。
-**提交层 21540 冷却的真实成功仍只有单测**；受管节点的 `submitGate`／`onPartConfirmed` 装配也未在节点上跑过。
+**提交层 21540 冷却的真实成功仍只有单测**；`submitGate`／`onPartConfirmed` 的节点装配已在下述金丝雀里跑过，`noteRateLimited` 仍未触发。
 
-**仍然不能默认开启**：`DREC_LIVE_PUMP_DRIVER` 默认值保持 0。上面 11 处对齐（§8.5 的 7 处 + §8.5.1 的 4 处）只说明两条路径在**代码层面**一致，
-不代表节点执行体跑过——下一版必须选**一台**节点开 flag 实跑一场（分 P 数、stem、private、受管回执）才能翻转默认值。
+**节点金丝雀（2026-11-13，一台空闲 worker）**：另一台在录，选空闲的那台；部署 0.0.385 后临时开 flag。
+任务 id 48（非受管）跑 9 个分 P 同一私稿；受管分支用 `--zero-disk-managed 1` + `DREC_ZERO_DISK_DELIVERY` 手工跑：
+预检通过、`submitGate` 记账成功（`upload_limits` 该账号 `claims=1`）、driver 建私稿 `BV1xx`、回执写入（bvid + parts=1），
+SIGTERM 后 2s 退出。随后 flag 关闭、测试任务/目录/回执清理。**未覆盖** `noteRateLimited` 与真实 21540（601 把第 2 段挡在 preupload）。
+
+**仍然不能默认开启**：`DREC_LIVE_PUMP_DRIVER` 默认值保持 0。上面 11 处对齐（§8.5 的 7 处 + §8.5.1 的 4 处）加上节点金丝雀，
+已覆盖分 P 数、stem、private、受管回执；剩下的硬缺口是**真实 21540 的冷却重试成功**与 `noteRateLimited` 记账。补上后才能讨论默认值。
 
 ## §9 验收清单（对应审计「复审验收点」）
 
