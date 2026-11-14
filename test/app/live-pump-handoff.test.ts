@@ -138,4 +138,57 @@ describe("T-221 startup handoff into the real node queue", () => {
     expect(r.error).toBe("queued uploads pending");
     expect(readLivePumpState(statePath)?.parts[0]?.confirmed).toBe(false);
   }, 30_000);
+
+  it("sol 4th: an ambiguous pending create is blocked, not a zero-take retry loop", async () => {
+    // recover() can prove the pending create is AMBIGUOUS (two same-title candidates). The queue
+    // helper only sees "pending" and reports deferred, so the receipt classifier would say
+    // retryable and the pump would exit 75 before ever recording. The pump must override it.
+    const dir = join(root, "recordings", "t221");
+    const p0 = join(dir, "a_000.live.ts");
+    writeFileSync(p0, "aaa");
+    const statePath = livePumpStatePath(dir, "t221");
+    writeLivePumpState(statePath, {
+      schemaVersion: 1, room: "t221", createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
+      updatedAt: Date.now(), queueManaged: true,
+      parts: [{ index: 0, spoolPath: p0, filename: "a_000.live.ts", stem: "s0", title: "P1", bytes: 3, durationSec: 2, confirmed: false }],
+      // A create intent whose outcome was never persisted (no bvid/aid): the dangerous case.
+      pending: { kind: "create", partIndex: 0, stem: "s0", title: "P1", bytes: 3, durationSec: 2, spoolPath: p0 },
+    });
+
+    let polls = 0;
+    let submits = 0;
+    const ambiguousFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      const m = (init?.method ?? "GET").toUpperCase();
+      if (m !== "GET") submits++;
+      // The archive list is readable and returns TWO exact same-title candidates -> ambiguous.
+      if (u.pathname === "/x/web/archives") {
+        return new Response(JSON.stringify({
+          code: 0, data: { archives: [{ aid: 1, bvid: "BV1", title: "t" }, { aid: 2, bvid: "BV2", title: "t" }] },
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ code: 0, data: {} }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const r = await runLivePump({
+      cookiesPath: join(root, "cookies.json"), room: "t221", spoolDir: dir,
+      title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: 10 * 1024 * 1024, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
+      waitForBroadcast: true, idlePollMs: 1,
+      fetchImpl: ambiguousFetch, fetch: async () => ({ living: false }),
+      sleep: async () => { polls++; }, shouldStop: () => polls >= 2,
+      onHandoff: (sp) => livePumpHandoffReceipt(enqueueLivePumpPending({
+        statePath: sp, cookiesPath: join(root, "cookies.json"), log: () => {},
+      })),
+      probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
+    });
+
+    expect(polls).toBeGreaterThan(0); // kept the recording wait, not an immediate exit 75
+    expect(submits).toBe(0); // never re-submitted the ambiguous create/append
+    expect(r.uploadPending).toBe(true);
+    expect(r.error).toBe("queued uploads pending");
+    // The pending intent is preserved for a human; nothing was confirmed.
+    expect(readLivePumpState(statePath)?.pending?.partIndex).toBe(0);
+    expect(readLivePumpState(statePath)?.parts[0]?.confirmed).toBe(false);
+  }, 30_000);
 });

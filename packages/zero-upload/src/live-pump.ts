@@ -1355,7 +1355,7 @@ export class LivePumpSession {
    * title lookup; an append intent is resolved by checking whether the stem is already present.
    * Ambiguous outcomes stay pending and are reported, never retried blindly.
    */
-  async recover(): Promise<{ ok: boolean; reason?: string; archiveExists?: boolean }> {
+  async recover(): Promise<{ ok: boolean; reason?: string; archiveExists?: boolean; needsManual?: boolean }> {
     const p = this.state.pending;
     if (!p) return { ok: true };
     const reportRecovered = (): void => {
@@ -1389,7 +1389,7 @@ export class LivePumpSession {
         return { ok: false, reason: `cannot search archive during recovery: ${String((e as Error)?.message ?? e).slice(0, 200)}` };
       }
       if (found.searched === false) {
-        return { ok: false, reason: "cannot search archive during recovery; needs manual verification" };
+        return { ok: false, needsManual: true, reason: "cannot search archive during recovery; needs manual verification" };
       }
       if (found.searched === true && found.matches === 0) {
         // The list was readable and no archive with this title exists. The create request
@@ -1404,17 +1404,17 @@ export class LivePumpSession {
         return { ok: true };
       }
       if (!found.ok || !found.archive) {
-        return { ok: false, reason: `create outcome ambiguous (matches=${found.matches}); needs manual verification` };
+        return { ok: false, needsManual: true, reason: `create outcome ambiguous (matches=${found.matches}); needs manual verification` };
       }
       const confirmed = found.archive.videos.some((v) => v.filename === p.stem);
       if (!confirmed) {
         // The archive exists, but P1 is not present. The submit outcome is still ambiguous:
         // retrying create would duplicate the archive; retrying append would silently drop P1.
-        return { ok: false, archiveExists: true, reason: "archive found but first part is not present; needs manual verification" };
+        return { ok: false, archiveExists: true, needsManual: true, reason: "archive found but first part is not present; needs manual verification" };
       }
       // An archive without a BV cannot be resumed safely: append needs a stable identifier.
       if (!found.archive.bvid && !(found.archive.aid > 0)) {
-        return { ok: false, archiveExists: true, reason: "archive found but has no bvid/aid; needs manual verification" };
+        return { ok: false, archiveExists: true, needsManual: true, reason: "archive found but has no bvid/aid; needs manual verification" };
       }
       this.state = {
         ...this.state,
@@ -3638,6 +3638,10 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     // T-221: spool-only recording (no Bilibili contact) when the caller asks for it, or when a
     // previous exit handed this session's parts to the queue and it has not settled them yet.
     let spoolOnlyRun = o.submitMode === "spool";
+    // sol 4th: a recover() that declared the pending submit intent needs-manual must not be
+    // turned into a retryable handoff. The queue helper cannot tell an ambiguous create from a
+    // merely-deferred row, so the pump overrides the receipt to `blocked` below.
+    let pendingNeedsManual = false;
     if (o.submit !== false) {
       // T-220/T-221: a previous exit handed sealed parts to the node proc-queue. The queue
       // records confirmations in the journal, NOT in the state (the pump owns the state file
@@ -3675,7 +3679,10 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         if (session.hasUnconfirmed) {
           try {
             const recovered = await session.recover();
-            if (!recovered.ok) log(`[直播直传] ⚠️ 待决提交意图无法消歧(继续录制,该分 P 暂不入队): ${recovered.reason}`);
+            if (!recovered.ok) {
+              log(`[直播直传] ⚠️ 待决提交意图无法消歧(继续录制,该分 P 暂不入队): ${recovered.reason}`);
+              pendingNeedsManual = recovered.needsManual === true;
+            }
           } catch (e) {
             log(`[直播直传] ⚠️ 待决提交意图消歧失败(继续录制): ${String((e as Error)?.message ?? e)}`);
           }
@@ -3811,6 +3818,12 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
           receipt = await o.onHandoff(handoffPath) ?? { status: "blocked", detail: "handoff 未返回回执" };
         } catch (e) {
           receipt = { status: "retryable", detail: String((e as Error)?.message ?? e) };
+        }
+        // sol 4th: recover() proved the pending intent is ambiguous (a human must resolve it).
+        // The queue helper sees only "pending" and reports deferred, so without this override the
+        // receipt would be `retryable` and the pump would exit 75 forever without recording.
+        if (pendingNeedsManual && receipt.status === "retryable") {
+          receipt = { status: "blocked", detail: `待决提交意图需人工消歧,不自动重投: ${receipt.detail}` };
         }
         if (receipt.status === "owned") {
           handoffDone = true;
