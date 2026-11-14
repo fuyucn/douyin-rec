@@ -90,19 +90,24 @@ function controlSignal(signal?: AbortSignal): AbortSignal {
 }
 
 /**
- * B 站限流:preupload 会以 HTTP 406 + `{"code":601,"message":"您上传视频过快…"}`
+ * B 站限流:preupload 会以 HTTP 406 + `{"code":601|406,"message":"您上传视频过快…"}`
  * 拒绝新分 P(实测)。**只发生在 preupload**(建新上传会话),不在 chunk PUT 上。
  * 这不是失败,是「退后一点再来」——所以单独一个类,调用方能区分「限流」和「真错」。
  */
 export class UposRateLimited extends Error {
   constructor(readonly detail: Record<string, unknown>) {
-    super("B 站上传限流(601 上传过快,需冷却后重试)");
+    super("B 站上传限流(406/601 上传过快,需冷却后重试)");
     this.name = "UposRateLimited";
   }
 }
 
 function isRateLimitedBody(j: { code?: unknown }): boolean {
-  return Number(j.code) === 601;
+  // Real responses come in two shapes: 601 (the older "上传视频过快" body) and 406
+  // (observed 2026-11-14 on the same endpoint after ~9 preuploads in one minute). Treating
+  // 406 as a generic "missing fields" error skipped every backoff and turned a cooldown into
+  // a recording failure. Both are retryable rate limits.
+  const code = Number(j.code);
+  return code === 601 || code === 406;
 }
 
 /**

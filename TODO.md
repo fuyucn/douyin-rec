@@ -1428,3 +1428,5 @@
 - [x] **VPS2 部署** — `video-rec-2` 装 worker + tailscale，master→VPS2 同步通。（2026-10-07）
 - [x] **Dockerfile SSH 通配化** — `Host 100.97.21.80` → `Host 100.* *.ts.net`，修新 worker 走 `root@` 的 Permission denied。（2026-10-07）
 - [x] **Web UI 移动端 nav** — 窄屏第二行显示「录制任务 / Hub / 处理队列」。（2026-10-07）
+
+- [ ] **T-219 B 站 preupload 406 被当成普通失败，收尾上传打崩录制任务（2026-11-14）** — **做什么**: `isRateLimitedBody` 只认 `code:601`；实测 406 返回同文案但 `code:406`，`preupload` 抛「缺少字段」，收尾整文件重传不退避；pump 非零退出，TaskManager 重启 5 次后报「录制中断/放弃」。**修复**: 406 也归 `UposRateLimited`，复用 48 分钟退避；单测覆盖 601/406 双码。**验收**: 撤 406 分支新测红、复原绿；全量 5354 passed；两台节点已回滚 0.0.384，本修复未部署。**版本**: 待 0.0.386。
