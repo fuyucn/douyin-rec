@@ -112,11 +112,11 @@ describe("preupload", () => {
     await expect(pu({ cookiesPath: COOKIES, fileName: "x.mkv", totalSize: 0, fetchImpl: impl })).resolves.toBeTruthy();
   });
 
-  it("601 限流(实测过:多 P 连传)-> 抛 UposRateLimited,不是普通 Error", async () => {
+  it.each([601, 406])("%s 限流(实测过:多 P 连传/短时 preupload)-> 抛 UposRateLimited,不是普通 Error", async (code) => {
     fakeCookies();
     const { preupload: pu } = await import("./upos-stream.js");
     const impl = (async () => {
-      return new Response(JSON.stringify({ OK: 0, code: 601, message: "您上传视频过快，请您稍作休息后再继续" }), { status: 406 });
+      return new Response(JSON.stringify({ OK: 0, code, message: "您上传视频过快，请您稍作休息后再继续" }), { status: 406 });
     }) as unknown as typeof fetch;
     await expect(pu({ cookiesPath: COOKIES, fileName: "x.ts", totalSize: 8, fetchImpl: impl }))
       .rejects.toThrow(UposRateLimited);
