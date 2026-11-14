@@ -86,6 +86,13 @@ export interface TaskManagerOpts {
   /** Max consecutive auto-restarts per task before giving up. Default 5. */
   maxRestarts?: number;
   /**
+   * Delay before retrying a zero-disk pump that exited 75 (upload-only pending). Retries use
+   * exponential backoff and never consume the recording restart budget. Default 5 min.
+   */
+  uploadPendingDelayMs?: number;
+  /** Cap for the upload-pending backoff. Default 60 min. */
+  uploadPendingMaxDelayMs?: number;
+  /**
    * After restarts are exhausted, how long the daemon must leave the task alone before starting
    * it again (default 10 min). Without it the daemon re-started a given-up task on its next tick
    * (~20s later), so "give up" never happened and a crash loop ran forever (issue #308).
@@ -129,6 +136,8 @@ export class TaskManager {
   private readonly autoRestart: boolean;
   private readonly restartDelayMs: number;
   private readonly maxRestarts: number;
+  private readonly uploadPendingDelayMs: number;
+  private readonly uploadPendingMaxDelayMs: number;
   private readonly giveUpCooldownMs: number;
   private readonly onTaskDown?: (taskId: number, reason: string) => void;
   private readonly onRecordingStateChanged?: (taskId: number) => void;
@@ -154,6 +163,8 @@ export class TaskManager {
   private readonly restartPending = new Set<number>();
   /** taskId → consecutive auto-restart count (reset on explicit start/stop). */
   private readonly restarts = new Map<number, number>();
+  /** taskId → consecutive upload-pending exits (exit 75); drives the upload retry backoff. */
+  private readonly uploadPendingAttempts = new Map<number, number>();
   /** taskId → epoch ms the restart budget ran out (cleared by an explicit start or stop). */
   private readonly gaveUpAt = new Map<number, number>();
   /** taskIds currently DRAINING (window ended, waiting for the broadcast to end). */
@@ -187,6 +198,8 @@ export class TaskManager {
     this.autoRestart = opts.autoRestart ?? false;
     this.restartDelayMs = opts.restartDelayMs ?? 5_000;
     this.maxRestarts = opts.maxRestarts ?? 5;
+    this.uploadPendingDelayMs = Math.max(1_000, opts.uploadPendingDelayMs ?? 5 * 60_000);
+    this.uploadPendingMaxDelayMs = Math.max(this.uploadPendingDelayMs, opts.uploadPendingMaxDelayMs ?? 60 * 60_000);
     this.giveUpCooldownMs = Math.max(0, opts.giveUpCooldownMs ?? 10 * 60_000);
     this.onTaskDown = opts.onTaskDown;
     this.onRecordingStateChanged = opts.onRecordingStateChanged;
@@ -298,6 +311,8 @@ export class TaskManager {
   start(taskId: number): boolean {
     if (this.procs.has(taskId) || this.gates.has(taskId)) return false;
     this.gaveUpAt.delete(taskId);
+    // Explicit start cancels an upload-pending backoff; a later exit 75 starts a fresh ramp.
+    this.uploadPendingAttempts.delete(taskId);
     // Taking over a pending crash restart keeps the counter, so a crash loop that is repeatedly
     // "started" by the daemon still reaches maxRestarts / gaveUpAt. Anything else starts fresh.
     const takesOverRestart = this.restartPending.has(taskId) && this.restarts.has(taskId);
@@ -500,6 +515,7 @@ export class TaskManager {
     const proc = this.procs.get(taskId);
     // Reset restart budget so an in-flight restart timer becomes a no-op.
     this.restarts.delete(taskId);
+    this.uploadPendingAttempts.delete(taskId);
     this.restartPending.delete(taskId);
     this.gaveUpAt.delete(taskId);
     this.draining.delete(taskId);
@@ -707,6 +723,7 @@ export class TaskManager {
         // A real part reached the archive: this run made progress, so a later network
         // failure gets a fresh restart budget instead of inheriting startup-crash counts.
         this.restarts.set(taskId, 0);
+        this.uploadPendingAttempts.set(taskId, 0);
       } else if (msg.includes("[状态] 录制停滞")) {
         if (this.recordingPhase.get(taskId)) this.notifyRecordingState(taskId);
         this.recordingPhase.set(taskId, false);
@@ -753,6 +770,55 @@ export class TaskManager {
     const zeroDiskFinalized = info.code === 0
       && !info.expected
       && this.store.getTask(taskId)?.streamUpload === true;
+    const task = this.store.getTask(taskId);
+    const uploadPendingExit = info.code === 75
+      && !info.expected
+      && task?.streamUpload === true;
+
+    if (uploadPendingExit) {
+      // Exit 75 is the pump's structured verdict: the recorded bytes (spool) are intact, only
+      // an archive submit/preupload/append failed. This is not a recording crash; retry with
+      // its own backoff and never consume the recording restart budget. A permanent/local
+      // failure stays on the normal failure path (the pump does not emit this code for it).
+      this.store.setStatus(taskId, "pending");
+      this.notifyRecordingState(taskId);
+      this.logTask(
+        taskId,
+        `[task_manager] ⏳ 任务 id=${taskId} 上传待补(exit 75),保留 spool;不消耗录制重启预算`,
+      );
+      if (!this.autoRestart) return;
+      if (task?.enabled !== true) {
+        this.store.setStatus(taskId, "stopped");
+        this.notifyRecordingState(taskId);
+        return;
+      }
+      const attempt = (this.uploadPendingAttempts.get(taskId) ?? 0) + 1;
+      this.uploadPendingAttempts.set(taskId, attempt);
+      const delay = Math.min(
+        this.uploadPendingMaxDelayMs,
+        this.uploadPendingDelayMs * 2 ** Math.min(attempt - 1, 10),
+      );
+      this.logTask(
+        taskId,
+        `[task_manager] ↻ 任务 id=${taskId} 上传待补将在 ${Math.round(delay / 1000)}s 后第 ${attempt} 次重试`,
+      );
+      this.restartPending.add(taskId);
+      this.schedule(() => {
+        this.restartPending.delete(taskId);
+        if (!this.uploadPendingAttempts.has(taskId)) return; // explicit start/stop cancelled it
+        if (this.procs.has(taskId) || this.gates.has(taskId)) return;
+        const current = this.store.getTask(taskId);
+        if (!current || current.enabled !== true) {
+          this.store.setStatus(taskId, "stopped");
+          this.notifyRecordingState(taskId);
+          return;
+        }
+        if (!this.trySpawn(taskId)) return;
+        this.store.setStatus(taskId, "running");
+        this.notifyRecordingState(taskId);
+      }, delay);
+      return;
+    }
 
     if (info.expected || zeroDiskFinalized) {
       this.store.setStatus(taskId, "stopped");

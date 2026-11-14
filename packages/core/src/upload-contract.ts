@@ -69,7 +69,7 @@ export function isAppendAmbiguous(err: unknown): boolean {
  */
 export function isUploadRateLimited(err: unknown): boolean {
   const s = String((err as Error)?.message ?? err);
-  return /upload rate limit|code["']?\s*:\s*(?:601|21566|21540|21186)|上传视频过快|上传过快|投稿过于频繁|投稿的频率过快|请求过于频繁/i.test(s);
+  return /upload rate limit|code["']?\s*:\s*(?:601|406|21566|21540|21186)|上传视频过快|上传过快|投稿过于频繁|投稿的频率过快|请求过于频繁/i.test(s);
 }
 
 /**

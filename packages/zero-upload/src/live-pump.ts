@@ -337,6 +337,12 @@ export interface LivePumpState {
      */
     sealed?: boolean;
   }>;
+  /**
+   * The node proc-queue owns the remaining sealed parts (T-220). A restart must not whole-file
+   * resubmit them: the queue may still be uploading them. The queue helper clears this once every
+   * part is confirmed; until then the pump exits as upload-pending and lets the queue work.
+   */
+  queueManaged?: boolean;
   /** WAL for crash recovery. */
   pending?: {
     kind: "create" | "append";
@@ -394,6 +400,63 @@ export function livePumpHasUnconfirmed(path: string): boolean {
   const state = readLivePumpState(path);
   if (!state) return true;
   return !!state.pending || state.parts.some((p) => !p?.confirmed);
+}
+
+/**
+ * T-220 queue adapter: mark one sealed live-pump part confirmed after the node proc-queue's
+ * `upload-part` (biliup transport) proved it. The queue may still be uploading later parts, so
+ * this does not clear `queueManaged` until every part and the WAL are settled.
+ *
+ * Inputs are already validated by the processor: `index` is the live state's 0-based part index,
+ * `bv` an explicit archive id, `fp` the in-queue fingerprint. Any mismatch is a hard error: the
+ * queue must not delete the spool or claim a part it cannot prove.
+ */
+export function confirmLivePumpPart(
+  statePath: string,
+  index: number,
+  bv: string,
+  fp: { size: number; mtimeMs: number },
+): { ok: true } | { ok: false; error: string } {
+  if (!bv) return { ok: false, error: "confirmLivePumpPart requires a confirmed bv" };
+  const state = readLivePumpState(statePath);
+  if (!state) return { ok: false, error: "live state missing or unreadable: " + statePath };
+  const part = state.parts.find((p) => p.index === index);
+  if (!part) return { ok: false, error: "live state has no part index " + index };
+  if (state.bvid && state.bvid !== bv) {
+    return { ok: false, error: "live state bvid does not match the queue result: " + state.bvid + " vs " + bv };
+  }
+  if (part.confirmed) {
+    if (state.bvid && state.bvid !== bv) {
+      return { ok: false, error: "live part already confirmed under another bv: " + state.bvid + " vs " + bv };
+    }
+    return { ok: true };
+  }
+  let now: { size: number; mtimeMs: number };
+  try {
+    const s = statSync(part.spoolPath);
+    now = { size: s.size, mtimeMs: s.mtimeMs };
+  } catch (e) {
+    return { ok: false, error: "live part spool cannot be stat-ed: " + String((e as Error)?.message ?? e) };
+  }
+  if (now.size !== fp.size || now.mtimeMs !== fp.mtimeMs) {
+    return { ok: false, error: "live part fingerprint changed after queue upload" };
+  }
+  const parts = state.parts.map((p) => p.index === index ? { ...p, confirmed: true } : p);
+  const pending = state.pending && state.pending.partIndex === index ? undefined : state.pending;
+  const settled = !pending && parts.every((p) => p.confirmed);
+  const next: LivePumpState = {
+    ...state,
+    bvid: state.bvid ?? bv,
+    parts,
+    ...(pending ? { pending } : { pending: undefined }),
+    ...(settled ? { queueManaged: undefined } : { queueManaged: true }),
+  };
+  try {
+    writeLivePumpState(statePath, next);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: "live state write failed: " + String((e as Error)?.message ?? e) };
+  }
 }
 
 export function writeLivePumpState(path: string, state: LivePumpState): void {
@@ -479,6 +542,9 @@ function rolloverStaleState(path: string, room: string, nowMs: number, log: (msg
   if (!state) return archive("无法读取或已损坏", true) || undefined;
   if (state.room !== room) return archive(`房间不匹配(${state.room})`, true) || undefined;
   const unconfirmed = !!state.pending || state.parts.some((p) => !p.confirmed);
+  // T-220: a queue-managed state is active work, not a finished broadcast. Ageing it out would
+  // archive the very state the queue is about to confirm (and lose the association mid-upload).
+  if (state.queueManaged && unconfirmed) return undefined;
   let lastActivity = state.updatedAt;
   if (typeof lastActivity !== "number" || !Number.isFinite(lastActivity) || lastActivity <= 0) {
     if (unconfirmed) return archive("缺少最后活动时间且有未确认分 P,无法判断是否同一场", true) || undefined;
@@ -724,8 +790,8 @@ export class LivePumpSession {
    * so it does not block the parts after it (the archive only needs the remaining parts in order;
    * the held part is a known, reported hole, never a silent one).
    */
-  async resubmitAllUnconfirmed(signal?: AbortSignal): Promise<{ ok: boolean; bvid?: string; aid?: number; error?: string; held?: number[] }> {
-    let last: { ok: boolean; bvid?: string; aid?: number; error?: string } = { ok: true, bvid: this.state.bvid, aid: this.state.aid };
+  async resubmitAllUnconfirmed(signal?: AbortSignal): Promise<{ ok: boolean; bvid?: string; aid?: number; error?: string; held?: number[]; retryable?: boolean }> {
+    let last: { ok: boolean; bvid?: string; aid?: number; error?: string; retryable?: boolean } = { ok: true, bvid: this.state.bvid, aid: this.state.aid };
     const held: number[] = [];
     while (this.lowestUnconfirmed()) {
       // Hard stop (SIGTERM/manual): never start another part or a new irreversible request.
@@ -733,7 +799,7 @@ export class LivePumpSession {
       const before = this.lowestUnconfirmed()!.index;
       const r = await this.resubmitUnconfirmedPart(signal);
       if (r.held) { held.push(before); continue; }
-      last = { ok: r.ok, bvid: r.bvid, aid: r.aid, error: r.error };
+      last = { ok: r.ok, bvid: r.bvid, aid: r.aid, error: r.error, ...(r.retryable ? { retryable: true } : {}) };
       if (!r.ok) return { ...last, ...(held.length ? { held } : {}) };
     }
     return { ...last, ...(held.length ? { held } : {}) };
@@ -756,7 +822,7 @@ export class LivePumpSession {
    * check. Callers must only invoke this when no other part is pending; a missing archive identity
    * is safe for the first unconfirmed part because `submitPart` then creates the archive path.
    */
-  async resubmitUnconfirmedPart(signal?: AbortSignal): Promise<{ ok: boolean; bvid?: string; aid?: number; error?: string; held?: boolean }> {
+  async resubmitUnconfirmedPart(signal?: AbortSignal): Promise<{ ok: boolean; bvid?: string; aid?: number; error?: string; held?: boolean; retryable?: boolean }> {
     if (this.stateUntrusted) return { ok: false, error: "state sidecar is untrusted" };
     if (this.state.pending) return { ok: false, error: "another submit is pending" };
     const target = this.lowestUnconfirmed();
@@ -861,7 +927,9 @@ export class LivePumpSession {
       ...(signal ? { signal } : {}),
     });
     if (!fb.ok || !fb.stem) {
-      return { ok: false, error: `resubmit upload failed: ${fb.error ?? "no stem"}` };
+      // The spool is intact; only the upload/preupload/append failed. Callers keep it for a later
+      // retry instead of treating the whole recording as crashed (B站 406/601, transport, 5xx).
+      return { ok: false, retryable: true, error: `resubmit upload failed: ${fb.error ?? "no stem"}` };
     }
     if (signal?.aborted) return { ok: false, error: "resubmit aborted" };
     const submitted = await this.submitPart({
@@ -872,7 +940,12 @@ export class LivePumpSession {
       bytes: fb.bytes,
       durationSec,
     }, signal);
-    if (!submitted.ok) return { ok: false, error: submitted.error };
+    if (!submitted.ok) {
+      // Retryability is decided by submitPart itself (driver failure class or rate-limit
+      // exhaustion), never by matching the human-readable error text: a local/permanent
+      // failure must not be handed to the pending-upload retry loop.
+      return { ok: false, ...(submitted.retryable ? { retryable: true } : {}), error: submitted.error };
+    }
     return { ok: true, bvid: submitted.bvid, aid: submitted.aid };
   }
 
@@ -1116,7 +1189,7 @@ export class LivePumpSession {
     title: string;
     bytes: number;
     durationSec: number;
-  }, signal?: AbortSignal): Promise<{ ok: boolean; bvid?: string; aid?: number; error?: string; needsManual?: boolean }> {
+  }, signal?: AbortSignal): Promise<{ ok: boolean; bvid?: string; aid?: number; error?: string; needsManual?: boolean; retryable?: boolean }> {
     if (this.stateUntrusted) {
       return { ok: false, error: "state sidecar is untrusted; refusing to submit (manual recovery required)" };
     }
@@ -1153,7 +1226,7 @@ export class LivePumpSession {
     }
 
     const result = await this.submitWithRateLimitRetry(pending, video, doFetch, signal);
-    if (!result.ok) return { ok: false, error: result.error };
+    if (!result.ok) return { ok: false, ...(result.retryable ? { retryable: true } : {}), error: result.error };
     return this.recordConfirmed(input, existing, pending.kind, result.bvid, result.aid);
   }
 
@@ -1223,7 +1296,7 @@ export class LivePumpSession {
     input: PartSubmitInput,
     existing: LivePumpState["parts"][number] | undefined,
     signal?: AbortSignal,
-  ): Promise<{ ok: boolean; bvid?: string; aid?: number; error?: string; needsManual?: boolean }> {
+  ): Promise<{ ok: boolean; bvid?: string; aid?: number; error?: string; needsManual?: boolean; retryable?: boolean }> {
     const submitter = this.o.submitter;
     if (!submitter) return { ok: false, error: "submitter missing" };
     const hadArchive = !!(this.state.bvid || this.state.aid);
@@ -1287,10 +1360,15 @@ export class LivePumpSession {
     } catch (e) {
       const err = e as { name?: string; failure?: string; message?: string };
       const needsManual = err?.name === "UploadDriverError" && err.failure === "needs-manual";
+      // retry-exhausted means the driver already used its bounded transient/rate-limit budget;
+      // the bytes (or the create checkpoint) are durable, so a later run may settle it. A
+      // needs-manual/unknown create outcome is never retried automatically (it may duplicate).
+      const retryable = err?.name === "UploadDriverError" && err.failure === "retry-exhausted";
       return {
         ok: false,
         error: String(err?.message ?? e).slice(0, 300),
         ...(needsManual ? { needsManual: true } : {}),
+        ...(retryable ? { retryable: true } : {}),
       };
     }
     return this.recordConfirmed(input, existing, kind, bvid, aid);
@@ -1309,7 +1387,7 @@ export class LivePumpSession {
     video: StudioVideo,
     doFetch: typeof fetch,
     signal?: AbortSignal,
-  ): Promise<{ ok: true; bvid?: string; aid?: number } | { ok: false; error: string }> {
+  ): Promise<{ ok: true; bvid?: string; aid?: number } | { ok: false; error: string; retryable?: boolean }> {
     const sleep = this.o.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
     const baseMs = this.o.rateLimitBaseMs ?? 60_000;
     const maxAttempts = this.o.rateLimitAttempts ?? 5;
@@ -1366,7 +1444,7 @@ export class LivePumpSession {
       await sleepUnlessAborted(waitMs, [signal], sleep);
       if (signal?.aborted) return { ok: false, error: "submit aborted" };
     }
-    return { ok: false, error: `${lastError}(限流重试 ${maxAttempts} 次后仍失败)` };
+    return { ok: false, error: `${lastError}(限流重试 ${maxAttempts} 次后仍失败)`, retryable: true };
   }
 
   /**
@@ -2987,6 +3065,11 @@ export interface RunLivePumpResult {
   lostParts?: number;
   /** Zero-disk parts whose archive submit was in flight when the run was cut off; outcome unknown, not lost. */
   unknownParts?: number;
+  /**
+   * True when the run only failed to settle an already-recorded part (preupload/append/transport).
+   * Callers must keep the spool and retry later, not treat this as a recording crash.
+   */
+  uploadPending?: boolean;
   /** The archive already exists, so creating a new one is forbidden. */
   archiveExists?: boolean;
   bvid?: string;
@@ -3134,7 +3217,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
    * rule (#293) against the current time. Returns a failure result instead of a session when
    * the archive is in a state that must not collect more parts.
    */
-  const openSession = async (): Promise<{ session: LivePumpSession } | { fail: RunLivePumpResult }> => {
+  const openSession = async (): Promise<{ session: LivePumpSession } | { fail: RunLivePumpResult } | { pending: RunLivePumpResult }> => {
     const session = new LivePumpSession({
       cookiesPath: o.cookiesPath,
       room: o.room,
@@ -3167,6 +3250,21 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     });
 
     if (o.submit !== false) {
+      // T-220: a previous exit handed the remaining sealed parts to the node proc-queue. Do not
+      // recover/resubmit them (the queue may be mid-upload) and do not contact Bilibili for an
+      // ambiguous create: keep the run pending and let the queue settle them. This check must run
+      // before recover(), which may itself confirm or query an archive.
+      const queued = readLivePumpState(livePumpStatePath(o.spoolDir, o.room));
+      if (queued?.queueManaged && (queued.pending || queued.parts.some((p) => !p.confirmed))) {
+        log("[直播直传] 未确认分 P 已交给节点上传队列,本次不重传;等待队列确认");
+        return { pending: {
+          ok: false, uploadPending: true, error: "queued uploads pending",
+          title: session.archiveTitle, segments: [], spoolDir: o.spoolDir,
+          statePath: livePumpStatePath(o.spoolDir, o.room),
+          ...(queued.bvid ? { bvid: queued.bvid } : {}),
+          ...(queued.aid ? { aid: queued.aid } : {}),
+        } };
+      }
       // Whenever this child owns unconfirmed upload work the phase is `finalizing` (plans/044): WAL recovery and
       // the whole-file re-upload of a previous run's parts must never look like "idle, waiting for a broadcast".
       phase("finalizing");
@@ -3201,6 +3299,20 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
           const fixed = await session.resubmitAllUnconfirmed(o.signal);
           if (fixed.held?.length) log(`[直播直传] ⚠️ 恢复时有 ${fixed.held.length} 个分 P 因时间戳跳变被扣留(索引 ${fixed.held.join(",")}),稿件缺这几 P,需人工处理`);
           if (!fixed.ok) {
+            // Recovery reached an upload-only failure (preupload/append/transport). The recorded
+            // bytes are still in the spool, so this is a pending upload, not a recording crash.
+            // Keep the run alive for the caller's pending-upload queue/retry.
+            if (fixed.retryable) {
+              const msg = `直播直传上传待补: ${fixed.error ?? "upload pending"}；spool 已保留,稍后自动重试`;
+              log(`[直播直传] ⚠️ ${msg}`);
+              try { o.onAlert?.(msg); } catch { /* alert channel must not break recovery */ }
+              return { pending: {
+                ok: false, uploadPending: true, error: fixed.error,
+                bvid: session.bvid, aid: session.aid, title: session.archiveTitle,
+                segments: [], spoolDir: o.spoolDir,
+                statePath: livePumpStatePath(o.spoolDir, o.room),
+              } };
+            }
             return { fail: {
               ok: false, error: fixed.error, bvid: session.bvid, aid: session.aid,
               title: session.archiveTitle, segments: [], spoolDir: o.spoolDir,
@@ -3235,6 +3347,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     if (o.submit !== false && st !== undefined && (!st || !!st.pending || st.parts.some((p) => !p.confirmed))) {
       log("[直播直传] 上次运行留有未确认分 P,等待开播前先恢复");
       const pre = await openSession();
+      if ("pending" in pre) return pre.pending;
       if ("fail" in pre) return pre.fail;
       preRecoveryOpened = true;
     }
@@ -3252,6 +3365,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     }
   }
   const opened = await openSession();
+  if ("pending" in opened) return opened.pending;
   if ("fail" in opened) return opened.fail;
   const session = opened.session;
 
@@ -3438,8 +3552,8 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       usedFileFallback: r.usedFileFallback,
       ...(r.spoolIncomplete ? { spoolIncomplete: true } : {}),
     };
-    const fail = (error: string, extra: Partial<LivePumpSegmentReport> = {}): Disposition => failRun({
-      ok: false, error, bvid: session.bvid, aid: session.aid, title: session.archiveTitle,
+    const fail = (error: string, extra: Partial<LivePumpSegmentReport> = {}, uploadPending = false): Disposition => failRun({
+      ok: false, error, uploadPending, bvid: session.bvid, aid: session.aid, title: session.archiveTitle,
       segments: [...segments, { ...base, ...extra, uploadError: error }],
       spoolDir: o.spoolDir, statePath: livePumpStatePath(o.spoolDir, o.room),
     });
@@ -3477,11 +3591,12 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       if (note.ok) emit({ at: Date.now(), kind: "part_unconfirmed", part: unconfirmedIndex, bytes: r.spooledBytes });
       return note.ok ? undefined : (note.error ?? "无法记录未确认分 P");
     };
-    const retryUnconfirmed = async (): Promise<{ ok: boolean; stem?: string; bvid?: string; aid?: number; error?: string }> => {
+    const retryUnconfirmed = async (): Promise<{ ok: boolean; stem?: string; bvid?: string; aid?: number; error?: string; retryable?: boolean }> => {
       emit({ at: Date.now(), kind: "part_retry", part: unconfirmedIndex });
       const deadline = Date.now() + recoverWindowMs;
       let waitMs = Math.min(5_000, recoverWindowMs);
       let lastError = "";
+      let lastRetryable = false;
       for (;;) {
         // Drain means "finish this part, do not start another"; a hard signal is the only thing
         // that should abort the current spool retry.
@@ -3493,7 +3608,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         if (!recovered.ok) {
           lastError = recovered.reason ?? "状态恢复失败";
         } else {
-          const submitted: { ok: boolean; bvid?: string; aid?: number; error?: string } =
+          const submitted: { ok: boolean; bvid?: string; aid?: number; error?: string; retryable?: boolean } =
             await session.resubmitUnconfirmedPart(sig).catch((e: unknown) => ({
               ok: false,
               error: String((e as Error)?.message ?? e).slice(0, 200),
@@ -3512,16 +3627,17 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
             };
           }
           lastError = submitted.error ?? "未确认分 P 重试失败";
+          lastRetryable = submitted.retryable === true;
         }
-        if (Date.now() >= deadline) return { ok: false, error: lastError || "自动重试窗口耗尽" };
+        if (Date.now() >= deadline) return { ok: false, error: lastError || "自动重试窗口耗尽", retryable: lastRetryable };
         const sleepMs = Math.max(0, Math.min(waitMs, deadline - Date.now()));
         log(`[直播直传] 段${seg + 1} 自动重试上传,${Math.max(1, Math.ceil(sleepMs / 1000))}s 后继续: ${lastError}`);
         await sleepUnlessAborted(sleepMs, [sig], o.sleep);
         waitMs = Math.min(60_000, Math.max(1_000, waitMs * 2));
       }
     };
-
-    // Zero-disk: backpressure means bytes were produced but not uploaded, and there is no file
+    /** Set when the last auto-retry attempt was an upload-only (retryable) failure. */
+    let retryableUploadFailure = false;
     // to fall back to. Treating it as a warning would silently lose video — it is a hard error.
     if (spoolMode === "none" && r.backpressured) {
       const error = ZERO_DISK_PART_LOST;
@@ -3566,6 +3682,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
           return { kind: "continue" };
         }
         error = `${error};自动重试失败: ${retried.error ?? "窗口耗尽"}`;
+        retryableUploadFailure = retried.retryable === true;
       }
       // A cancelled run that already delivered parts is still a success: the archive holds
       // everything recorded so far. Reporting failure would make callers (ledger writeback,
@@ -3589,7 +3706,9 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         return { kind: "ended" };
       }
       emit({ at: Date.now(), kind: "part_failed", part: unconfirmedIndex, message: error });
-      return fail(error);
+      // A zero-disk failure with no local spool has nothing the queue could upload; it remains
+      // a real failure (exit 75 would retry a byte that no longer exists).
+      return fail(error, {}, retryableUploadFailure && spoolMode !== "none" && existsSync(spoolPath));
     }
 
     const stem = r.stemOfCompleted;
@@ -3623,6 +3742,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         emit({ at: Date.now(), kind: "part_failed", part: index, message: submitted.error });
         return failRun({
           ok: false, error: submitted.error, bvid: session.bvid, aid: session.aid,
+          uploadPending: submitted.retryable === true && spoolMode !== "none" && existsSync(spoolPath),
           title: session.archiveTitle, segments: [...segments, { ...report, uploadError: submitted.error }],
           spoolDir: o.spoolDir, statePath: livePumpStatePath(o.spoolDir, o.room),
         });

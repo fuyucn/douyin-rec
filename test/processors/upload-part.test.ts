@@ -7,6 +7,7 @@ import {
   APPEND_AMBIGUOUS_MARKER, PART_KINDS, jobIdOf, type ProcessContext, type ProcessJob, type PartCtx,
 } from "@drec/core";
 import { makeUploadPartProcessor, shouldChainCleanup, PART_WORKFLOW_PARAM, uploadPartProcessor } from "@drec/bilibili-upload";
+import { livePumpStatePath, readLivePumpState, writeLivePumpState, type LivePumpState } from "@drec/zero-upload";
 import type { BiliupHooks } from "../../packages/bilibili-upload/src/run-biliup.js";
 import { parseSsAcked } from "../../packages/bilibili-upload/src/biliup-progress.js";
 
@@ -357,6 +358,30 @@ describe("upload-part processor", () => {
     } finally { teardown(); }
   });
 
+
+  it("live-pump: confirms the pump state (not the rolling sidecar) before cleanup can chain", async () => {
+    setup();
+    try {
+      const f = put("a_000.live.ts");
+      const statePath = livePumpStatePath(dir, "r");
+      const st: LivePumpState = {
+        schemaVersion: 1, room: "r", createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
+        parts: [{ index: 0, spoolPath: f, filename: "a_000.live.ts", stem: "s", title: "P1", bytes: 10, durationSec: 2, confirmed: false }],
+      };
+      writeLivePumpState(statePath, st);
+      const p = processor(seams());
+      const jobLive = job(f, { params: { [PART_WORKFLOW_PARAM]: "live-pump", liveStatePath: statePath } });
+      expect(p.validate(jobLive)).toBeNull();
+      await p.run(jobLive, pc());
+      const after = readLivePumpState(statePath);
+      expect(after?.parts[0]?.confirmed).toBe(true);
+      expect(after?.bvid).toBe(BV);
+      expect(after?.queueManaged).toBeUndefined(); // no later unconfirmed part is waiting
+      expect(existsSync(join(dir, "a_000.rolling.json"))).toBe(false);
+      // The untrusted path rule is enforced before the transfer starts.
+      expect(p.validate(job(f, { params: { [PART_WORKFLOW_PARAM]: "live-pump", liveStatePath: "/tmp/nope.json" } }))).toMatch(/state/);
+    } finally { teardown(); }
+  });
 
   it("B3d: a bogus sidecarIndex is refused by validate and never written by run", async () => {
     setup();

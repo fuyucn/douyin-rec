@@ -181,6 +181,9 @@ describe("isUploadRateLimited：识别 601 与 21566", () => {
     const msg = 'create failed: {"code":21186,"message":"您投稿的频率过快，请稍等2秒","ttl":1}';
     expect(isUploadRateLimited(new Error(msg))).toBe(true);
   });
+  it("406 同样按账号限流处理（2026-11-14 收尾重传实测）", () => {
+    expect(isUploadRateLimited(new Error('{"code":406,"message":"请求过于频繁"}'))).toBe(true);
+  });
   it("JSON 形态（引号键、无中文文案）同样识别 601/21540/21566/21186", () => {
     // 直传路径把 JSON.stringify(raw) 交给本函数:键带引号，旧正则只认 code: 601。
     expect(isUploadRateLimited(new Error('append failed: {"code":601}'))).toBe(true);

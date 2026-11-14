@@ -647,6 +647,40 @@ describe("runLivePump must actually use the injected submitter (issue #688)", ()
   }, 20_000);
 });
 
+describe("T-220 queue-managed recovery", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "live-pump-queue-managed-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  it("does not whole-file resubmit sealed parts the node queue already owns", async () => {
+    const spool = join(dir, "a_000.live.ts");
+    writeFileSync(spool, "aaa");
+    writeFileSync(join(dir, "cookies.json"), JSON.stringify({
+      cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
+    }));
+    const statePath = livePumpStatePath(dir, "qm");
+    writeLivePumpState(statePath, {
+      schemaVersion: 1, room: "qm", createdAt: 1, title: "t", tid: 21, tag: "x", private: true, updatedAt: Date.now(),
+      queueManaged: true,
+      parts: [{ index: 0, spoolPath: spool, filename: "a_000.live.ts", stem: "s", title: "P1", bytes: 3, durationSec: 1, confirmed: false }],
+    });
+    const fetches: string[] = [];
+    const r = await runLivePump({
+      cookiesPath: join(dir, "cookies.json"), room: "qm", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: CHUNK, maxMs: 100, maxSegments: 1, submit: true, spoolMode: "none", quality: "origin",
+      fetch: async (u) => { fetches.push(String(u)); return { living: true, url: "http://x/y.ts" }; },
+      sleep: async () => {},
+    });
+    expect(r.ok).toBe(false);
+    expect(r.uploadPending).toBe(true);
+    expect(r.error).toBe("queued uploads pending");
+    expect(r.segments).toEqual([]);
+    // No stream request and no submit: the queue owns the remaining part.
+    expect(fetches.length).toBe(0);
+    expect(readLivePumpState(statePath)?.parts[0]?.confirmed).toBe(false);
+  });
+});
+
 describe("archive description survives state and reaches the create request", () => {
   it("passes desc from runLivePump options to the first studio create", async () => {
     const dir = mkdtempSync(join(tmpdir(), "live-pump-desc-"));
@@ -2921,6 +2955,38 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
     expect(completes).toBeGreaterThan(0);
     expect(readLivePumpState(statePath)?.parts.every((p) => p.confirmed)).toBe(true);
     expect(existsSync(spool)).toBe(false);
+  });
+
+  it("preupload 406 is reported retryable, not as a permanent recording failure", async () => {
+    // Production 2026-11-14: a 406 during whole-file resubmit was classified as a generic
+    // upload failure, the pump exited non-zero, and TaskManager burned its restart budget.
+    // The spool must survive and the result must advertise an upload-only pending state.
+    const impl = (async () => new Response(
+      JSON.stringify({ code: 406, message: "您上传视频过快，请稍后重试" }),
+      { status: 406, headers: { "content-type": "application/json" } },
+    )) as unknown as typeof fetch;
+    const statePath = livePumpStatePath(dir, "r406");
+    const spool = join(dir, "p406.ts");
+    writeFileSync(spool, "retryable-part-bytes");
+    writeLivePumpState(statePath, {
+      schemaVersion: 1, room: "r406", createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
+      bvid: "BILIfake406", aid: 7,
+      parts: [{
+        index: 0, spoolPath: spool, filename: "p406.ts", stem: "stem406", title: "P1",
+        bytes: 19, durationSec: 10, confirmed: false,
+      }],
+      updatedAt: 1,
+    });
+    const session = new LivePumpSession({
+      cookiesPath: COOKIES, room: "r406", spoolDir: dir, title: "t",
+      tid: 21, tag: "x", private: true, probeDuration: async () => 60, scanDtsGap: async () => null, fetchImpl: impl,
+      sleep: async () => {},
+    });
+    const r = await session.resubmitUnconfirmedPart();
+    expect(r.ok).toBe(false);
+    expect(r.retryable).toBe(true);
+    expect(existsSync(spool)).toBe(true);
+    expect(readLivePumpState(statePath)?.parts[0]?.confirmed).toBe(false);
   });
 
   it("can recover the first unconfirmed part without an archive identity by creating it", async () => {
