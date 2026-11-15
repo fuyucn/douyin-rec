@@ -46,11 +46,14 @@ ARG IMAGE_ROLE=master
 # openssh-client + rsync：docker 当 master 时经 SshTransport ssh/rsync 从 VPS 拉流(走 tailscale sidecar)。
 # fonts-noto-cjk：烧字幕(burn danmu/livechat)的 ASS 字体名 = "Noto Sans CJK SC",镜像无 CJK 字体
 #   则 libass 回落到无中文字形的字体 → 中文乱码。装上它 fontconfig 才能解析出真字体。
+# iproute2: provides `ss` for the biliup transfer watchdog (`ss -tinpH` TCP bytes_acked).
+#   Without `ss`, readTcpAcked returns null and stall detection stays paused until maxWallMs (24h),
+#   allowing a hung upload-part child to block subsequent ordered parts (issue #699).
 RUN apt-get update \
  && if [ "$IMAGE_ROLE" = "master" ]; then \
-      apt-get install -y --no-install-recommends ffmpeg ca-certificates curl openssh-client rsync xz-utils fonts-noto-cjk; \
+      apt-get install -y --no-install-recommends ffmpeg ca-certificates curl openssh-client rsync xz-utils fonts-noto-cjk iproute2; \
     else \
-      apt-get install -y --no-install-recommends ffmpeg ca-certificates curl xz-utils; \
+      apt-get install -y --no-install-recommends ffmpeg ca-certificates curl xz-utils iproute2; \
     fi \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
