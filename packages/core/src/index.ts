@@ -19,6 +19,7 @@ export * from "./worker-contract.js";
 // app(L4)的「本机抑制」也要用它,而 app 不能依赖 orchestrator(L4.5)——单一真理源在 core。
 export * from "./capabilities.js";
 export * from "./hub-ledger-contract.js";
+export * from "./hub-room-history.js";
 export * from "./hub-flow.js";
 // Same-broadcast gap rule (issue #292): the one tolerance for clustering and the reconnect wait.
 export * from "./broadcast-window.js";

@@ -8,7 +8,11 @@
  */
 import { DatabaseSync } from "node:sqlite";
 import { existsSync, rmSync } from "node:fs";
-import { HUB_TABLE_NAMES, jobLogPathCandidates } from "@drec/core";
+import {
+  HUB_TABLE_NAMES, HUB_ROOM_STREAM_PREDICATE, jobLogPathCandidates, roomKeyToStreamPrefix,
+} from "@drec/core";
+
+export { roomKeyToStreamPrefix } from "@drec/core";
 
 /** Budget for waiting on the writers' lock; without it a busy ledger silently fails the request. */
 const LEDGER_BUSY_TIMEOUT_MS = 3000;
@@ -29,16 +33,11 @@ export interface DeleteHubHistoryOptions {
   logsDir: string;
 }
 
-/** room key `{platform}.{roomSlug}` → streamKey prefix `{platform}:{roomSlug}:` (first dot only). */
-export function roomKeyToStreamPrefix(roomKey: string): string {
-  return `${roomKey.replace(".", ":")}:`;
-}
-
 /**
  * Delete every history run of a room: the ledger tables plus each run's job.log.
  *
  * Write connection (issue #428): this runs concurrently with SyncLedger writers, so it waits on the
- * lock (`busy_timeout`) and wraps the five DELETEs in one `BEGIN IMMEDIATE` transaction — a
+ * lock (`busy_timeout`) and wraps the six DELETEs in one `BEGIN IMMEDIATE` transaction — a
  * mid-way failure rolls back instead of leaving half a room's history deleted.
  */
 export function deleteHubHistory(o: DeleteHubHistoryOptions): DeleteHubHistoryResult {
@@ -54,11 +53,12 @@ export function deleteHubHistory(o: DeleteHubHistoryOptions): DeleteHubHistoryRe
         (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as unknown as { name: string }[]).map((r) => r.name),
       );
       try {
-        rows = db.prepare("SELECT streamKey FROM sync_jobs WHERE streamKey LIKE ?").all(prefix + "%") as unknown as { streamKey: string }[];
+        rows = db.prepare(`SELECT streamKey FROM sync_jobs WHERE ${HUB_ROOM_STREAM_PREDICATE}`)
+          .all(prefix, prefix) as unknown as { streamKey: string }[];
       } catch { /* old db without sync_jobs → still delete from the tables that exist */ }
       for (const table of HUB_TABLE_NAMES) {
         if (!tables.has(table)) continue;
-        db.prepare(`DELETE FROM ${table} WHERE streamKey LIKE ?`).run(prefix + "%");
+        db.prepare(`DELETE FROM ${table} WHERE ${HUB_ROOM_STREAM_PREDICATE}`).run(prefix, prefix);
       }
       db.exec("COMMIT");
     } catch (e) {
