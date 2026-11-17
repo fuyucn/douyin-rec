@@ -78,7 +78,7 @@ The submitter checkpoint seeds only confirmed parts from the pump state.
 4. [~] **Accept stability before permanence.**
    - Current-bundle canary with >=120s segments: default create, append, restart, pending recovery,
      bounded throttling, queue takeover and safe stop, with no duplicate draft or lost confirmed part.
-   - 2026-11-17 retry on room 252165330607 completed create/append/restart plus pending queue
+   - 2026-11-17 retry on an authorized public live room completed create/append/restart plus pending queue
      takeover/publication and direct recovery over six real 182s parts. Direct recovery's cleanup
      order is supported by inotify state-rename-before-unlink and final confirmed state; the strict
      synchronous hook missed it because cleanup uses `rmSync`, not the wrapped `unlinkSync`.
