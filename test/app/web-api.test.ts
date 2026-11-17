@@ -203,6 +203,7 @@ function hubDeps(prefix: string, extra: Partial<ApiDeps> = {}): Partial<ApiDeps>
     hubDir,
     hubConfigPath,
     hubEnabled: true,
+    syncDbPath: join(hubDir, "sync.db"),
     deleteHubHistory: (syncDbPath: string, roomKey: string) =>
       deleteHubHistory({ syncDbPath, roomKey, stageDir: hubDir, logsDir: hubDir }),
     ...extra,
@@ -1915,7 +1916,11 @@ describe("删除 hub 规则同时清理该直播间历史 run", () => {
   it("有进行中 run → 409 且规则保留;终态后可删", () => {
     const syncDbPath = makeSyncDb();
     const hubDir = mkdtempSync(join(tmpdir(), "hubdel-active-"));
-    const a = makeApi({ store, manager, hubDir, syncDbPath });
+    const a = makeApi({
+      store, manager, hubDir, syncDbPath,
+      deleteHubHistory: (dbPath: string, roomKey: string) =>
+        deleteHubHistory({ syncDbPath: dbPath, roomKey, stageDir: hubDir, logsDir: hubDir }),
+    });
     const t = a.createTask({ room: "123456" }).body as { id: number };
     a.createHubRule({ recording: { sourceTaskId: t.id } });
 
@@ -2411,7 +2416,7 @@ describe("rooms 域(T9 统一房间视图)", () => {
       s.close();
     });
 
-    it("删历史撞锁/抛错 → 显式 500(任务已删、规则仍在,可重试收敛),不是通用 500", async () => {
+    it("删历史撞锁/抛错 → 503 且任务与规则都保留,不是通用 500", async () => {
       const s = new TaskStore(":memory:");
       // syncDbPath 指向一个坏文件 → 删历史的首条 exec 必然抛(SQLITE_NOTADB,与 #428 的锁/IO 故障同类)
       const broken = join(mkdtempSync(join(tmpdir(), "rooms-del-histfail-db-")), "sync.db");
@@ -2420,11 +2425,11 @@ describe("rooms 域(T9 统一房间视图)", () => {
       const id = (aBad.createTask({ room: "123456", name: "主播" }).body as { id: number }).id;
       expect(aBad.createHubRule({ recording: { sourceTaskId: id }, workers: ["local"] }).status).toBe(201);
       const res = await aBad.deleteRoom("douyin.123456");
-      expect(res.status).toBe(500);
-      expect((res.body as { error: string }).error).toContain("处理历史清理失败");
+      expect(res.status).toBe(503);
+      expect((res.body as { error: string }).error).toContain("无法确认 hub 台账状态");
       expect((res.body as { error: string }).error).toContain("重试");
-      expect(s.getTask(id)).toBeNull();              // 任务已删(先删任务后删历史)
-      expect(ruleListed(aBad, "douyin.123456")).toBe(true); // 规则仍在,重试可收敛
+      expect(s.getTask(id)).not.toBeNull();
+      expect(ruleListed(aBad, "douyin.123456")).toBe(true);
       s.close();
     });
 
