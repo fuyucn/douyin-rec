@@ -12,8 +12,8 @@
 import { DatabaseSync } from "node:sqlite";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import {
-  HUB_TABLE_NAMES, HUB_TERMINAL_STATES, HUB_FLOW_ORDER, isSidecarSkipEvent, readyNodes, STAGE_READY, USER_STOP,
-  jobLogPathCandidates,
+  HUB_TABLE_NAMES, HUB_TERMINAL_STATES, HUB_FLOW_ORDER, HUB_ROOM_STREAM_PREDICATE, isSidecarSkipEvent, readyNodes, STAGE_READY, USER_STOP,
+  jobLogPathCandidates, roomKeyToStreamPrefix,
   type HubPoolSnapshotDTO, type HubQueueDTO, type HubQueueStats, type NodeUploadStatusDTO, type QueueItemDTO, type QueuePhase,
 } from "@drec/core";
 import { rootHubConfig, rootLogsDir, rootStageDir } from "./paths.js";
@@ -87,11 +87,6 @@ function openLedger(syncDbPath: string): DatabaseSync {
   return db;
 }
 
-/** room key `{platform}.{roomSlug}` → streamKey 前缀 `{platform}:{roomSlug}:`(仅替换首个点)。 */
-function roomKeyToStreamPrefix(roomKey: string): string {
-  return `${roomKey.replace(".", ":")}:`;
-}
-
 /**
  * 该房间仍有「进行中」run(终态 done/failed/needs_manual 不算;failed 允许删除清掉卡住的旧记录)。
  * 无 db / 旧库无表 → 空(无从守卫)。
@@ -100,9 +95,10 @@ export function activeHubJobKeys(syncDbPath: string, roomKey: string): string[] 
   if (!existsSync(syncDbPath)) return [];
   const db = openLedger(syncDbPath);
   try {
+    const prefix = roomKeyToStreamPrefix(roomKey);
     return (db.prepare(
-      `SELECT streamKey FROM sync_jobs WHERE streamKey LIKE ? AND state NOT IN (${TERMINAL_SQL}) ORDER BY updatedAt DESC`,
-    ).all(roomKeyToStreamPrefix(roomKey) + "%") as unknown as { streamKey: string }[]).map((r) => r.streamKey);
+      `SELECT streamKey FROM sync_jobs WHERE ${HUB_ROOM_STREAM_PREDICATE} AND state NOT IN (${TERMINAL_SQL}) ORDER BY updatedAt DESC`,
+    ).all(prefix, prefix) as unknown as { streamKey: string }[]).map((r) => r.streamKey);
   } catch {
     return [];
   } finally {
@@ -369,8 +365,7 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
   const { room, limit = 10, offset = 0, now = Date.now(), stageDir = hubStageDir(), logsDir = hubLogsDir() } = opts;
   if (!existsSync(syncDbPath)) return { jobs: [], total: 0 };
   const db = openLedger(syncDbPath);
-  // room key `{platform}.{roomSlug}` → streamKey 前缀 `{platform}:{roomSlug}:`(仅替换首个点)。
-  const prefix = room ? room.replace(".", ":") + ":" : null;
+  const prefix = room ? roomKeyToStreamPrefix(room) : null;
   try {
     let jobs: RawJob[];
     let total = 0;
@@ -378,7 +373,7 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
       // WHERE 子句统一拼:room 前缀 + 状态过滤(常量占位符,无注入面)。
       const where: string[] = [];
       const params: Array<string | number> = [];
-      if (prefix) { where.push("streamKey LIKE ?"); params.push(prefix + "%"); }
+      if (prefix) { where.push(HUB_ROOM_STREAM_PREDICATE); params.push(prefix, prefix); }
       // states 与 excludeStates 互斥(同时给以 excludeStates 为准 —— 调用方不该这么用)。
       if (opts.states && opts.states.length > 0) {
         where.push(`state IN (${opts.states.map(() => "?").join(",")})`);

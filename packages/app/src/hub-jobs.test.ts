@@ -229,6 +229,26 @@ describe("deleteHubJobHistory / activeHubJobKeys", () => {
     expect(activeHubJobKeys(dbPath, "douyin.300")).toEqual([]);
   });
 
+  it("uses the literal room identity in the active guard and in the job list", () => {
+    const cases = [
+      { room: "douyin.alpha_beta", target: "douyin:alpha_beta:2026-07-01", sibling: "douyin:alphaXbeta:2026-07-01" },
+      { room: "douyin.alpha%beta", target: "douyin:alpha%beta:2026-07-01", sibling: "douyin:alphaZZbeta:2026-07-01" },
+      { room: "douyin.alphaBeta", target: "douyin:alphaBeta:2026-07-01", sibling: "douyin:alphabeta:2026-07-01" },
+    ];
+    for (const c of cases) {
+      const { dbPath, db } = makeSyncDb();
+      seedJob(db, c.target, [["merging", T0]], 100);
+      seedJob(db, c.sibling, [["merging", T0 + 1000]], 100);
+      db.close();
+      const stage = mkdtempSync(join(tmpdir(), "hubroom-stage-"));
+      const logs = mkdtempSync(join(tmpdir(), "hubroom-logs-"));
+      expect(activeHubJobKeys(dbPath, c.room)).toEqual([c.target]);
+      const { jobs, total } = listHubJobs(dbPath, { room: c.room, stageDir: stage, logsDir: logs });
+      expect(total).toBe(1);
+      expect(jobs.map((j) => j.streamKey)).toEqual([c.target]);
+    }
+  });
+
   it("旧库缺表 / sync db 不存在 → 不炸,只删能删的", () => {
     const dir = mkdtempSync(join(tmpdir(), "hubdelete-old-"));
     const dbPath = join(dir, "old-sync.db");
