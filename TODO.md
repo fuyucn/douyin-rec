@@ -23,7 +23,7 @@
 - [~] **T-225 Room history deletion isolation (issue [#701](https://github.com/fuyucn/douyin-rec/issues/701); plan [053](plans/053_room_history_isolation.md))**
   — **What/why**: use one literal case-sensitive room prefix in ledger discovery/deletion to prevent cross-room history/log removal.
   **Acceptance**: independent regression FAIL/PASS; all tables/log roots preserve other rooms; legacy/rollback compatibility; full tests, types, architecture, bundle, strict quality and independent review.
-  **Status (2026-11-17)**: rebased onto 0.0.391; 15 new regressions pass; full 5449 passed / 42 skipped; typecheck, architecture and bundle pass; version 0.0.392. PR pending; no deployment or production deletion. Active guard failures and transactional recheck remain S2.
+  **Status (2026-11-17)**: rebased onto 0.0.391; 15 new regressions pass; full 5449 passed / 42 skipped; typecheck, architecture and bundle pass; version 0.0.392. PR #706 merged (8dcb3138); deployment pending. No production deletion. Active guard failures and transactional recheck remain S2.
 - [x] **T-199 部署守卫带 Web 凭据并覆盖在途上传（issue [#645](https://github.com/fuyucn/douyin-rec/issues/645) → PR [#647](https://github.com/fuyucn/douyin-rec/pull/647)，2026-11-12）**
   — **做什么**: `deploy-precheck.sh/.py` 读取各节点 `config/web-token` 并带 `Authorization`；200 分支统计 `biliup / upload-part / upload-prep / reconcile-part / remux` 与新鲜 `phase=uploading` 结果文件；新增 `--node` 单节点模式；`auto-deploy.sh` 的 `wait_idle` 改为逐节点调用 precheck；`install-worker.sh --check-busy` 同样带 token 并把 `remux` 计入忙。
   **为什么**: 启用 Web 鉴权后守卫全部 401 → fail-closed 永远等待；同时 precheck 只数 `running.biliup`，auto-deploy 又完全不调用 precheck，重启可能打断不可逆的上传分P链。
