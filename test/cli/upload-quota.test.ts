@@ -1,11 +1,4 @@
-/**
- * issue #596 / 审计 P0-5: manual `upload` / `_upos-upload` must take the same
- * UploadGate (account cooldown + sliding window) and node UploadSlot as production.
- * The unit tests pin the helper's order/release/rate-limit behavior; the source
- * guard pins that both CLI commands actually call it (helper tests alone cannot).
- */
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+/** Account gate ordering and release; command behavior lives in upload-command.test.ts. */
 import { describe, expect, it, vi } from "vitest";
 import type { UploadSlot } from "@drec/core";
 import { runWithUploadQuota } from "../../packages/cli/src/upload-quota.js";
@@ -62,21 +55,5 @@ describe("runWithUploadQuota (issue #596)", () => {
       events.push("upload");
     });
     expect(events).toEqual(["gate", "upload"]);
-  });
-});
-
-describe("manual upload 命令接线（source guard）", () => {
-  const root = join(import.meta.dirname, "..", "..");
-  const src = readFileSync(join(root, "packages/cli/src/cli.ts"), "utf-8");
-  const uploadCmd = src.slice(src.indexOf('.command("upload")'), src.indexOf("// ─── Hub starter"));
-  const uposCmd = src.slice(src.indexOf('.command("_upos-upload'), src.indexOf("// ─── _live-pump"));
-
-  it("upload 走 helper，并暴露槽位等待上限", () => {
-    expect(uploadCmd).toContain("runWithUploadQuota(");
-    expect(uploadCmd).toContain("--slot-wait");
-  });
-
-  it("_upos-upload 走 helper（不再直接撞 submitStudio）", () => {
-    expect(uposCmd).toContain("runWithUploadQuota(");
   });
 });

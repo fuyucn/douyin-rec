@@ -6,17 +6,17 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ArchiveRef, PartSubmitter, SubmitArchiveMeta } from "@drec/core";
+import type { ArchiveRef, PartSubmitter } from "@drec/core";
 import { LivePumpSession, livePumpStatePath, readLivePumpState } from "./live-pump.js";
 
 const REF: ArchiveRef = { targetId: "bilibili-upos", id: "BILIfake1" };
 
 interface Calls {
-  ensure: Array<{ archive: SubmitArchiveMeta; name: string; title?: string; skipFindRecent?: boolean }>;
-  append: Array<{ ref: ArchiveRef; name: string; title?: string }>;
+  ensure: Array<Parameters<PartSubmitter["ensureStreamedArchive"]>[0]>;
+  append: Array<Parameters<PartSubmitter["appendStreamedPart"]>[0]>;
 }
 
-function fakeSubmitter(mode: "ok" | "needs-manual" = "ok"): { submitter: PartSubmitter; calls: Calls } {
+function fakeSubmitter(mode: "ok" | "needs-manual" | "retry-exhausted" = "ok"): { submitter: PartSubmitter; calls: Calls } {
   const calls: Calls = { ensure: [], append: [] };
   const fail = (): never => {
     const err = new Error("archive outcome unknown") as Error & { failure?: string };
@@ -47,15 +47,17 @@ describe("live-pump -> PartSubmitter seam", () => {
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "live-pump-submitter-")); });
   afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
 
-  const session = (submitter: PartSubmitter) => new LivePumpSession({
-    cookiesPath: join(dir, "cookies.json"),
+  const session = (submitter: PartSubmitter, spoolDir = dir, submitterTargetId?: string) => new LivePumpSession({
+    cookiesPath: join(spoolDir, "cookies.json"),
     room: "r",
-    spoolDir: dir,
+    spoolDir,
     title: "测试-1",
     tid: 21,
-    tag: "x",
+    tag: "x,,y",
+    desc: "test description",
     private: true,
     submitter,
+    submitterTargetId,
     cleanupConfirmedSpool: true,
   });
 
@@ -64,61 +66,84 @@ describe("live-pump -> PartSubmitter seam", () => {
     const s = session(submitter);
     const spool = join(dir, "p0.ts");
     writeFileSync(spool, "part-0");
-    const r = await s.submitPart({ index: 0, spoolPath: spool, stem: "stem0", title: "P1", bytes: 6, durationSec: 10 });
+    const publish = submitter.ensureStreamedArchive;
+    submitter.ensureStreamedArchive = async (request) => {
+      expect(readLivePumpState(livePumpStatePath(dir, "r"))?.pending)
+        .toMatchObject({ kind: "create", partIndex: 0, stem: "stem0", spoolPath: spool });
+      expect(existsSync(spool)).toBe(true);
+      return publish(request);
+    };
+    const title = "P1".repeat(50);
+    const signal = new AbortController().signal;
+    const r = await s.submitPart({ index: 0, spoolPath: spool, stem: "stem0", title, bytes: 6, durationSec: 10.6 }, signal);
     expect(r.ok).toBe(true);
     expect(s.bvid).toBe("BILIfake1");
     expect(calls.ensure).toHaveLength(1);
     expect(calls.append).toHaveLength(0);
-    expect(calls.ensure[0]!.name).toBe("stem0");
-    expect(calls.ensure[0]!.archive.policy?.visibility).toBe("private");
-    expect(calls.ensure[0]!.archive.tid).toBe(21);
+    expect(calls.ensure[0]).toEqual({
+      archive: { title: "测试-1", tid: 21, tags: ["x", "y"], desc: "test description",
+        policy: { visibility: "private", watermark: false, copyright: "self" } },
+      name: "stem0", title: title.slice(0, 80), expectedDurationSec: 11, skipFindRecent: true, signal,
+    });
+    expect(calls.ensure[0]!.signal).toBe(signal);
     expect(s.parts.map((p) => p.confirmed)).toEqual([true]);
+    expect(readLivePumpState(livePumpStatePath(dir, "r"))).toMatchObject({
+      bvid: REF.id, parts: [{ stem: "stem0", confirmed: true }],
+    });
     expect(existsSync(spool)).toBe(false);
   });
 
   it("P2 appends to the archive the submitter created", async () => {
     const { submitter, calls } = fakeSubmitter();
-    const s = session(submitter);
+    const s = session(submitter, dir, "custom-target");
+    const signal = new AbortController().signal;
+    const title = "Part title".repeat(10);
+    const append = submitter.appendStreamedPart;
+    submitter.appendStreamedPart = async (request) => {
+      expect(readLivePumpState(livePumpStatePath(dir, "r"))).toMatchObject({
+        bvid: REF.id, pending: { kind: "append", partIndex: 1, stem: "stem1" },
+        parts: [{ stem: "stem0", confirmed: true }],
+      });
+      expect(existsSync(join(dir, "p1.ts"))).toBe(true);
+      return append(request);
+    };
     for (let i = 0; i < 2; i++) {
       const spool = join(dir, "p" + i + ".ts");
       writeFileSync(spool, "part-" + i);
-      const r = await s.submitPart({ index: i, spoolPath: spool, stem: "stem" + i, title: "P" + (i + 1), bytes: 6, durationSec: 10 });
+      const r = await s.submitPart({ index: i, spoolPath: spool, stem: "stem" + i, title, bytes: 6, durationSec: 10 }, signal);
       expect(r.ok).toBe(true);
     }
     expect(calls.ensure).toHaveLength(1);
     expect(calls.append).toHaveLength(1);
-    expect(calls.append[0]!.ref).toEqual(REF);
-    expect(calls.append[0]!.name).toBe("stem1");
+    expect(calls.append[0]).toEqual({
+      ref: { targetId: "custom-target", id: REF.id }, name: "stem1", title: title.slice(0, 80), size: 6, signal,
+    });
+    expect(calls.append[0]!.signal).toBe(signal);
     expect(s.parts.map((p) => p.confirmed)).toEqual([true, true]);
   });
 
-  it("needs-manual keeps the spool, the WAL entry and the part unconfirmed", async () => {
-    const { submitter, calls } = fakeSubmitter("needs-manual");
-    const s = session(submitter);
-    const spool = join(dir, "p0.ts");
-    writeFileSync(spool, "part-0");
-    const r = await s.submitPart({ index: 0, spoolPath: spool, stem: "stem0", title: "P1", bytes: 6, durationSec: 10 });
-    expect(r.ok).toBe(false);
-    expect(r.needsManual).toBe(true);
-    expect(calls.ensure).toHaveLength(1);
-    expect(existsSync(spool)).toBe(true);
-    // An empty array satisfies `every(...)`, so asserting on the in-memory list proved nothing.
-    // Read the WAL the next start actually recovers from.
-    const state = readLivePumpState(livePumpStatePath(dir, "r"));
-    expect(state).not.toBeNull();
-    expect(state!.pending).toMatchObject({ kind: "create", partIndex: 0, stem: "stem0", spoolPath: spool });
-    expect(state!.parts.some((p) => p.confirmed)).toBe(false);
-    expect(s.bvid).toBeUndefined();
-  });
-
-  it("a refused publish is never retried by the runner", async () => {
-    const { submitter, calls } = fakeSubmitter("needs-manual");
-    const s = session(submitter);
-    const spool = join(dir, "p0.ts");
-    writeFileSync(spool, "part-0");
-    const r = await s.submitPart({ index: 0, spoolPath: spool, stem: "stem0", title: "P1", bytes: 6, durationSec: 10 });
-    expect(r.ok).toBe(false);
-    expect(calls.ensure).toHaveLength(1);
+  it("driver failures preserve the spool and WAL without runner retries", async () => {
+    for (const failure of ["needs-manual", "retry-exhausted"] as const) {
+      const spoolDir = join(dir, failure);
+      const { submitter, calls } = fakeSubmitter(failure);
+      const s = session(submitter, spoolDir);
+      const spool = join(spoolDir, "p0.ts");
+      writeFileSync(spool, "part-0");
+      const r = await s.submitPart({ index: 0, spoolPath: spool, stem: "stem0", title: "P1", bytes: 6, durationSec: 10 });
+      expect(r.ok, failure).toBe(false);
+      expect(r.needsManual, failure).toBe(failure === "needs-manual" ? true : undefined);
+      expect(r.retryable, failure).toBe(failure === "retry-exhausted" ? true : undefined);
+      expect(r.error).toBe("archive outcome unknown");
+      expect(calls.ensure).toHaveLength(1);
+      expect(calls.append).toHaveLength(0);
+      expect(existsSync(spool)).toBe(true);
+      // Read the WAL the next start recovers; an empty in-memory list proves nothing.
+      const state = readLivePumpState(livePumpStatePath(spoolDir, "r"));
+      expect(state).not.toBeNull();
+      expect(state!.pending).toMatchObject({ kind: "create", partIndex: 0, stem: "stem0", spoolPath: spool });
+      expect(state!.parts.some((p) => p.confirmed)).toBe(false);
+      expect(s.bvid).toBeUndefined();
+    }
   });
 
   it("the first part asks the submitter to create, never to adopt an older same-title archive", async () => {
@@ -126,9 +151,11 @@ describe("live-pump -> PartSubmitter seam", () => {
     const s = session(submitter);
     const spool = join(dir, "p0.ts");
     writeFileSync(spool, "part-0");
-    await s.submitPart({ index: 0, spoolPath: spool, stem: "stem0", title: "P1", bytes: 6, durationSec: 10 });
+    await s.submitPart({ index: 0, spoolPath: spool, stem: "stem0", title: "", bytes: 6, durationSec: 0 });
     // The legacy path only dedupes by title during crash recovery; a live title template can render
     // the same title twice in a day, and adopting the first archive would mix two broadcasts.
     expect(calls.ensure[0]!.skipFindRecent).toBe(true);
+    expect(calls.ensure[0]).not.toHaveProperty("title");
+    expect(calls.ensure[0]).not.toHaveProperty("expectedDurationSec");
   });
 });

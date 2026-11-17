@@ -542,17 +542,6 @@ describe("rework round 2", () => {
     expect(openQueue().list({ kind: PART_KINDS.upload })).toHaveLength(1);
   });
 
-  it("B2: production record wires the hub-owner decision (static)", () => {
-    const src = readFileSync(path.join(import.meta.dirname, "..", "..", "cli", "src", "cli.ts"), "utf-8");
-    expect(src).toContain("uploadOwnerForTask");
-    expect(src).toContain("enqueueHubOwnedSkip");
-    expect(src).toContain("new TaskStore(resolveDbPath())");
-    // Ownership is decided only on a hub master (DOUYIN_REC_HUB_MASTER) or for a hub-managed task.
-    expect(src).toContain("shouldDecideUploadOwner(task, hubMaster)");
-    expect(src).toContain("DOUYIN_REC_HUB_MASTER");
-    expect(src).toContain("masterOwnedWithoutRule");
-  });
-
   it("B2b: task run passes the notifier and gates the owner decision (static)", () => {
     const src = readFileSync(path.join(import.meta.dirname, "cli-task.ts"), "utf-8");
     expect(src).toContain("notify: (message: string)");

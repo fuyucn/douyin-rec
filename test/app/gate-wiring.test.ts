@@ -2,8 +2,8 @@
  * issue #96 接线守护:新一场开播闸门必须接在**每一条**起录路径上。
  * 行为已由 disk-gate / session / recorder / web-api 测试覆盖;这里只防「某处接线被删而其余测试仍全绿」。
  *  - task run(前台)→ buildSessionForTask 真实构造,检查会话持有闸门;
- *  - cli record(子进程)/ serve 手动启动 → 入口文件无法在 vitest 里运行(依赖真平台包),
- *    退而求其次做源码级断言(脆但能抓住误删)。
+ * CLI record is exercised through Commander in packages/cli/src/record-command.test.ts.
+ * The serve manual-start path retains its source guard below.
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
@@ -22,14 +22,6 @@ describe("新一场开播闸门接线", () => {
     const t = store.addTask({ room: "991" });
     const { session } = buildSessionForTask(t, store);
     expect(typeof (session as unknown as { admitNewBroadcast?: unknown }).admitNewBroadcast).toBe("function");
-  });
-
-  it("cli record:RecordingSession 构造处传入 admitNewBroadcast,且水位来源用 effectiveHubConfig()", () => {
-    const s = src("packages/cli/src/cli.ts");
-    expect(s).toMatch(/new RecordingSession\([^)]*admitNewBroadcast/);
-    // 审查打回后统一走 effectiveHubConfig()(含 inline/settings 来源的 JSON),不再只用「路径」。
-    expect(s).toContain("effectiveHubConfig()");
-    expect(s).toMatch(/hubConfigJson:\s*effHub\.json/);
   });
 
   it("serve:手动启动准入用 makeManualStartAdmit,并把当前生效的那份配置交给子进程", () => {

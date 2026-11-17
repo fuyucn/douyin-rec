@@ -1,13 +1,18 @@
 // T-220: zero-disk upload-pending handoff must be durable, idempotent, and must not duplicate
 // a part that the queue already owns.
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { existsSync, fsyncSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PART_KINDS } from "@drec/core";
 import { ProcQueueStore, procQueueDbPath } from "@drec/proc-queue";
 import { appendConfirmedJournal, confirmLivePumpPart, livePumpHasUnconfirmed, livePumpStatePath, readConfirmedJournal, readLivePumpState, writeLivePumpState, type LivePumpState } from "@drec/zero-upload";
 import { enqueueLivePumpPending } from "./live-pump-queue.js";
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, fsyncSync: vi.fn(actual.fsyncSync), writeSync: vi.fn(actual.writeSync) };
+});
 
 let root: string;
 let oldRoot: string | undefined;
@@ -26,7 +31,10 @@ function stateWith(parts: Array<{ index: number; spoolPath: string; confirmed?: 
   };
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+  const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+  vi.mocked(fsyncSync).mockImplementation(actual.fsyncSync);
+  vi.mocked(writeSync).mockImplementation(actual.writeSync);
   oldRoot = process.env.DOUYIN_REC_ROOT;
   root = mkdtempSync(join(tmpdir(), "live-queue-"));
   process.env.DOUYIN_REC_ROOT = root;
@@ -37,6 +45,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.resetAllMocks();
   process.env.DOUYIN_REC_ROOT = oldRoot;
   rmSync(root, { recursive: true, force: true });
 });
@@ -294,12 +303,8 @@ describe("confirmLivePumpPart", () => {
     expect(confirmLivePumpPart(statePath, 0, "BV2", { size: 3, mtimeMs: statSync(p0).mtimeMs })).toMatchObject({ ok: false });
   });
 
-  it("T-221 (sol P1-2): a journal-only hit re-syncs durably instead of approving the cleanup", () => {
-    // The earlier confirmation may have returned FAILURE after its record already became
-    // readable (its fsync / trailing-newline write failed). A retry that only saw journal.has()
-    // used to return ok without any new durable write, letting cleanup delete the spool while the
-    // only confirmation still lived in the page cache. The state-confirmed case is already
-    // durable; the journal-only case must write+fsync again.
+  it("T-221 (sol P1-2): a journal-only hit re-syncs durably instead of approving the cleanup", async () => {
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
     const dir = join(root, "recordings", "q");
     const p0 = join(dir, "a_000.live.ts");
     writeFileSync(p0, "aaa");
@@ -309,16 +314,38 @@ describe("confirmLivePumpPart", () => {
     appendConfirmedJournal(statePath, { index: 0, bv: "BV1", at: 5, createdAt: 1_000 });
     const before = readFileSync(journal, "utf-8").split("\n").filter(Boolean).length;
     const fp = { size: 3, mtimeMs: statSync(p0).mtimeMs };
+    vi.mocked(fsyncSync).mockClear().mockImplementationOnce(() => { throw new Error("sync failed"); });
+    expect(confirmLivePumpPart(statePath, 0, "BV1", fp)).toEqual({
+      ok: false, error: "confirmation journal re-sync failed: sync failed",
+    });
+    expect(fsyncSync).toHaveBeenCalledTimes(1);
+    expect(readConfirmedJournal(statePath, 1_000).get(0)?.bv).toBe("BV1");
+    expect(existsSync(p0)).toBe(true);
+    expect(readLivePumpState(statePath)?.parts[0]?.confirmed).toBe(false);
+
+    // A short write must finish the record before the retry may acknowledge cleanup.
+    vi.mocked(writeSync).mockClear().mockImplementationOnce((fd, data) =>
+      actual.writeSync(fd, (data as unknown as Buffer).subarray(0, 8)));
+    vi.mocked(fsyncSync).mockClear();
     expect(confirmLivePumpPart(statePath, 0, "BV1", fp)).toEqual({ ok: true });
+    expect(writeSync).toHaveBeenCalledTimes(2);
+    expect(fsyncSync).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(fsyncSync).mock.invocationCallOrder[0]).toBeGreaterThan(
+      vi.mocked(writeSync).mock.invocationCallOrder[1]!,
+    );
+    expect(JSON.parse(readFileSync(journal, "utf-8").trim().split("\n").at(-1)!))
+      .toEqual({ index: 0, bv: "BV1", at: 5, createdAt: 1_000 });
     const after = readFileSync(journal, "utf-8").split("\n").filter(Boolean).length;
-    expect(after).toBe(before + 1); // re-appended: the retry performed a real durable write
+    expect(after).toBe(before + 2);
     expect(readConfirmedJournal(statePath, 1_000).get(0)?.bv).toBe("BV1");
 
     // A state-confirmed row is durable already: no extra journal line is written.
     const st2 = readLivePumpState(statePath)!;
     writeLivePumpState(statePath, { ...st2, parts: st2.parts.map((p) => ({ ...p, confirmed: true })) });
     const before2 = readFileSync(journal, "utf-8").split("\n").filter(Boolean).length;
+    vi.mocked(fsyncSync).mockClear();
     expect(confirmLivePumpPart(statePath, 0, "BV1", fp)).toEqual({ ok: true });
+    expect(fsyncSync).not.toHaveBeenCalled();
     const after2 = readFileSync(journal, "utf-8").split("\n").filter(Boolean).length;
     expect(after2).toBe(before2);
   });

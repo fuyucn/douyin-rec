@@ -1,12 +1,19 @@
 /**
- * The zero-disk submitter stays off unless the flag is set: a half-wired upload path is worse
- * than the legacy one (plans/049 stage 2b-2c).
+ * Streamed-upload tasks use the driver-backed submitter (plans/049 stage 2b-2c).
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ArchiveInfo, PublishStreamedInput, PublishStreamedResult, UploadErrorClass, UploadTarget } from "@drec/core";
+import { livePumpStatePath, writeLivePumpState } from "@drec/zero-upload";
 import { abortableSleep, buildLivePumpSubmitter } from "./live-pump-submitter.js";
 
-afterEach(() => { vi.useRealTimers(); });
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
+});
 
 const base = {
   cookiesPath: "/tmp/cookies.json",
@@ -14,18 +21,65 @@ const base = {
   pumpRoom: "r",
 };
 
-describe("buildLivePumpSubmitter", () => {
-  it("returns null when the flag is off", () => {
-    const s = buildLivePumpSubmitter({ ...base, env: () => undefined });
-    expect(s).toBeNull();
-  });
+function streamedWire() {
+  const hits: string[] = [];
+  const posts: unknown[] = [];
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const path = new URL(input instanceof Request ? input.url : String(input)).pathname;
+    hits.push(path);
+    if (path === "/x/vu/web/add/v3" || path === "/x/vu/web/edit") {
+      posts.push(JSON.parse(String(init?.body)));
+      return Response.json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } });
+    }
+    if (path === "/x/vupre/web/archive/view") {
+      return Response.json({ code: 0, data: {
+        archive: { aid: 7, bvid: "BILIfake1", title: "T", tid: 21, is_only_self: 1 },
+        videos: [{ cid: 1, filename: "stem0", title: "P1" }],
+      } });
+    }
+    throw new Error("Unexpected network request: " + path);
+  };
+  return { fetchImpl, hits, posts };
+}
 
-  it("returns the three operations when the flag is on", () => {
-    const s = buildLivePumpSubmitter({ ...base, env: (k) => (k === "DREC_LIVE_PUMP_DRIVER" ? "1" : undefined) });
-    expect(s).not.toBeNull();
-    expect(typeof s!.ensureStreamedArchive).toBe("function");
-    expect(typeof s!.appendStreamedPart).toBe("function");
-    expect(typeof s!.verify).toBe("function");
+describe("buildLivePumpSubmitter", () => {
+  it("publishes by default and resumes the next part despite a retired off flag", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "live-pump-driver-default-"));
+    try {
+      const cookiesPath = join(dir, "cookies.json");
+      writeFileSync(cookiesPath, JSON.stringify({ cookie_info: { cookies: [
+        { name: "SESSDATA", value: "test-session" }, { name: "bili_jct", value: "test-csrf" },
+      ] } }));
+      const wire = streamedWire();
+      vi.stubGlobal("fetch", wire.fetchImpl);
+      vi.stubEnv("DREC_LIVE_PUMP_DRIVER", undefined);
+      const noteSubmit = vi.fn();
+      const opts = { cookiesPath, spoolDir: dir, pumpRoom: "test-room",
+        submitGate: { noteSubmit, noteRateLimited: vi.fn() } };
+      const created = await buildLivePumpSubmitter(opts).ensureStreamedArchive({
+        archive: ARCHIVE, name: "stem0", title: "P1", skipFindRecent: true,
+      });
+      expect(created).toEqual({ ref: { targetId: "bilibili-upos", id: "BILIfake1" }, reused: false });
+      const part = { spoolPath: join(dir, "p1.ts"), filename: "p1.ts", stem: "stem0",
+        title: "P1", bytes: 1, durationSec: 180 };
+      writeLivePumpState(livePumpStatePath(dir, opts.pumpRoom), {
+        schemaVersion: 1, room: opts.pumpRoom, createdAt: 1, updatedAt: 1,
+        title: "T", tid: 21, tag: "", private: true, bvid: created.ref.id,
+        parts: [{ ...part, index: 0, confirmed: true }, { ...part, index: 1, confirmed: false }],
+      });
+      vi.stubEnv("DREC_LIVE_PUMP_DRIVER", "0");
+      const resumed = buildLivePumpSubmitter(opts);
+      await expect(resumed.appendStreamedPart({ ref: created.ref, name: "stem1", title: "P2", size: 1 }))
+        .resolves.toEqual({ confirmed: [2] });
+      expect(wire.hits).toEqual(["/x/vu/web/add/v3", "/x/vupre/web/archive/view", "/x/vu/web/edit"]);
+      expect(wire.posts[0]).toMatchObject({ is_only_self: 1, copyright: 1, watermark: { state: 0 },
+        videos: [{ filename: "stem0", title: "P1" }] });
+      expect(wire.posts[1]).toMatchObject({ aid: 7, is_only_self: 1, watermark: { state: 0 },
+        videos: [{ filename: "stem0", title: "P1" }, { filename: "stem1", title: "P2" }] });
+      expect(noteSubmit).toHaveBeenCalledTimes(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -76,12 +130,11 @@ function built(o: (Parameters<typeof fakeTarget>[0] & { submitGate?: { noteSubmi
   const sleeps: number[] = [];
   const s = buildLivePumpSubmitter({
     ...base,
-    env: (k) => (k === "DREC_LIVE_PUMP_DRIVER" ? "1" : undefined),
     target: fake.target,
     sleep: o.sleep ?? (async (ms) => { sleeps.push(ms); }),
     ...(o.submitGate ? { submitGate: o.submitGate } : {}),
   });
-  return { s: s!, calls: fake.calls, finds: fake.finds, sleeps };
+  return { s, calls: fake.calls, finds: fake.finds, sleeps };
 }
 
 describe("live-pump submitter driver wiring", () => {
@@ -115,7 +168,6 @@ describe("live-pump submitter driver wiring", () => {
     };
     const s = buildLivePumpSubmitter({
       ...base,
-      env: (k) => (k === "DREC_LIVE_PUMP_DRIVER" ? "1" : undefined),
       target: fake.target,
       sleep: async () => {},
       submitGate: {
@@ -123,7 +175,7 @@ describe("live-pump submitter driver wiring", () => {
         noteRateLimited: () => events.push("rate-limited"),
       },
     });
-    await s!.ensureStreamedArchive({ archive: ARCHIVE, name: "stem0", skipFindRecent: true });
+    await s.ensureStreamedArchive({ archive: ARCHIVE, name: "stem0", skipFindRecent: true });
     expect(events).toEqual(["submit", "rate-limited", "submit"]);
   });
 

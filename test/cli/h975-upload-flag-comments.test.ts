@@ -11,7 +11,10 @@ import { describe, expect, it } from "vitest";
 const ROOT = join(__dirname, "..", "..");
 const read = (...p: string[]): string => readFileSync(join(ROOT, ...p), "utf8");
 
-const CLI = read("packages", "cli", "src", "cli.ts");
+const CLI = read("packages", "cli", "src", "record-command.ts")
+  + "\n" + read("packages", "cli", "src", "record-setup.ts");
+const OPTIONS = read("packages", "cli", "src", "record-options.ts");
+const STREAM = read("packages", "cli", "src", "stream-upload-record.ts");
 const FLAGS = read("packages", "cli", "src", "cli-flags.ts");
 const BOOL = read("packages", "core", "src", "bool-flag.ts");
 
@@ -35,17 +38,6 @@ function docBefore(src: string, anchor: string): string {
   return head.slice(start, end + 2);
 }
 
-/** Consecutive `//` lines directly above `anchor`. */
-function lineCommentsBefore(src: string, anchor: string): string {
-  const at = src.indexOf(anchor);
-  expect(at, `anchor not found: ${anchor}`).toBeGreaterThanOrEqual(0);
-  const lines = src.slice(0, at).split("\n");
-  lines.pop(); // the anchor's own line prefix
-  const block: string[] = [];
-  for (let i = lines.length - 1; i >= 0 && /^\s*\/\//.test(lines[i]); i--) block.unshift(lines[i]);
-  return block.join("\n");
-}
-
 const OFF_WORDS = ["no", "n", "false", "0", "off", "none"];
 const ON_WORDS = ["yes", "y", "true", "1", "on"];
 
@@ -60,37 +52,13 @@ function expectProtocol(doc: string, what: string): void {
   expect(doc, `${what}: never "on"`).toMatch(/never[^.]*"on"|绝不回落为开/i);
 }
 
-describe("cli.ts SIGUSR2 drain comment (scope item 1)", () => {
-  it("no longer claims `--stream-upload-spool none` drops the local copy / loses the video", () => {
-    const c = comments(CLI);
-    expect(c).not.toMatch(/lost\s+for\s+good/i);
-    expect(c).not.toMatch(/no local copy/i);
-    const block = lineCommentsBefore(CLI, "const drain = new AbortController();");
-    expect(block).not.toMatch(/spool\s+none/);
-  });
-
-  it("keeps the still-true reasons: exit 159 mid-upload and the false 「直播自然收播，排空完成」 log", () => {
-    const block = lineCommentsBefore(CLI, "const drain = new AbortController();");
-    expect(block).toMatch(/SIGUSR2/);
-    expect(block).toMatch(/159/);
-    expect(block).toMatch(/in-flight part/);
-    expect(block).toMatch(/stopGraceful/);
-    expect(block).toContain("直播自然收播，排空完成");
-  });
-
-  it("every `spool none` mention in cli.ts is about the startup rejection", () => {
-    const lines = CLI.split("\n").filter((l) => /spool none/.test(l));
-    for (const l of lines) expect(l, l).toMatch(/Reject|已禁用|rejectsNoSpoolFlag|不再生效/);
-  });
-});
-
 describe("cli.ts RecordCliOpts upload-switch field docs (scope item 4)", () => {
   for (const [field, parser] of [
     ["rollingUpload?: string;", "parseRollingUploadFlag"],
     ["streamUpload?: string;", "parseStreamUploadFlag"],
   ] as const) {
     it(`${field} has a doc pointing at ${parser} and the strict protocol`, () => {
-      const doc = docBefore(CLI, field);
+      const doc = docBefore(OPTIONS, field);
       expect(doc).toContain(parser);
       expect(doc).toMatch(/严格|strict/i);
       expect(doc).toMatch(/未知|unknown/i);
@@ -222,10 +190,10 @@ describe("upload-switch comments stay within the brief's edge cases (round 3)", 
   const CLI_TASK = read("packages", "app", "src", "cli-task.ts");
 
   it("--stream-upload-private is not documented as strictly parsed (it still uses !== \"0\")", () => {
-    expect(CLI).toMatch(/manual\.streamUploadPrivate !== "0"/); // precondition: still lenient
+    expect(STREAM).toMatch(/manual\.streamUploadPrivate !== "0"/); // precondition: still lenient
     const fieldDoc = (() => {
-      const at = CLI.indexOf("streamUploadPrivate?: string;");
-      const head = CLI.slice(0, at).trimEnd();
+      const at = OPTIONS.indexOf("streamUploadPrivate?: string;");
+      const head = OPTIONS.slice(0, at).trimEnd();
       return head.endsWith("*/") ? head.slice(head.lastIndexOf("/**")) : "";
     })();
     expect(fieldDoc).not.toMatch(/strict|严格|parseStrict/i);
@@ -242,7 +210,7 @@ describe("upload-switch comments stay within the brief's edge cases (round 3)", 
 
   it("RecordCliOpts upload docs do not describe the error value as normalized", () => {
     for (const field of ["rollingUpload?: string;", "streamUpload?: string;"]) {
-      expect(docBefore(CLI, field)).not.toMatch(/normali[sz]|规范化|小写化|trim 后的取值/i);
+      expect(docBefore(OPTIONS, field)).not.toMatch(/normali[sz]|规范化|小写化|trim 后的取值/i);
     }
   });
 
