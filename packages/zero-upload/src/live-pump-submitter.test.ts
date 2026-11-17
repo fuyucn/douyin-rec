@@ -93,6 +93,34 @@ describe("live-pump -> PartSubmitter seam", () => {
     expect(existsSync(spool)).toBe(false);
   });
 
+  it("serializes concurrent submits for the same fresh part", async () => {
+    const { submitter, calls } = fakeSubmitter();
+    const s = session(submitter);
+    const spool = join(dir, "p0.ts");
+    writeFileSync(spool, "part-0");
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let ensureAttempts = 0;
+    const ensure = submitter.ensureStreamedArchive;
+    submitter.ensureStreamedArchive = async (request) => {
+      ensureAttempts += 1;
+      await gate;
+      return ensure(request);
+    };
+    const input = { index: 0, spoolPath: spool, stem: "stem0", title: "P1", bytes: 6, durationSec: 10 };
+    const first = s.submitPart(input);
+    const second = s.submitPart(input);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    // Without the submission lock both callers reach ensureStreamedArchive before the gate opens.
+    expect(ensureAttempts).toBe(1);
+    release();
+    const [a, b] = await Promise.all([first, second]);
+    expect(a.ok, a.error ?? "").toBe(true);
+    expect(b.ok, b.error ?? "").toBe(true);
+    expect(calls.ensure).toHaveLength(1);
+    expect(s.parts.filter((p) => p.confirmed)).toHaveLength(1);
+  });
+
   it("P2 appends to the archive the submitter created", async () => {
     const { submitter, calls } = fakeSubmitter();
     const s = session(submitter, dir, "custom-target");
