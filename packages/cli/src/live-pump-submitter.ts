@@ -4,9 +4,6 @@
  * The runner already uploaded the bytes while the part was recording, so the submitter only
  * publishes metadata through the driver. Everything the driver needs is assembled here: the UPOS
  * target, a checkpoint store backed by the pump's own state file, and one bound credential.
- *
- * Off by default: DREC_LIVE_PUMP_DRIVER must be 1. A half-wired upload path is worse than the
- * legacy one, and this flip changes what happens when the archive id is unreadable.
  */
 import { createUposTarget, UPOS_TARGET_ID } from "@drec/bilibili-upload";
 import type { ArchiveRef, PartSubmitter, UploadTarget } from "@drec/core";
@@ -28,7 +25,6 @@ export interface LivePumpSubmitterOpts {
   target?: UploadTarget;
   /** Test seam: cooldown waits must not be real sleeps in tests. */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
-  env?: (key: string) => string | undefined;
   log?: (msg: string) => void;
 }
 
@@ -84,11 +80,9 @@ export function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> 
 }
 
 /**
- * Returns null when the flag is off, so the caller keeps the legacy in-process path untouched.
+ * Builds the driver-backed submitter used by tasks that selected streamed upload.
  */
-export function buildLivePumpSubmitter(o: LivePumpSubmitterOpts): PartSubmitter | null {
-  const env = o.env ?? ((key: string) => process.env[key]);
-  if (env("DREC_LIVE_PUMP_DRIVER") !== "1") return null;
+export function buildLivePumpSubmitter(o: LivePumpSubmitterOpts): PartSubmitter {
   const log = o.log ?? (() => {});
   const target = o.target ?? createUposTarget({ log });
   const cred: { targetId: string; locator: string } = { targetId: UPOS_TARGET_ID, locator: o.cookiesPath };

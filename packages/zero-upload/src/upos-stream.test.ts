@@ -321,7 +321,7 @@ describe("submitStudio", () => {
     const { submitStudio: sub } = await import("./upos-stream.js");
     const { impl, seen } = makeSubmitFetch();
     const r = await sub({
-      cookiesPath: COOKIES, title: "测试-timestamp", tid: 21, tag: "测试", private: true,
+      cookiesPath: COOKIES, title: "测试-timestamp", tid: 21, tag: "测试",
       videos: [{ cid: "999", filename: "abc123", title: "part-1" }],
       fetchImpl: impl,
     });

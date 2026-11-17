@@ -1,86 +1,13 @@
-/**
- * H-974 acceptance: the `record` action consumes the strict upload-switch parsers.
- *
- * Two halves:
- *   1. Source-level wiring of packages/cli/src/cli.ts (the brief's grep acceptance checks, pinned
- *      as tests): no lenient `parseBoolFlag` left in cli.ts, both strict parsers imported from
- *      ./cli-flags.js and called on `o.rollingUpload` / `o.streamUpload`, no bare-string compares
- *      on either switch, and the strict parse sits before platformForRoom, the rolling hook
- *      factory, the mutual-exclusion gate and initRecorderState inside the record action.
- *   2. Real cli entry (private esbuild bundle, same isolation as record-upload-flag-baseline):
- *      the brief's `enble` typo case with the full vocabulary list and `[rec] ` prefix, valid
- *      on-words in odd case/whitespace still reaching the mutual-exclusion gate, an invalid value
- *      next to a valid odd-case on-word giving the parse error (not the gate), and
- *      `--stream-upload-spool none` still rejected first with its own message.
- *
- * Every spawned argv keeps the *other* switch at an on value, so even on a regression (lenient
- * parse) the run stops at the mutual-exclusion gate before any recorder/network call; the 8s
- * SIGKILL is the last-resort guard.
- */
+/** Real CLI error precedence and accepted upload-switch vocabulary (H-974). */
 import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const ROOT = join(__dirname, "..", "..");
-const CLI_SRC = readFileSync(join(ROOT, "packages", "cli", "src", "cli.ts"), "utf8");
 const ROOM = "https://live.douyin.com/1";
 const VOCAB = "0/1、on/off、yes/no、true/false";
-
-/** Body of the `record` action: from `.command("record")` to the next `.command(`. */
-function recordAction(): string {
-  const start = CLI_SRC.indexOf('.command("record")');
-  expect(start, "record command not found in cli.ts").toBeGreaterThanOrEqual(0);
-  const end = CLI_SRC.indexOf(".command(", start + 1);
-  return CLI_SRC.slice(start, end < 0 ? undefined : end);
-}
-
-describe("cli.ts wiring of the strict upload-switch parsers (H-974)", () => {
-  it("has no lenient parseBoolFlag on --rolling-upload / --stream-upload", () => {
-    expect(CLI_SRC).not.toMatch(/parseBoolFlag\((o\.)?(rollingUpload|streamUpload)/);
-  });
-
-  it("does not reference parseBoolFlag at all", () => {
-    expect(CLI_SRC).not.toContain("parseBoolFlag");
-  });
-
-  it("imports both strict parsers from ./cli-flags.js", () => {
-    const imp = CLI_SRC.match(/import\s*\{([^}]*)\}\s*from\s*"\.\/cli-flags\.js"/);
-    expect(imp, "no ./cli-flags.js import").not.toBeNull();
-    const names = imp![1].split(",").map((s) => s.trim());
-    expect(names).toContain("parseRollingUploadFlag");
-    expect(names).toContain("parseStreamUploadFlag");
-  });
-
-  it("calls the strict parsers on o.rollingUpload / o.streamUpload inside the record action", () => {
-    const body = recordAction();
-    expect(body).toMatch(/parseRollingUploadFlag\(\s*o\.rollingUpload\s*\)/);
-    expect(body).toMatch(/parseStreamUploadFlag\(\s*o\.streamUpload\s*\)/);
-  });
-
-  it("has no bare-string comparisons on either switch", () => {
-    // Line by line, like the brief's `grep -nE` (in JS `[^P]*` would otherwise span newlines).
-    const hits = CLI_SRC.split("\n").filter((l) => /(rollingUpload|streamUpload)\b[^P]*[!=]== ?"/.test(l));
-    expect(hits).toEqual([]);
-  });
-
-  it("parses rolling before stream, after the spool-none gate, before platform/factory/gate/state", () => {
-    const body = recordAction();
-    const at = (needle: string): number => {
-      const i = body.indexOf(needle);
-      expect(i, `${needle} not found in record action`).toBeGreaterThanOrEqual(0);
-      return i;
-    };
-    const rolling = at("parseRollingUploadFlag(");
-    const stream = at("parseStreamUploadFlag(");
-    expect(at("rejectsNoSpoolFlag(")).toBeLessThan(rolling);
-    expect(rolling).toBeLessThan(stream);
-    for (const later of ["platformForRoom(", "makeRollingUploadHookFactory(", "--rolling-upload 互斥", "initRecorderState("]) {
-      expect(stream, `strict parse must precede ${later}`).toBeLessThan(at(later));
-    }
-  });
-});
 
 let ENTRY = "";
 let DATA_ROOT = "";

@@ -239,7 +239,7 @@ describe("NODE_COMMANDS", () => {
 
 describe("hidden CLI commands", () => {
   it("every registry command is wired to its hidden CLI command through runNodeCommandCli (no second implementation)", () => {
-    const src = ["cli.ts", "node-pipeline-commands.ts"]
+    const src = ["node-command-registration.ts", "node-pipeline-commands.ts"]
       .map((f) => readFileSync(join(__dirname, "../../packages/cli/src", f), "utf8"))
       .join("\n");
     for (const name of Object.keys(NODE_COMMANDS)) {
