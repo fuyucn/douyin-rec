@@ -16,6 +16,7 @@ export class LivePumpSession {
   private readonly checkpoint: LivePumpCheckpoint;
   private readonly season: LivePumpSeason;
   private readonly log: (message: string) => void;
+  private submitTail: Promise<void> = Promise.resolve();
   constructor(private readonly o: LivePumpSessionOpts) {
     this.log = o.log ?? (message => process.stderr.write(message + "\n"));
     this.checkpoint = new LivePumpCheckpoint(o);
@@ -123,7 +124,29 @@ export class LivePumpSession {
   } {
     return this.checkpoint.reconcileConfirmedJournal();
   }
-  async submitPart(input: {
+  submitPart(input: {
+    index: number;
+    spoolPath: string;
+    stem: string;
+    title: string;
+    bytes: number;
+    durationSec: number;
+  }, signal?: AbortSignal): Promise<{
+    ok: boolean;
+    bvid?: string;
+    aid?: number;
+    error?: string;
+    needsManual?: boolean;
+    retryable?: boolean;
+  }> {
+    // The pending check and the intent write are separated by awaits; concurrent callers could
+    // otherwise both publish a fresh archive. Serialize submissions so the second caller observes
+    // the first caller's pending or confirmed part.
+    const run = this.submitTail.then(() => this.submitPartExclusive(input, signal));
+    this.submitTail = run.then(() => undefined, () => undefined);
+    return run;
+  }
+  private async submitPartExclusive(input: {
     index: number;
     spoolPath: string;
     stem: string;
