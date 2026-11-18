@@ -11,12 +11,14 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { request as httpRequest } from "node:http";
+import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TaskStore } from "../../packages/app/src/store.js";
 import { createWebServer, matchRoute, hostAllowed, originAllowed } from "../../packages/app/src/web/server.js";
 import type { ManagerLike } from "../../packages/app/src/web/api.js";
+import { deleteHubHistory } from "../../packages/orchestrator/src/ledger-history.js";
 
 class MockManager implements ManagerLike {
   private running = new Set<number>();
@@ -276,6 +278,8 @@ describe("createWebServer (live)", () => {
   beforeEach(async () => {
     store = new TaskStore(":memory:");
     hubDir = mkdtempSync(join(tmpdir(), "web-hub-")); // 文件版 hub 配置 → 临时目录
+    const syncDbPath = join(hubDir, "sync.db");
+    new DatabaseSync(syncDbPath).close();
     // no-op anchor resolver so创建任务不会触发真实 getInfo（vitest 无法 import biliLive）。
     server = createWebServer({
       store,
@@ -283,7 +287,10 @@ describe("createWebServer (live)", () => {
       log: () => {},
       resolveAnchor: async () => null,
       resolveShortUrl: async () => null,
-      hubDir,
+      hubDir, syncDbPath,
+      deleteHubHistory: (path, roomKey) => deleteHubHistory({
+        syncDbPath: path, roomKey, stageDir: hubDir, logsDir: hubDir,
+      }),
     });
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
     const addr = server.address() as AddressInfo;

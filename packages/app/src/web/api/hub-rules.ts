@@ -1,9 +1,4 @@
-/**
- * web/api/hub-rules.ts — hub 规则 CRUD(文件版)+ 排序
- *
- * 从 web/api.ts 拆出(T-22 第 1 步):原文件 1321 行、makeApi 单函数 909 行、53 个方法。
- * 现按域拆开;`makeApi`(web/api.ts)只做组装。各域导出 `buildHubRules(ctx)` 返回方法对象。
- */
+/** Hub-rule CRUD and reorder endpoints. */
 import type { ApiCtx } from "./context.js";
 import type { ApiResult } from "./types.js";
 import type { HubRulePayload, HubPipelineConfig, HubRecordingConfig } from "@drec/core";
@@ -12,173 +7,162 @@ import * as hubStore from "../../hub-store.js";
 import { refreshLocalRollingEffective } from "../../rolling-effective.js";
 import { activeHubJobKeys } from "../../hub-jobs.js";
 
-export function buildHubRules(ctx: ApiCtx) {
-  const { deps, store, manager, hubDir, hubConfigPath,
-    err, validateWorkers, validatePipeline, hubRuleView, recordingError, zeroDiskErrorFor, zeroDiskRoomError } = ctx;
+function createHubRule(ctx: ApiCtx, input: HubRulePayload): ApiResult {
+  const workersError = ctx.validateWorkers(input);
+  if (workersError) return ctx.err(400, workersError);
+  const sourceTaskId = input.recording?.sourceTaskId;
+  if (!sourceTaskId) return ctx.err(400, "新建 hub 规则必须绑定 source task（房间取自该任务）");
+  const task = ctx.store.getTask(Number(sourceTaskId));
+  if (!task) return ctx.err(400, "recording.sourceTaskId 指向的任务不存在");
+  const platform = platformForRoom(task.room);
+  const roomSlug = platform.extractRoomSlug(task.room);
+  const recordingError = task.streamUpload ? null : ctx.recordingError(sourceTaskId, roomSlug);
+  if (recordingError) return ctx.err(400, recordingError);
+  const key = hubStore.hubKey(platform.id, roomSlug);
+  const existing = hubStore.getHubRule(ctx.hubDir, key);
+  const validationError = ctx.validatePipeline(input, existing?.pipeline);
+  if (validationError) return ctx.err(400, validationError);
+  const ruleView = mergedRuleView(input, existing);
+  const zeroDiskError = ctx.zeroDiskErrorFor(sourceTaskId, task.streamUpload, ruleView);
+  if (zeroDiskError) return ctx.err(400, zeroDiskError);
+  const roomError = ctx.zeroDiskRoomError(platform.id, roomSlug, ruleView);
+  if (roomError) return ctx.err(400, roomError);
+  try {
+    const rule = hubStore.upsertHubRule(ctx.hubDir, {
+      platform: platform.id, roomSlug, room: task.room,
+      enabled: input.enabled, pipeline: input.pipeline, recording: input.recording,
+      workers: input.workers, requires: input.requires,
+    });
+    refreshLocalRollingEffective(ctx.store, ctx.hubDir);
+    ctx.deps.requestSyncTasks?.();
+    return { status: 201, body: ctx.hubRuleView(rule) };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return ctx.err(400, "无法解析房间地址: " + reason);
+  }
+}
+
+function mergedRuleView(input: HubRulePayload, existing: ReturnType<typeof hubStore.getHubRule>) {
+  const merged = hubStore.mergePipeline(existing?.pipeline, input.pipeline);
   return {
-    hubStatus(): ApiResult {
-      return { status: 200, body: { enabled: deps.hubEnabled ?? false } };
-    },
+    enabled: input.enabled ?? existing?.enabled,
+    mode: merged.upload?.mode,
+    workers: input.workers ?? existing?.workers,
+    steps: merged.steps,
+  };
+}
 
-    /**
-     * POST /api/hub/apply?force=1 — 立刻触发一次全节点任务同步。
-     *
-     * `force=1` 让节点跳过 T-2 期望骤减安全阀:这是「用户确认要把房间从某节点撤下 /
-     * 清空某节点受管任务」的唯一合法出口(没有它,合法缩容与「master 读不到规则」这两种
-     * 情况在节点侧无法区分,守卫会一直拦 → 旧节点继续双录)。
-     *
-     * 语义要点:
-     * - **异步**:只触发不等待节点往返(节点可能离线);结果看 serve 日志的
-     *   `[hub] 任务同步 …` / `被节点安全阀拒绝` 行。
-     * - **非 master 返回 400**:单机/worker 节点没有 hub 编排,假装成功会让 UI 显示「已同步」。
-     * - force 由 cli 侧**累积**到合并补跑那一轮,同步在途时点也不会丢(见 cli requestHubSync)。
-     */
-    applyHubTasks(opts?: { force?: boolean }): ApiResult {
-      if (!(deps.hubEnabled ?? false)) return err(400, "本节点未启用 hub(master)");
-      if (!deps.requestSyncTasks) return err(400, "hub 任务同步未就绪");
-      deps.requestSyncTasks({ force: opts?.force === true });
-      return { status: 202, body: { triggered: true, force: opts?.force === true } };
-    },
+function patchHubRule(input: HubRulePayload): {
+  enabled?: boolean; pipeline?: HubPipelineConfig; recording?: HubRecordingConfig; workers?: string[]; requires?: string[];
+} {
+  const patch: ReturnType<typeof patchHubRule> = {};
+  if ("enabled" in input) patch.enabled = input.enabled;
+  if ("pipeline" in input) patch.pipeline = input.pipeline;
+  if ("recording" in input) patch.recording = input.recording;
+  if ("workers" in input) patch.workers = input.workers;
+  if ("requires" in input) patch.requires = input.requires;
+  return patch;
+}
 
-    listHubRules(): ApiResult {
-      return { status: 200, body: hubStore.listHubRules(hubDir).map(hubRuleView) };
-    },
+function updateHubRule(ctx: ApiCtx, key: string, input: HubRulePayload): ApiResult {
+  const workersError = ctx.validateWorkers(input);
+  if (workersError) return ctx.err(400, workersError);
+  const existing = hubStore.getHubRule(ctx.hubDir, key);
+  const pipelineError = ctx.validatePipeline(input, existing?.pipeline);
+  if (pipelineError) return ctx.err(400, pipelineError);
+  const dot = key.indexOf(".");
+  const ruleSlug = dot < 0 ? key : key.slice(dot + 1);
+  const recordingError = ctx.recordingError(input.recording?.sourceTaskId, ruleSlug, existing);
+  if (recordingError) return ctx.err(400, recordingError);
+  const sourceTaskId = input.recording?.sourceTaskId ?? existing?.recording?.sourceTaskId ?? null;
+  const sourceTask = sourceTaskId ? ctx.store.getTask(Number(sourceTaskId)) : null;
+  const ruleView = mergedRuleView(input, existing);
+  const zeroDiskError = ctx.zeroDiskErrorFor(sourceTaskId, sourceTask?.streamUpload, ruleView);
+  if (zeroDiskError) return ctx.err(400, zeroDiskError);
+  const roomError = ctx.zeroDiskRoomError(key.slice(0, dot), ruleSlug, ruleView);
+  if (roomError) return ctx.err(400, roomError);
+  const updated = hubStore.updateHubRule(ctx.hubDir, key, patchHubRule(input));
+  if (!updated) return ctx.err(404, "未找到 hub 规则 key=" + key);
+  ctx.settleLegacyRolling(updated.recording?.sourceTaskId, input.pipeline?.upload?.mode);
+  refreshLocalRollingEffective(ctx.store, ctx.hubDir);
+  ctx.deps.requestSyncTasks?.();
+  return { status: 200, body: ctx.hubRuleView(updated) };
+}
 
-    createHubRule(input: HubRulePayload): ApiResult {
-      const werr = validateWorkers(input);
-      if (werr) return err(400, werr);
-      const sourceTaskId = input.recording?.sourceTaskId;
-      if (!sourceTaskId) return err(400, "新建 hub 规则必须绑定 source task（房间取自该任务）");
-      const task = store.getTask(Number(sourceTaskId));
-      if (!task) return err(400, "recording.sourceTaskId 指向的任务不存在");
-      const platform = platformForRoom(task.room);
-      const roomSlug = platform.extractRoomSlug(task.room);
-      // Reuse the shared existence/room check. A zero-disk source is allowed only when this
-      // create call itself is the rolling rule that makes zero-disk legal; the check below
-      // rejects every other case.
-      const rerr = task.streamUpload ? null : recordingError(sourceTaskId, roomSlug);
-      if (rerr) return err(400, rerr);
-      // 同房间规则已存在时 upsert 会深合并 pipeline → 按合并后校验。
-      // Issue #481: identity is the filename stem, but create still keys the file by the source task's CURRENT
-      // room — reusing an older divergent stem would write the new room into it and leave a dead rule.
-      const existingRule = hubStore.getHubRule(hubDir, hubStore.hubKey(platform.id, roomSlug));
-      const perr = validatePipeline(input, existingRule?.pipeline);
-      if (perr) return err(400, perr);
-      // create is an upsert: validate what will be stored (merged), not just the request body.
-      const merged = hubStore.mergePipeline(existingRule?.pipeline, input.pipeline);
-      const ruleView = {
-        enabled: input.enabled ?? existingRule?.enabled,
-        mode: merged.upload?.mode,
-        workers: input.workers ?? existingRule?.workers,
-        steps: merged.steps,
-      };
-      const zerr = zeroDiskErrorFor(
-        sourceTaskId,
-        task.streamUpload,
-        ruleView,
-      );
-      if (zerr) return err(400, zerr);
-      const roomErr = zeroDiskRoomError(platform.id, roomSlug, ruleView);
-      if (roomErr) return err(400, roomErr);
-      try {
-        const rule = hubStore.upsertHubRule(hubDir, {
-          platform: platform.id,
-          roomSlug,
-          room: task.room,
-          enabled: input.enabled,
-          pipeline: input.pipeline,
-          recording: input.recording,
-          workers: input.workers,
-          requires: input.requires,
-        });
-        // 新建规则不收口旧开关:此前没有规则可展示「迁移后的 rolling」,旧开关 true 的任务保持 rolling(同改前)。
-        refreshLocalRollingEffective(store, hubDir);
-        deps.requestSyncTasks?.();
-        return { status: 201, body: hubRuleView(rule) };
-      } catch (e) {
-        return err(400, `无法解析房间地址: ${(e as Error).message}`);
-      }
-    },
+function deleteHubRule(ctx: ApiCtx, key: string): ApiResult {
+  const existing = hubStore.getHubRule(ctx.hubDir, key);
+  if (!existing) return ctx.err(404, "未找到 hub 规则 key=" + key);
+  if (!ctx.deps.syncDbPath || !ctx.deps.deleteHubHistory) {
+    return ctx.err(503, "hub 台账未就绪，无法安全删除规则；请检查服务配置后重试");
+  }
+  const activeError = activeJobError(ctx, key);
+  if (activeError) return activeError;
+  const history = deleteRuleHistory(ctx, key);
+  if (history.error) return history.error;
+  const ruleError = removeRuleAfterHistory(ctx, key, "rule");
+  if (ruleError) return ruleError;
+  refreshLocalRollingEffective(ctx.store, ctx.hubDir);
+  ctx.deps.requestSyncTasks?.();
+  return { status: 200, body: { ok: true, key, deletedHistory: history.deleted } };
+}
 
-    updateHubRule(key: string, input: HubRulePayload): ApiResult {
-      const werr = validateWorkers(input);
-      if (werr) return err(400, werr);
-      const perr = validatePipeline(input, hubStore.getHubRule(hubDir, key)?.pipeline);
-      if (perr) return err(400, perr);
-      const dot = key.indexOf(".");
-      const ruleSlug = dot < 0 ? key : key.slice(dot + 1);
-      const existingRule = hubStore.getHubRule(hubDir, key);
-      const rerr = recordingError(input.recording?.sourceTaskId, ruleSlug, existingRule);
-      if (rerr) return err(400, rerr);
-      const sourceTaskId = input.recording?.sourceTaskId ?? existingRule?.recording?.sourceTaskId ?? null;
-      const sourceTask = sourceTaskId ? store.getTask(Number(sourceTaskId)) : null;
-      const merged = hubStore.mergePipeline(existingRule?.pipeline, input.pipeline);
-      const zerr = zeroDiskErrorFor(
-        sourceTaskId,
-        sourceTask?.streamUpload,
-        {
-          enabled: input.enabled ?? existingRule?.enabled,
-          mode: merged.upload?.mode,
-          workers: input.workers ?? existingRule?.workers,
-          steps: merged.steps,
-        },
-      );
-      if (zerr) return err(400, zerr);
-      const roomErr = zeroDiskRoomError(
-        key.slice(0, key.indexOf(".")),
-        ruleSlug,
-        {
-          enabled: input.enabled ?? existingRule?.enabled,
-          mode: merged.upload?.mode,
-          workers: input.workers ?? existingRule?.workers,
-          steps: merged.steps,
-        },
-      );
-      if (roomErr) return err(400, roomErr);
-      const patch: { enabled?: boolean; pipeline?: HubPipelineConfig; recording?: HubRecordingConfig; workers?: string[]; requires?: string[] } = {};
-      if ("enabled" in input) patch.enabled = input.enabled;
-      if ("pipeline" in input) patch.pipeline = input.pipeline;
-      if ("recording" in input) patch.recording = input.recording;
-      if ("workers" in input) patch.workers = input.workers;
-      if ("requires" in input) patch.requires = input.requires;
-      const updated = hubStore.updateHubRule(hubDir, key, patch);
-      if (!updated) return err(404, `未找到 hub 规则 key=${key}`);
-      ctx.settleLegacyRolling(updated.recording?.sourceTaskId, input.pipeline?.upload?.mode);
-      // 解绑(sourceTaskId 清空)/停用/换 mode 后立刻重算本机派生值,不等下一个同步 tick。
-      refreshLocalRollingEffective(store, hubDir);
-      deps.requestSyncTasks?.();
-      return { status: 200, body: hubRuleView(updated) };
-    },
+export function removeRuleAfterHistory(
+  ctx: ApiCtx, key: string, retryTarget: "room" | "rule", taskRemoved = false,
+): ApiResult | null {
+  try {
+    if (hubStore.removeHubRule(ctx.hubDir, key)) return null;
+  } catch {
+    // History is already committed; report the partial result for either failure mode.
+  }
+  const taskState = taskRemoved ? " Recording task has also been removed." : "";
+  return ctx.err(500, `Failed to delete processing rule (${key}). Processing history has already been cleared.${taskState} Retry ${retryTarget} deletion.`);
+}
 
-    deleteHubRule(key: string): ApiResult {
-      const existing = hubStore.getHubRule(hubDir, key);
-      if (!existing) return err(404, `未找到 hub 规则 key=${key}`);
-      if (deps.syncDbPath) {
-        const active = activeHubJobKeys(deps.syncDbPath, key);
-        if (active.length > 0) {
-          return err(409, `该直播间有进行中的 hub 任务(${active[0]}),请先等它结束或停止后再删除规则`);
-        }
-      }
-      const history = deps.syncDbPath && deps.deleteHubHistory
-        ? deps.deleteHubHistory(deps.syncDbPath, key)
-        : { deleted: 0, streamKeys: [] };
-      const ok = hubStore.removeHubRule(hubDir, key);
-      if (!ok) return err(404, `未找到 hub 规则 key=${key}`);
-      refreshLocalRollingEffective(store, hubDir); // 规则已删:本机源任务派生值回落,不再边传
-      deps.requestSyncTasks?.();
-      return { status: 200, body: { ok: true, key, deletedHistory: history.deleted } };
-    },
+function activeJobError(ctx: ApiCtx, key: string): ApiResult | null {
+  try {
+    const active = activeHubJobKeys(ctx.deps.syncDbPath!, key);
+    return active.length === 0 ? null : ctx.err(409, "该直播间有进行中的 hub 任务(" + active[0] + "),请先等它结束或停止后再删除规则");
+  } catch {
+    return ctx.err(503, "无法确认 hub 台账状态，规则未删除；请检查台账后重试");
+  }
+}
 
-    reorderHubRules(input: { keys?: string[] }): ApiResult {
-      if (!deps.hubEnabled) return err(400, "hub 未启用(仅 master 可管理规则)");
-      if (!Array.isArray(input.keys)) return err(400, "keys 必填(数组)");
-      try {
-        const rules = hubStore.reorderHubRules(hubDir, input.keys);
-        deps.requestSyncTasks?.();
-        return { status: 200, body: rules.map(hubRuleView) };
-      } catch (e) {
-        return err(400, (e as Error).message);
-      }
-    },
+function deleteRuleHistory(ctx: ApiCtx, key: string): { deleted: number; error: ApiResult | null } {
+  try {
+    const result = ctx.deps.deleteHubHistory!(ctx.deps.syncDbPath!, key);
+    return { deleted: result.deleted, error: null };
+  } catch {
+    return { deleted: 0, error: ctx.err(503, "无法安全清理处理历史，规则未删除；请检查台账后重试") };
+  }
+}
+
+function reorderHubRules(ctx: ApiCtx, input: { keys?: string[] }): ApiResult {
+  if (!ctx.deps.hubEnabled) return ctx.err(400, "hub 未启用(仅 master 可管理规则)");
+  if (!Array.isArray(input.keys)) return ctx.err(400, "keys 必填(数组)");
+  try {
+    const rules = hubStore.reorderHubRules(ctx.hubDir, input.keys);
+    ctx.deps.requestSyncTasks?.();
+    return { status: 200, body: rules.map(ctx.hubRuleView) };
+  } catch (error) {
+    return ctx.err(400, error instanceof Error ? error.message : String(error));
+  }
+}
+
+function applyHubTasks(ctx: ApiCtx, opts?: { force?: boolean }): ApiResult {
+  if (!(ctx.deps.hubEnabled ?? false)) return ctx.err(400, "本节点未启用 hub(master)");
+  if (!ctx.deps.requestSyncTasks) return ctx.err(400, "hub 任务同步未就绪");
+  ctx.deps.requestSyncTasks({ force: opts?.force === true });
+  return { status: 202, body: { triggered: true, force: opts?.force === true } };
+}
+
+export function buildHubRules(ctx: ApiCtx) {
+  return {
+    hubStatus: (): ApiResult => ({ status: 200, body: { enabled: ctx.deps.hubEnabled ?? false } }),
+    applyHubTasks: (opts?: { force?: boolean }): ApiResult => applyHubTasks(ctx, opts),
+    listHubRules: (): ApiResult => ({ status: 200, body: hubStore.listHubRules(ctx.hubDir).map(ctx.hubRuleView) }),
+    createHubRule: (input: HubRulePayload): ApiResult => createHubRule(ctx, input),
+    updateHubRule: (key: string, input: HubRulePayload): ApiResult => updateHubRule(ctx, key, input),
+    deleteHubRule: (key: string): ApiResult => deleteHubRule(ctx, key),
+    reorderHubRules: (input: { keys?: string[] }): ApiResult => reorderHubRules(ctx, input),
   };
 }
