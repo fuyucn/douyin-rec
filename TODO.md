@@ -14,10 +14,6 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
-- [~] **T-228 Worker archive marker semantics (issue [#587](https://github.com/fuyucn/douyin-rec/issues/587))**
-  — **What/why**: distinguish the running API version from the last full-install archive markers so bundle-only updates cannot mislead operations.
-  **Acceptance**: verify both workers against their live API and bundle; document marker provenance and the authoritative runtime query; documentation-only PR, no version bump or restart.
-  **Status (2026-11-18)**: both runtime APIs report 0.0.393-fa1229 while archive markers remain 0.0.364; the documentation alternative explicitly accepted by the issue is implemented; PR/review pending.
 
 - [x] **T-223 移除直播直传驱动 rollout gate（issue [#676](https://github.com/fuyucn/douyin-rec/issues/676)，2026-11-15）** — **做什么**: 依次修复旧 aid-only 状态兼容、拆分 CLI 编排并补可执行选路测试、完成当前产物稳定性验收，再移除 DREC_LIVE_PUMP_DRIVER；保留任务级上传选项和安全配置。**为什么**: 两套实现长期并存会漂移，但历史 0.0.388 canary 不代表当前草稿验收通过。**计划与验收**: [plans/055_live_pump_driver_permanent.md](plans/055_live_pump_driver_permanent.md)。全量回归、结构门禁、独立复审及真实运行证据缺一不可；本轮仅本地实现，不提交、不部署，线上观察票仍开放。
   **Live acceptance (2026-11-17, 一个公开直播间)**: 隔离验收主体完成——`queue-capture`（182.0s/110.5MiB 未确认，exit 1）→ `queue-handoff`（`queueManaged=true`、1 个 pending `upload-part`、exit 75）→ `queue-publish`（测试私稿别名 Q，upload-part/cleanup-part 均 done，确认日志 + 同步 before/after 删除证据）→ `recover-capture`（182.0s/110.9MiB，exit 1）→ `recover-publish`（整文件恢复 116.3MB 确认到测试私稿别名 R、exit 0、spool 已删）。共 6 个真实分 P（此前 4 个 + 本轮 2 个），生产未变、未停任何房间。**两处证据缺口**: ① 直接恢复删除走 `rmSync`，测试钩子只包 `unlinkSync`，缺同步 before/after；inotify 顺序显示确认态 rename 早于唯一 unlink 约 13µs，最终 state `confirmed:true`，记为测试钩子缺口；② 真实限流/退避未主动触发。**待人工删私稿**: 别名 Q、R（原值仅留在本地未跟踪验收记录）。
@@ -25,15 +21,7 @@
 
   **Local checkpoint (2026-11-16)**: Local restructuring and whole-candidate readiness are complete; live stability acceptance is not. The candidate is 0.0.390-4fc287, exactly one patch above verified remote main 0.0.389; other uncommitted drafts do not reserve versions. All 60 touched production files pass strict structure (max function 60 lines; nesting 4), and all 66 pump exports are preserved. Final full regression: 5432 passed, 42 existing skips, 128.18s; typecheck, architecture, bundle, isolated HTTP smoke and whitespace pass. Full tracked-plus-untracked privacy scan now passes after anonymizing a copied help example and mapping local evidence; no rule relaxation or added skips. Independent Standards and Spec reviews found no actionable issues within their stated scope. Upload/cleanup RISK and authorized exact-artifact real acceptance remain open. Plan 055 contains the bounded private canary proposal and exact-artifact evidence map. No commit, push, deployment or production mutation.
 
-- [~] **T-225 Room history deletion isolation (issue [#701](https://github.com/fuyucn/douyin-rec/issues/701); plan [053](plans/053_room_history_isolation.md))**
-  — **What/why**: use one literal case-sensitive room prefix in ledger discovery/deletion to prevent cross-room history/log removal.
-  **Acceptance**: independent regression FAIL/PASS; all tables/log roots preserve other rooms; legacy/rollback compatibility; full tests, types, architecture, bundle, strict quality and independent review.
-  **Status (2026-11-18)**: PR #706 merged (8dcb3138) and deployed within 0.0.393-fa1229 on all three nodes; bundle hashes match. Current full regression: 5468 passed / 42 skipped; types and architecture pass. Exact deployed-image HTTP verification passes six-table/two-log isolation using temporary fixtures. No real production room was deleted; see [closeout evidence](docs/verification/2026-11-18-room-deletion.md). Closure bookkeeping pending.
 
-- [~] **T-226 Fail-closed hub history deletion (issue [#702](https://github.com/fuyucn/douyin-rec/issues/702); plan [054](plans/054_fail_closed_deletion.md))**
-  — **What/why**: an unreadable ledger, malformed schema, null/unknown state, or a run that becomes active after the first guard must refuse deletion; the writer rechecks inside the deleting transaction, and both routes clear history before removing task/rule configuration.
-  **Acceptance**: refusal preserves task, rule, ledger rows and logs; absent DB and absent legacy table stay idle-compatible; focused module split keeps exports stable; full gates and independent review.
-  **Status (2026-11-18)**: PR #707 merged (`009d8d94`) and deployed as 0.0.393-fa1229 on all three nodes. Independent review approved after schema/lock-race fixes. Current full regression: 5468 passed / 42 skipped; types and architecture pass. Exact deployed-image HTTP verification confirms both routes refuse active/unknown jobs and malformed ledger schemas while retaining fixture data; healthy retry succeeds. Configuration removal after committed history can report an explicit partial-result error; no cross-store atomicity claim. See [closeout evidence](docs/verification/2026-11-18-room-deletion.md). Closure bookkeeping pending.
 
 - [x] **T-227 plans/051 管线步骤注册表设计评审（2026-11-18）**
   — 评审 [plans/051](plans/051_pipeline_step_registry.md)，结论方向成立但不能按原稿直接 P1：分段模式不是单张 DAG、执行器 `PipelineDeps` 依赖边界未落地、上传驱动与低层包互相矛盾、步骤数写成 14（实际 13）、`select`/`pull` 不是执行器节点、清理失败语义未定。修订阶段为 P0 execution-trace 对拍 → P1 纯数据注册表 → P2 merge/node 执行器 → P3 分段模型 → P4 上传 port；评审见 [051_review_2026-11-18.md](plans/051_review_2026-11-18.md)。
@@ -248,12 +236,6 @@
   **做什么**: `desiredFor` 只对「规则启用但未勾选本节点」的房间下发 `deleted:true` 点名删除（节点两阶段删除，点名缩容不被空期望/骤减守卫拦）；规则停用/能力不满足仍下发 `enabled:false` 停用保留（本机源任务停用靠这条写回，review F1）；deleted 条目不带凭据。
   **为什么**: 节点只保留「启用且分配给它」的房间；master 误读保护（desired 为空仍拒发）不交化。
   **验收**: 点名删除两阶段生效且保留房间不动；空期望守卫不变；规则停用仍停本机；source-grep + 节点侧回归测试钉住；全量门禁通过。
-- [~] **T-133 删除房间同时删掉录制任务与 hub 规则（issue [#439](https://github.com/fuyucn/douyin-rec/issues/439)）**（2026-11-03）
-  — 房间页「删除房间」只删录制任务，hub 规则残留；列表是「规则 ∪ 任务」，房间删完仍在 `/rooms`，且残留的「仅规则」房间在房间页上没有删除入口。
-  **做什么**: 新增 `DELETE /api/rooms/:key` 一次删两半（带受管 403 / 启用或录制中 409 / 进行中 hub job 409 守卫，先全量校验再动数据）；房间编辑器删除改走该端点；仅规则房间也可删。
-  **为什么**: 删除房间必须真的把房间删掉，不能留下看不见的半边。
-  **验收**: 三种形态（任务+规则 / 仅任务 / 仅规则）都删干净；守卫触发时两半都不动；全量门禁通过。
-  **Status (2026-11-18)**: original endpoint/editor fix is PR #441; #707 subsequently hardened its guards. All three nodes run 0.0.393-fa1229. Exact deployed-image HTTP verification removes combined, task-only, and rule-only fixtures from storage and the rooms list; guard cases retain both halves. See [closeout evidence](docs/verification/2026-11-18-room-deletion.md). Closure bookkeeping pending.
 - [~] **T-132 节点通知发件箱容量上限（issue [#409](https://github.com/fuyucn/douyin-rec/issues/409)）**（2026-10-30）
   — 通知改由主控拉取后，节点发件箱在主控长期不可用时会无限增长。
   **做什么**: 保留期从「只删已确认」改为「超期一律删」，再加总行数上限（默认 1 万），超出时从最旧开始删；节点每写 200 条自动清理一次。
@@ -1002,6 +984,28 @@
   属模型取舍，不是可顺手加的功能。**为什么**：冗余模型把轮询量乘了 N，是 VPS 被限流的根因之一。
 
 ## 已完成
+
+- [x] **T-228 Worker archive marker semantics (issue [#587](https://github.com/fuyucn/douyin-rec/issues/587))** （2026-11-18）
+  — **What/why**: distinguish the running API version from the last full-install archive markers so bundle-only updates cannot mislead operations.
+  **Acceptance**: verify both workers against their live API and bundle; document marker provenance and the authoritative runtime query; documentation-only PR, no version bump or restart.
+  **Status (2026-11-18)**: both runtime APIs report 0.0.393-fa1229 while archive markers remain 0.0.364; the documentation alternative explicitly accepted by the issue and its acceptance evidence are delivered by PR #708; merge automatically closes #587. No runtime update or marker rewrite.
+
+- [x] **T-225 Room history deletion isolation (issue [#701](https://github.com/fuyucn/douyin-rec/issues/701); plan [053](plans/053_room_history_isolation.md))** （2026-11-18）
+  — **What/why**: use one literal case-sensitive room prefix in ledger discovery/deletion to prevent cross-room history/log removal.
+  **Acceptance**: independent regression FAIL/PASS; all tables/log roots preserve other rooms; legacy/rollback compatibility; full tests, types, architecture, bundle, strict quality and independent review.
+  **Status (2026-11-18)**: PR #706 merged (8dcb3138) and deployed within 0.0.393-fa1229 on all three nodes; bundle hashes match. Current full regression: 5468 passed / 42 skipped; types and architecture pass. Exact deployed-image HTTP verification passes six-table/two-log isolation using temporary fixtures. No real production room was deleted; see [closeout evidence](docs/verification/2026-11-18-room-deletion.md). Issue #701 closed on 2026-11-18; consolidated verification and ledger delivered by PR #708.
+
+- [x] **T-226 Fail-closed hub history deletion (issue [#702](https://github.com/fuyucn/douyin-rec/issues/702); plan [054](plans/054_fail_closed_deletion.md))** （2026-11-18）
+  — **What/why**: an unreadable ledger, malformed schema, null/unknown state, or a run that becomes active after the first guard must refuse deletion; the writer rechecks inside the deleting transaction, and both routes clear history before removing task/rule configuration.
+  **Acceptance**: refusal preserves task, rule, ledger rows and logs; absent DB and absent legacy table stay idle-compatible; focused module split keeps exports stable; full gates and independent review.
+  **Status (2026-11-18)**: PR #707 merged (`009d8d94`) and deployed as 0.0.393-fa1229 on all three nodes. Independent review approved after schema/lock-race fixes. Current full regression: 5468 passed / 42 skipped; types and architecture pass. Exact deployed-image HTTP verification confirms both routes refuse active/unknown jobs and malformed ledger schemas while retaining fixture data; healthy retry succeeds. Configuration removal after committed history can report an explicit partial-result error; no cross-store atomicity claim. See [closeout evidence](docs/verification/2026-11-18-room-deletion.md). Issue #702 closed on 2026-11-18; consolidated verification and ledger delivered by PR #708.
+
+- [x] **T-133 删除房间同时删掉录制任务与 hub 规则（issue [#439](https://github.com/fuyucn/douyin-rec/issues/439)）**（2026-11-03） （2026-11-18）
+  — 房间页「删除房间」只删录制任务，hub 规则残留；列表是「规则 ∪ 任务」，房间删完仍在 `/rooms`，且残留的「仅规则」房间在房间页上没有删除入口。
+  **做什么**: 新增 `DELETE /api/rooms/:key` 一次删两半（带受管 403 / 启用或录制中 409 / 进行中 hub job 409 守卫，先全量校验再动数据）；房间编辑器删除改走该端点；仅规则房间也可删。
+  **为什么**: 删除房间必须真的把房间删掉，不能留下看不见的半边。
+  **验收**: 三种形态（任务+规则 / 仅任务 / 仅规则）都删干净；守卫触发时两半都不动；全量门禁通过。
+  **Status (2026-11-18)**: original endpoint/editor fix is PR #441; #707 subsequently hardened its guards. All three nodes run 0.0.393-fa1229. Exact deployed-image HTTP verification removes combined, task-only, and rule-only fixtures from storage and the rooms list; guard cases retain both halves. See [closeout evidence](docs/verification/2026-11-18-room-deletion.md). Issue #439 closed on 2026-11-18; consolidated verification and ledger delivered by PR #708.
 
 - [x] **T-224 直播直传并发提交串行化（issue [#704](https://github.com/fuyucn/douyin-rec/issues/704) → PR [#705](https://github.com/fuyucn/douyin-rec/pull/705)，2026-11-17）** — **做什么**: 按 session 串行化 `submitPart`：后一个调用等前一个完成后重新读取 pending/confirmed 状态；新增同一 fresh part 的并发回归测试；版本 0.0.390 → 0.0.391。**为什么**: PR #703 复审 P2——pending 检查与 intent 写入之间的 await 可让两个并发调用各自建稿；生产 finalization 此前串行，未观察到线上重复，但合并代码需消除潜在竞态。**验收**: 无锁变异新用例 FAIL（`ensureAttempts` 2→1）、复原 PASS；全量 362 文件 5427 passed | 48 skipped；typecheck、arch:check、`git diff --check` 全绿；独立复审 `xingchiapi/gpt-6-astra`（magpie-0129cb6f）**APPROVE**，其 P2 文档措辞已修正。**部署（2026-11-17）**: 三端 **0.0.391-640450**；部署前 0 录制 / 0 上传；worker 保留 `0.0.390-4fc287` bundle 备份，master 回滚镜像 `douyin-rec:rollback-0.0.390-9368ac`；fleet 已重连。issue #704 已关闭。
 
