@@ -1,7 +1,7 @@
 /** Fail-closed detection of active jobs for a room. */
 
 import { statSync } from "node:fs";
-import { HUB_ROOM_STREAM_PREDICATE, roomKeyToStreamPrefix } from "@drec/core";
+import { HUB_ROOM_STREAM_PREDICATE, HUB_TABLE_NAMES, roomKeyToStreamPrefix } from "@drec/core";
 import { openLedger, TERMINAL_SQL } from "./hub-job-ledger.js";
 
 export function activeHubJobKeys(syncDbPath: string, roomKey: string): string[] {
@@ -13,8 +13,14 @@ export function activeHubJobKeys(syncDbPath: string, roomKey: string): string[] 
   }
   const db = openLedger(syncDbPath);
   try {
-    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as unknown as { name: string }[];
-    if (!tables.some((table) => table.name === "sync_jobs")) return [];
+    const objects = db.prepare(
+      `SELECT name, type FROM sqlite_master WHERE lower(name) IN (${HUB_TABLE_NAMES.map(() => "?").join(",")})`,
+    ).all(...HUB_TABLE_NAMES) as unknown as { name: string; type: string }[];
+    const syncJobs = objects.find((object) => object.name.toLowerCase() === "sync_jobs");
+    if (!syncJobs) return [];
+    if (syncJobs.type !== "table") {
+      throw new Error(`Unexpected schema object type for sync_jobs: ${syncJobs.type}`);
+    }
     return (db.prepare(
       `SELECT streamKey FROM sync_jobs WHERE ${HUB_ROOM_STREAM_PREDICATE} AND (state IS NULL OR state NOT IN (${TERMINAL_SQL})) ORDER BY updatedAt DESC`,
     ).all(roomKeyToStreamPrefix(roomKey), roomKeyToStreamPrefix(roomKey)) as unknown as { streamKey: string }[]).map((r) => r.streamKey);

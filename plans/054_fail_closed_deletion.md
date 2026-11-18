@@ -51,5 +51,6 @@ ledger rows and logs on refusal.
 - [x] Writer rechecks nonterminal and `NULL` state inside `BEGIN IMMEDIATE`.
 - [x] Both routes clear history before removing task/rule configuration.
 - [x] Focused module split keeps public exports and avoids cycles.
-- [x] Full regression 5459 passed / 48 skipped; typecheck, architecture, bundle, smoke and strict quality pass.
+- [x] Full regression 5468 passed / 42 skipped; typecheck, architecture, bundle, smoke and strict quality pass.
+- [x] Review follow-up: case-variant `sync_jobs` and view rejection; coordinated lock-race test distinguishes the in-transaction recheck.
 - [ ] Independent review.

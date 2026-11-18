@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { once } from "node:events";
+import { Worker } from "node:worker_threads";
 import { DatabaseSync } from "node:sqlite";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -86,6 +88,76 @@ describe("active room history guard", () => {
     expect(result.deleted).toBe(3);
     expect(result.streamKeys.sort()).toEqual(["douyin:123:done", "douyin:123:failed", "douyin:123:needs_manual"]);
     expect(activeHubJobKeys(dbPath, "douyin.1234")).toEqual(["douyin:1234:session"]);
+  });
+
+  it("treats a case-variant sync_jobs table as the ledger and refuses active rows", () => {
+    const { root, dbPath } = ledger();
+    const db = new DatabaseSync(dbPath);
+    db.exec("DROP TABLE sync_jobs; CREATE TABLE SYNC_JOBS (streamKey TEXT PRIMARY KEY, state TEXT, updatedAt INTEGER)");
+    db.prepare("INSERT INTO sync_jobs(streamKey, state, updatedAt) VALUES(?, 'merging', 2)")
+      .run("douyin:123:case-variant");
+    db.close();
+    expect(activeHubJobKeys(dbPath, "douyin.123")).toEqual(["douyin:123:case-variant"]);
+    expect(() => deleteHubHistory({ syncDbPath: dbPath, roomKey: "douyin.123", stageDir: root, logsDir: root }))
+      .toThrow(/active or unknown/);
+    const after = new DatabaseSync(dbPath);
+    expect(after.prepare("SELECT state FROM sync_jobs WHERE streamKey = ?").get("douyin:123:case-variant"))
+      .toMatchObject({ state: "merging" });
+    after.close();
+  });
+
+  it("rejects a sync_jobs view instead of treating it as a legacy database", () => {
+    const { root, dbPath } = ledger();
+    const db = new DatabaseSync(dbPath);
+    db.exec("DROP TABLE sync_jobs; CREATE VIEW sync_jobs AS SELECT 'douyin:123:x' AS streamKey, 'done' AS state, 1 AS updatedAt");
+    seedRelatedHistory(dbPath);
+    const logPath = jobLog(root);
+    expect(() => activeHubJobKeys(dbPath, "douyin.123")).toThrow(/Unexpected schema object type/);
+    expect(() => deleteHubHistory({ syncDbPath: dbPath, roomKey: "douyin.123", stageDir: root, logsDir: root }))
+      .toThrow(/Unexpected schema object type/);
+    expect(existsSync(logPath)).toBe(true);
+    const after = new DatabaseSync(dbPath);
+    for (const table of HUB_TABLE_NAMES) {
+      if (table === "sync_jobs") continue;
+      expect(after.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE streamKey = ?`).get("douyin:123:session"))
+        .toMatchObject({ count: 1 });
+    }
+    after.close();
+  });
+
+  it("sees an active row committed while the writer waits for its lock", async () => {
+    const { root, dbPath } = ledger("done");
+    const logPath = jobLog(root);
+    const worker = new Worker(`
+      const { parentPort, workerData } = require("node:worker_threads");
+      const { DatabaseSync } = require("node:sqlite");
+      const db = new DatabaseSync(workerData.dbPath);
+      db.exec("BEGIN IMMEDIATE");
+      db.prepare("INSERT INTO sync_jobs(streamKey, state, updatedAt) VALUES(?, ?, ?)")
+        .run(workerData.streamKey, "merging", 2);
+      parentPort.postMessage("locked");
+      setTimeout(() => {
+        db.exec("COMMIT");
+        parentPort.postMessage("committed");
+        db.close();
+      }, 250);
+    `, { eval: true, workerData: { dbPath, streamKey: "douyin:123:late" } });
+    try {
+      await once(worker, "message");
+      const committed = once(worker, "message");
+      expect(() => deleteHubHistory({ syncDbPath: dbPath, roomKey: "douyin.123", stageDir: root, logsDir: root }))
+        .toThrow(/active or unknown/);
+      await committed;
+    } finally {
+      await worker.terminate();
+    }
+    const db = new DatabaseSync(dbPath);
+    expect(db.prepare("SELECT state FROM sync_jobs WHERE streamKey = ?").get("douyin:123:session"))
+      .toMatchObject({ state: "done" });
+    expect(db.prepare("SELECT state FROM sync_jobs WHERE streamKey = ?").get("douyin:123:late"))
+      .toMatchObject({ state: "merging" });
+    db.close();
+    expect(existsSync(logPath)).toBe(true);
   });
 
   it.each(["merging", null, "future-state"])("refuses deletion and preserves ledger/logs for state %s", (state) => {

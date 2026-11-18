@@ -39,9 +39,16 @@ type HistoryRun = { streamKey: string; state: string | null };
 function deleteHistoryRows(db: DatabaseSync, prefix: string): string[] {
   db.exec("BEGIN IMMEDIATE");
   try {
-    const tables = new Set(
-      (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as unknown as { name: string }[]).map((r) => r.name),
-    );
+    const objects = db.prepare(
+      `SELECT name, type FROM sqlite_master WHERE lower(name) IN (${HUB_TABLE_NAMES.map(() => "?").join(",")})`,
+    ).all(...HUB_TABLE_NAMES) as unknown as { name: string; type: string }[];
+    const tables = new Set<string>();
+    for (const object of objects) {
+      if (object.type !== "table") {
+        throw new Error(`Unexpected schema object type for ${object.name}: ${object.type}`);
+      }
+      tables.add(object.name.toLowerCase());
+    }
     let rows: HistoryRun[] = [];
     if (tables.has("sync_jobs")) {
       rows = db.prepare(`SELECT streamKey, state FROM sync_jobs WHERE ${HUB_ROOM_STREAM_PREDICATE}`)
