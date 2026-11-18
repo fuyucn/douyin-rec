@@ -29,6 +29,9 @@
   — **What/why**: an unreadable ledger, malformed schema, null/unknown state, or a run that becomes active after the first guard must refuse deletion; the writer rechecks inside the deleting transaction, and both routes clear history before removing task/rule configuration.
   **Acceptance**: refusal preserves task, rule, ledger rows and logs; absent DB and absent legacy table stay idle-compatible; focused module split keeps exports stable; full gates and independent review.
   **Status (2026-11-18)**: implementation rebased onto 0.0.392 from the local draft; 19 guard/deletion regressions pass; full 5468 passed / 42 skipped (1 environment-skipped file: real ffmpeg); typecheck, architecture, bundle and smoke pass; independent review first BLOCK (schema case/type, lock-race test) then APPROVE after fixes. PR #707 merged (`009d8d94`); version 0.0.393; deployment pending a worker idle window and all-node precheck.
+
+- [x] **T-227 plans/051 管线步骤注册表设计评审（2026-11-18）**
+  — 评审 [plans/051](plans/051_pipeline_step_registry.md)，结论方向成立但不能按原稿直接 P1：分段模式不是单张 DAG、执行器 `PipelineDeps` 依赖边界未落地、上传驱动与低层包互相矛盾、步骤数写成 14（实际 13）、`select`/`pull` 不是执行器节点、清理失败语义未定。修订阶段为 P0 execution-trace 对拍 → P1 纯数据注册表 → P2 merge/node 执行器 → P3 分段模型 → P4 上传 port；评审见 [051_review_2026-11-18.md](plans/051_review_2026-11-18.md)。
 - [x] **T-199 部署守卫带 Web 凭据并覆盖在途上传（issue [#645](https://github.com/fuyucn/douyin-rec/issues/645) → PR [#647](https://github.com/fuyucn/douyin-rec/pull/647)，2026-11-12）**
   — **做什么**: `deploy-precheck.sh/.py` 读取各节点 `config/web-token` 并带 `Authorization`；200 分支统计 `biliup / upload-part / upload-prep / reconcile-part / remux` 与新鲜 `phase=uploading` 结果文件；新增 `--node` 单节点模式；`auto-deploy.sh` 的 `wait_idle` 改为逐节点调用 precheck；`install-worker.sh --check-busy` 同样带 token 并把 `remux` 计入忙。
   **为什么**: 启用 Web 鉴权后守卫全部 401 → fail-closed 永远等待；同时 precheck 只数 `running.biliup`，auto-deploy 又完全不调用 precheck，重启可能打断不可逆的上传分P链。
@@ -229,13 +232,13 @@
   **做什么**: 隐藏命令注册表 → 节点出站 WebSocket 长连接（心跳/事件/请求应答，ssh 回落）→ inventory 增量 → 录制进程内存实测 → 判活闸门。
   **验收**: 见 plan「预期效果」表（控制面 node 进程 0/分、繁忙 worker steal < 20%、待命内存 ~60MB），上线后同方法复测。
   — 见 plans/042_worker_footprint.md
-- [~] **T-134 直播统计 tab（issue [#443](https://github.com/fuyucn/douyin-rec/issues/443) → PR [#444](https://github.com/fuyucn/douyin-rec/pull/444)，2026-11-03）**
+- [x] **T-134 直播统计 tab（issue [#443](https://github.com/fuyucn/douyin-rec/issues/443) → PR [#444](https://github.com/fuyucn/douyin-rec/pull/444)，2026-11-03；已关闭 2026-11-18）**
   — master 对账旁路采集各节点会话落 `room-stats.db`，新增 /stats 页展示热力图/节点负载/配置总览。
   **做什么**: 库 + 聚合 + API（/api/stats）+ 前端页；契约在 core。
   **验收**: 全量门禁通过（typecheck / test 4067 / pr-gate 444 / risk-scan 命中但为关键词误判(见 PR)，待 review 心跳按门禁决定）。
   — 见 plans/041_stats_tab.md
 
-- [~] **T-134 hub 同步只下发启用且分配的房间，未勾选点名删除（issue [#442](https://github.com/fuyucn/douyin-rec/issues/442)）**（2026-11-03）
+- [x] **T-134 hub 同步只下发启用且分配的房间，未勾选点名删除（issue [#442](https://github.com/fuyucn/douyin-rec/issues/442)）**（2026-11-03；已关闭 2026-11-18）
   — 未分配/停用的房间也全量下发到所有节点，节点上长期积压隐藏的未分配受管任务，审计快照还明文存未启用房间的凭据。
   **做什么**: `desiredFor` 只对「规则启用但未勾选本节点」的房间下发 `deleted:true` 点名删除（节点两阶段删除，点名缩容不被空期望/骤减守卫拦）；规则停用/能力不满足仍下发 `enabled:false` 停用保留（本机源任务停用靠这条写回，review F1）；deleted 条目不带凭据。
   **为什么**: 节点只保留「启用且分配给它」的房间；master 误读保护（desired 为空仍拒发）不交化。

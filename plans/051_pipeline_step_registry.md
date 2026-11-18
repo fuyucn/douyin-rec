@@ -1,12 +1,12 @@
 # plans/051 — 管线步骤注册表（审计 P1-2 / 组 F）
 
-> 状态：**设计待评审，未开工**。按 AGENTS.md：纯搬迁与行为变更分开 PR，每个阶段单独 PR。
+> 状态：**设计评审完成（2026-11-18），按修订阶段开工；P0 对拍先行**。评审结论与未决问题回答见 [051_review_2026-11-18.md](051_review_2026-11-18.md)。纯搬迁与行为变更分开 PR，每个阶段单独 PR。
 
 ## §1 现状（2026-11-13 核实）
 
 **事实 1：步骤词表只有一份，执行写法有五种。**
 
-- 词表在 `packages/core/src/hub-ledger-contract.ts` 的 `HUB_STEP_NAMES`（14 个）：
+- 词表在 `packages/core/src/hub-ledger-contract.ts` 的 `HUB_STEP_NAMES`（13 个）：
   `select` / `pull` / `node_upload` / `merge` / `burn_danmu` / `burn_livechat` /
   `upload_plain` / `append_danmu` / `append_livechat` / `clean_verify` /
   `clean_stage_src` / `clean_source` / `clean_stage`。
@@ -34,7 +34,7 @@
 
 ## §2 目标
 
-1. **步骤是数据**：14 个步骤各有一份 `StepSpec`（输入、输出、资源类别、幂等依据、重试与禁用条件、
+1. **步骤是数据**：13 个步骤各有一份 `StepSpec`（输入、输出、资源类别、幂等依据、重试与禁用条件、
    run），加步骤 = 在表里加一行 + 在图里连一条边，不改类型 union。
 2. **三种模式 = 同一执行器上的三张图**：合并 / 分段 / 节点三张 `StepGraph` 由同一张表声明，
    执行器（幂等、blocked/skipped 派生、资源池、续跑）只有一份。
@@ -205,7 +205,7 @@ P1–P3 是纯搬迁；P4 改失败语义，单独评审；P5 动 worker 执行�
 4. **执行器下沉可能改变初始化顺序**：今天 `deps` 是闭包注入，搬到 `@drec/pipeline` 后必须保持
    「运行期只读注入」，不能 import 任何具体实现包。
 
-## §10 未决问题（评审时逐条回答）
+## §10 未决问题（2026-11-18 评审已逐条回答，见 review）
 
 1. `@drec/pipeline` 与 `@drec/upload-runtime` 的边界：驱动属于 upload-runtime，
    步骤执行器属于 pipeline，二者谁依赖谁？（当前设计：pipeline 不依赖 upload-runtime，
