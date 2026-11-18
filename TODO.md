@@ -1000,7 +1000,7 @@
   **Acceptance**: refusal preserves task, rule, ledger rows and logs; absent DB and absent legacy table stay idle-compatible; focused module split keeps exports stable; full gates and independent review.
   **Status (2026-11-18)**: PR #707 merged (`009d8d94`) and deployed as 0.0.393-fa1229 on all three nodes. Independent review approved after schema/lock-race fixes. Current full regression: 5468 passed / 42 skipped; types and architecture pass. Exact deployed-image HTTP verification confirms both routes refuse active/unknown jobs and malformed ledger schemas while retaining fixture data; healthy retry succeeds. Configuration removal after committed history can report an explicit partial-result error; no cross-store atomicity claim. See [closeout evidence](docs/verification/2026-11-18-room-deletion.md). Issue #702 closed on 2026-11-18; consolidated verification and ledger delivered by PR #708.
 
-- [x] **T-133 删除房间同时删掉录制任务与 hub 规则（issue [#439](https://github.com/fuyucn/douyin-rec/issues/439)）**（2026-11-03） （2026-11-18）
+- [x] **T-133 删除房间同时删掉录制任务与 hub 规则（issue [#439](https://github.com/fuyucn/douyin-rec/issues/439)）**（2026-11-18）
   — 房间页「删除房间」只删录制任务，hub 规则残留；列表是「规则 ∪ 任务」，房间删完仍在 `/rooms`，且残留的「仅规则」房间在房间页上没有删除入口。
   **做什么**: 新增 `DELETE /api/rooms/:key` 一次删两半（带受管 403 / 启用或录制中 409 / 进行中 hub job 409 守卫，先全量校验再动数据）；房间编辑器删除改走该端点；仅规则房间也可删。
   **为什么**: 删除房间必须真的把房间删掉，不能留下看不见的半边。
