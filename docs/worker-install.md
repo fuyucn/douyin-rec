@@ -83,6 +83,19 @@ curl -fsSL https://raw.githubusercontent.com/fuyucn/douyin-rec/main/scripts/inst
 - 现有节点布局与默认值不同时,用 `--root`、`--service` 等参数适配,先 `--dry-run`。
 - 部署开发版后要记录「节点、版本、分支、提交」,避免忘记回到 stable。
 
+### 运行版本与安装标记
+
+`GET /api/version` 是当前运行的 CLI/API 版本依据，返回值包含补丁版本和构建提交后缀。
+节点根目录的 `VERSION` 与归档清单的 `version` 则记录最近一次完整安装所用的
+worker 归档版本；发布归档中的版本号通常不含提交后缀。
+
+安装器会从归档复制这两个标记。仅更新 bundle 的流程（包括 `auto-deploy.sh` 的
+`update_node`）不更新归档标记，也不代表其他安装组件已一起升级，因此标记滞后本身不表示
+旧服务仍在运行。不要为使数值相同而把归档清单改写成当前 bundle 版本。
+
+升级验收应读取运行接口，并与目标产物的内嵌版本及校验值核对；归档标记仅用于追溯安装来源。
+若运行接口与目标不一致，应排查部署路径及服务进程，不能仅凭 `VERSION` 判定升级成功。
+
 ## Packages 与角色
 
 默认安装完整 worker package：
@@ -206,6 +219,10 @@ sudo systemctl status drec-worker
 sudo journalctl -u drec-worker -f
 curl -fsS http://127.0.0.1:7860/api/version
 ```
+
+核对当前运行版本时使用上面的接口；启用访问鉴权时通过现有密钥机制访问，勿把密钥写入
+日志或工单。`VERSION` 和归档清单只能回答「最近完整安装了哪个归档」，不能回答「当前
+服务运行哪个 bundle」。仅检查接口版本也不等于完成行为验收。
 
 升级时重新运行 install 命令即可。未显式传 `--packages` / `--role` 时，
 安装器会保留已写入 `/etc/<service>.env` 的原组合。安装器只更新受管

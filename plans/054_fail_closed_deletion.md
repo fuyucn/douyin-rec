@@ -53,4 +53,14 @@ ledger rows and logs on refusal.
 - [x] Focused module split keeps public exports and avoids cycles.
 - [x] Full regression 5468 passed / 42 skipped; typecheck, architecture, bundle, smoke and strict quality pass.
 - [x] Review follow-up: case-variant `sync_jobs` and view rejection; coordinated lock-race test distinguishes the in-transaction recheck.
-- [ ] Independent review.
+- [x] Independent review approved after schema and lock-race follow-ups; PR #707 merged.
+
+## Delivery follow-up (2026-11-18)
+
+The controller and both workers run 0.0.393-fa1229 with matching bundle hashes. The exact
+deployed image passed isolated HTTP checks for both deletion routes: active/unknown state
+returns 409 and malformed schema returns 503 without changing fixture task, rule, rows, or logs;
+a healthy retry succeeds. The full 5468-test regression, typecheck, and architecture check pass.
+This uses temporary synthetic data, not a real production deletion. A configuration failure after
+history commits is explicitly reported and retryable; it is not a cross-store atomic rollback.
+See [the closeout record](../docs/verification/2026-11-18-room-deletion.md).
