@@ -1,8 +1,8 @@
-# Zero-disk CPU profile (captured 2026-10-22)
+# Zero-disk CPU profile (partial evidence for #352; captured 2026-10-22)
 
 ## Scope
 
-This is the measurement result for [issue #352](https://github.com/fuyucn/douyin-rec/issues/352), based on the profile report recorded there on 2026-10-22. It describes one zero-disk recording process on a small worker under heavy CPU steal and swap pressure. It is not a general performance guarantee.
+This is a partial, CPU-only measurement step for [issue #352](https://github.com/fuyucn/douyin-rec/issues/352), based on the profile report recorded there on 2026-10-22. It does not complete or close #352. It describes one zero-disk recording process on a small worker under heavy CPU steal and swap pressure. It is not a general performance guarantee. A reviewable heap/memory result, a healthy-node capture, and a same-bitrate zero-disk-on/off comparison remain required before #352 can close.
 
 ## Method
 
@@ -26,4 +26,4 @@ The dominant observed application frame was the redundant per-read copy. At the 
 - No healthy-node capture or same-bitrate zero-disk-off comparison was performed; these results do not establish behavior on an unconstrained node.
 - Heap sampling was enabled, but this measurement did not produce a comparative memory result.
 - Issue #353 tracks the separately approved change to remove only the redundant read-callback copy while retaining the per-chunk ownership copy; preallocated chunk buffers are out of scope. That change still requires byte-exact regression coverage and before/after profiling.
-- This issue was measurement-only: no runtime behavior changed, so no runtime regression test or deployment was part of this result.
+- This documentation step changed no runtime behavior; it provides no runtime regression evidence and does not satisfy the remaining memory or comparison acceptance criteria.
