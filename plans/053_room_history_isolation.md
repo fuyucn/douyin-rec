@@ -37,3 +37,12 @@ No PR, merge, deployment or production acceptance. The worktree remains unfinish
 
 TODO.md entry T-225 is the local implementation ledger. This plan is not a production acceptance
 certificate: current fleet uptime and short synthetic tests do not certify sustained new behavior.
+
+## Delivery follow-up (2026-11-18)
+
+PR #706 merged and its fix is deployed in 0.0.393-fa1229 on the controller and both workers.
+The three bundle hashes match. Full regression now passes 5468 tests with 42 skips; types and
+architecture pass. The exact deployed image passed isolated HTTP deletion checks across all six
+tables and both log layouts, preserving adjacent and cross-platform identities. This is synthetic
+post-deployment artifact validation, not deletion of a real production room or sustained observation.
+See [the closeout record](../docs/verification/2026-11-18-room-deletion.md).
