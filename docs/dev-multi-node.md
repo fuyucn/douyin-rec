@@ -246,7 +246,7 @@ api -X POST $API/api/hub/apply            # 立刻同步任务到所选节点
 
 预期(样例):
 - 台账:`sync_candidates` 只有 node-1(node-2 未被选中,不参与选优)。
-- 文件:撤销分配后 node-2 上 A 的任务行按 #442 两阶段契约最终删除，但 A 的源录像仍保留；节点 managed/rooms.json 的期望快照保留 deleted:true。
+- 文件:撤销分配后 node-2 上 A 的任务行按 #442 两阶段契约最终删除，但 A 的源录像仍保留；节点 managed snapshot 的期望条目保留 deleted:true。
 - API:在启用规则中移除 node-2 后，验收须先保存 node-2 上 A 的原任务 id，再确认同一 id 最终从 /api/tasks 消失；API 错误不能作为「已删除」的证据。node-1 上 A 仍 assigned:true。
 - 停用边界:规则 B 仍把 node-2 列在 workers 中但设置 enabled:false 后，node-2 上已有 B 任务必须留存并变为 enabled:false；start/PATCH/DELETE 对仍存在的受管 B 仍返回 403。
 
