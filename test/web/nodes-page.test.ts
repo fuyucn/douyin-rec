@@ -134,7 +134,7 @@ describe("nodes page model", () => {
     expect(parseRecordingWarningLimitInput("")).toBeNull();
     expect(parseRecordingWarningLimitInput("  ")).toBeNull();
     expect(parseRecordingWarningLimitInput(" 5 ")).toBe(5);
-    for (const bad of ["0", "-2", "1.5", "1e3", "abc", "3x", "99999999999999999999"]) expect(parseRecordingWarningLimitInput(bad)).toBeUndefined();
+    for (const bad of ["0", "-2", "1.5", "1e3", "abc", "3x", "9".repeat(20)]) expect(parseRecordingWarningLimitInput(bad)).toBeUndefined();
   });
 
   it("keeps the controller manageable-gated off and workers manageable", () => {

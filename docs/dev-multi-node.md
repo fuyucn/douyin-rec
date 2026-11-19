@@ -161,7 +161,7 @@ dev 环境的处理:worker 的 sshd 默认 `SetEnv TZ=Asia/Shanghai`(与 serve �
 
 | 编号 | 场景 | 对应 | 状态 |
 | --- | --- | --- | --- |
-| **S1** | **归属隐藏**:规则只勾选 node-1 → node-2 上该任务被停用保留(`assigned=false`),worker 模式 UI/`/api/tasks` 默认隐藏「受管 ∧ 未分配 ∧ 未在录」;不是删除 | T-45 / #73;`isWorkerAssigned`(core `capabilities.ts`) | P2 PR |
+| **S1** | **撤销节点分配与停用规则**:启用规则移除 node-2 后，#442 契约要求节点任务先停用、后删除，但录像保留；规则仍选中 node-2 但整体停用时，已有节点任务保持存在且 `enabled=false` | T-45 / #73;`desiredSpecsForWorker` + `applyRemoteTasks` | P2 PR |
 | **S2** | **失联三态**:节点清单分 ok / empty / unreachable;`docker stop`(连接被拒,快速失败=reject 路径)与 `docker pause`(挂起,超时路径)**双断言**;unreachable 的场本轮不选优、不收口、不删源,恢复后补收口 | T-42 / #27 | P2 PR |
 | **S3** | **收口清理**:收播后选优 → pull → merge → 假 biliup 上传 → 核验 → 按 cleanup 配置清 stage/源;`xml/ass` 保留规则(不得删最后一份) | `reconciler` / `pipeline` / `stage-clean` | P2 PR |
 | **S4** | **重启接管**:`docker restart` worker / controller,在途 job 续跑或转人工,不重复建稿 | **#72 / #57 解锁后**(P3b) | **阻塞**,不在本 PR |
@@ -240,14 +240,15 @@ api -X POST $API/api/hub/apply            # 立刻同步任务到所选节点
 | **文件在位** | `docker exec <节点> ls -l /output-data/recordings/<anchor>`、`docker exec $CTRL ls -R /output-data/stage` | 源录像/`.xml`/`.session.json` 是否仍在;stage 是否有残留;`fake-archive.jsonl`(`/output-data/config/biliup/`)里的 `watermarkOff:true`、`onlySelf:true` <!-- issue-guard: allow --> |
 | **API / 界面字段** | `GET /api/hub/jobs`、`/api/hub/queue`、`/api/hub/workers/status`、各节点 `GET /api/tasks`(经 `docker exec <节点> curl …`) | job 状态/ETA/步骤时间线、worker 三态点、节点任务的 `assigned`/`recording` 字段 |
 
-### 8.3 S1 归属隐藏
+### 8.3 S1 撤销节点分配与停用规则
 
 播种:8.1 的 node-1/node-2 都放录像;规则 `workers:["node-1"]`(只勾 node-1)后 `POST /api/hub/apply`。
 
 预期(样例):
 - 台账:`sync_candidates` 只有 node-1(node-2 未被选中,不参与选优)。
-- 文件:node-2 上的录像与任务**都还在**(「未派给」≠删除,T3;真删见 #75)。
-- API:`docker exec drec-dev-node-2 curl -s localhost:7860/api/tasks | jq '.[]|{id,managedBy,assigned,recording,enabled}'` → 该受管任务 `assigned:false, enabled:false`,且 worker 模式 Web 默认不列出;node-1 上同一任务 `assigned:true`。
+- 文件:撤销分配后 node-2 上 A 的任务行按 #442 两阶段契约最终删除，但 A 的源录像仍保留；节点 managed/rooms.json 的期望快照保留 deleted:true。
+- API:在启用规则中移除 node-2 后，验收须先保存 node-2 上 A 的原任务 id，再确认同一 id 最终从 /api/tasks 消失；API 错误不能作为「已删除」的证据。node-1 上 A 仍 assigned:true。
+- 停用边界:规则 B 仍把 node-2 列在 workers 中但设置 enabled:false 后，node-2 上已有 B 任务必须留存并变为 enabled:false；start/PATCH/DELETE 对仍存在的受管 B 仍返回 403。
 
 ### 8.4 S2 失联三态(stop + pause 双断言)
 
