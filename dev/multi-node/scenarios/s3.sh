@@ -29,12 +29,13 @@ s3_case() {
   expect_eq "$label/台账" "再过 2 轮对账仍仅 1 个 job" "$(job_count "$room")" 1
   # 文件路
   local sd="/output-data/stage/douyin_${room}_*"
+  local run_log="/output-data/logs/hub/douyin_${room}/douyin_${room}_*.log"
   # The blocking readback gate must complete before these cleanup assertions can pass.
   expect_eq "$label/files" "stage videos removed after matching readback" "$(cx sh -c "ls $sd/*.ts $sd/*.mp4 $sd/*.flv 2>/dev/null | wc -l" | tr -d ' ')" 0
   expect_eq "$label/ledger" "readback gate completed without an error" "$(ledger "SELECT COUNT(*) n FROM sync_node_states WHERE streamKey LIKE 'douyin:$room:%' AND node='clean_verify' AND state='done' AND error IS NULL" | jq -r '.[0].n')" 1
-  expect_true "$label/files" "job log records matching readback before cleanup" cx sh -c "grep -q '删源前回读通过' $sd/job.log"
+  expect_true "$label/files" "run log records matching readback before cleanup" cx sh -c "grep -q '删源前回读通过' $run_log"
   expect_eq "$label/文件" "stage 的 .xml/.ass 已删(stageAfterDone=true,节点源保留 xml)" "$(cx sh -c "ls $sd/*.xml $sd/*.ass 2>/dev/null | wc -l" | tr -d ' ')" 0
-  expect_true "$label/文件" "stage 仍有 job.log" cx sh -c "ls $sd/job.log"
+  expect_true "$label/files" "run log survives outside the cleaned stage" cx sh -c "ls $run_log"
   local n
   for n in 1 2; do
     expect_eq "$label/文件" "node-$n 源 .xml 保留(不得删最后一份)" "$(nx $n sh -c "ls /output-data/recordings/$anchor/*.xml | wc -l" | tr -d ' ')" 1
