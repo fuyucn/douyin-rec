@@ -10,9 +10,13 @@ function assertFakeEnvironment(env) {
   }
   const credentials = JSON.parse(readFileSync(join(root, "config/biliup/cookies.json"), "utf8"));
   const cookies = credentials.cookie_info?.cookies;
-  const values = Array.isArray(cookies) ? new Map(cookies.map((c) => [c.name, c.value])) : new Map();
-  if (credentials["drec-dev-fake"] !== true || values.get("SESSDATA") !== "FAKE-DEV-SESSDATA"
-      || values.get("bili_jct") !== "FAKE-DEV-JCT") {
+  const validCookies = Array.isArray(cookies) && [
+    ["SESSDATA", "FAKE-DEV-SESSDATA"], ["bili_jct", "FAKE-DEV-JCT"],
+  ].every(([name, value]) => {
+    const matches = cookies.filter((cookie) => cookie.name === name);
+    return matches.length === 1 && matches[0].value === value;
+  });
+  if (credentials["drec-dev-fake"] !== true || !validCookies) {
     throw new Error("Archive view refuses non-fake credentials");
   }
   return root;

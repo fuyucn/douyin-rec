@@ -82,6 +82,24 @@ describe("offline archive view", () => {
     expect(forward).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["SESSDATA", "duplicate-fake"], ["SESSDATA", "real-first"], ["SESSDATA", "real-last"],
+    ["bili_jct", "duplicate-fake"], ["bili_jct", "real-first"], ["bili_jct", "real-last"],
+  ])("rejects duplicate disk cookie %s (%s) at startup and readback", async (name, mode) => {
+    record(operation("upload", 2));
+    const view = createArchiveViewFetch(env(), forward);
+    const cookie = fakeCredentials.cookie_info.cookies.find((entry) => entry.name === name)!;
+    const duplicate = { ...cookie, value: mode === "duplicate-fake" ? cookie.value : "not-a-dev-cookie" };
+    const entries = mode === "real-last" ? [cookie, duplicate] : [duplicate, cookie];
+    writeFileSync(credentials, JSON.stringify({
+      ...fakeCredentials,
+      cookie_info: { cookies: [...fakeCredentials.cookie_info.cookies.filter((entry) => entry.name !== name), ...entries] },
+    }));
+    expect(() => createArchiveViewFetch(env(), forward)).toThrow();
+    expect((await view(endpoint(), { headers })).ok).toBe(false);
+    expect(forward).not.toHaveBeenCalled();
+  });
+
   it("intercepts only the exact GET view endpoint and preserves other fetch calls", async () => {
     record(operation("upload", 2));
     const view = createArchiveViewFetch(env(), forward);

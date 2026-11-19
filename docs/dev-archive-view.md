@@ -6,7 +6,7 @@ The internal multi-node environment uses a fake CLI and a dev-only Node preload 
 
 - The CLI records each successful simulated upload or append. The view counts the recorded files for that archive, resetting at its latest upload and adding subsequent appends. It never reads the expected count from the job ledger.
 - The preload answers only the exact GET view endpoint with a single archive-id parameter. All other requests keep the original fetch implementation.
-- Activation requires the explicit controller flag, dev mode, a marked dev data root, known fake credentials on disk, and the known fake credentials on each request. These checks fail closed. The fixture is not copied into the production Dockerfile.
+- Activation requires the explicit controller flag, dev mode, a marked dev data root, known fake credentials on disk, and the known fake credentials on each request. Each required credential must occur exactly once, both on disk and on the request; duplicate fake values and mixed values are refused at startup and during readback. These checks fail closed. The fixture is not copied into the production Dockerfile.
 - The egress and mirror compose overlays explicitly disable the preload. This fixture must not replace any real-platform acceptance evidence.
 - Missing, malformed, unknown or out-of-order archive operations do not produce a successful view. A valid observed count may still be lower or higher than the ledger expectation; the real finalization gate must then keep both source and stage video and move the job to manual review.
 
