@@ -2,7 +2,7 @@
 
 > 本文件是本仓库 **agent 工作的唯一待办台账**。管理规则见 `AGENTS.md`「任务与 TODO 管理」。
 > 编号 `T-N` 稳定不变（引用/提交信息里用它指代条目）。
-> 最后更新：2026-11-18
+> 最后更新：2026-11-19
 
 ## 状态约定
 
@@ -14,9 +14,6 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
-
-- [~] **T-231 Read-callback copy acceptance (issue [#353](https://github.com/fuyucn/douyin-rec/issues/353), 2026-11-19)** — **What**: Pin the existing Buffer-reuse reader with an identity regression and a same-machine CPU control comparison. **Why**: The implementation already exists, but the old measurement does not prove the current path or its byte correctness. **Acceptance**: Byte-exact size/duration/tail/abort/backpressure coverage, red/green copy regression, repeatable profiles with declared limits, full tests/typecheck and independent review. Preserve per-chunk detach copies; no preallocation, production changes or real submissions.
-  **Local evidence**: Three reader regressions pass, including exact abort-prefix and backpressure-spool contents; full regression 5465 passed / 48 skipped; typecheck and architecture check pass. Five paired same-machine synthetic replays produce identical hashes with 13.316% lower median process CPU for reuse. See [the acceptance report](docs/perf/2026-11-read-copy-acceptance.md) for the copy-restored control and limits. Independent review and merge are still pending; #352/#462 are not completed by this work.
 
 - [~] **T-229 零落盘 CPU 热点阶段记录（issue [#352](https://github.com/fuyucn/douyin-rec/issues/352)，2026-11-18）** — **做什么**:整理现有 50 秒 CPU profile 并记录其环境限制。**为什么**:区分实际程序热点与 CPU steal / swap 的环境放大，同时不把单一受限节点的 CPU 结果外推为整体通过。**已得结果**:每次读取的 Buffer.from(data) 占 wall 32% / busy 约 54%；GC 为 0.8%，独立 Buffer.concat 热点未证实；结论只适用于当时 CPU steal 约 78%、swap 在用的小节点，不能外推健康节点。阶段报告见 [docs/perf/2026-11-zero-disk-cpu-profile.md](docs/perf/2026-11-zero-disk-cpu-profile.md)。**验收**:当前仅 CPU 阶段记录完成；补齐可复核的 heap / 内存 profile 结论、健康节点 profile、同码率 zero-disk 开/关比较后，才能评估开销并关闭 #352。#352 保持未完成。
 
@@ -989,6 +986,11 @@
   属模型取舍，不是可顺手加的功能。**为什么**：冗余模型把轮询量乘了 N，是 VPS 被限流的根因之一。
 
 ## 已完成
+
+- [x] **T-231 Read-callback copy acceptance (issue [#353](https://github.com/fuyucn/douyin-rec/issues/353))** （2026-11-19）
+  — **What/why**: pin the existing Buffer-reuse reader with identity and byte-exact regressions, plus a reproducible same-machine CPU control comparison. Preserve per-chunk detach copies; no preallocation or runtime changes.
+  **Acceptance**: three reader regressions cover buffer identity, exact unaligned abort prefixes and backpressure spool contents; the copy-restored mutation fails and restoration passes. Independent full regression: 5465 passed / 48 skipped; typecheck, architecture, privacy and risk gates pass. Five paired synthetic replays produce identical hashes with 13.316% lower median process CPU for reuse; this is not a new production performance claim. See [the acceptance report](docs/perf/2026-11-read-copy-acceptance.md).
+  **Closeout**: independent review approved [PR #711](https://github.com/fuyucn/douyin-rec/pull/711); both push and pull-request CI passed on the reviewed head. Merged as `f08f6826`; issue #353 auto-closed on 2026-11-19. No deployment or real submission was needed. Issues #352 and #462 remain incomplete.
 
 - [x] **T-228 Worker archive marker semantics (issue [#587](https://github.com/fuyucn/douyin-rec/issues/587))** （2026-11-18）
   — **What/why**: distinguish the running API version from the last full-install archive markers so bundle-only updates cannot mislead operations.
