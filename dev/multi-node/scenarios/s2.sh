@@ -17,15 +17,15 @@ s2_phase() {
   seed 1 "$anchor" "$room" "$END" 2 10; seed 2 "$anchor" "$room" "$END" 2 10
   local m1 m2; m1=$(manifest 1 "$anchor"); m2=$(manifest 2 "$anchor")
   # events / fake-archive 跨多次运行累积:本阶段一律按「相对基线的增量」断言
-  local alerts0 arch0; alerts0=$(alert_count); arch0=$(arch_count "$anchor")
+  local alerts0 arch0 logs0; alerts0=$(alert_count); arch0=$(arch_count "$anchor"); logs0=$(lost_logs)
   fault "$down" 2
   local t; t=$(mk_task "$room" "$anchor")
   mk_rule "$t" '["node-1","node-2"]' "$PIPE_UP" >/dev/null
   api POST /api/hub/apply >/dev/null
-  local logs0; logs0=$(lost_logs)
   have_lost() { [[ $(lost_logs) -gt $logs0 ]]; }
   if [[ $down == stop ]]; then
-    wait_for 120 have_lost && sc_pass "$label/日志: controller 记录「清单失联,不当作无录像」" || sc_fail "$label/日志: 120s 内无失联日志"
+    # Preserve the existing warm-up budget, but assert the warning at the alert threshold.
+    wait_for 120 have_lost || sc_info "[$label] inventory warning pending; checking again at the alert threshold"
   fi
   [[ $label == stop ]] || sc_info "[$label] pause 走超时路径:每轮 inventory 最长 60s,达阈值需约 6 轮,请耐心等"
   # 达阈值(默认 6 轮)后告警恰好 1 条。pause 路径每轮 ≥60s,故等待上限放宽。
@@ -33,11 +33,9 @@ s2_phase() {
   hit() { [[ $(( $(alert_count) - alerts0 )) -ge 1 ]]; }
   if [[ $down == pause ]]; then lim=720; fi
   wait_for $lim hit && sc_pass "$label/API: 失联达阈值发出通知(本阶段新增 $(( $(alert_count) - alerts0 )) 条)" || sc_fail "$label/API: ${lim}s 内未见阈值告警"
-  # A paused worker can hold an existing settle pass before inventory runs.
+  # Either fault can hold an existing settle pass before inventory runs.
   # Check its warning within the unchanged threshold deadline, not a separate 120s guess.
-  if [[ $down == pause ]]; then
-    expect_true "$label/log" "unreachable inventory warning is present at the alert threshold" have_lost
-  fi
+  expect_true "$label/log" "unreachable inventory warning is present at the alert threshold" have_lost
   if [[ $down == pause ]]; then sleep 70; else sleep 50; fi
   expect_eq "$label/API" "阈值后继续失联,通知不重复(本阶段新增条数)" "$(( $(alert_count) - alerts0 ))" 1
   # 失联期间:不选优 / 不收口 / 不建 job / 源不变
