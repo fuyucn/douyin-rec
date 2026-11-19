@@ -2,7 +2,7 @@
 
 > 本文件是本仓库 **agent 工作的唯一待办台账**。管理规则见 `AGENTS.md`「任务与 TODO 管理」。
 > 编号 `T-N` 稳定不变（引用/提交信息里用它指代条目）。
-> 最后更新：2026-11-18
+> 最后更新：2026-11-19
 
 ## 状态约定
 
@@ -988,6 +988,11 @@
   属模型取舍，不是可顺手加的功能。**为什么**：冗余模型把轮询量乘了 N，是 VPS 被限流的根因之一。
 
 ## 已完成
+
+- [x] **T-231 Read-callback copy acceptance (issue [#353](https://github.com/fuyucn/douyin-rec/issues/353))** （2026-11-19）
+  — **What/why**: pin the existing Buffer-reuse reader with identity and byte-exact regressions, plus a reproducible same-machine CPU control comparison. Preserve per-chunk detach copies; no preallocation or runtime changes.
+  **Acceptance**: three reader regressions cover buffer identity, exact unaligned abort prefixes and backpressure spool contents; the copy-restored mutation fails and restoration passes. Independent full regression: 5465 passed / 48 skipped; typecheck, architecture, privacy and risk gates pass. Five paired synthetic replays produce identical hashes with 13.316% lower median process CPU for reuse; this is not a new production performance claim. See [the acceptance report](docs/perf/2026-11-read-copy-acceptance.md).
+  **Closeout**: independent review approved [PR #711](https://github.com/fuyucn/douyin-rec/pull/711); both push and pull-request CI passed on the reviewed head. Merged as `f08f6826`; issue #353 auto-closed on 2026-11-19. No deployment or real submission was needed. Issues #352 and #462 remain incomplete.
 
 - [x] **T-228 Worker archive marker semantics (issue [#587](https://github.com/fuyucn/douyin-rec/issues/587))** （2026-11-18）
   — **What/why**: distinguish the running API version from the last full-install archive markers so bundle-only updates cannot mislead operations.
