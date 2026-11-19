@@ -24,4 +24,8 @@ if [ ! -f "$CK" ]; then
 JSON
 fi
 cd /app
+# Only the internal compose tier enables the simulated archive view.
+if [ "${DREC_DEV_ARCHIVE_VIEW:-0}" = "1" ]; then
+  export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--import=/opt/drec-dev/fake-archive-view.mjs"
+fi
 exec "$@"
