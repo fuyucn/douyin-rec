@@ -24,7 +24,7 @@ The old assumption that a successful CLI exit alone allows cleanup was supersede
 
 After publication and independent review, check out the exact reviewed revision in a dedicated, clean worktree. Run the following from that checkout's root, with `DOCKER_CONTEXT` explicitly set to the approved local Docker context. Do not copy an uncommitted alternate adapter from another PR or reuse another task's cluster.
 
-This example reserves an unused `-r714` suffix and creates a fresh data root. It refuses existing containers or a network with that suffix instead of stopping, replacing or cleaning them. If the suffix is occupied, coordinate another valid, unused suffix before running it. Both real-interaction modes are explicitly disabled. No cleanup command is included: `SC_KEEP=1` retains scenario evidence, and a failed command stops the replay with its logs intact.
+This example reserves an unused `-r714` suffix and creates a fresh data root. It refuses existing containers, a network or either dev image tag with that suffix instead of replacing them. If the suffix is occupied, coordinate another valid, unused suffix before running it. Both real-interaction modes are explicitly disabled. No cleanup command is included: `SC_KEEP=1` retains scenario evidence, and a failed command stops the replay with its captured command logs intact. The existing startup isolation gate can still remove newly created containers if their isolation checks fail; `SC_KEEP` does not disable that safety teardown.
 
 ```bash
 (
@@ -50,6 +50,12 @@ This example reserves an unused `-r714` suffix and creates a fresh data root. It
     printf 'Refusing occupied replay network\n' >&2
     exit 1
   fi
+  for replay_image in "drec-dev-base:local$DREC_DEV_SUFFIX" "drec-dev-node:local$DREC_DEV_SUFFIX"; do
+    if docker image inspect "$replay_image" >/dev/null 2>&1; then
+      printf 'Refusing occupied replay image: %s\n' "$replay_image" >&2
+      exit 1
+    fi
+  done
 
   git rev-parse HEAD | tee "$replay_root/source.txt"
   bash scripts/e2e-verify.sh doctor 2>&1 | tee "$replay_root/doctor.log"
