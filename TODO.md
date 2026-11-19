@@ -15,6 +15,8 @@
 
 ## 进行中
 
+- [~] **T-230 单节点录制数告警（issue [#351](https://github.com/fuyucn/douyin-rec/issues/351)，2026-11-18）** — **做什么**: 在远端 worker 配置可选的正整数录制数阈值；达到阈值仅在 Nodes 页提示，默认关闭，local 不变。**为什么**: 小内存节点并发负载偏高时给操作者可见提醒，但不改变录制或上传行为。**验收**: DTO/config 持久化、正整数/清空边界、warn-only 与 local 保护回归；全量 test/typecheck/Web build/bundle，独立审查、窄屏布局、PR/CI；部署后真实节点 UI 检查须等所有生产节点空闲。**状态**: 实现与首轮验证已完成；独立复审后补 legacy local 配置容错、remote→local 阻断测试、local-kind UI 守卫及窄屏按钮换行；未部署。
+
 - [~] **T-229 零落盘 CPU 热点阶段记录（issue [#352](https://github.com/fuyucn/douyin-rec/issues/352)，2026-11-18）** — **做什么**:整理现有 50 秒 CPU profile 并记录其环境限制。**为什么**:区分实际程序热点与 CPU steal / swap 的环境放大，同时不把单一受限节点的 CPU 结果外推为整体通过。**已得结果**:每次读取的 Buffer.from(data) 占 wall 32% / busy 约 54%；GC 为 0.8%，独立 Buffer.concat 热点未证实；结论只适用于当时 CPU steal 约 78%、swap 在用的小节点，不能外推健康节点。阶段报告见 [docs/perf/2026-11-zero-disk-cpu-profile.md](docs/perf/2026-11-zero-disk-cpu-profile.md)。**验收**:当前仅 CPU 阶段记录完成；补齐可复核的 heap / 内存 profile 结论、健康节点 profile、同码率 zero-disk 开/关比较后，才能评估开销并关闭 #352。#352 保持未完成。
 
 - [x] **T-223 移除直播直传驱动 rollout gate（issue [#676](https://github.com/fuyucn/douyin-rec/issues/676)，2026-11-15）** — **做什么**: 依次修复旧 aid-only 状态兼容、拆分 CLI 编排并补可执行选路测试、完成当前产物稳定性验收，再移除 DREC_LIVE_PUMP_DRIVER；保留任务级上传选项和安全配置。**为什么**: 两套实现长期并存会漂移，但历史 0.0.388 canary 不代表当前草稿验收通过。**计划与验收**: [plans/055_live_pump_driver_permanent.md](plans/055_live_pump_driver_permanent.md)。全量回归、结构门禁、独立复审及真实运行证据缺一不可；本轮仅本地实现，不提交、不部署，线上观察票仍开放。
