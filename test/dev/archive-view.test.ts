@@ -103,6 +103,12 @@ describe("offline archive view", () => {
     });
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout.trim()).toBe("2");
+    const refused = spawnSync(process.execPath, ["--import", modulePath, "-e", "console.log('must-not-run')"], {
+      env: { ...process.env, ...env(), DREC_DEV: "0" }, encoding: "utf8", timeout: 5000,
+    });
+    expect(refused.status, refused.stderr).not.toBe(0);
+    expect(refused.stderr).toContain("Archive view requires");
+    expect(refused.stdout).not.toContain("must-not-run");
     const disabled = spawnSync(process.execPath, ["--import", modulePath, "-e", "console.log('unmodified')"], {
       env: { ...process.env, DREC_DEV_ARCHIVE_VIEW: "0", DREC_DEV: "0" }, encoding: "utf8", timeout: 5000,
     });

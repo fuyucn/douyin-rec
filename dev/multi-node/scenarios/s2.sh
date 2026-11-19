@@ -24,13 +24,20 @@ s2_phase() {
   api POST /api/hub/apply >/dev/null
   local logs0; logs0=$(lost_logs)
   have_lost() { [[ $(lost_logs) -gt $logs0 ]]; }
-  wait_for 120 have_lost && sc_pass "$label/日志: controller 记录「清单失联,不当作无录像」" || sc_fail "$label/日志: 120s 内无失联日志"
+  if [[ $down == stop ]]; then
+    wait_for 120 have_lost && sc_pass "$label/日志: controller 记录「清单失联,不当作无录像」" || sc_fail "$label/日志: 120s 内无失联日志"
+  fi
   [[ $label == stop ]] || sc_info "[$label] pause 走超时路径:每轮 inventory 最长 60s,达阈值需约 6 轮,请耐心等"
   # 达阈值(默认 6 轮)后告警恰好 1 条。pause 路径每轮 ≥60s,故等待上限放宽。
   local lim=240; [[ $down == pause ]] || lim=150
   hit() { [[ $(( $(alert_count) - alerts0 )) -ge 1 ]]; }
   if [[ $down == pause ]]; then lim=720; fi
   wait_for $lim hit && sc_pass "$label/API: 失联达阈值发出通知(本阶段新增 $(( $(alert_count) - alerts0 )) 条)" || sc_fail "$label/API: ${lim}s 内未见阈值告警"
+  # A paused worker can hold an existing settle pass before inventory runs.
+  # Check its warning within the unchanged threshold deadline, not a separate 120s guess.
+  if [[ $down == pause ]]; then
+    expect_true "$label/log" "unreachable inventory warning is present at the alert threshold" have_lost
+  fi
   if [[ $down == pause ]]; then sleep 70; else sleep 50; fi
   expect_eq "$label/API" "阈值后继续失联,通知不重复(本阶段新增条数)" "$(( $(alert_count) - alerts0 ))" 1
   # 失联期间:不选优 / 不收口 / 不建 job / 源不变

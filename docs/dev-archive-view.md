@@ -2,6 +2,8 @@
 
 The internal multi-node environment uses a fake CLI and a dev-only Node preload to model the same archive from both sides. The production readback and finalization code is unchanged.
 
+S2 checks a paused worker's unreachable warning within its existing alert-threshold deadline. An in-flight settle pass can precede inventory, so a separate 120-second warning deadline is not valid. The alert deadline and all source-preservation, no-submission and recovery assertions remain unchanged.
+
 ## Contract
 
 - The CLI records each successful simulated upload or append. The view counts the recorded files for that archive, resetting at its latest upload and adding subsequent appends. It never reads the expected count from the job ledger.
