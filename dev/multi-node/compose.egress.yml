@@ -5,6 +5,8 @@
 # 其余隔离栏(容器名前缀/无 ports/无 privileged/数据根不重叠/worker host 为 dev 名)一律照常断言。
 services:
   controller:
+    environment:
+      DREC_DEV_ARCHIVE_VIEW: "0"
     networks: [drec-devnet, drec-devnet-egress]
     volumes:
       - ${EGRESS_COOKIES:?由 scripts/e2e-verify.sh 注入}:/output-data/config/biliup/cookies.json:ro

@@ -29,7 +29,9 @@ services:
     restart: "no"
     entrypoint: ["/usr/local/bin/dev-controller-entrypoint.sh"]
     command: ["node", "dist/douyin-rec.mjs", "task", "serve", "--port", "7860", "--hub"]
-    environment: *dev-env
+    environment:
+      <<: *dev-env
+      DREC_DEV_ARCHIVE_VIEW: "1"
     volumes:
       - ${E2E_ROOT:?由 scripts/e2e-verify.sh 注入}/controller:/output-data
       - ${E2E_ROOT}/keys/dev_ed25519:/dev-keys/dev_ed25519:ro

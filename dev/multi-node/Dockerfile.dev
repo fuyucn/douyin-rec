@@ -19,6 +19,7 @@ RUN apt-get update \
 
 # 假 biliup:模仿真实 BV 输出;只认 FAKE-DEV 假 cookies,绝不联网。
 COPY fake-biliup.js /opt/drec-dev/fake-biliup.js
+COPY fake-archive-view.mjs /opt/drec-dev/fake-archive-view.mjs
 COPY dev-worker-entrypoint.sh dev-controller-entrypoint.sh /usr/local/bin/
 COPY ssh_config.dev /etc/drec-dev/ssh_config.dev
 RUN chmod 0755 /opt/drec-dev/fake-biliup.js /usr/local/bin/dev-worker-entrypoint.sh /usr/local/bin/dev-controller-entrypoint.sh \

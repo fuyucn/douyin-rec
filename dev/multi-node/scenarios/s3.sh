@@ -1,6 +1,6 @@
 # S3 收口清理(#60/#61)。真 ffmpeg 分段 + session.json + xml,走收播对账 → 烧录 → 假 biliup 上传 → 清理。
-# 重要(#92):收口清理以「上传确认(biliup rc=0)」为前提;回读 B站分P数只是旁路校验,不拦清理。
-# 因此 internal 档(断外网、假 biliup)也能断言清零类结果。
+# Contract #327: cleanup requires both CLI confirmation and a matching observed part count.
+# Internal mode reads the fake archive through the dev-only view; unknown/mismatch keeps sources.
 # 口径(xmlKeepRule,orchestrator/src/pipeline.ts):stageAfterDone=true → stage 视频类清零、stage 的 .xml/.ass 可删、
 # 节点源 .xml 必须保留;sourceAfterDone=true 时节点源视频(.ts)删。.xml 永不两处同时删光。
 
@@ -29,11 +29,13 @@ s3_case() {
   expect_eq "$label/台账" "再过 2 轮对账仍仅 1 个 job" "$(job_count "$room")" 1
   # 文件路
   local sd="/output-data/stage/douyin_${room}_*"
-  # #92:清理只看上传确认(biliup rc=0),不再被「回读分P数」拦住;回读降为旁路校验(clean_verify)。
-  expect_eq "$label/文件" "stage 视频类(.ts/.mp4/.flv)清零(上传已确认即清理)" "$(cx sh -c "ls $sd/*.ts $sd/*.mp4 $sd/*.flv 2>/dev/null | wc -l" | tr -d ' ')" 0
-  expect_eq "$label/台账" "旁路校验 clean_verify 未失败(不阻塞清理)" "$(ledger "SELECT COUNT(*) n FROM sync_node_states WHERE streamKey LIKE 'douyin:$room:%' AND node='clean_verify' AND state='failed'" | jq -r '.[0].n')" 0
+  local run_log="/output-data/logs/hub/douyin_${room}/douyin_${room}_*.log"
+  # The blocking readback gate must complete before these cleanup assertions can pass.
+  expect_eq "$label/files" "stage videos removed after matching readback" "$(cx sh -c "ls $sd/*.ts $sd/*.mp4 $sd/*.flv 2>/dev/null | wc -l" | tr -d ' ')" 0
+  expect_eq "$label/ledger" "readback gate completed without an error" "$(ledger "SELECT COUNT(*) n FROM sync_node_states WHERE streamKey LIKE 'douyin:$room:%' AND node='clean_verify' AND state='done' AND error IS NULL" | jq -r '.[0].n')" 1
+  expect_true "$label/files" "run log records matching readback before cleanup" cx sh -c "grep -q '删源前回读通过' $run_log"
   expect_eq "$label/文件" "stage 的 .xml/.ass 已删(stageAfterDone=true,节点源保留 xml)" "$(cx sh -c "ls $sd/*.xml $sd/*.ass 2>/dev/null | wc -l" | tr -d ' ')" 0
-  expect_true "$label/文件" "stage 仍有 job.log" cx sh -c "ls $sd/job.log"
+  expect_true "$label/files" "run log survives outside the cleaned stage" cx sh -c "ls $run_log"
   local n
   for n in 1 2; do
     expect_eq "$label/文件" "node-$n 源 .xml 保留(不得删最后一份)" "$(nx $n sh -c "ls /output-data/recordings/$anchor/*.xml | wc -l" | tr -d ' ')" 1
