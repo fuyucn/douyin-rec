@@ -408,9 +408,9 @@ export interface Api {
   /** GET /api/hub/workers — 列出录制 worker(hub 未启用 → 400)。 */
   listWorkers(): ApiResult;
   /** POST /api/hub/workers — 新建 worker。 */
-  createWorker(input: { name?: string; kind?: string; host?: string; dataRoot?: string; apiUrl?: string; capabilities?: string[]; id?: string }): ApiResult;
+  createWorker(input: { name?: string; kind?: string; host?: string; dataRoot?: string; apiUrl?: string; capabilities?: string[]; recordingWarningLimit?: number | null; id?: string }): ApiResult;
   /** PATCH /api/hub/workers/:id — 部分更新。 */
-  updateWorker(id: string, input: { name?: string; kind?: string; host?: string; dataRoot?: string; apiUrl?: string; capabilities?: string[] }): ApiResult;
+  updateWorker(id: string, input: { name?: string; kind?: string; host?: string; dataRoot?: string; apiUrl?: string; capabilities?: string[]; recordingWarningLimit?: number | null }): ApiResult;
   /** DELETE /api/hub/workers/:id — 删除(local 保护)。 */
   deleteWorker(id: string): ApiResult;
   /** POST /api/hub/workers/reorder { ids } — 按给定顺序整体重排 worker 列表(拖拽排序持久化)。 */

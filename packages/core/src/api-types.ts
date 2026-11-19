@@ -329,7 +329,7 @@ export interface HubJobDTO {
 }
 
 /** 一个录制 worker(节点)的展示投影。id 内部稳定主键(UI 不展示);name 友好名。 */
-export interface WorkerDTO { id: string; name: string; kind: string; host?: string; dataRoot?: string; apiUrl?: string; capabilities?: string[] }
+export interface WorkerDTO { id: string; name: string; kind: string; host?: string; dataRoot?: string; apiUrl?: string; capabilities?: string[]; recordingWarningLimit?: number }
 
 /** worker 连接测试结果(POST /api/hub/workers/test)——轻量 ping:可达 + dataRoot 存在。 */
 export interface WorkerTestResult {

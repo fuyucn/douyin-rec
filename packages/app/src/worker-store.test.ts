@@ -95,6 +95,46 @@ describe("worker-store(文件版 CRUD)", () => {
     expect(j.tenants).toBeUndefined();       // 迁移后删旧键
     expect(j.workerSeq).toBe(1);
   });
+  it("recordingWarningLimit: default omitted; set/clear round-trip; keep on unrelated update (issue #351)", () => {
+    const w = createWorker(cfg, { kind: "ssh", host: "h", dataRoot: "/d" });
+    expect(w.recordingWarningLimit).toBeUndefined();
+    expect("recordingWarningLimit" in read().workers.find((x: { id: string }) => x.id === "worker-1")).toBe(false);
+    expect(updateWorker(cfg, "worker-1", { recordingWarningLimit: 3 })!.recordingWarningLimit).toBe(3);
+    expect(updateWorker(cfg, "worker-1", { name: "renamed" })!.recordingWarningLimit).toBe(3); // untouched when omitted
+    expect(read().workers.find((x: { id: string }) => x.id === "worker-1").recordingWarningLimit).toBe(3);
+    const cleared = updateWorker(cfg, "worker-1", { recordingWarningLimit: null });
+    expect(cleared!.recordingWarningLimit).toBeUndefined(); // clearing disables
+    expect("recordingWarningLimit" in read().workers.find((x: { id: string }) => x.id === "worker-1")).toBe(false);
+    expect(createWorker(cfg, { kind: "ssh", host: "h2", dataRoot: "/d", recordingWarningLimit: 2 }).recordingWarningLimit).toBe(2);
+  });
+  it("recordingWarningLimit validation: positive integers only, remote workers only; failures do not touch disk", () => {
+    createWorker(cfg, { kind: "ssh", host: "h", dataRoot: "/d" });
+    const before = readFileSync(cfg, "utf-8");
+    for (const bad of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 60, "3", true, {}, []]) {
+      expect(() => updateWorker(cfg, "worker-1", { recordingWarningLimit: bad as never })).toThrow(/positive integer/);
+      expect(() => createWorker(cfg, { kind: "ssh", host: "x", dataRoot: "/d", recordingWarningLimit: bad as never })).toThrow(/positive integer/);
+    }
+    expect(() => updateWorker(cfg, "local", { recordingWarningLimit: 2 })).toThrow(/remote/);
+    expect(() => createWorker(cfg, { kind: "local", dataRoot: "/x", recordingWarningLimit: 2 })).toThrow(/remote/);
+    expect(() => updateWorker(cfg, "worker-1", { kind: "local", recordingWarningLimit: 2 })).toThrow(/remote/);
+    updateWorker(cfg, "worker-1", { recordingWarningLimit: 3 });
+    const beforeKindSwitch = readFileSync(cfg, "utf-8");
+    expect(() => updateWorker(cfg, "worker-1", { kind: "local" })).toThrow(/remote/);
+    expect(readFileSync(cfg, "utf-8")).toBe(beforeKindSwitch);
+    expect(updateWorker(cfg, "local", { recordingWarningLimit: null })!.recordingWarningLimit).toBeUndefined(); // clearing on local is a no-op
+  });
+  it("legacy local warning values do not block ordinary edits; remote-to-local keeps rejecting the value", () => {
+    const j = read();
+    j.workers[0].recordingWarningLimit = 7;
+    writeFileSync(cfg, JSON.stringify(j, null, 2));
+    expect(updateWorker(cfg, "local", { name: "renamed local" })!.name).toBe("renamed local");
+    expect("recordingWarningLimit" in read().workers[0]).toBe(false);
+
+    createWorker(cfg, { kind: "ssh", host: "h", dataRoot: "/d", recordingWarningLimit: 3 });
+    const beforeRemoteSwitch = readFileSync(cfg, "utf-8");
+    expect(() => updateWorker(cfg, "worker-1", { kind: "local" })).toThrow(/remote/);
+    expect(readFileSync(cfg, "utf-8")).toBe(beforeRemoteSwitch);
+  });
   it("reorder:按 ids 整体重排数组(顺序 = 显示序),集合不匹配则拒绝", () => {
     createWorker(cfg, { kind: "ssh", host: "h2", dataRoot: "/d" }); // worker-1
     const w3 = createWorker(cfg, { kind: "ssh", host: "h3", dataRoot: "/d" }); // worker-2

@@ -87,7 +87,7 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
 
   const workerToDto = (w: workerStore.WorkerConfig): WorkerDTO => ({
     id: w.id, name: w.name ?? w.id, kind: w.kind, host: w.host, dataRoot: w.dataRoot, apiUrl: w.apiUrl,
-    capabilities: w.capabilities,
+    capabilities: w.capabilities, recordingWarningLimit: w.recordingWarningLimit,
   });
 
   // 后台抓主播名写回 store(创建/改房间号时)。去重/节流:同一任务抓取中跳过;throttleMs 窗口内不重抓。

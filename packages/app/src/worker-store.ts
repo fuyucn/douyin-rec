@@ -57,6 +57,24 @@ function normalizeCapabilities(caps: string[] | undefined): string[] | undefined
   return out.length > 0 ? out : undefined;
 }
 
+/**
+ * Validate a recording warning limit. undefined/null = unset (disabled). Anything else must be a
+ * positive safe integer, otherwise throw instead of coercing a typo into a limit.
+ */
+export function normalizeRecordingWarningLimit(v: unknown): number | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 1) {
+    throw new Error("recordingWarningLimit must be a positive integer");
+  }
+  return v;
+}
+
+function assertWarningLimitRemote(kind: string, limit: number | undefined): void {
+  if (limit !== undefined && kind === "local") {
+    throw new Error("recordingWarningLimit is only supported on remote workers (ssh/tailscale-ssh)");
+  }
+}
+
 export function listWorkers(configPath: string): WorkerConfig[] {
   return workersOf(readConfig(configPath));
 }
@@ -65,6 +83,7 @@ export function createWorker(
   configPath: string,
   input: {
     name?: string; kind: string; host?: string; dataRoot?: string; apiUrl?: string; capabilities?: string[];
+    recordingWarningLimit?: number | null;
     /**
      * 显式指定 worker id(通常是节点自报的稳定 nodeId)。给了就用它,不再自分配 `worker-N`。
      * 已存在同 id → 抛错(防重复添加),由调用方提示用户。
@@ -73,6 +92,8 @@ export function createWorker(
   },
 ): WorkerConfig {
   validate(input.kind, input.host, input.dataRoot);
+  const warningLimit = normalizeRecordingWarningLimit(input.recordingWarningLimit);
+  assertWarningLimitRemote(input.kind, warningLimit);
   const cfg = readConfig(configPath);
   const workers = [...workersOf(cfg)];
   // 单调 seq:cfg.workerSeq 起,跳过任何已存在的 worker-N(绝不复用/碰撞)。
@@ -96,6 +117,7 @@ export function createWorker(
   if (input.apiUrl) w.apiUrl = input.apiUrl;
   const caps = normalizeCapabilities(input.capabilities);
   if (caps) w.capabilities = caps;
+  if (warningLimit !== undefined) w.recordingWarningLimit = warningLimit;
   workers.push(w);
   writeConfig(configPath, cfg, workers, seq);
   return w;
@@ -104,7 +126,7 @@ export function createWorker(
 export function updateWorker(
   configPath: string,
   id: string,
-  patch: { name?: string; kind?: string; host?: string; dataRoot?: string; apiUrl?: string; capabilities?: string[] },
+  patch: { name?: string; kind?: string; host?: string; dataRoot?: string; apiUrl?: string; capabilities?: string[]; recordingWarningLimit?: number | null },
 ): WorkerConfig | null {
   const cfg = readConfig(configPath);
   const workers = [...workersOf(cfg)];
@@ -125,7 +147,26 @@ export function updateWorker(
     if (caps) next.capabilities = caps;
     else delete next.capabilities;
   }
+  // recordingWarningLimit: undefined = keep; null = clear (disable); otherwise require a positive integer.
+  if (patch.recordingWarningLimit !== undefined) {
+    const limit = normalizeRecordingWarningLimit(patch.recordingWarningLimit);
+    if (limit === undefined) delete next.recordingWarningLimit;
+    else next.recordingWarningLimit = limit;
+  }
   validate(next.kind, next.host, next.dataRoot);
+  // Legacy configs may have a stray local value; unrelated edits should continue to work and
+  // normalize it away. A remote worker cannot carry the threshold into a local kind.
+  if (next.kind === "local") {
+    if (patch.recordingWarningLimit != null && next.recordingWarningLimit !== undefined) {
+      assertWarningLimitRemote(next.kind, next.recordingWarningLimit);
+    }
+    if (cur.kind !== "local" && patch.recordingWarningLimit !== null && next.recordingWarningLimit !== undefined) {
+      assertWarningLimitRemote(next.kind, next.recordingWarningLimit);
+    }
+    delete next.recordingWarningLimit;
+  } else {
+    assertWarningLimitRemote(next.kind, next.recordingWarningLimit);
+  }
   workers[i] = next;
   writeConfig(configPath, cfg, workers, cfg.workerSeq ?? 0);
   return next;

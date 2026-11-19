@@ -32,6 +32,10 @@ export interface NodeView extends Omit<NodeSummary, "rooms"> {
   apiUrl?: string;
   /** Capability tags from the worker config (absent on old configs / unknown nodes). */
   capabilities?: string[];
+  /** Optional warn-only recording threshold from the worker config (remote workers; absent = disabled). */
+  recordingWarningLimit?: number;
+  /** Worker kind from the config; used to avoid showing remote-only hints on any local-kind worker. */
+  workerKind?: WorkerDTO["kind"];
 }
 
 const STATE_RANK: Record<NodeRoomView["state"], number> = {
@@ -82,6 +86,8 @@ export function buildNodes(
       host: cfg?.host,
       apiUrl: cfg?.apiUrl,
       capabilities: cfg?.capabilities,
+      recordingWarningLimit: cfg?.recordingWarningLimit,
+      workerKind: cfg?.kind,
       rooms: roomsOut,
       activeRooms: roomsOut.filter((r) => r.state !== "disabled").length,
       recordingRooms: roomsOut.filter((r) => r.state === "recording").length,
@@ -120,6 +126,28 @@ export function nodeCounts(n: Pick<NodeView, "activeRooms" | "recordingRooms" | 
   unavailable: number;
 } {
   return { active: n.activeRooms, recording: n.recordingRooms, unavailable: n.unavailable };
+}
+
+/**
+ * Display-only warning: non-null when a remote worker has a valid positive-integer limit and its
+ * recording-room count has reached it (>=). The controller never warns. Never feeds any gating.
+ */
+export function recordingWarning(n: Pick<NodeView, "id" | "recordingRooms" | "recordingWarningLimit" | "workerKind">): { count: number; limit: number } | null {
+  const limit = n.recordingWarningLimit;
+  if (n.id === "local" || n.workerKind === "local" || typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1) return null;
+  return n.recordingRooms >= limit ? { count: n.recordingRooms, limit } : null;
+}
+
+/**
+ * Parse the editor field: blank = disabled (null); otherwise digits only, positive integer.
+ * Returns undefined for invalid input so the caller can block the save.
+ */
+export function parseRecordingWarningLimitInput(raw: string): number | null | undefined {
+  const s = raw.trim();
+  if (s === "") return null;
+  if (!/^[0-9]+$/.test(s)) return undefined;
+  const v = Number(s);
+  return Number.isSafeInteger(v) && v >= 1 ? v : undefined;
 }
 
 /** Nodes with management actions: everything except the controller itself (never editable/deletable). */

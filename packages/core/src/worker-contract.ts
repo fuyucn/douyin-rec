@@ -26,6 +26,12 @@ export interface WorkerConfig {
    * `requires: ["danmu:douyin"]` → 该 VPS 自动被排除,不再出现「勾了它却整场 0 弹幕」的静默失败。
    */
   capabilities?: string[];
+  /**
+   * Optional warning threshold for remote workers: the Nodes page shows a warning when the node's
+   * recording-room count is >= this value. Positive integer; omitted = disabled (default).
+   * Display-only: it never gates, delays or alters recording or delivery tasks (issue #351).
+   */
+  recordingWarningLimit?: number;
 }
 
 /**

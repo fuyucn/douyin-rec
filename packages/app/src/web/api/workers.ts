@@ -19,12 +19,12 @@ export function buildWorkers(ctx: ApiCtx) {
       return { status: 200, body: workerStore.listWorkers(hubConfigPath).map(workerToDto) };
     },
 
-    createWorker(input: { name?: string; kind?: string; host?: string; dataRoot?: string; apiUrl?: string; capabilities?: string[]; id?: string }): ApiResult {
+    createWorker(input: { name?: string; kind?: string; host?: string; dataRoot?: string; apiUrl?: string; capabilities?: string[]; recordingWarningLimit?: number | null; id?: string }): ApiResult {
       if (!deps.hubEnabled) return err(400, "hub 未启用(仅 master 可管理 worker)");
       try {
         const w = workerStore.createWorker(hubConfigPath, {
           name: input.name ?? undefined, kind: input.kind ?? "", host: input.host, dataRoot: input.dataRoot, apiUrl: input.apiUrl,
-          capabilities: input.capabilities,
+          capabilities: input.capabilities, recordingWarningLimit: input.recordingWarningLimit,
           // 显式 id:UI「测试连接」探测到的节点稳定身份(nodeId),用它替代自分配 worker-N。
           id: input.id,
         });
@@ -33,7 +33,7 @@ export function buildWorkers(ctx: ApiCtx) {
       } catch (e) { return err(400, (e as Error).message); }
     },
 
-    updateWorker(id: string, input: { name?: string; kind?: string; host?: string; dataRoot?: string; apiUrl?: string; capabilities?: string[] }): ApiResult {
+    updateWorker(id: string, input: { name?: string; kind?: string; host?: string; dataRoot?: string; apiUrl?: string; capabilities?: string[]; recordingWarningLimit?: number | null }): ApiResult {
       if (!deps.hubEnabled) return err(400, "hub 未启用(仅 master 可管理 worker)");
       try {
         const w = workerStore.updateWorker(hubConfigPath, id, input);

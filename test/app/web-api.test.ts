@@ -1544,6 +1544,18 @@ describe("hub workers 端点(CRUD + hubEnabled 门)", () => {
     const u = a.updateWorker("worker-1", { capabilities: ["upload"] });
     expect((u.body as any).capabilities).toEqual(["upload"]);
   });
+  it("recordingWarningLimit: DTO round-trip, null clears, invalid/local → 400 (issue #351)", () => {
+    const { api: a } = apiWith(true);
+    const c = a.createWorker({ kind: "ssh", host: "h", dataRoot: "/d" });
+    expect((c.body as any).recordingWarningLimit).toBeUndefined(); // default off
+    expect((a.updateWorker("worker-1", { recordingWarningLimit: 4 }).body as any).recordingWarningLimit).toBe(4);
+    expect((a.listWorkers().body as any[]).find((w) => w.id === "worker-1").recordingWarningLimit).toBe(4);
+    expect(a.updateWorker("worker-1", { recordingWarningLimit: 0 }).status).toBe(400);
+    expect(a.updateWorker("worker-1", { recordingWarningLimit: "2" as any }).status).toBe(400);
+    expect(a.updateWorker("local", { recordingWarningLimit: 2 }).status).toBe(400);
+    expect((a.listWorkers().body as any[]).find((w) => w.id === "worker-1").recordingWarningLimit).toBe(4); // failed writes keep old value
+    expect((a.updateWorker("worker-1", { recordingWarningLimit: null }).body as any).recordingWarningLimit).toBeUndefined();
+  });
   it("create 校验错 → 400;local 保护 → 400", () => {
     const { api: a } = apiWith(true);
     expect(a.createWorker({ kind: "ssh", dataRoot: "/d" } as any).status).toBe(400); // 缺 host

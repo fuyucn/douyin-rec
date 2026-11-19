@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { api, type WorkerDTO, type WorkerTestResult } from "../api/client";
+import { api, type WorkerDTO, type WorkerInput, type WorkerTestResult } from "../api/client";
+import { parseRecordingWarningLimitInput } from "../lib/nodes-page";
 import { Button } from "../components/Button";
 import { Dialog } from "../components/Dialog";
 import { errMessage, useToast } from "../lib/hooks";
@@ -20,9 +21,11 @@ interface FormState {
   dataRoot: string;
   /** 逗号分隔的能力标签(存前 trim + 去重)。 */
   capabilities: string;
+  /** Warn-only recording threshold (remote workers); blank = disabled. */
+  warnLimit: string;
 }
 
-const BLANK: FormState = { name: "", kind: "ssh", host: "", dataRoot: "", capabilities: "" };
+const BLANK: FormState = { name: "", kind: "ssh", host: "", dataRoot: "", capabilities: "", warnLimit: "" };
 const KINDS = ["local", "ssh", "tailscale-ssh"] as const;
 
 /** "a, b ,,c" → ["a","b","c"](trim + 去空 + 去重,保序)。 */
@@ -53,7 +56,7 @@ export function WorkerDialog({ open, onClose, worker, onSaved }: Props): ReactNo
     if (open) {
       setForm(
         worker
-          ? { name: worker.name ?? "", kind: worker.kind, host: worker.host ?? "", dataRoot: worker.dataRoot ?? "", capabilities: (worker.capabilities ?? []).join(", ") }
+          ? { name: worker.name ?? "", kind: worker.kind, host: worker.host ?? "", dataRoot: worker.dataRoot ?? "", capabilities: (worker.capabilities ?? []).join(", "), warnLimit: worker.recordingWarningLimit ? String(worker.recordingWarningLimit) : "" }
           : BLANK,
       );
       setTest(null);
@@ -63,19 +66,23 @@ export function WorkerDialog({ open, onClose, worker, onSaved }: Props): ReactNo
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]): void => setForm((f) => ({ ...f, [k]: v }));
   const needsHost = form.kind === "ssh" || form.kind === "tailscale-ssh";
-  const payload = (): Partial<WorkerDTO> => ({
+  const warnLimit = needsHost ? parseRecordingWarningLimitInput(form.warnLimit) : null;
+  const payload = (): WorkerInput => ({
     name: form.name.trim() || undefined,
     kind: form.kind,
     host: needsHost ? form.host.trim() : undefined,
     dataRoot: form.dataRoot.trim(),
     // 显式传数组(空数组 = 清空能力):后端 updateWorker 用 `!= null` 判定「是否覆盖」。
     capabilities: parseCaps(form.capabilities),
+    // null clears (disables) the threshold; invalid input is blocked in submit() before it is sent.
+    recordingWarningLimit: warnLimit ?? null,
   });
 
   async function runTest(): Promise<void> {
     setTesting(true);
     try {
-      setTest(await api.testWorker(payload()));
+      const { recordingWarningLimit: _limit, ...testInput } = payload();
+      setTest(await api.testWorker(testInput));
     } catch (e) {
       setTest({ ok: false, error: errMessage(e) });
     } finally {
@@ -85,6 +92,10 @@ export function WorkerDialog({ open, onClose, worker, onSaved }: Props): ReactNo
 
   async function submit(ev: FormEvent): Promise<void> {
     ev.preventDefault();
+    if (warnLimit === undefined) {
+      toast(t("hub.workerDialog.warnLimitInvalid"), "error");
+      return;
+    }
     setBusy(true);
     try {
       if (isEdit) await api.updateWorker(worker.id, payload());
@@ -93,7 +104,8 @@ export function WorkerDialog({ open, onClose, worker, onSaved }: Props): ReactNo
         // 没测过 → 先探一次(拿不到身份也不阻断,后端回落自分配)。
         let id = test?.nodeId;
         if (!id) {
-          const r = await api.testWorker(payload()).catch(() => null);
+          const { recordingWarningLimit: _limit, ...testInput } = payload();
+          const r = await api.testWorker(testInput).catch(() => null);
           if (r?.ok) { setTest(r); id = r.nodeId; }
         }
         await api.createWorker({ ...payload(), ...(id ? { id } : {}) });
@@ -176,6 +188,21 @@ export function WorkerDialog({ open, onClose, worker, onSaved }: Props): ReactNo
           />
           <div className="text-xs text-muted mt-1">{t("hub.workerDialog.capsHint")}</div>
         </div>
+        {needsHost && (
+          <div>
+            <label className="field-label">{t("hub.workerDialog.warnLimitLabel")}</label>
+            <input
+              className="input"
+              inputMode="numeric"
+              placeholder={t("hub.workerDialog.warnLimitPlaceholder")}
+              value={form.warnLimit}
+              aria-invalid={warnLimit === undefined || undefined}
+              onChange={(e) => set("warnLimit", e.target.value)}
+            />
+            <div className="text-xs text-muted mt-1">{t("hub.workerDialog.warnLimitHint")}</div>
+            {warnLimit === undefined && <div className="text-xs mt-1" style={{ color: "var(--error-fg)" }}>{t("hub.workerDialog.warnLimitInvalid")}</div>}
+          </div>
+        )}
         {test && (
           <div
             className="status-strip text-sm"
@@ -190,11 +217,11 @@ export function WorkerDialog({ open, onClose, worker, onSaved }: Props): ReactNo
             )}
           </div>
         )}
-        <div className="flex justify-between gap-3 mt-2">
+        <div className="flex flex-wrap items-center justify-between gap-3 mt-2">
           <Button type="button" variant="secondary" onClick={() => void runTest()} disabled={testing} loading={testing}>
             {t("hub.workers.testConn")}
           </Button>
-          <div className="flex gap-3">
+          <div className="ml-auto flex flex-wrap justify-end gap-3">
             <Button type="button" variant="secondary" onClick={onClose}>
               {t("hub.common.cancel")}
             </Button>

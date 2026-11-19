@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildNodes, nodeConnectionInfo, nodeCounts, nodeManagable, nodeRoomHref } from "../../packages/web/src/lib/nodes-page.js";
+import { buildNodes, nodeConnectionInfo, nodeCounts, nodeManagable, nodeRoomHref, parseRecordingWarningLimitInput, recordingWarning } from "../../packages/web/src/lib/nodes-page.js";
 import type { RoomDTO, Task, WorkerDTO, WorkerStatus } from "../../packages/core/src/api-types.js";
 
 const workers: WorkerDTO[] = [
@@ -105,6 +105,36 @@ describe("nodes page model", () => {
     // The controller has no host; a plain ssh worker has no apiUrl.
     expect(nodeConnectionInfo(out.find((n) => n.id === "local")!).host).toBeUndefined();
     expect(nodeConnectionInfo(out.find((n) => n.id === "w1")!).apiUrl).toBeUndefined();
+  });
+
+  it("recording warning is off by default and warns only at count >= limit (issue #351)", () => {
+    const rec = (workerId: string, slug: string) => task({ id: Number(slug), room: `https://live.douyin.com/${slug}`, recordingWorkers: [{ workerId, workerName: workerId, state: "recording", checkedAt: 1 }] });
+    const tasks = [rec("w1", "1"), rec("w1", "2")];
+    const nodeOf = (cfg: WorkerDTO[]) => buildNodes(tasks, [], cfg, { w1: { id: "w1", ok: true } }, [], "0.0.234").find((n) => n.id === "w1")!;
+    const off = nodeOf(workers);
+    expect(off.recordingRooms).toBe(2);
+    expect(recordingWarning(off)).toBeNull(); // default: disabled
+    const withLimit = (limit: number): WorkerDTO[] => [workers[0]!, { ...workers[1]!, recordingWarningLimit: limit }];
+    expect(recordingWarning(nodeOf(withLimit(3)))).toBeNull(); // below
+    expect(recordingWarning(nodeOf(withLimit(2)))).toEqual({ count: 2, limit: 2 }); // boundary: equal warns
+    expect(recordingWarning(nodeOf(withLimit(1)))).toEqual({ count: 2, limit: 1 }); // above
+    // Warn-only: configuring a limit changes nothing else in the node view.
+    const { recordingWarningLimit: _l, ...rest } = nodeOf(withLimit(1));
+    expect(rest).toEqual(off);
+  });
+
+  it("recording warning ignores the controller and invalid limits", () => {
+    expect(recordingWarning({ id: "local", recordingRooms: 9, recordingWarningLimit: 1 })).toBeNull();
+    expect(recordingWarning({ id: "renamed-local", workerKind: "local", recordingRooms: 9, recordingWarningLimit: 1 })).toBeNull();
+    for (const bad of [0, -1, 1.5, Number.NaN]) expect(recordingWarning({ id: "w1", recordingRooms: 9, recordingWarningLimit: bad })).toBeNull();
+    expect(recordingWarning({ id: "w1", recordingRooms: 0, recordingWarningLimit: 1 })).toBeNull();
+  });
+
+  it("parses the editor field: blank disables, digits-only positive integers, everything else invalid", () => {
+    expect(parseRecordingWarningLimitInput("")).toBeNull();
+    expect(parseRecordingWarningLimitInput("  ")).toBeNull();
+    expect(parseRecordingWarningLimitInput(" 5 ")).toBe(5);
+    for (const bad of ["0", "-2", "1.5", "1e3", "abc", "3x", "99999999999999999999"]) expect(parseRecordingWarningLimitInput(bad)).toBeUndefined();
   });
 
   it("keeps the controller manageable-gated off and workers manageable", () => {

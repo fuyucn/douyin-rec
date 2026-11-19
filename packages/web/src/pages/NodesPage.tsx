@@ -21,7 +21,7 @@ import {
   type NodeHealthState,
   type NodeHealthLoadState,
 } from "../lib/nodes-summary";
-import { buildNodes, nodeConnectionInfo, nodeCounts, nodeManagable, nodeRoomHref, nodeRoleLabel, type NodeRoomView, type NodeView } from "../lib/nodes-page";
+import { buildNodes, nodeConnectionInfo, nodeCounts, nodeManagable, nodeRoomHref, nodeRoleLabel, recordingWarning, type NodeRoomView, type NodeView } from "../lib/nodes-page";
 import { useAtomValue } from "jotai";
 import { hubEnabledAtom } from "../atoms";
 
@@ -381,6 +381,7 @@ function NodeCard({
   const health = nodeHealthState(n, healthProbe);
   const conn = nodeConnectionInfo(n);
   const manage = nodeManagable(n);
+  const warning = recordingWarning(n);
   const dot = health === "online"
     ? "var(--success)"
     : health === "offline"
@@ -437,6 +438,7 @@ function NodeCard({
           {health === "offline" && n.error && <div className="mt-1 text-[11px]" style={{ color: "var(--error-fg)" }}>{n.error}</div>}
           {health === "probe-failed" && <div className="mt-1 text-[11px]" style={{ color: "var(--warning-fg)" }}>{t("nodes.probeFailedHint")}</div>}
           {health === "unknown" && <div className="mt-1 text-[11px] text-muted-soft">{t("nodes.noStatusHint")}</div>}
+          {warning && <div role="status" className="mt-1 text-[11px] break-words" style={{ color: "var(--warning-fg)" }}>{t("nodes.recordingWarning", { n: warning.count, limit: warning.limit })}</div>}
           {n.syncLag && <div className="mt-1 text-[11px]" style={{ color: "var(--warning-fg)" }}>{t("nodes.syncLag", { expected: n.expectedVersion ?? "-", applied: n.appliedVersion ?? "-" })}</div>}
           {!n.syncLag && n.appliedAt && <div className="mt-1 text-[11px] text-muted-soft">{t("nodes.synced", { ago: ago(n.appliedAt, now) })}</div>}
         </div>

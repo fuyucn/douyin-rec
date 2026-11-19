@@ -50,6 +50,7 @@ import type {
   HubResources,
 } from "@drec/contracts";
 export type { Task, TaskDetail, TaskRuntime, CookieStatus, BiliupAuthStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobNodeStateDTO, HubJobCandidateDTO, HubJobEventDTO, HubJobsDTO, HubQueueDTO, RollingDeliveryDTO, QueueItemDTO, NodeUploadStatusDTO, HubPoolSnapshotDTO, HubBlockedBroadcastDTO, QueuePhase, HubJobStepDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, NotifWebhookToggles, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult, WorkerStatus, NodeTasksDTO, NodeTaskLogsDTO, RoomDTO, RoomPayload, HubResources, ProcActiveDTO, StatsDTO };
+export type WorkerInput = Omit<Partial<WorkerDTO>, "recordingWarningLimit"> & { recordingWarningLimit?: number | null };
 
 /**
  * POST /api/rooms 的入参:与 PUT 同一份 `RoomPayload`,但 `recording.room` 必填
@@ -228,8 +229,8 @@ export const api = {
 
   // ── 多节点 worker(录制节点)管理 ─────────────────────────────────────────────
   listWorkers: (): Promise<WorkerDTO[]> => request("GET", "/api/hub/workers"),
-  createWorker: (input: Partial<WorkerDTO>): Promise<WorkerDTO> => request("POST", "/api/hub/workers", input),
-  updateWorker: (id: string, input: Partial<WorkerDTO>): Promise<WorkerDTO> =>
+  createWorker: (input: WorkerInput): Promise<WorkerDTO> => request("POST", "/api/hub/workers", input),
+  updateWorker: (id: string, input: WorkerInput): Promise<WorkerDTO> =>
     request("PATCH", `/api/hub/workers/${encodeURIComponent(id)}`, input),
   deleteWorker: (id: string): Promise<{ ok: boolean; id: string }> =>
     request("DELETE", `/api/hub/workers/${encodeURIComponent(id)}`),
