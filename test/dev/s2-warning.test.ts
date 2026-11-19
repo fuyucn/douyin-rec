@@ -1,5 +1,14 @@
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
+import type { AppEventDTO, EventsDTO } from "@drec/core";
+
+const inventoryEvent = (id: number, message: string): AppEventDTO => ({
+  id, at: id, taskId: null, event: { kind: "error", stage: "同步", message },
+});
+const eventsResponse = (...events: AppEventDTO[]) =>
+  JSON.stringify({ events, cursor: events.at(-1)?.id ?? 0 } satisfies EventsDTO);
+const nodeWarning = inventoryEvent(1, "节点 node-2 清单已连续 6 轮失联(test)");
+const roomEscalation = inventoryEvent(2, "Fixture room · Fixture date 节点 node-2 清单已连续 12 轮失联(test),已转人工");
 
 // Execute the real scenario and assertions without Docker, network access or wall-clock waits.
 const harness = String.raw`
@@ -27,12 +36,12 @@ api() {
   API_CODE=200
   case $2 in
     /api/events)
-      API_BODY='{"events":[]}'
+      API_BODY='${eventsResponse()}'
       if [[ $phase != initial ]]; then
-        API_BODY='{"events":[{"kind":"error","message":"节点 node-2 清单已连续 6 轮失联(test)"}]}'
+        API_BODY='${eventsResponse(nodeWarning)}'
       fi
       if [[ $timing == escalation && $phase == follow_up ]]; then
-        API_BODY='{"events":[{"kind":"error","message":"节点 node-2 清单已连续 6 轮失联(test)"},{"kind":"error","message":"douyin:fixture-room:fixture-date 节点 node-2 清单已连续 12 轮失联(test),已转人工"}]}'
+        API_BODY='${eventsResponse(nodeWarning, roomEscalation)}'
       fi
       ;;
     /api/hub/queue)

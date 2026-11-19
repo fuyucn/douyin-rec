@@ -7,8 +7,8 @@ manifest() { nx "$1" sh -c "cd /output-data/recordings/$2 && find . -type f -exe
 alert_count() {
   api GET /api/events
   [[ $API_CODE == 200 ]] || return 1
-  # Room escalation is a separate event prefixed by a stream key.
-  printf '%s' "$API_BODY" | jq -er '[.events[] | select(.kind == "error" and (.message | startswith("节点 node-2 清单已连续 ")))] | length'
+  # The API wraps notifications in .event; a room escalation has a room prefix.
+  printf '%s' "$API_BODY" | jq -er '[.events[].event | select(.kind == "error" and (.message | strings | startswith("节点 node-2 清单已连续 ")))] | length'
 }
 
 s2_blocked_round() {
