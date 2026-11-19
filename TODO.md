@@ -15,6 +15,8 @@
 
 ## 进行中
 
+- [~] **T-234 Offline dev archive readback (issue [#714](https://github.com/fuyucn/douyin-rec/issues/714), 2026-11-19)** — **Scope**: provide a dev-only view of simulated archive operations and update S3 to the current fail-closed readback contract. **Why**: the offline fixture has no matching view response, blocking S2 recovery and both pending PRs. **Acceptance**: recognized fake archives reflect actual part counts; unknown, malformed and mismatched observations preserve sources; no fake hook in real-interaction mode; focused and full regression, isolated S2/S3 evidence and independent review. No production runtime or policy changes and no deployment.
+
 - [~] **T-229 零落盘 CPU 热点阶段记录（issue [#352](https://github.com/fuyucn/douyin-rec/issues/352)，2026-11-18）** — **做什么**:整理现有 50 秒 CPU profile 并记录其环境限制。**为什么**:区分实际程序热点与 CPU steal / swap 的环境放大，同时不把单一受限节点的 CPU 结果外推为整体通过。**已得结果**:每次读取的 Buffer.from(data) 占 wall 32% / busy 约 54%；GC 为 0.8%，独立 Buffer.concat 热点未证实；结论只适用于当时 CPU steal 约 78%、swap 在用的小节点，不能外推健康节点。阶段报告见 [docs/perf/2026-11-zero-disk-cpu-profile.md](docs/perf/2026-11-zero-disk-cpu-profile.md)。**验收**:当前仅 CPU 阶段记录完成；补齐可复核的 heap / 内存 profile 结论、健康节点 profile、同码率 zero-disk 开/关比较后，才能评估开销并关闭 #352。#352 保持未完成。
 
 - [x] **T-223 移除直播直传驱动 rollout gate（issue [#676](https://github.com/fuyucn/douyin-rec/issues/676)，2026-11-15）** — **做什么**: 依次修复旧 aid-only 状态兼容、拆分 CLI 编排并补可执行选路测试、完成当前产物稳定性验收，再移除 DREC_LIVE_PUMP_DRIVER；保留任务级上传选项和安全配置。**为什么**: 两套实现长期并存会漂移，但历史 0.0.388 canary 不代表当前草稿验收通过。**计划与验收**: [plans/055_live_pump_driver_permanent.md](plans/055_live_pump_driver_permanent.md)。全量回归、结构门禁、独立复审及真实运行证据缺一不可；本轮仅本地实现，不提交、不部署，线上观察票仍开放。
