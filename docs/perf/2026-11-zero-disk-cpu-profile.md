@@ -25,5 +25,5 @@ The dominant observed application frame was the redundant per-read copy. At the 
 
 - No healthy-node capture or same-bitrate zero-disk-off comparison was performed; these results do not establish behavior on an unconstrained node.
 - Heap sampling was enabled, but this measurement did not produce a comparative memory result.
-- Issue #353 tracks the separately approved change to remove only the redundant read-callback copy while retaining the per-chunk ownership copy; preallocated chunk buffers are out of scope. That change still requires byte-exact regression coverage and before/after profiling.
+- Issue #353 tracks only the separately approved removal of the redundant read-callback copy while retaining the per-chunk ownership copy; preallocated chunk buffers are out of scope. The current reader already reuses Buffer input. Its byte-exact regression and same-machine copy-restored comparison are documented in [the #353 acceptance report](2026-11-read-copy-acceptance.md); that limited comparison does not complete #352.
 - This documentation step changed no runtime behavior; it provides no runtime regression evidence and does not satisfy the remaining memory or comparison acceptance criteria.
