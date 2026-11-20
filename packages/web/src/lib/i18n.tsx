@@ -475,7 +475,7 @@ const DICT = {
         runNowMode: "执行方式", runNowResume: "续跑同任务（同 id 补传）", runNowNew: "新建任务（-1/-2 完整重跑）",
         runNowNewHint: "将以 {key} 新建 hub 任务并完整重跑；原任务保留。若原任务已上传，B 站会另建一份稿件。",
         runNowWorker: "选优节点", runNowWorkerAuto: "自动选优",
-        started: "已启动后处理", rerun: "重跑此场", retryFinalize: "补跑收尾(清理/核验,可安全重试)",
+        started: "已启动后处理", rerun: "重跑此场",
       },
       ruleDialog: {
         createTitle: "新建 Hub 规则", editTitle: "编辑 Hub 规则", desc: "按直播间配置多节点选优合并 → 烧录 → 上传的后处理流程",
@@ -1097,7 +1097,7 @@ const DICT = {
         runNowMode: "Run mode", runNowResume: "Resume same task (same id)", runNowNew: "New task (-1/-2 full rerun)",
         runNowNewHint: "Will create a new hub task as {key} and run fully; the old task stays. If the old task already uploaded, Bilibili gets a new submission.",
         runNowWorker: "Winner node", runNowWorkerAuto: "Auto-select",
-        started: "Post-process started", rerun: "Rerun this broadcast", retryFinalize: "Retry finalize (cleanup/verify, safe)",
+        started: "Post-process started", rerun: "Rerun this broadcast",
       },
       ruleDialog: {
         createTitle: "New Hub rule", editTitle: "Edit Hub rule", desc: "Configure the multi-node select → merge → burn → upload pipeline for this room",
