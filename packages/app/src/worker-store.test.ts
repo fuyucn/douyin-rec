@@ -77,11 +77,15 @@ describe("worker-store(文件版 CRUD)", () => {
   it("默认 name 无 host → `Worker N`", () => {
     expect(createWorker(cfg, { kind: "local", dataRoot: "/d" }).name).toBe("Worker 1");
   });
-  it("update 部分改;不存在返回 null", () => {
+  it("update 部分改;不存在时 update/delete 不落盘", () => {
     createWorker(cfg, { kind: "ssh", host: "h", dataRoot: "/d" });
     expect(updateWorker(cfg, "worker-1", { name: "新名", host: "h2" })!.name).toBe("新名");
     expect(updateWorker(cfg, "worker-1", {})!.host).toBe("h2");
+    writeFileSync(cfg, JSON.stringify(read())); // 紧凑格式,意外 rename 会改变原始字节
+    const original = readFileSync(cfg);
     expect(updateWorker(cfg, "nope", { name: "x" })).toBeNull();
+    expect(deleteWorker(cfg, "nope")).toBe(false);
+    expect(readFileSync(cfg)).toEqual(original);
   });
   it("local 保护:拒删 + 拒改 kind;name/dataRoot 可改", () => {
     expect(() => deleteWorker(cfg, "local")).toThrow();
