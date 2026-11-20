@@ -1,7 +1,7 @@
 import { noteRecorderDraining, noteRecorderSignal, zeroDiskStreamKey } from "@drec/core";
 import {
   LiveUploadReporter, createZeroDiskReporter, enqueueLivePumpPending, makeNodeSubmitGate,
-  syncDbPathFor, dbPathForDataRoot, type EnqueueLivePumpResult,
+  resolveDbPath, syncDbPathFor, type EnqueueLivePumpResult,
 } from "@drec/app";
 import { recordStreamUpload } from "@drec/orchestrator";
 import type { LivePumpHandoffReceipt, RunLivePumpResult } from "@drec/zero-upload";
@@ -93,7 +93,7 @@ async function reportResult(
   if (res.lostParts) console.log("[直播直传] ⚠️ 本场有 " + res.lostParts +
     " 个分 P 在停止时丢失,其余已入稿,照常记台账");
   const result = recordStreamUpload({
-    syncDbPath: syncDbPathFor(dbPathForDataRoot(process.env.DOUYIN_REC_ROOT ?? process.cwd())),
+    syncDbPath: syncDbPathFor(resolveDbPath()),
     streamKey: zeroDiskStreamKey(ctx.platform.id, ctx.roomSlug, startMs),
     bvid: res.bvid, parts, startMs,
   });
