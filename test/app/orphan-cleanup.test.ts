@@ -342,6 +342,41 @@ describe("maintenance protects the stage dirs of active hub jobs in BOTH layouts
     expect(r.legacy.every((k) => k === null)).toBe(true);
     expect(r.room.every((k) => k === null)).toBe(true);
   });
+
+  it("台账文件存在但没有 sync_jobs 表 → 预览/清理拒绝", () => {
+    const root = mkdtempSync(join(tmpdir(), "orphan-empty-ledger-"));
+    process.env.DOUYIN_REC_ROOT = root;
+    try {
+      const stage = join(root, "stage");
+      mkdirSync(stage, { recursive: true });
+      const syncDb = join(root, "empty-sync.db");
+      new DatabaseSync(syncDb).close();
+      const api = buildMaintenance({ store: new TaskStore(":memory:"), manager: { isRecording: () => false, getAnchorName: () => null } as never, dataRoot: root, syncDbPath: syncDb, stageDir: stage });
+      expect(api.previewOrphans().status).toBe(500);
+      expect(api.cleanupOrphans({ confirm: true }).status).toBe(500);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("台账存在但缺必需列 → 预览/清理拒绝,不把未知活动当空", () => {
+    const root = mkdtempSync(join(tmpdir(), "orphan-bad-ledger-"));
+    process.env.DOUYIN_REC_ROOT = root;
+    try {
+      const stage = join(root, "stage");
+      mkdirSync(stage, { recursive: true });
+      const syncDb = join(root, "bad-sync.db");
+      const db = new DatabaseSync(syncDb);
+      db.exec("CREATE TABLE sync_jobs(streamKey TEXT PRIMARY KEY, state TEXT NOT NULL)");
+      db.prepare("INSERT INTO sync_jobs(streamKey,state) VALUES(?,?)").run("douyin:555:2026-10-10", "merging");
+      db.close();
+      const api = buildMaintenance({ store: new TaskStore(":memory:"), manager: { isRecording: () => false, getAnchorName: () => null } as never, dataRoot: root, syncDbPath: syncDb, stageDir: stage });
+      expect(api.previewOrphans().status).toBe(500);
+      expect(api.cleanupOrphans({ confirm: true }).status).toBe(500);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("scanOrphans 分段后缀大小写口径(issue #50)", () => {

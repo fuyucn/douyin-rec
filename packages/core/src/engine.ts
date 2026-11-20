@@ -66,6 +66,8 @@ export interface DownloadEngine {
 const engines = new Map<string, DownloadEngine>();
 
 export function registerEngine(e: DownloadEngine): void {
+  if (!e.id.trim()) throw new Error("[engine] id 不能为空");
+  if (engines.has(e.id)) throw new Error(`[engine] 重复注册: ${e.id}`);
   engines.set(e.id, e);
 }
 

@@ -21,6 +21,7 @@ import {
   requestHubStopJob,
 } from "../../packages/hub-compose/src/hub-runtime.js";
 import type { HubPoolSnapshotDTO } from "../../packages/core/src/api-types.js";
+import * as orchestrator from "../../packages/orchestrator/src/index.js";
 import type { PipelineDeps, Reconciler, ResourcePool, SyncLedger, WorkflowNodeKey } from "../../packages/orchestrator/src/index.js";
 import type { Transport } from "../../packages/orchestrator/src/transport.js";
 
@@ -104,15 +105,18 @@ describe("retryNode verdicts", () => {
   });
 
   it("holds upload nodes behind an explicit force", async () => {
-    const { actions, setState } = makeActions();
+    const resolveCfg = vi.fn(() => null);
+    const { actions, setState } = makeActions({ resolveCfg });
     const refused = await actions.retryNode(STREAM, node("upload_plain"));
     expect(refused.code).toBe(400);
     expect(refused.error).toContain("需确认后才可重跑");
     expect(setState).not.toHaveBeenCalled();
 
-    // force=true walks past the confirmation gate and reaches the ledger transition.
+    expect(resolveCfg).not.toHaveBeenCalled();
+    // force=true passes confirmation, but an unavailable room must still leave the ledger alone.
     const forced = await actions.retryNode(STREAM, node("upload_plain"), true);
-    expect(setState).toHaveBeenCalledWith(STREAM, "retrying", {}, { force: true });
+    expect(resolveCfg).toHaveBeenCalledWith("douyin", "room1");
+    expect(setState).not.toHaveBeenCalled();
     expect(forced.code).toBe(400);
     expect(forced.error).toContain("房间未开 hub");
   });
@@ -120,6 +124,53 @@ describe("retryNode verdicts", () => {
   it("rejects a malformed stream key", async () => {
     const { actions } = makeActions();
     expect(await actions.retryNode("douyin:room1", node("merge"))).toMatchObject({ code: 400 });
+  });
+
+  it.each([
+    { reason: "segment mode", enabled: true, mergeSegments: false, legacy: false, code: 400, error: "分段上传模式不支持单节点重跑" },
+    { reason: "a disabled hub room", enabled: false, mergeSegments: true, legacy: false, code: 400, error: "房间未开 hub" },
+    { reason: "missing stage products", enabled: true, mergeSegments: true, legacy: false, code: 409, error: "stage 产物缺失" },
+    { reason: "missing stage products for a legacy job", enabled: true, mergeSegments: true, legacy: true, code: 409, error: "stage 产物缺失" },
+  ])("rejects $reason without changing the job, node states, events or execution calls", async ({ enabled, mergeSegments, legacy, code, error }) => {
+    const ledger = new orchestrator.SyncLedger(":memory:");
+    const runNodes = vi.spyOn(orchestrator, "runWorkflowNodes");
+    const deriveProducts = vi.spyOn(orchestrator, "deriveStageProducts").mockReturnValue(null);
+    const sh = vi.fn();
+    const onEvent = vi.fn();
+    try {
+      ledger.upsertPending(STREAM);
+      ledger.setState(STREAM, "done", {}, { force: true });
+      ledger.setBv(STREAM, "BV1abc");
+      ledger.logStep(STREAM, "merge", "start");
+      if (!legacy) ledger.syncNodeState(STREAM, "merge", "failed", { error: "original failure", attempts: 2 });
+      const { actions } = makeActions({
+        ledger,
+        resolveCfg: () => enabled ? ({
+          cleanMaxGapSec: 60, stageDir: "/tmp/stage", cookies: "", uploadMode: "upload",
+          uploadMeta: { tag: "test", tid: 21 }, steps: { mergeSegments },
+        }) : null,
+        pipelineDeps: { ledger, sh } as unknown as PipelineDeps,
+        onEvent,
+      });
+      const snapshot = () => ({
+        job: ledger.get(STREAM),
+        nodeStates: ledger.getNodeStates(STREAM),
+        events: ledger.getEvents(STREAM),
+        steps: ledger.getSteps(STREAM),
+        workflowCalls: [...runNodes.mock.calls],
+        shellCalls: [...sh.mock.calls],
+        notifications: [...onEvent.mock.calls],
+      });
+      const before = snapshot();
+      expect(await actions.retryNode(STREAM, node("merge"))).toMatchObject({
+        ok: false, code, error: expect.stringContaining(error),
+      });
+      expect(snapshot()).toEqual(before);
+    } finally {
+      deriveProducts.mockRestore();
+      runNodes.mockRestore();
+      ledger.close();
+    }
   });
 
   it("refuses a live or locked stream with 409 instead of queueing behind it", async () => {

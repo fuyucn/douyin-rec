@@ -113,7 +113,7 @@ export class BilibiliDanmuSource implements DanmuSource {
     this.wsErrorAlerted = false;
 
     // channelId 形如 live.bilibili.com/{slug};这里直接用 roomUrl 末段做 slug 解析真实 room_id。
-    const slug = roomUrl.match(/live\.bilibili\.com\/(\d+)/)?.[1] ?? roomUrl;
+    const slug = roomUrl.match(/live\.bilibili\.com\/(\d+)/i)?.[1] ?? roomUrl;
 
     let info: DanmuInfo;
     try {

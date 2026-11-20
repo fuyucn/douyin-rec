@@ -1,6 +1,6 @@
 # 架构
 
-pnpm workspace monorepo，13 个包，收敛成 **2 个可插拔接缝** + **1 个多节点编排层**：
+pnpm workspace monorepo，收敛成 **2 个可插拔接缝** + **1 个多节点编排层**：
 
 - **平台轴**（`<平台>-live`）—— 平台专属的一切：取流（`getStream`）+ 弹幕（`connectDanmu`）+ 开播判定（`getLiving`）。接新平台 = 写一个 `<平台>-live` 实现 `Platform` 接口 + `registerPlatform` 一行。
 - **引擎轴**（`record-engine`）—— 平台无关的下载：通用 `PollingRecorder` + 下载引擎策略（`ffmpeg` / `mesio`）。加新引擎 = 写一个 `DownloadEngine` 策略 + `registerEngine` 一行，所有平台立即可用。
@@ -14,9 +14,9 @@ pnpm workspace monorepo，13 个包，收敛成 **2 个可插拔接缝** + **1 �
 > 本文(`architecture.md`)是**叙述性真相源**,`architecture.html` 是其可视化快照。CLI / app 层细节见 [cli.md](./cli.md) · [app.md](./app.md)。
 
 > **现状 vs 目标**:本文件上文（依赖图 / 生成段落 / 数据流）描述**当前已实现**的架构；
-> 末节 [目标架构：030 计划带来的改进](#目标架构030-计划带来的改进计划中未落地) 描述**计划中**的
-> 实时状态、非阻塞派发、共享上传冷却、控制面安全阀、统一房间入口等改造（`T-30`，**尚未落地**）。
-> `architecture.html` 里对应两个标注「计划中」的流程与一张「030 计划改进」表，与本末节同步。
+> 末节 [目标架构：030 计划带来的改进](#目标架构030-计划带来的改进) 描述 `T-30` 的实时状态、非阻塞派发、
+> 共享上传冷却、控制面安全阀、统一房间入口等改造：**M1–M3 已落地**，T16 deferred、T20 仍待决策。
+> `architecture.html` 里对应流程已标「已落地」，任务状态直接来自 `plans/030_tasks.json`。
 
 ## 依赖分层图
 
@@ -230,9 +230,11 @@ flowchart TB
 - **配置与操作**：每房间一份 `config/hub/{platform}.{roomSlug}.json`（`upload.mode`=stage|upload + `private`），由 Web 控制台 Hub 页维护；录制任务在任务页管理。规则文件是配置真源，API 现读，控制台变更会反映到同步与调度。
 - **录制范围**：只有规则选中的节点会参与该房间录制与选优；Docker 运行 Hub 不会默认使它再录一份。选择 `local` 与远端 worker 才是显式双录。关水印/仅自己可见/copyright 是 `biliup.ts` 代码常量（不可配）。
 
-## 目标架构：030 计划带来的改进（**计划中，未落地**）
+## 目标架构：030 计划带来的改进
 
 > 来源：`plans/030_hub_tasks_optimization.md`（结构化任务 `plans/030_tasks.json`，台账 `T-30`）。
+> **状态（2026-11-20）**：M1–M3 已落地；T16 为 deferred，T20 仍 decision-gated。下列代码块保留 030 前
+> 「现状 / 目标」对照以便阅读，当前实现以代码与 `plans/030_tasks.json` 的状态为准。
 > 本节**手写**，用来叙述「改造后架构长什么样、为什么这么改」。上方的依赖图与 `architecture.html` 是
 > 从仓库**现算**的生成物（`pnpm arch:gen` 会覆盖），二者职责不同：生成物描述**现状**，本节描述**方向**。
 
