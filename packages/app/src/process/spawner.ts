@@ -78,6 +78,11 @@ export interface NodeRecordSpawnerOpts {
    */
   douyinApiMode?: () => string | undefined;
   /**
+   * Database path resolved by `task serve`. Injected only into the recording child so its direct
+   * commands (including stream-upload receipt reporting) use the same database as serve.
+   */
+  dbPath?: string | (() => string | undefined);
+  /**
    * Serve-level hub flag (getter, read at spawn time). True -> the child runs with DOUYIN_REC_HUB_MASTER=1,
    * which lets it take upload ownership for a rule-bound (not hub-managed) room. Without it a machine that
    * only has rule files keeps uploading on the node (plan 046 PR6 rollback finding).
@@ -124,6 +129,7 @@ export class NodeRecordSpawner implements Spawner {
   private readonly webhook: string | (() => string | undefined) | undefined;
   private readonly mesioPath: (() => string | undefined) | undefined;
   private readonly douyinApiMode: (() => string | undefined) | undefined;
+  private readonly dbPath: string | (() => string | undefined) | undefined;
   private readonly webhookToggles: (() => NotifWebhookToggles) | undefined;
   private readonly onLog: ((msg: string) => void) | undefined;
   private readonly killTimeoutMs: number | undefined;
@@ -137,6 +143,7 @@ export class NodeRecordSpawner implements Spawner {
     this.webhook = opts.webhook;
     this.mesioPath = opts.mesioPath;
     this.douyinApiMode = opts.douyinApiMode;
+    this.dbPath = opts.dbPath;
     this.webhookToggles = opts.webhookToggles;
     this.onLog = opts.onLog;
     this.killTimeoutMs = opts.killTimeoutMs;
@@ -171,17 +178,19 @@ export class NodeRecordSpawner implements Spawner {
     const mesio = this.mesioPath?.()?.trim();
     // 抖音 API 模式设置(若配置)→ 注入 DOUYIN_REC_API_MODE;否则继承父 env(douyin-live 用默认 balance)。
     const apiMode = this.douyinApiMode?.()?.trim();
+    const dbPath = typeof this.dbPath === "function" ? this.dbPath()?.trim() : this.dbPath?.trim();
     const toggles = this.webhookToggles?.();
     const zeroDiskEnv = zeroDiskDeliveryEnv(task);
     // Serve-level hub flag: only a hub master may take upload ownership for a rule-bound room that is not
     // hub-managed (plan 046 PR6 rollback finding). Env, like the zero-disk delivery object.
     const hubMaster = this.hubMaster?.() === true;
     const env =
-      mesio || apiMode || toggles || zeroDiskEnv || hubMaster
+      mesio || apiMode || dbPath || toggles || zeroDiskEnv || hubMaster
         ? {
             ...process.env,
             ...(mesio ? { MESIO_PATH: mesio } : {}),
             ...(apiMode ? { DOUYIN_REC_API_MODE: apiMode } : {}),
+            ...(dbPath ? { DOUYIN_REC_DB: dbPath } : {}),
             ...(toggles ? { [WEBHOOK_TOGGLES_ENV]: JSON.stringify(toggles) } : {}),
             ...(zeroDiskEnv ?? {}),
             ...(hubMaster ? { DOUYIN_REC_HUB_MASTER: "1" } : {}),

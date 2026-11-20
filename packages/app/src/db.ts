@@ -9,12 +9,18 @@
  */
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import { rootDbPath } from "./paths.js";
 
 /** Resolve the db path: explicit arg > env DOUYIN_REC_DB > <root>/db/douyin-rec.db (root always resolves, see paths.ts). */
 export function resolveDbPath(path?: string): string {
   return path ?? process.env.DOUYIN_REC_DB ?? rootDbPath();
+}
+
+/** Resolve the serve database once as an absolute path for parent and child-process consumers. */
+export function resolveServeDbPath(path?: string): string {
+  const dbPath = resolveDbPath(path);
+  return dbPath === ":memory:" ? dbPath : resolve(dbPath);
 }
 
 /**
