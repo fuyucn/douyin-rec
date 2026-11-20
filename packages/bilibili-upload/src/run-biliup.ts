@@ -275,13 +275,16 @@ export const APPEND_UNREADABLE_REREAD_DELAYS_MS: readonly number[] = [5000, 1000
  * 追加一个逻辑组到已建稿件(空组跳过)。多组必须**串行**调用(同稿件并发 append 会撞)。
  * public 透传给 buildAppendArgs,保证追加分 P 时保留 P1 的可见性/水印设置。
  *
- * **幂等**:传入 `countParts`(生产由此前的分 P 数查询提供)时,失败后会重新查询分 P 数:
+ * **幂等**:传入 `countParts`(生产由此前的分 P 数查询提供)时
+ * ① **失败后**重新查询分 P 数:
  *   变多 → 服务端其实已追加成功(直接返回,不再重试);
  *   未变 → 分 P 列表刷新有延迟(约 0.5-1s+,#66),按 APPEND_REREAD_DELAYS_MS 间隔继续重读(合计约 10s);
  *     期间变多 → 已追加成功;整个窗口都没变 → 确认未提交,安全换线;
  *   读到 null(且有基线)→ 先按 APPEND_UNREADABLE_REREAD_DELAYS_MS 延迟重读(#310)等接口恢复,仍读不到才算结果不确定;
  *     恢复后若数量未变,同样要在完整的 APPEND_REREAD_DELAYS_MS 窗口内保持不变才算未提交,窗口内任一次 null 即不确定,
  *     抛 APPEND_AMBIGUOUS_MARKER(调用方不得自动重试,转人工);没有基线(before 为 null)直接不确定。
+ * ② **成功后**确认真的落地(2026-11 线上事故):rc=0 不等于分 P 已增加,见 {@link confirmAppendLanded}。
+ *   稳定不符 → 抛 APPEND_AMBIGUOUS_MARKER,**不换线、不重发**(提交已发出,重发可能重复分 P)。
  * 不传 countParts → 保持旧行为(仅换线,不判定)。
  */
 export async function appendGroup(o: {
@@ -309,7 +312,6 @@ export async function appendGroup(o: {
     tried.push(line);
     try {
       await run(buildAppendArgs({ cookies: o.cookies, bv: o.bv, files: o.files, public: o.public, line }), o.hooks);
-      return;
     } catch (e) {
       last = e;
       if (!isRetryableLineError(e)) throw e;
@@ -340,9 +342,61 @@ export async function appendGroup(o: {
           );
         }
       }
+      continue; // 失败且确认未提交 → 换下一条线路
     }
+    // run 返回成功:rc=0 不等于分 P 已落地。有基线时确认服务端真的多了 files.length 个。
+    if (!o.countParts || before == null) return;
+    const v = await confirmAppendLanded({ before, added: o.files.length, countParts: o.countParts, sleep });
+    if (v.kind === "ok" || v.kind === "unknown") return;
+    throw new Error(
+      `${APPEND_AMBIGUOUS_MARKER} append 返回成功但服务端分 P 数不符(期望 ${before + o.files.length}、实际 ${v.actual ?? "读不到"}),可能未真正落地;不重发,请人工核对稿件`,
+    );
   }
   throw new Error(`append 上传线路均失败 (${tried.join(",")}): ${String((last as Error)?.message ?? last)}`);
+}
+
+/**
+ * append 返回**成功**(rc=0)后的落地确认(2026-11 线上事故)。
+ *
+ * 现场:段 4 的 append 返回成功,但 B 站稿件只有 5 个分 P(P1..P4 + 标题 P6 的段 5),
+ * 缺的正是段 4;台账已把 6 段都记成 done,直到 10 分钟后的删源前回读「期望 6 实际 5」才转人工。
+ * 只看返回码时,后续段会照常追加、标题跳号,整场卡人工并保留全部源。
+ *
+ * 判定口径(期望 = before + added):
+ * - 命中期望 → ok;
+ * - 基线上的稳定不符(整窗读完仍 != 期望)→ mismatch。调用方**不得重试**:rc=0 说明提交请求已发出,
+ *   重发可能产生重复分 P;
+ * - 多于期望 / 少于基线 → mismatch(列表异常或重复提交),不必等;
+ * - 整窗都读不到 → unknown(回落 rc=0;删源前 10 分钟回读仍兜底,避免视图接口抖动误转人工)。
+ */
+async function confirmAppendLanded(o: {
+  before: number;
+  added: number;
+  countParts: () => Promise<number | null>;
+  sleep: (ms: number) => Promise<void>;
+}): Promise<{ kind: "ok" | "mismatch" | "unknown"; actual: number | null }> {
+  const want = o.before + o.added;
+  let after = await o.countParts().catch(() => null);
+  if (after == null) {
+    // 与失败路径同一 #310 口径:基线已知但视图接口暂时读不到时,先等它恢复再判断。
+    for (const delay of APPEND_UNREADABLE_REREAD_DELAYS_MS) {
+      await o.sleep(delay);
+      after = await o.countParts().catch(() => null);
+      if (after != null) break;
+    }
+    if (after == null) return { kind: "unknown", actual: null };
+  }
+  if (after === want) return { kind: "ok", actual: after };
+  if (after > want || after < o.before) return { kind: "mismatch", actual: after };
+  // 少于期望但没低于基线:可能是 #66 的列表刷新延迟,必须整窗仍不符才判 mismatch。
+  for (const delay of APPEND_REREAD_DELAYS_MS) {
+    await o.sleep(delay);
+    after = await o.countParts().catch(() => null);
+    if (after == null) return { kind: "unknown", actual: null };
+    if (after === want) return { kind: "ok", actual: after };
+    if (after > want || after < o.before) return { kind: "mismatch", actual: after };
+  }
+  return { kind: "mismatch", actual: after };
 }
 
 /**

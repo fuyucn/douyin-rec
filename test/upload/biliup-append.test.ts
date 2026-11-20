@@ -66,6 +66,7 @@ describe("P1→append", () => {
 
   it("appendGroup：countParts 确认未提交 → 继续换线(安全重试)", async () => {
     const calls: string[][] = [];
+    const counts = [1, 1, 1, 1, 1, 2]; // 首轮失败窗口全为 1；换线后真的 +1
     const run = async (argv: string[]): Promise<string> => {
       calls.push(argv);
       if (argv.includes("alia")) {
@@ -75,7 +76,7 @@ describe("P1→append", () => {
     };
     await appendGroup({
       cookies: "c.json", bv: "BV1", files: ["d.mp4"], run, lines: ["alia", "txa"],
-      countParts: async () => 1, // before=after=1 → 未提交
+      countParts: async () => counts.shift() ?? 2,
       sleep: async () => {},
     });
     expect(calls).toHaveLength(2);
@@ -107,14 +108,15 @@ describe("P1→append", () => {
     let reads = 0;
     await appendGroup({
       cookies: "c.json", bv: "BV1", files: ["d.mp4"], run: failRun(calls, "txa"), lines: ["alia", "txa"],
-      countParts: async () => { reads++; return 1; },
+      // 首轮失败窗口的 5 次读均为 1；换线成功后再读一次（确认落地）→ 2。
+      countParts: async () => { reads++; return reads <= 5 ? 1 : 2; },
       sleep: async (ms) => { sleeps.push(ms); },
     });
     expect(calls).toHaveLength(2);
     expect(calls[1]).toContain("txa");
     expect(sleeps).toEqual([...APPEND_REREAD_DELAYS_MS]);
     expect(sleeps.reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(10_000);
-    expect(reads).toBe(1 + 1 + APPEND_REREAD_DELAYS_MS.length);
+    expect(reads).toBe(1 + 1 + APPEND_REREAD_DELAYS_MS.length + 1);
   });
 
   it("appendGroup(#66)：重读中途读不到 → ambiguous,不换线", async () => {
@@ -144,10 +146,10 @@ describe("P1→append", () => {
   it("appendGroup(#310)：恢复后数量没变 → 仍要走完整的 #66 窗口才换线", async () => {
     const calls: string[][] = [];
     const sleeps: number[] = [];
-    const counts: (number | null)[] = [1, null, 1, 1, 1, 1];
+    const counts: (number | null)[] = [1, null, 1, 1, 1, 1, 2]; // 换线成功后确认读 +1
     await appendGroup({
       cookies: "c.json", bv: "BV1", files: ["d.mp4"], run: failRun(calls, "txa"), lines: ["alia", "txa"],
-      countParts: async () => (counts.length > 0 ? counts.shift()! : 1),
+      countParts: async () => (counts.length > 0 ? counts.shift()! : 2),
       sleep: async (ms) => { sleeps.push(ms); },
     });
     expect(calls).toHaveLength(2);
@@ -243,6 +245,101 @@ describe("P1→append", () => {
         run,
       })
     ).rejects.toThrow("BV");
+  });
+});
+
+describe("appendGroup 成功返回后的落地确认（rc=0 但分 P 未落地）", () => {
+  const succeed = (calls: string[][]) => async (argv: string[]): Promise<string> => {
+    calls.push(argv);
+    return "appended";
+  };
+
+  it("分 P 数恰好 +N → 成功返回，只跑一次、不等待", async () => {
+    const calls: string[][] = [];
+    const sleeps: number[] = [];
+    const counts = [4, 5];
+    await appendGroup({
+      cookies: "c.json", bv: "BV1", files: ["d.mp4"], run: succeed(calls), lines: ["alia", "txa"],
+      countParts: async () => counts.shift() ?? 5,
+      sleep: async (ms) => { sleeps.push(ms); },
+    });
+    expect(calls).toHaveLength(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  it("多文件 append 要求 +files.length", async () => {
+    const calls: string[][] = [];
+    const counts = [1, 3];
+    await appendGroup({
+      cookies: "c.json", bv: "BV1", files: ["d.mp4", "l.mp4"], run: succeed(calls),
+      countParts: async () => counts.shift() ?? 3,
+      sleep: async () => {},
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("多文件 append 只落一部分 → ambiguous，且不重发", async () => {
+    const calls: string[][] = [];
+    const sleeps: number[] = [];
+    const counts = [1, 2, 2, 2, 2]; // before=1，期望 3，服务端只落了 1 个
+    await expect(appendGroup({
+      cookies: "c.json", bv: "BV1", files: ["d.mp4", "l.mp4"], run: succeed(calls), lines: ["alia", "txa"],
+      countParts: async () => counts.shift() ?? 2,
+      sleep: async (ms) => { sleeps.push(ms); },
+    })).rejects.toThrow(/append-ambiguous/);
+    expect(calls).toHaveLength(1);
+    expect(sleeps).toEqual([...APPEND_REREAD_DELAYS_MS]);
+  });
+
+  it("首读偏少但刷新后到位（#66）→ 不判失败", async () => {
+    const calls: string[][] = [];
+    const sleeps: number[] = [];
+    const counts = [4, 4, 5];
+    await appendGroup({
+      cookies: "c.json", bv: "BV1", files: ["d.mp4"], run: succeed(calls), lines: ["alia"],
+      countParts: async () => counts.shift() ?? 5,
+      sleep: async (ms) => { sleeps.push(ms); },
+    });
+    expect(calls).toHaveLength(1);
+    expect(sleeps).toEqual([APPEND_REREAD_DELAYS_MS[0]]);
+  });
+
+  it("整窗都未增加 → 抛 append-ambiguous，且不换线重发", async () => {
+    const calls: string[][] = [];
+    const sleeps: number[] = [];
+    await expect(appendGroup({
+      cookies: "c.json", bv: "BV1", files: ["d.mp4"], run: succeed(calls), lines: ["alia", "txa"],
+      countParts: async () => 4,
+      sleep: async (ms) => { sleeps.push(ms); },
+    })).rejects.toThrow(/append-ambiguous/);
+    expect(calls).toHaveLength(1); // rc=0 已发出提交，重发会重复分 P
+    expect(sleeps).toEqual([...APPEND_REREAD_DELAYS_MS]);
+  });
+
+  it("多于期望（可能重复提交）→ 立即 ambiguous，不等待", async () => {
+    const calls: string[][] = [];
+    const sleeps: number[] = [];
+    const counts = [4, 6];
+    await expect(appendGroup({
+      cookies: "c.json", bv: "BV1", files: ["d.mp4"], run: succeed(calls), lines: ["alia"],
+      countParts: async () => counts.shift() ?? 6,
+      sleep: async (ms) => { sleeps.push(ms); },
+    })).rejects.toThrow(/append-ambiguous/);
+    expect(calls).toHaveLength(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  it("整窗都读不到 → 回落 rc=0 成功（最终回读兜底，不误转人工）", async () => {
+    const calls: string[][] = [];
+    const sleeps: number[] = [];
+    const counts: (number | null)[] = [4];
+    await appendGroup({
+      cookies: "c.json", bv: "BV1", files: ["d.mp4"], run: succeed(calls), lines: ["alia"],
+      countParts: async () => counts.shift() ?? null,
+      sleep: async (ms) => { sleeps.push(ms); },
+    });
+    expect(calls).toHaveLength(1);
+    expect(sleeps).toEqual([...APPEND_UNREADABLE_REREAD_DELAYS_MS]);
   });
 });
 

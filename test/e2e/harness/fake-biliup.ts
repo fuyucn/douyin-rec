@@ -33,7 +33,9 @@ export type FaultMode =
   /** 进程被杀(SIGKILL):`applied` 决定被杀前服务端是否已提交。非重试类错误,直接冒泡。 */
   | "killed"
   /** 挂起:run 永不返回(模拟进程在该调用中途整体死亡;配合 `Scenario.restart()` 做「崩溃续跑」)。 */
-  | "hang";
+  | "hang"
+  /** 返回成功但**服务端未落盘**:模拟 biliup rc=0 却少一个分 P(2026-11 事故的形态)。 */
+  | "drop";
 
 export interface Fault {
   op: "upload" | "append";
@@ -63,8 +65,8 @@ export interface FakeCall {
   line?: string;
   /** 完整 argv(断言关水印 / 仅自己可见等硬标准用)。 */
   argv: string[];
-  /** ok = 已提交且成功返回;lost = 已提交但客户端没拿到响应;rejected = 未提交;hung = 调用被挂起(进程死亡)。 */
-  outcome: "ok" | "lost" | "rejected" | "hung";
+  /** ok = 已提交且成功返回;lost = 已提交但客户端没拿到响应;rejected = 未提交;hung = 调用被挂起(进程死亡);dropped = 返回成功但服务端未落盘。 */
+  outcome: "ok" | "lost" | "rejected" | "hung" | "dropped";
 }
 
 function parseFlags(argv: string[]): { op: "upload" | "append"; files: string[]; flags: Map<string, string> } {
@@ -157,6 +159,11 @@ export class FakeBiliup {
         const a = apply();
         record("lost", a.bv);
         throw new Error("biliup 失败 (rc=1): Gateway Time-out uploader.rs:456 start=0 end=1048576");
+      }
+      if (fault.mode === "drop") {
+        // rc=0 但服务端没有新增分 P:客户端只看到“成功”。
+        record("dropped", flags.get("--vid") ?? undefined);
+        return "appended";
       }
       // killed
       if (fault.applied) { const a = apply(); record("lost", a.bv); } else record("rejected");
