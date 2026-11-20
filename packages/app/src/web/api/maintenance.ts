@@ -86,8 +86,9 @@ export function buildMaintenance(deps: MaintenanceDeps): {
           activeLogPaths.push(...jobLogPaths(key, stage, logsRoot));
         }
       } catch {
-        // 台账读不到(首次运行/损坏)→ 只靠「正在录制」+ 陈旧阈值兜底(宁可少删);
-        // job-log 侧同样不排除也不报错(保守 = 维持旧口径,不误伤接口)。
+        // 台账存在但不可读/缺必需列时，无法确认活动 stage。预览可以承担误删风险，
+        // 但清理是破坏性动作；宁可拒绝，也不能把“未知活动”当成“没有活动”放行。
+        throw new Error("hub 台账不可读，无法确认活动 stage；拒绝清理");
       }
     }
     return { recordingDirs, activePaths, activeLogPaths };

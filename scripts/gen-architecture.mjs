@@ -380,7 +380,7 @@ const PLAN = existsSync(PLAN_FILE) ? JSON.parse(readFileSync(PLAN_FILE, "utf-8")
 // 里程碑/状态直接来自 030 计划本身(不另维护一份),缺省按里程碑顺序推断。
 const PLAN_MILESTONE = {};
 for (const m of (PLAN?.milestones ?? [])) for (const t of m.tasks) PLAN_MILESTONE[t] = m.id;
-const PLAN_STATUS = { "decision-gated": "需你确认后立项", deferred: "后置/可选" };
+const PLAN_STATUS = { done: "已完成", "decision-gated": "需你确认后立项", deferred: "后置/可选" };
 const planTasks = PLAN ? PLAN.tasks : [];
 
 const MERMAID = buildMermaid();
