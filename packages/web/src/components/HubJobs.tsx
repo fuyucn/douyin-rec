@@ -258,6 +258,8 @@ function PipelineFlowInner({
   // 运行中 run 的失败节点可能是上一轮崩溃残留,而续跑已经在处理该轨道(append 中);
   // 此刻点重跑会排队/与续跑冲突,故只在终态(failed / needs_manual)才显示节点级重跑。
   const nodeRetryVisible = TERMINAL.has(job.state) && onRetry != null;
+  // 分段模式整体拒绝单节点重跑(后端 retryNode 同样条件返回 400),UI 不再给必然失败的按钮。
+  const retryModeOk = cfg?.steps?.mergeSegments !== false;
   const termStatus: NodeStatus =
     job.state === "failed" ? "failed" : job.state === "done" ? "done" : job.state === "needs_manual" ? "done" : "todo";
   const termLabel = job.state === "needs_manual" ? labels.needs_manual : job.state === "failed" ? labels.failed : t("hub.jobs.termDone");
@@ -271,7 +273,7 @@ function PipelineFlowInner({
         status: st[n.key]?.status ?? "todo",
         sec: st[n.key]?.sec ?? null,
         detail: nodeErrorOf(n.key) ?? detailOf(n.key),
-        onRetry: (st[n.key]?.status === "failed" || st[n.key]?.status === "blocked") && isRetryableNode(n.key) && nodeRetryVisible
+        onRetry: (st[n.key]?.status === "failed" || st[n.key]?.status === "blocked") && retryModeOk && isRetryableNode(n.key) && nodeRetryVisible
           ? () => onRetry(n.key)
           : undefined,
         metric: n.key === "select"

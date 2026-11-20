@@ -183,8 +183,8 @@ const FLOWS = [
     edges: [["cron","proc"],["proc","poll"],["poll","plat"],["poll","live"],["live","dl"],["live","dm"],["dm","xml"],["dl","xml"]],
   },
   {
-    id: "realtime", title: "③ 实时状态（030 计划：SSE 取代轮询）", sub: "写入方 → HubWatch 指纹 → SSE → 三个页面",
-    planned: true,
+    id: "realtime", title: "③ 实时状态（HubWatch + SSE）", sub: "写入方 → HubWatch 指纹 → SSE → 三个页面",
+    implemented: true,
     nodes: [
       ["w1", "任务/录制状态", "起停 · 开播", "app"],
       ["w2", "sync 台账", "状态/步骤/分P", "hub"],
@@ -199,8 +199,8 @@ const FLOWS = [
     note: "断线退化为指数退避兜底轮询(3s→30s,隐藏页暂停);页面不再各自 setInterval 拉整份数据",
   },
   {
-    id: "fanout", title: "④ 编排（030 计划：跨房间非阻塞派发）", sub: "reconcileAll 两阶段：先建 job，再交给有界并发 dispatcher",
-    planned: true,
+    id: "fanout", title: "④ 编排（跨房间非阻塞派发）", sub: "reconcileAll 两阶段：先建 job，再交给有界并发 dispatcher",
+    implemented: true,
     nodes: [
       ["inv2", "listInventory", "各节点清单", "hub"],
       ["clu2", "聚类 + 过滤", "(platform,roomSlug)", "hub"],
@@ -231,7 +231,7 @@ const FLOWS = [
   },
 ];
 
-// ── 030 计划改进(未落地;数据来自 plans/030_tasks.json,人工同步,不参与 --check 漂移)─────
+// ── 030 改进(M1–M3 已落地;T16/T20 仍延期/待决策;数据来自 plans/030_tasks.json,人工同步,不参与 --check 漂移)─────
 const PLANNED = [
   { area: "HubWatch + SSE", where: "app/hub-watch.ts(新) · web/server.ts · web 三页", change: "/api/hub/stream 推送 changed;前端 useHubStream 取代 3s 轮询,本地 1s 计时,断线退避兜底", why: "队列/workflow 不实时、慢请求覆盖新值、无人知断连" },
   { area: "JobDispatcher", where: "orchestrator/job-dispatcher.ts(新) · reconciler.ts", change: "reconcileAll 拆两阶段:先建全部 job,再有界并发执行(同房间串行)", why: "单场长上传阻塞后面所有房间建 job" },
@@ -523,7 +523,8 @@ const html = `<!doctype html>
     <div class="blabel">${esc(f.title)} — ${esc(f.sub)}</div>
     ${flowSvg(f)}
     ${f.planned ? `<div class="note"><b>计划中(030 未落地)</b> · 见 plans/030_hub_tasks_optimization.md</div>` : ""}
-    ${f.note ? `<div class="note">${f.planned ? "" : "<b>实验特性</b> · "}${esc(f.note)}</div>` : ""}
+    ${f.implemented ? `<div class="note"><b>已落地</b></div>` : ""}
+    ${f.note ? `<div class="note">${f.planned || f.implemented ? "" : "<b>实验特性</b> · "}${esc(f.note)}</div>` : ""}
   </div>`).join("\n  ")}
 
   ${(PLAN?.milestones ?? []).length ? `<h2>030 里程碑（分批发版 · 来自 plans/030_tasks.json）</h2>
@@ -537,7 +538,7 @@ const html = `<!doctype html>
     </tr>`).join("\n    ")}</tbody>
   </table>
 
-  ` : ""}  <h2>030 计划改进（未落地 · 见 plans/030_tasks.json）</h2>
+  ` : ""}  <h2>030 改进（M1–M3 已落地；T16/T20 延期/待决策 · 见 plans/030_tasks.json）</h2>
   <table>
     <thead><tr><th>组件</th><th>落点</th><th>改什么</th><th>为什么</th></tr></thead>
     <tbody>${PLANNED.map((r) => `<tr>
@@ -548,7 +549,7 @@ const html = `<!doctype html>
     </tr>`).join("\n    ")}</tbody>
   </table>
 
-  ${planTasks.length ? `<h2>030 任务清单（来自 plans/030_tasks.json · 未落地）</h2>
+  ${planTasks.length ? `<h2>030 任务清单（来自 plans/030_tasks.json）</h2>
   <table>
     <thead><tr><th>id</th><th>里程碑</th><th>任务</th><th>serves</th><th>依赖</th><th>状态</th><th class="n">估 LOC</th></tr></thead>
     <tbody>${planTasks.map((t) => `<tr>

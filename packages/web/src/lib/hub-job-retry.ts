@@ -23,8 +23,10 @@ export const RETRY_CONFIRM_NODES: readonly string[] = [
   "append_livechat",
 ];
 
-/** 节点是否显示重试按钮(仅当后端接受该节点时为 true)。 */
-export function isRetryableNode(node: string): boolean {
+/** 节点是否显示重试按钮(仅当后端接受该节点时为 true)。
+ * 分段模式整体不接受单节点重跑;即使节点在六节点集合内,也必须隐藏。 */
+export function isRetryableNode(node: string, opts: { mergeSegments?: boolean } = {}): boolean {
+  if (opts.mergeSegments === false) return false;
   return RETRYABLE_NODES.includes(node);
 }
 

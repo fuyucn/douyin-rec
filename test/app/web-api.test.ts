@@ -2867,6 +2867,22 @@ describe("T15 /api/hub/resources", () => {
     s.close();
   });
 
+  it("source=settings 的 JSON 根不是对象 → 400 且不写 settings", () => {
+    const s = new TaskStore(":memory:");
+    for (const bad of ["[]", "null", '"text"']) {
+      const a = makeApi({
+        store: s, manager: new MockManager(),
+        hubDir: mkdtempSync(join(tmpdir(), "hubres-bad-")),
+        hubConfigSource: () => ({ json: bad, source: "settings" as const }),
+      });
+      const r = a.putHubResources({ maxCpuParallel: 3 });
+      expect(r.status).toBe(400);
+      expect(String((r.body as { error: string }).error)).toContain("JSON");
+      expect(s.getSetting("hubConfig")).toBeNull();
+    }
+    s.close();
+  });
+
   it("source=inline → 400 且**明确说明无法持久化**(不假装保存成功)", () => {
     const { s, a } = setup("inline");
     const r = a.putHubResources({ maxCpuParallel: 3 });

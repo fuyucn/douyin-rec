@@ -136,6 +136,13 @@ describe("组件源码(静态断言)", () => {
     expect(src).not.toMatch(/job\.state === "done"[\s\S]{0,300}onRunNow/);
   });
 
+  it("分段模式不显示六节点重试(后端同条件返回 400)", () => {
+    expect(isRetryableNode("merge", { mergeSegments: false })).toBe(false);
+    expect(isRetryableNode("merge", { mergeSegments: true })).toBe(true);
+    expect(src).toContain("retryModeOk");
+    expect(src).toContain("cfg?.steps?.mergeSegments !== false");
+  });
+
   it("节点重试统一经 retryRequest 发送(一次点击只发一次)", () => {
     expect(src).toContain("retryRequest(");
   });
