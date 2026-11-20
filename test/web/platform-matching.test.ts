@@ -31,6 +31,11 @@ describe("pickPlatform URL matching", () => {
     expect(pickPlatform("12345", [])).toBeUndefined();
   });
 
+  it("normalizes uppercase live URLs to the numeric room slug", () => {
+    expect(bilibiliPlatform.extractRoomSlug("https://LIVE.BILIBILI.COM/12345")).toBe("12345");
+    expect(bilibiliPlatform.extractRoomSlug("https://live.bilibili.com/12345")).toBe("12345");
+  });
+
   it("reports overlapping client patterns rather than choosing by list order", () => {
     const overlapping = [dto("first", "shared\\.example"), dto("second", "shared\\.example")];
     expect(() => pickPlatform("https://shared.example/room", overlapping)).toThrow(

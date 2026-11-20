@@ -1,4 +1,4 @@
-import { closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 
 /**
@@ -14,7 +14,9 @@ export function writeFileAtomicSync(file: string, data: string, opts: { mode?: n
   const tmp = `${file}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
   const fd = openSync(tmp, "w", opts.mode ?? 0o666);
   try {
-    writeSync(fd, data, null, "utf-8");
+    // writeFileSync(fd) is the complete-write primitive; writeSync may return a short count
+    // on ENOSPC/storage hiccups, which would commit a truncated JSON after rename.
+    writeFileSync(fd, data, "utf-8");
     fsyncSync(fd);
   } finally {
     closeSync(fd);

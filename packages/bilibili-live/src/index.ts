@@ -23,7 +23,7 @@ const BILIBILI_URL_RE = new RegExp(BILIBILI_URL_PATTERN, BILIBILI_URL_FLAGS);
 
 /** URL / 房间号 → 房间号(live.bilibili.com/{roomid});已是房间号则原样。 */
 export function extractRoomSlug(url: string): string {
-  const m = url.match(/live\.bilibili\.com\/(\d+)/);
+  const m = url.match(/live\.bilibili\.com\/(\d+)/i);
   return m ? m[1] : url;
 }
 

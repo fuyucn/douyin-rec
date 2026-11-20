@@ -76,7 +76,7 @@ export function buildMaintenance(deps: MaintenanceDeps): {
         // Active-path protection only needs the non-terminal stream keys. Calling the full job
         // projection here would make an old ledger with no attached tables look like "no active
         // work" and silently drop protection (the projection rightly rejects an incomplete schema).
-        const keys = activeHubJobKeys(deps.syncDbPath);
+        const keys = activeHubJobKeys(deps.syncDbPath, undefined, { requireSyncJobs: true });
         const stage = deps.stageDir ?? hubStageDir();
         // Paths come from the core resolver (the pipeline builds them there too) and cover both the
         // legacy and the room layout: a mismatch would leave the active job unprotected, silently.
