@@ -49,19 +49,44 @@ export interface HubConfigSource {
   path?: string;
 }
 
+/** Parse a valid hub config root; callers choose strict write or lenient display behavior. */
+function parseConfigTextStrict(text: string): HubConfigFile {
+  const parsed: unknown = JSON.parse(text);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("JSON 根必须是对象");
+  }
+  return parsed as HubConfigFile;
+}
+
 /** Parse hub config text. Missing/garbage → `{}` (same lenient rule for the file and inline text). */
 function parseConfigText(text: string | undefined): HubConfigFile {
   if (text === undefined) return {};
-  try {
-    const parsed: unknown = JSON.parse(text);
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? (parsed as HubConfigFile) : {};
-  } catch { return {}; }
+  try { return parseConfigTextStrict(text); }
+  catch { return {}; }
 }
 
-/** Read a config file. Missing/unreadable/garbage → `{}` (writes replace it with valid JSON). */
+/** Read a config file. Missing/unreadable/garbage → `{}` for lenient display paths. */
 function readFile(path: string): HubConfigFile {
   try { return parseConfigText(readFileSync(path, "utf-8")); }
   catch { return {}; }
+}
+
+/** Writes may start from an absent file, but must not replace invalid or unreadable input. */
+function readFileForWrite(path: string): HubConfigFile {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf-8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    const code = (error as NodeJS.ErrnoException).code ?? "unknown";
+    throw new Error(`无法读取 hub 配置 ${path} (${code})`, { cause: error });
+  }
+
+  try {
+    return parseConfigTextStrict(text);
+  } catch (error) {
+    throw new Error(`hub 配置无效 ${path}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  }
 }
 
 /** Resolve a path or source object to config content (JSON text first, then the file). */
@@ -126,7 +151,7 @@ export function validateResources(patch: Partial<HubResources>): string | null {
  * 与 worker-store 同样的 temp+rename:读时现读不缓存,若写到一半被读会拿到半截 JSON。
  */
 export function writeResources(configPath: string, patch: Partial<HubResources>): void {
-  const cfg = readFile(configPath);
+  const cfg = readFileForWrite(configPath);
   mkdirSync(dirname(configPath), { recursive: true });
   const next: HubConfigFile = { ...cfg, resources: { ...(cfg.resources ?? {}), ...patch } };
   const tmp = join(dirname(configPath), `.${basename(configPath)}.tmp`);

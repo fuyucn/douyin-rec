@@ -6,11 +6,26 @@
  *  2. 非法值不写坏配置(先校验后落盘);
  *  3. 手改坏的文件不能让服务起不来(读时回落默认)。
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readResources, writeResources, validateResources, DEFAULT_HUB_RESOURCES } from "../../packages/app/src/hub-config-store.js";
+import { createWorker } from "../../packages/app/src/worker-store.js";
+
+const readFailure = vi.hoisted(() => ({ path: null as string | null, code: null as string | null }));
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    readFileSync: (path: any, ...args: any[]) => {
+      if (readFailure.path === String(path)) {
+        throw Object.assign(new Error(`mock read failure: ${readFailure.code}`), { code: readFailure.code });
+      }
+      return actual.readFileSync(path, ...args);
+    },
+  };
+});
 
 describe("hub-config-store(T15 resources)", () => {
   let dir: string;
@@ -67,18 +82,53 @@ describe("hub-config-store(T15 resources)", () => {
     expect(readResources({ json: "null" })).toEqual(DEFAULT_HUB_RESOURCES);
   });
 
+  it.each([
+    ["坏 JSON", "{ not json"],
+    ["空文件", ""],
+    ["数组根形状", "[]"],
+    ["null 根形状", "null"],
+  ])("写入遇到 %s 时拒绝且原字节不变", (_label, contents) => {
+    writeFileSync(cfg, contents, "utf-8");
+    const original = readFileSync(cfg);
+    expect(() => writeResources(cfg, { maxCpuParallel: 4 })).toThrow(/配置|JSON|根/);
+    expect(readFileSync(cfg)).toEqual(original);
+  });
+
+  it.each(["EACCES", "EPERM", "EIO"])("读取 %s 时拒绝写且保留原文件", (code) => {
+    writeFileSync(cfg, JSON.stringify({ resources: { maxCpuParallel: 2 } }), "utf-8");
+    const original = readFileSync(cfg);
+    readFailure.path = cfg;
+    readFailure.code = code;
+    try {
+      expect(() => writeResources(cfg, { maxCpuParallel: 4 })).toThrow(code);
+      expect(readResources(cfg)).toEqual(DEFAULT_HUB_RESOURCES); // 展示读取仍宽松
+    } finally {
+      readFailure.path = null;
+      readFailure.code = null;
+    }
+    expect(readFileSync(cfg)).toEqual(original);
+  });
+
+  it("缺失配置首次创建 resources 后可继续写入", () => {
+    writeResources(cfg, { maxCpuParallel: 4 });
+    createWorker(cfg, { kind: "ssh", host: "h", dataRoot: "/d" });
+    writeResources(cfg, { maxNetParallel: 3 });
+    expect(readResources(cfg)).toMatchObject({ maxCpuParallel: 4, maxNetParallel: 3 });
+    expect(JSON.parse(readFileSync(cfg, "utf-8")).workers[0].id).toBe("worker-1");
+  });
+
   it("写 resources **不破坏** workers / workerSeq / 自定义字段", () => {
     writeFileSync(cfg, JSON.stringify({
       workerSeq: 2,
       workers: [{ id: "vps", kind: "ssh", host: "h", dataRoot: "/d" }],
       stageDir: "/custom/stage",
       settleMs: 12345,
-      resources: { maxCpuParallel: 1 },
+      resources: { maxCpuParallel: 1, extension: { keep: true } },
     }), "utf-8");
     writeResources(cfg, { maxCpuParallel: 4 });
     const raw = JSON.parse(readFileSync(cfg, "utf-8")) as Record<string, unknown>;
     expect(raw.maxCpuParallel).toBeUndefined();
-    expect((raw.resources as { maxCpuParallel: number }).maxCpuParallel).toBe(4);
+    expect(raw.resources).toMatchObject({ maxCpuParallel: 4, extension: { keep: true } });
     expect(raw.workerSeq).toBe(2);
     expect(raw.stageDir).toBe("/custom/stage");     // 自定义字段必须活下来
     expect(raw.settleMs).toBe(12345);
