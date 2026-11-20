@@ -226,6 +226,59 @@ describe("chunk retry policy + transport diagnostics", () => {
     expect(Date.now() - started).toBeLessThan(1000);
   });
 
+  it("直播默认预算:3 次重试、1/2/3s,4 次尝试后失败", async () => {
+    fakeCookies();
+    const mod = await import("./upos-stream.js");
+    const { impl } = makeFetch();
+    const session = await mod.preupload({ cookiesPath: COOKIES, fileName: "t.mkv", totalSize: 1024, fetchImpl: impl });
+    let puts = 0;
+    const waits: number[] = [];
+    const failing = (async (input: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? "GET").toUpperCase() !== "PUT") return impl(input, init);
+      puts++;
+      throw new TypeError("fetch failed");
+    }) as unknown as typeof fetch;
+    const err = await mod.uploadChunks({
+      session, totalSize: 1024, fetchImpl: failing,
+      retrySleep: async (ms: number) => { waits.push(ms); },
+      readChunk: async () => new Uint8Array(1024),
+    }).catch((e: Error) => e);
+    expect((err as Error).message).toMatch(/已重试 3 次/);
+    expect(puts).toBe(4);
+    expect(waits).toEqual([1000, 2000, 3000]);
+  });
+
+  it("空 delays 回落 3s,单元素延迟复用到最后一次", async () => {
+    fakeCookies();
+    const mod = await import("./upos-stream.js");
+    const { impl } = makeFetch();
+    const session = await mod.preupload({ cookiesPath: COOKIES, fileName: "t.mkv", totalSize: 1024, fetchImpl: impl });
+    const failThenOk = (left: number) => {
+      let n = 0;
+      return (async (input: string | URL | Request, init?: RequestInit) => {
+        if ((init?.method ?? "GET").toUpperCase() === "PUT" && ++n <= left) throw new TypeError("fetch failed");
+        return impl(input, init);
+      }) as unknown as typeof fetch;
+    };
+    const emptyWaits: number[] = [];
+    const empty = await mod.uploadChunks({
+      session, totalSize: 1024, fetchImpl: failThenOk(3), retries: 3, retryDelaysMs: [],
+      retrySleep: async (ms: number) => { emptyWaits.push(ms); },
+      readChunk: async () => new Uint8Array(1024),
+    });
+    expect(empty).toHaveLength(1);
+    expect(emptyWaits).toEqual([3000, 3000, 3000]);
+
+    const oneWaits: number[] = [];
+    const one = await mod.uploadChunks({
+      session, totalSize: 1024, fetchImpl: failThenOk(2), retries: 2, retryDelaysMs: [7],
+      retrySleep: async (ms: number) => { oneWaits.push(ms); },
+      readChunk: async () => new Uint8Array(1024),
+    });
+    expect(one).toHaveLength(1);
+    expect(oneWaits).toEqual([7, 7]);
+  });
+
   it("fetch failed 保留 cause code,错误消息与 onChunkFailure 都带", async () => {
     fakeCookies();
     const mod = await import("./upos-stream.js");
@@ -234,7 +287,8 @@ describe("chunk retry policy + transport diagnostics", () => {
     const failing = (async (input: string | URL | Request, init?: RequestInit) => {
       if ((init?.method ?? "GET").toUpperCase() !== "PUT") return impl(input, init);
       const e = new TypeError("fetch failed");
-      (e as { cause?: unknown }).cause = { code: "ECONNRESET" };
+      // cause.message 可能带签名 URL / Cookie，绝不能原样落库。
+      (e as { cause?: unknown }).cause = { code: "ECONNRESET", message: "https://example.invalid/up?v=abc123" };
       throw e;
     }) as unknown as typeof fetch;
     const failures: Array<{ chunk: number; error?: string }> = [];
@@ -244,7 +298,30 @@ describe("chunk retry policy + transport diagnostics", () => {
       readChunk: async () => new Uint8Array(1024),
     }).catch((e: Error) => e);
     expect((err as Error).message).toMatch(/fetch failed \(ECONNRESET\)/);
+    expect((err as Error).message).not.toMatch(/example|abc123/);
     expect(failures).toEqual([{ chunk: 0, error: expect.stringContaining("ECONNRESET") }]);
+  });
+
+  it("cause 只有 message 时不落库,避免签名 URL/凭证泄漏", async () => {
+    fakeCookies();
+    const mod = await import("./upos-stream.js");
+    const { impl } = makeFetch();
+    const session = await mod.preupload({ cookiesPath: COOKIES, fileName: "t.mkv", totalSize: 1024, fetchImpl: impl });
+    const failing = (async (input: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? "GET").toUpperCase() !== "PUT") return impl(input, init);
+      const e = new TypeError("fetch failed");
+      (e as { cause?: unknown }).cause = { message: "https://example.invalid/up?v=abc123" };
+      throw e;
+    }) as unknown as typeof fetch;
+    const failures: Array<{ chunk: number; error?: string }> = [];
+    const err = await mod.uploadChunks({
+      session, totalSize: 1024, fetchImpl: failing, retries: 0,
+      onChunkFailure: (f: { chunk: number; error?: string }) => failures.push(f),
+      readChunk: async () => new Uint8Array(1024),
+    }).catch((e: Error) => e);
+    expect((err as Error).message).toBe("分块 0 上传失败(已重试 0 次),TypeError: fetch failed");
+    expect((err as Error).message).not.toMatch(/example|abc123/);
+    expect(failures[0]?.error).toBe("TypeError: fetch failed");
   });
 });
 

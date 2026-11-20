@@ -278,13 +278,14 @@ function describeFetchError(e: unknown): string {
   const err = e as { name?: unknown; message?: unknown; cause?: unknown };
   const name = typeof err?.name === "string" ? err.name : "Error";
   const message = String(err?.message ?? e).slice(0, 200);
+  // Only stable cause codes/names are safe to persist: cause.message can embed the signed URL
+  // (including query credentials), a Cookie header or a resolved IP. Never copy it verbatim.
   let detail: string | undefined;
   const cause = err?.cause;
-  if (typeof cause === "string") detail = cause;
-  else if (cause && typeof cause === "object") {
-    const c = cause as { code?: unknown; message?: unknown; name?: unknown };
-    const raw = (typeof c.code === "string" && c.code) || (typeof c.message === "string" && c.message) || (typeof c.name === "string" && c.name);
-    if (raw) detail = raw;
+  if (cause && typeof cause === "object") {
+    const c = cause as { code?: unknown; name?: unknown };
+    if (typeof c.code === "string" && c.code) detail = c.code;
+    else if (typeof c.name === "string" && c.name !== "Error") detail = c.name;
   }
   return `${name}: ${message}${detail ? ` (${detail.slice(0, 120)})` : ""}`;
 }
