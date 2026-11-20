@@ -1976,6 +1976,47 @@ describe("失败回退:已录字节必须被用上,不能白躺盘上", () => {
     expect(puts.map((p) => p.bytes)).toEqual([CHUNK, CHUNK, CHUNK]); // 无尾块协商问题
   });
 
+  it("reuploadSpoolFile:短时 transport 抖动按更长窗口重试成功,不误报回退失败", async () => {
+    const spool = join(dir, "seg-flaky.ts");
+    const total = CHUNK * 3;
+    writeFileSync(spool, Buffer.alloc(total, 7));
+    const { fake } = makeUploadFetch();
+    let puts = 0;
+    const flaky = (async (input: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? "GET").toUpperCase() === "PUT" && ++puts <= 4) throw new TypeError("fetch failed");
+      return fake(input, init);
+    }) as unknown as typeof fetch;
+    const waits: number[] = [];
+    const r = await reuploadSpoolFile({
+      cookiesPath: COOKIES, fileName: "seg-flaky.ts", spoolPath: spool, line: "txa",
+      fetchImpl: flaky, sleep: async (ms: number) => { waits.push(ms); },
+    });
+    expect(r.ok).toBe(true);
+    expect(r.stem).toBe("fb123");
+    expect(puts).toBeGreaterThanOrEqual(5); // 旧 3 次会在这里耗尽
+    expect(waits).toEqual([2000, 5000, 10000, 20000]); // 默认回退策略，不是空转/4 次
+  });
+
+  it("reuploadSpoolFile:默认重试耗尽 7 次 PUT 后失败", async () => {
+    const spool = join(dir, "seg-exhaust.ts");
+    writeFileSync(spool, Buffer.alloc(CHUNK, 3));
+    const { fake } = makeUploadFetch({ failAllPuts: true });
+    let puts = 0;
+    const waits: number[] = [];
+    const counted = (async (input: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? "GET").toUpperCase() === "PUT") puts++;
+      return fake(input, init);
+    }) as unknown as typeof fake;
+    const r = await reuploadSpoolFile({
+      cookiesPath: COOKIES, fileName: "seg-exhaust.ts", spoolPath: spool, line: "txa",
+      fetchImpl: counted, sleep: async (ms: number) => { waits.push(ms); },
+    });
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/分块 0 上传失败/);
+    expect(puts).toBe(7); // initial + 6 retries, not the live path's 4 attempts
+    expect(waits).toEqual([2000, 5000, 10000, 20000, 30000, 30000]); // 后两次 30s 也必须被钉住
+  });
+
   it("reuploadSpoolFile:分片读取与文件逐字节一致,含不足一块的尾块", async () => {
     const spool = join(dir, "seg-tail.ts");
     const total = CHUNK * 2 + 123;

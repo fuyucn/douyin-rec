@@ -1,6 +1,9 @@
 import { existsSync, statSync } from "node:fs";
 import { ffprobeDuration, ffprobeDtsGap, type DtsGap } from "@drec/post-process";
-import { preupload, uploadChunks, complete, UposRateLimited, type PreuploadResult } from "./upos-stream.js";
+import {
+  preupload, uploadChunks, complete, UposRateLimited, RECOVERY_CHUNK_RETRY_DELAYS_MS,
+  type PreuploadResult,
+} from "./upos-stream.js";
 import type { LivePumpState } from "./live-pump-state.js";
 import { sleepUnlessAborted } from "./live-pump-wait.js";
 
@@ -147,8 +150,12 @@ export async function reuploadSpoolFile(o: {
   onChunk?: (streamedBytes: number, chunksDone: number) => void;
   /** Progress/diagnostic log (preupload backoff). */
   log?: (msg: string) => void;
-  /** Sleep seam for the preupload 601 backoff (tests). */
+  /** Sleep seam for the preupload 601 backoff and chunk retries (tests). */
   sleep?: (ms: number) => Promise<void>;
+  /** Chunk retries after the initial attempt; defaults to the recovery policy (6). */
+  retries?: number;
+  /** Chunk retry delays; defaults to the recovery policy (2/5/10/20/30/30s). */
+  retryDelaysMs?: readonly number[];
 }): Promise<{ ok: boolean; stem?: string; chunks: number; bytes: number; error?: string }> {
   const { openSync, closeSync, statSync } = await import("node:fs");
   let totalSize: number;
@@ -201,7 +208,11 @@ async function reuploadOpenSpool(
     const parts = await uploadChunks({
       session, totalSize,
       fetchImpl: o.fetchImpl ?? fetch,
-      retries: 3,
+      // Recovery runs after the segment is sealed: wait out a short CDN/TCP blip instead
+      // of declaring the whole-file fallback failed. The live path keeps 3 fast retries.
+      retries: o.retries ?? RECOVERY_CHUNK_RETRY_DELAYS_MS.length,
+      retryDelaysMs: o.retryDelaysMs ?? RECOVERY_CHUNK_RETRY_DELAYS_MS,
+      ...(o.sleep ? { retrySleep: o.sleep } : {}),
       signal: o.signal,
       onProgress: (p) => o.onChunk?.(p.uploadedBytes, p.chunksDone),
       readChunk,
