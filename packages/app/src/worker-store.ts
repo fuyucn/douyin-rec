@@ -14,9 +14,35 @@ const KINDS = new Set(["local", "ssh", "tailscale-ssh"]);
 
 interface HubConfigFile { workerSeq?: number; workers?: WorkerConfig[]; tenants?: WorkerConfig[]; [k: string]: unknown }
 
+function parseConfig(text: string): HubConfigFile {
+  const parsed: unknown = JSON.parse(text);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("JSON 根必须是对象");
+  }
+  return parsed as HubConfigFile;
+}
+
 function readConfig(path: string): HubConfigFile {
   try { return JSON.parse(readFileSync(path, "utf-8")) as HubConfigFile; }
-  catch { return {}; } // 缺失/坏 JSON → 空(list 返 []);create 会写出合法文件
+  catch { return {}; } // 读取展示保持宽松:缺失/坏 JSON → 空(list 返 [])
+}
+
+/** 写入底稿仅在明确缺失时默认为空;损坏或不可读必须拒绝原子替换。 */
+function readConfigForWrite(path: string): HubConfigFile {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf-8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    const code = (error as NodeJS.ErrnoException).code ?? "unknown";
+    throw new Error(`无法读取 hub 配置 ${path} (${code})`, { cause: error });
+  }
+
+  try {
+    return parseConfig(text);
+  } catch (error) {
+    throw new Error(`hub 配置无效 ${path}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  }
 }
 
 /** 归一 workers 数组:workers ?? tenants(旧键 back-compat)。不改盘,只读。 */
@@ -73,7 +99,7 @@ export function createWorker(
   },
 ): WorkerConfig {
   validate(input.kind, input.host, input.dataRoot);
-  const cfg = readConfig(configPath);
+  const cfg = readConfigForWrite(configPath);
   const workers = [...workersOf(cfg)];
   // 单调 seq:cfg.workerSeq 起,跳过任何已存在的 worker-N(绝不复用/碰撞)。
   const prevSeq = cfg.workerSeq ?? 0;
@@ -106,7 +132,7 @@ export function updateWorker(
   id: string,
   patch: { name?: string; kind?: string; host?: string; dataRoot?: string; apiUrl?: string; capabilities?: string[] },
 ): WorkerConfig | null {
-  const cfg = readConfig(configPath);
+  const cfg = readConfigForWrite(configPath);
   const workers = [...workersOf(cfg)];
   const i = workers.findIndex((w) => w.id === id);
   if (i < 0) return null;
@@ -133,7 +159,7 @@ export function updateWorker(
 
 export function deleteWorker(configPath: string, id: string): boolean {
   if (id === "local") throw new Error("local worker(master 自身)不可删除");
-  const cfg = readConfig(configPath);
+  const cfg = readConfigForWrite(configPath);
   const workers = workersOf(cfg);
   const next = workers.filter((w) => w.id !== id);
   if (next.length === workers.length) return false; // 不存在
@@ -143,7 +169,7 @@ export function deleteWorker(configPath: string, id: string): boolean {
 
 /** 整体重排版序:ids 必须与现有 worker 集合完全相等,按数组顺序写回(数组序 = 显示序)。 */
 export function reorderWorkers(configPath: string, ids: string[]): WorkerConfig[] {
-  const cfg = readConfig(configPath);
+  const cfg = readConfigForWrite(configPath);
   const workers = workersOf(cfg);
   const byId = new Map(workers.map((w) => [w.id, w]));
   if (ids.length !== workers.length || ids.some((id) => !byId.has(id)) || new Set(ids).size !== ids.length) {
