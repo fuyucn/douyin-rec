@@ -607,7 +607,7 @@ function patchMarkdown(checkOnly) {
   const body = `${MD_BEGIN}\n\n\`\`\`mermaid\n${MERMAID}\n\`\`\`\n\n${MD_END}`;
   const next = md.slice(0, i) + body + md.slice(j + MD_END.length);
   if (next === md) return false;
-  if (!checkOnly) writeFileSync(MD_PATH, next);
+  if (!checkOnly) writeFileSync(MD_PATH, next.replace(/[ \t]+$/gm, ""));
   return true;
 }
 
@@ -626,7 +626,7 @@ if (CHECK) {
   }
   console.log("architecture.html + architecture.md 结构与仓库一致 ✓(热度统计不参与比对)");
 } else {
-  writeFileSync(OUT, html);
+  writeFileSync(OUT, html.replace(/[ \t]+$/gm, ""));
   const mdChanged = patchMarkdown(false);
   console.log(`wrote ${OUT} (${all.length} 包, ${edges.length} 依赖边, 热度窗口 ${DAYS}d)`);
   console.log(`patched ${MD_PATH}${mdChanged ? " (mermaid 已更新)" : " (mermaid 无变化)"}`);

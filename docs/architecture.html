@@ -83,7 +83,7 @@
     <div>
       <h1>直播录制 · 架构图</h1>
       <p class="sub">抖音 / B站 / 快手直播录制 + 弹幕 + 多节点 hub 后处理。两个可插拔接缝:平台轴 + 引擎轴。</p>
-      <p class="gen">由 scripts/gen-architecture.mjs 生成 · 热度窗口近 90 天 · 2026-11-20 22:51</p>
+      <p class="gen">由 scripts/gen-architecture.mjs 生成 · 热度窗口近 90 天 · 2026-11-20 22:59</p>
     </div>
     <div class="tools">
       <button class="tbtn" id="theme">◐ 主题</button>
@@ -228,11 +228,11 @@
     </div>
   <div class="band">
       <div class="blabel">L4 · 有状态应用</div>
-      <div class="grid"><div class="card" style="--role:#34d399;--mix:34%" title="@drec/app · 20115 LOC · 87 文件 · 93 测试 · 近 90 天 358 次提交">
+      <div class="grid"><div class="card" style="--role:#34d399;--mix:34%" title="@drec/app · 20115 LOC · 87 文件 · 93 测试 · 近 90 天 359 次提交">
           <span class="rail" style="background:#34d399"></span>
           <div class="t">app</div>
           <div class="pkg">@drec/app</div>
-          <div class="m"><span><b>20115</b> LOC</span><span><b>87</b> 文件</span><span><b>93</b> 测试</span><span><b>358</b> Δ</span></div>
+          <div class="m"><span><b>20115</b> LOC</span><span><b>87</b> 文件</span><span><b>93</b> 测试</span><span><b>359</b> Δ</span></div>
           <div class="hbar"><i style="width:100%;background:#34d399"></i></div>
         </div><div class="card" style="--role:#34d399;--mix:29%" title="@drec/web (独立 Vite) · 15400 LOC · 101 文件 · 0 测试 · 近 90 天 289 次提交">
           <span class="rail" style="background:#34d399"></span>
@@ -321,9 +321,9 @@
       <text x="452" y="201" class="fs">biliLive 格式 .xml</text>
     </g>
   </svg>
-    
-    
-    
+
+
+
   </div>
   <div class="band">
     <div class="blabel">③ 实时状态（HubWatch + SSE） — 写入方 → HubWatch 指纹 → SSE → 三个页面</div>
@@ -372,7 +372,7 @@
       <text x="452" y="201" class="fs">状态 + 动作</text>
     </g>
   </svg>
-    
+
     <div class="note"><b>已落地</b></div>
     <div class="note">断线退化为指数退避兜底轮询(3s→30s,隐藏页暂停);页面不再各自 setInterval 拉整份数据</div>
   </div>
@@ -418,7 +418,7 @@
       <text x="660" y="201" class="fs">cpu/net/upload</text>
     </g>
   </svg>
-    
+
     <div class="note"><b>已落地</b></div>
     <div class="note">仍 await dispatcher.drain()：保留 hub 的 running 守卫；收益是后一房间的 job 行立即可见 + net/upload 与前一房间 CPU 重叠</div>
   </div>
@@ -474,8 +474,8 @@
       <text x="244" y="201" class="fs">P1 ∥ 烧录, append 分P</text>
     </g>
   </svg>
-    
-    
+
+
     <div class="note"><b>实验特性</b> · experimental:不烧录的房间可走 nodeSideUpload —— winner 节点本地 remux+上传,跳过 pull(见 plans/027)</div>
   </div>
 
@@ -843,7 +843,7 @@
       <td><code>app</code></td>
       <td>L4 · 有状态应用</td>
       <td><span style="color:#34d399">●</span> 应用/前端</td>
-      <td class="n">20115</td><td class="n">87</td><td class="n">93</td><td class="n">358</td>
+      <td class="n">20115</td><td class="n">87</td><td class="n">93</td><td class="n">359</td>
     </tr>
     <tr>
       <td><code>web</code></td>
