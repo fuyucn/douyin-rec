@@ -6,10 +6,24 @@
  */
 import type { ApiCtx } from "./context.js";
 import type { ApiResult } from "./types.js";
-import { HUB_JOB_STATES, QUEUE_PHASES, isUploadingMode, platformForRoom, type QueuePhase } from "@drec/core";
+import { HUB_JOB_STATES, QUEUE_PHASES, isUploadingMode, platformForRoom, type HubJobsDTO, type QueuePhase } from "@drec/core";
 import { listHubJobs, readHubJobLog, latestRunPerRoom, buildQueueView } from "../../hub-jobs.js";
+import { HubJobLedgerSchemaError } from "../../hub-job-ledger.js";
 import * as hubStore from "../../hub-store.js";
 import { knownTaskName } from "../../hub-label-lookup.js";
+
+function ledgerError(error: unknown): string {
+  if (error instanceof HubJobLedgerSchemaError) return `读 hub 台账失败: ${error.message}`;
+  const dbError = error as { code?: unknown; message?: unknown };
+  const rawCode = typeof dbError?.code === "string" ? dbError.code : "";
+  const code = /^[A-Z0-9_]{1,40}$/.test(rawCode) ? rawCode : "";
+  const message = typeof dbError?.message === "string" ? dbError.message : "";
+  const reason = /BUSY|LOCKED/.test(code) || /database (table )?is locked/i.test(message) ? "数据库被锁定"
+    : /CORRUPT|NOTADB/.test(code) || /file is not a database|database disk image is malformed/i.test(message) ? "数据库损坏"
+      : /IOERR|CANTOPEN|READONLY/.test(code) || /disk I\/O error|unable to open database|readonly/i.test(message) ? "数据库 I/O 错误"
+        : "数据库查询失败";
+  return `读 hub 台账失败 (${code || "DB_ERROR"}): ${reason}；请检查文件状态、锁与存储 I/O`;
+}
 
 export function buildHubJobs(ctx: ApiCtx) {
   const { deps, store, manager, hubDir, hubConfigPath,
@@ -28,9 +42,10 @@ export function buildHubJobs(ctx: ApiCtx) {
           offset: opts.offset ?? 0,
           states: states.length > 0 ? states : undefined,
         });
-        return { status: 200, body: { jobs, total } };
+        const response = { jobs, total } satisfies HubJobsDTO;
+        return { status: 200, body: response };
       } catch (e) {
-        return err(500, `读 hub 台账失败: ${String((e as Error)?.message ?? e)}`);
+        return err(500, ledgerError(e));
       }
     },
 
@@ -45,7 +60,7 @@ export function buildHubJobs(ctx: ApiCtx) {
       try {
         return { status: 200, body: { rooms: latestRunPerRoom(deps.syncDbPath) } };
       } catch (e) {
-        return err(500, `读 hub 台账失败: ${String((e as Error)?.message ?? e)}`);
+        return err(500, ledgerError(e));
       }
     },
 
