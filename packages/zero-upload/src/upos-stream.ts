@@ -2,6 +2,7 @@
 // Keep this module's exports stable; Studio metadata operations live in separate modules.
 import { noteRecorderProgress } from "@drec/core";
 import { UA, controlSignal, readBiliupCookieHeader } from "./upos-http.js";
+import { sleepUnlessAborted } from "./live-pump-wait.js";
 
 export { lookupArchive, findArchiveByTitle } from "./studio-archive.js";
 export type { StudioVideo, StudioArchive, LookupArchiveResult, FindArchiveResult } from "./studio-archive.js";
@@ -299,11 +300,13 @@ async function putChunk(
   signal?: AbortSignal,
   onFail?: (info: { httpStatus?: number; error?: string }) => void,
 ): Promise<boolean> {
-  const wait = retrySleep ?? sleep;
+  const wait = (ms: number): Promise<void> => sleepUnlessAborted(ms, [signal], retrySleep);
   const delayOf = (attempt: number): number => retryDelaysMs[attempt] ?? retryDelaysMs.at(-1) ?? 3000;
   let httpStatus: number | undefined;
   let error: string | undefined;
   for (let attempt = 0; attempt <= retries; attempt++) {
+    // Stop must not wait out a recovery backoff (up to 30s); check before every attempt.
+    signal?.throwIfAborted();
     // A later timeout must replace an earlier HTTP failure in the diagnostic result.
     httpStatus = undefined;
     error = undefined;
@@ -333,8 +336,4 @@ async function putChunk(
   }
   onFail?.({ ...(httpStatus !== undefined ? { httpStatus } : {}), ...(error !== undefined ? { error } : {}) });
   return false;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
 }

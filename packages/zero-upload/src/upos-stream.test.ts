@@ -206,6 +206,26 @@ describe("chunk retry policy + transport diagnostics", () => {
     expect(waits).toEqual([1, 2, 3, 4]);
   });
 
+  it("重试等待可被 stop 中断,不干等 30s", async () => {
+    fakeCookies();
+    const mod = await import("./upos-stream.js");
+    const { impl } = makeFetch();
+    const session = await mod.preupload({ cookiesPath: COOKIES, fileName: "t.mkv", totalSize: 1024, fetchImpl: impl });
+    const failing = (async (input: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? "GET").toUpperCase() !== "PUT") return impl(input, init);
+      throw new TypeError("fetch failed");
+    }) as unknown as typeof fetch;
+    const ac = new AbortController();
+    const started = Date.now();
+    const run = mod.uploadChunks({
+      session, totalSize: 1024, fetchImpl: failing, retries: 1, retryDelaysMs: [30_000],
+      signal: ac.signal, readChunk: async () => new Uint8Array(1024),
+    });
+    setTimeout(() => ac.abort(), 20);
+    await expect(run).rejects.toThrow(/abort/i);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
   it("fetch failed 保留 cause code,错误消息与 onChunkFailure 都带", async () => {
     fakeCookies();
     const mod = await import("./upos-stream.js");
