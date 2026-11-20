@@ -2,9 +2,8 @@
  * Hub operator actions: manual node re-run, stop/ack/run-now, drain-support probe, pool providers.
  *
  * Extracted from the hub starter (plan 050.5). These handlers are called straight through by the
- * web API, so their 400/409 verdicts, ledger transitions and probe ordering are unchanged - only
- * the assembly site moves. `retryNode` stays byte-for-byte identical: it re-drives a workflow node
- * on a job the reconciler may still be touching, and a silent change there would duplicate uploads.
+ * web API. `retryNode` validates prerequisites before mutating the ledger, while preserving
+ * stream locking and upload safeguards: re-driving a node must not duplicate uploads.
  */
 
 import {
@@ -110,10 +109,8 @@ export function createHubActions(deps: HubActionsDeps): HubActions {
       try {
         return await deps.pool.withStreamLock(streamKey, async () => {
           throwIfAborted();
-          deps.ledger.setState(streamKey, "retrying", {}, { force: true }); // 人工重跑:允许 done 场重跑单节点
           const cfg = deps.resolveCfg(platform, roomSlug);
           if (!cfg) {
-            deps.ledger.setState(streamKey, "failed", { error: `房间未开 hub: ${streamKey}` });
             return { ok: false, error: `房间未开 hub: ${streamKey}`, code: 400 };
           }
           // 分段模式:产出/烧录/上传是一个整体(逐段 remux + 多文件建稿),不做单节点重跑
@@ -121,12 +118,13 @@ export function createHubActions(deps: HubActionsDeps): HubActions {
           if (cfg.steps?.mergeSegments === false) {
             return { ok: false, error: "分段上传模式不支持单节点重跑,请用「重新运行」整场重跑", code: 400 };
           }
-          deps.ledger.backfillNodeStates(streamKey);
           const derived = deriveStageProducts(stageSub, effectiveStageFormat(cfg.outputFormat, cfg.uploadMode));
           if (!derived) {
-            deps.ledger.setState(streamKey, "failed", { error: `stage 产物缺失,无法重跑: ${stageSub}` });
             return { ok: false, error: `stage 产物缺失,无法重跑: ${stageSub}`, code: 409 };
           }
+          // 前置检查全部通过后才写台账,拒绝重跑时保留原 job / 节点状态 / 事件。
+          deps.ledger.setState(streamKey, "retrying", {}, { force: true }); // 人工重跑:允许 done 场重跑单节点
+          deps.ledger.backfillNodeStates(streamKey);
           const products = job?.outputStem ? withOutputStem(derived, job.outputStem) : derived;
           const workflow = buildWorkflow({
             streamKey, stageSub, products, deps: deps.pipelineDeps, cfg, log: deps.log,
