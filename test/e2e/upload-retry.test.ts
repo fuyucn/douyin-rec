@@ -126,16 +126,31 @@ describe("e2e: 上传超时/故障后的重试与降级", () => {
   // The fake lag is counted in reads and the fake injects a no-op sleep; backoff timing is unit-tested
   // next to appendGroup (test/upload/biliup-append.test.ts).
   it("fake: countLagReads keeps the pre-append count for N reads", async () => {
-    // No countParts -> the master's delayed read-back gate (#327) is off and does not consume the fake's lag reads.
+    // appendGroup 成功后现在也会回读并消耗 lag（生产行为）；这里用不带 countParts 的裸 append 验证 fake 语义。
     s = await Scenario.create({ cfg: { cleanup: FULL_CLEANUP }, deps: { countParts: undefined } }); rec(s);
-    s.fake.countLagReads = 2;
     await s.reconcile();
     const bv = s.fake.onlyArchive.bv;
     expect(s.fake.onlyArchive.parts).toHaveLength(3);
-    // The last append (livechat) left a 2-read lag: the counts before it, then the real count.
-    expect(await s.fake.countVideoParts(bv)).toBe(2);
-    expect(await s.fake.countVideoParts(bv)).toBe(2);
+    s.fake.countLagReads = 2;
+    await s.fake.appendGroup({ cookies: "", bv, files: ["lag-probe.mp4"] });
+    expect(s.fake.onlyArchive.parts).toHaveLength(4);
+    // 提交后前两次读仍是提交前的分 P 数，第三次才看到真实值。
     expect(await s.fake.countVideoParts(bv)).toBe(3);
+    expect(await s.fake.countVideoParts(bv)).toBe(3);
+    expect(await s.fake.countVideoParts(bv)).toBe(4);
+  });
+
+  it("append 返回成功但分 P 未落地 → 停在上传,不再追加后续段,保留源", async () => {
+    s = await create(); rec(s);
+    s.fake.inject({ op: "append", mode: "drop", match: (files) => files.some((f) => f.endsWith("_danmu.mp4")) });
+    await s.reconcile();
+    const key = s.onlyKey();
+    const appended = s.fake.calls.filter((c) => c.op === "append");
+    expect(appended.filter((c) => c.files.some((f) => f.endsWith("_livechat.mp4"))), "后续段不得再追加").toHaveLength(0);
+    expect(s.fake.onlyArchive.parts, "只有 P1 落地").toHaveLength(1);
+    expect(s.jobState(key)).toBe("failed");
+    expect(s.ledger.get(key)?.error).toContain("append-ambiguous");
+    expect(tsLeft(s), "不得删源").toBe(3);
   });
 
   it("append applied but response lost + delayed readback → must not append twice (#66)", async () => {

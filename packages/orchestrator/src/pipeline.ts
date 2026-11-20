@@ -265,6 +265,11 @@ export interface PipelineDeps {
    * 缺省 undefined = 核验关闭(行为与本次上线前一致)。
    */
   countParts?: (bv: string) => Promise<number | null>;
+  /**
+   * 读某稿件当前分 P 的标题/时长（最终回读失败时的诊断用，可选）。
+   * 缺省 undefined = 不附加诊断；返回 null = 读不到（不影响放行判定）。
+   */
+  readParts?: (bv: string) => Promise<Array<{ page: number; title: string; durationSec: number }> | null>;
   /** 删 master 本地 stage 文件(cleanup 用);默认 fs.rm,可注入测试。 */
   rmStage?: (paths: string[]) => Promise<void>;
   notify: (e: NotifyEvent) => void;
@@ -643,14 +648,29 @@ async function readbackBeforeCleanup(o: {
     return { ok: true };
   }
   const waited = `已等待 ${Math.round(windowMs / 60_000)} 分钟`;
-  const reason = v.kind === "mismatch"
+  const base = v.kind === "mismatch"
     ? (v.actual > v.expected
       ? `上传后回读分 P 数多于期望(期望 ${v.expected}、回读 ${v.actual},${waited}),可能重复分 P;已保留全部视频源,请人工核对`
       : `上传后回读分 P 数不足(期望 ${v.expected}、回读 ${v.actual},${waited});已保留全部视频源,请在创作中心核对分 P`)
     : `上传后无法回读分 P 数(${v.kind === "unknown" ? v.reason : "未知"},${waited});已保留全部视频源,请人工核对`;
+  // 诊断用:失败时附上实际分 P 的标题/时长,人工能直接看出缺了哪一段(不改变放行判定)。
+  const actualParts = v.kind === "mismatch" ? await actualPartsSummary(deps, bv) : null;
+  const reason = actualParts ? `${base};实际分P: ${actualParts}` : base;
   deps.ledger.logStep(streamKey, "clean_verify", "done", reason);
   log(`${reason} bv=${bv}`);
   return { ok: false, reason };
+}
+
+/** 最终回读 mismatch 时的诊断摘要:`P1(3601s)/P2(3602s)/…`;读不到 → null(不阻断判定)。 */
+async function actualPartsSummary(deps: PipelineDeps, bv: string): Promise<string | null> {
+  if (!deps.readParts) return null;
+  try {
+    const parts = await deps.readParts(bv);
+    if (!parts || parts.length === 0) return null;
+    return parts.map((p) => `${p.title || "?"}(${Math.round(p.durationSec)}s)`).join("/");
+  } catch {
+    return null;
+  }
 }
 
 /**

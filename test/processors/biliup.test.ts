@@ -177,7 +177,9 @@ describe("biliup processor (plan 038 T08)", () => {
   it("a bv already in the table resumes appending from the confirmed part count", async () => {
     const run = vi.fn(async () => "ok");
     const j = withRowBv(4);
-    const p = makeBiliupProcessor({ run, countParts: async () => 2 });
+    // onServer=2 → append#1 before/after=2/3 → append#2 before/after=3/4（成功路径也会回读确认落地）
+    const counts = [2, 2, 3, 3, 4];
+    const p = makeBiliupProcessor({ run, countParts: async () => counts.shift() ?? 4 });
     const r = await p.run(j as never, ctx());
     expect(r.bv).toBe("BV1fffffffff"); // issue-guard: allow (fake BV fixture)
     // P1 and P2 are already on the archive: only the files at index 2 and 3 are appended, never P1 again.
