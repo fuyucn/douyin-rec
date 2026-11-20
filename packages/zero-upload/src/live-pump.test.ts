@@ -2002,17 +2002,19 @@ describe("失败回退:已录字节必须被用上,不能白躺盘上", () => {
     writeFileSync(spool, Buffer.alloc(CHUNK, 3));
     const { fake } = makeUploadFetch({ failAllPuts: true });
     let puts = 0;
+    const waits: number[] = [];
     const counted = (async (input: string | URL | Request, init?: RequestInit) => {
       if ((init?.method ?? "GET").toUpperCase() === "PUT") puts++;
       return fake(input, init);
-    }) as unknown as typeof fetch;
+    }) as unknown as typeof fake;
     const r = await reuploadSpoolFile({
       cookiesPath: COOKIES, fileName: "seg-exhaust.ts", spoolPath: spool, line: "txa",
-      fetchImpl: counted, sleep: async () => {},
+      fetchImpl: counted, sleep: async (ms: number) => { waits.push(ms); },
     });
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/分块 0 上传失败/);
     expect(puts).toBe(7); // initial + 6 retries, not the live path's 4 attempts
+    expect(waits).toEqual([2000, 5000, 10000, 20000, 30000, 30000]); // 后两次 30s 也必须被钉住
   });
 
   it("reuploadSpoolFile:分片读取与文件逐字节一致,含不足一块的尾块", async () => {
