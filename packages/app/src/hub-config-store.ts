@@ -1,19 +1,16 @@
 /**
  * hub-config-store.ts — hub.config.json 里 **`resources` 段**的读写(T15)。
  *
- * 为什么单独一个文件:worker CRUD 已经在 worker-store.ts 里(同款「原子写 + 保留其它字段」),
- * 而 resources 是**另一类东西** —— 它不是节点列表,是**本机资源闸门**(CPU/网络并行度、烧录内存下限、
- * 上传限流)。两者写同一个文件,如果各写一份「读-改-写」逻辑,迟早会在某次并发里互相覆盖
- * (worker-store 保留非 worker 字段、resources 也保留非 resources 字段,各自都以为自己完整)。
+ * resources 是**本机资源闸门**(CPU/网络并行度、烧录内存下限、上传限流),领域逻辑与节点列表分开。
+ * 两个 store 写同一个文件,共用 hub-config-transaction 防止并发写入互相覆盖。
  *
  * 真理源仍是 `<root>/config/hub.config.json`(**或 master 实际解析到的那份**,见
  * `resolveHubConfigJson` 的 source),本模块不新增存储、不迁数据:读时现读不缓存,
  * 所以手改文件与 UI 天然同步(与 workers 一致)。
  */
-import { readFileSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
-import { dirname, join, basename } from "node:path";
-
+import { readFileSync } from "node:fs";
 import type { HubResources } from "@drec/core";
+import { mutateHubConfig, parseHubConfig, type HubConfigFile } from "./hub-config-transaction.js";
 
 // 类型本身放 core(app 与 orchestrator 共用);这里的 re-export 保持既有引用路径不变。
 export type { HubResources } from "@drec/core";
@@ -36,8 +33,6 @@ export const DEFAULT_HUB_RESOURCES: Required<HubResources> = {
   maxConcurrentPipelines: 2,
 };
 
-interface HubConfigFile { resources?: Partial<HubResources>; [k: string]: unknown }
-
 /**
  * The hub config the master is **actually running with**: its JSON text and/or the file it came from
  * (same shape as `resolveHubConfig`'s result). `json` wins when present — that is the content the
@@ -49,19 +44,10 @@ export interface HubConfigSource {
   path?: string;
 }
 
-/** Parse a valid hub config root; callers choose strict write or lenient display behavior. */
-function parseConfigTextStrict(text: string): HubConfigFile {
-  const parsed: unknown = JSON.parse(text);
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new Error("JSON 根必须是对象");
-  }
-  return parsed as HubConfigFile;
-}
-
 /** Parse hub config text. Missing/garbage → `{}` (same lenient rule for the file and inline text). */
 function parseConfigText(text: string | undefined): HubConfigFile {
   if (text === undefined) return {};
-  try { return parseConfigTextStrict(text); }
+  try { return parseHubConfig(text); }
   catch { return {}; }
 }
 
@@ -69,24 +55,6 @@ function parseConfigText(text: string | undefined): HubConfigFile {
 function readFile(path: string): HubConfigFile {
   try { return parseConfigText(readFileSync(path, "utf-8")); }
   catch { return {}; }
-}
-
-/** Writes may start from an absent file, but must not replace invalid or unreadable input. */
-function readFileForWrite(path: string): HubConfigFile {
-  let text: string;
-  try {
-    text = readFileSync(path, "utf-8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
-    const code = (error as NodeJS.ErrnoException).code ?? "unknown";
-    throw new Error(`无法读取 hub 配置 ${path} (${code})`, { cause: error });
-  }
-
-  try {
-    return parseConfigTextStrict(text);
-  } catch (error) {
-    throw new Error(`hub 配置无效 ${path}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
-  }
 }
 
 /** Resolve a path or source object to config content (JSON text first, then the file). */
@@ -145,16 +113,10 @@ export function validateResources(patch: Partial<HubResources>): string | null {
   return null;
 }
 
-/**
- * 原子写 resources(**只覆盖 resources 键**,workers/workerSeq/其余字段原样保留)。
- *
- * 与 worker-store 同样的 temp+rename:读时现读不缓存,若写到一半被读会拿到半截 JSON。
- */
+/** 原子合并指定的 resources 子键,workers/workerSeq/其余字段原样保留。 */
 export function writeResources(configPath: string, patch: Partial<HubResources>): void {
-  const cfg = readFileForWrite(configPath);
-  mkdirSync(dirname(configPath), { recursive: true });
-  const next: HubConfigFile = { ...cfg, resources: { ...(cfg.resources ?? {}), ...patch } };
-  const tmp = join(dirname(configPath), `.${basename(configPath)}.tmp`);
-  writeFileSync(tmp, JSON.stringify(next, null, 2) + "\n", "utf-8");
-  renameSync(tmp, configPath);
+  mutateHubConfig(configPath, (cfg) => ({
+    next: { ...cfg, resources: { ...(cfg.resources ?? {}), ...patch } },
+    result: undefined,
+  }));
 }
