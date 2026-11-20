@@ -111,6 +111,11 @@ export interface UposPart {
   eTag: string;
 }
 
+/** Live-streaming path: fail fast, then degrade to spool instead of blocking the recorder. */
+export const DEFAULT_CHUNK_RETRY_DELAYS_MS = [1000, 2000, 3000] as const;
+/** Already-sealed recovery path: outlive a short network/CDN blip before giving up. */
+export const RECOVERY_CHUNK_RETRY_DELAYS_MS = [2000, 5000, 10000, 20000, 30000, 30000] as const;
+
 export interface UploadOptions {
   session: PreuploadResult;
   /** The byte count declared at preupload. */
@@ -119,6 +124,10 @@ export interface UploadOptions {
   readChunk: (index: number, size: number) => Promise<Uint8Array>;
   fetchImpl?: typeof fetch;
   retries?: number;
+  /** Delay before each retry; the last entry is reused when retries outnumber delays. */
+  retryDelaysMs?: readonly number[];
+  /** Test seam for retry backoff; production uses setTimeout. */
+  retrySleep?: (ms: number) => Promise<void>;
   onProgress?: (p: UploadChunkProgress) => void;
   signal?: AbortSignal;
   /** Current real size, capped by totalSize, for finalizing a live stream early. */
@@ -148,6 +157,7 @@ export async function uploadChunks(o: UploadOptions): Promise<UposPart[]> {
   const sizeOf = (): number => Math.min(totalSize, Math.max(1, Math.floor(o.totalSizeOf?.() ?? totalSize)));
   if (chunks === 0) throw new Error("totalSize 为 0,无可传内容");
   const retries = o.retries ?? 3;
+  const retryDelaysMs = o.retryDelaysMs ?? DEFAULT_CHUNK_RETRY_DELAYS_MS;
   const parts: UposPart[] = [];
   let uploadedBytes = 0;
 
@@ -173,7 +183,7 @@ export async function uploadChunks(o: UploadOptions): Promise<UposPart[]> {
       // UPOS accepts a shorter tail. Never zero-pad it: padding corrupts the media payload.
       declaredTotal = uploadedBytes + body.length;
     }
-    await uploadChunk(o, { doFetch, retries, chunks, declaredTotal, index: i, start, body });
+    await uploadChunk(o, { doFetch, retries, retryDelaysMs, retrySleep: o.retrySleep, chunks, declaredTotal, index: i, start, body });
     parts.push({ partNumber: i + 1, eTag: "etag" });
     uploadedBytes += body.length;
     noteRecorderProgress(); // A completed chunk is real progress for the finalizing stall judge.
@@ -187,11 +197,11 @@ export async function uploadChunks(o: UploadOptions): Promise<UposPart[]> {
 }
 
 async function uploadChunk(o: UploadOptions, transfer: {
-  doFetch: typeof fetch; retries: number; chunks: number; declaredTotal: number;
-  index: number; start: number; body: Uint8Array;
+  doFetch: typeof fetch; retries: number; retryDelaysMs: readonly number[]; retrySleep?: (ms: number) => Promise<void>;
+  chunks: number; declaredTotal: number; index: number; start: number; body: Uint8Array;
 }): Promise<void> {
   const { session } = o;
-  const { doFetch, retries, chunks, declaredTotal, index: i, start, body } = transfer;
+  const { doFetch, retries, retryDelaysMs, retrySleep, chunks, declaredTotal, index: i, start, body } = transfer;
   const params = new URLSearchParams({
     uploadId: await uploadIdOf(session, doFetch, o.signal),
     chunks: String(chunks),
@@ -203,7 +213,7 @@ async function uploadChunk(o: UploadOptions, transfer: {
     end: String(start + body.length),
   });
   let lastFail: { httpStatus?: number; error?: string } | undefined;
-  const ok = await putChunk(doFetch, `${session.url}?${params.toString()}`, session.bucket.auth, body, retries, o.signal, (f) => { lastFail = f; });
+  const ok = await putChunk(doFetch, `${session.url}?${params.toString()}`, session.bucket.auth, body, retries, retryDelaysMs, retrySleep, o.signal, (f) => { lastFail = f; });
   if (!ok) {
     o.onChunkFailure?.({ chunk: i, ...(lastFail?.httpStatus !== undefined ? { httpStatus: lastFail.httpStatus } : {}), ...(lastFail?.error !== undefined ? { error: lastFail.error } : {}) });
     // Preserve the last transport failure in the durable pump error, not just in its callback.
@@ -263,15 +273,34 @@ async function uploadIdOf(session: PreuploadResult, doFetch: typeof fetch, signa
   return j.upload_id;
 }
 
+function describeFetchError(e: unknown): string {
+  const err = e as { name?: unknown; message?: unknown; cause?: unknown };
+  const name = typeof err?.name === "string" ? err.name : "Error";
+  const message = String(err?.message ?? e).slice(0, 200);
+  let detail: string | undefined;
+  const cause = err?.cause;
+  if (typeof cause === "string") detail = cause;
+  else if (cause && typeof cause === "object") {
+    const c = cause as { code?: unknown; message?: unknown; name?: unknown };
+    const raw = (typeof c.code === "string" && c.code) || (typeof c.message === "string" && c.message) || (typeof c.name === "string" && c.name);
+    if (raw) detail = raw;
+  }
+  return `${name}: ${message}${detail ? ` (${detail.slice(0, 120)})` : ""}`;
+}
+
 async function putChunk(
   doFetch: typeof fetch,
   url: string,
   auth: string,
   body: Uint8Array,
   retries: number,
+  retryDelaysMs: readonly number[],
+  retrySleep: ((ms: number) => Promise<void>) | undefined,
   signal?: AbortSignal,
   onFail?: (info: { httpStatus?: number; error?: string }) => void,
 ): Promise<boolean> {
+  const wait = retrySleep ?? sleep;
+  const delayOf = (attempt: number): number => retryDelaysMs[attempt] ?? retryDelaysMs.at(-1) ?? 3000;
   let httpStatus: number | undefined;
   let error: string | undefined;
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -293,13 +322,13 @@ async function putChunk(
       });
       if (res.ok) return true;
       httpStatus = res.status;
-      if (res.status >= 500 && attempt < retries) { await sleep(1000 * (attempt + 1)); continue; }
+      if (res.status >= 500 && attempt < retries) { await wait(delayOf(attempt)); continue; }
       break;
     } catch (e) {
       if ((e as Error)?.name === "AbortError") throw e;
-      error = `${(e as Error)?.name ?? "Error"}: ${String((e as Error)?.message ?? e).slice(0, 200)}`;
+      error = describeFetchError(e);
       if (attempt >= retries) break;
-      await sleep(1000 * (attempt + 1));
+      await wait(delayOf(attempt));
     }
   }
   onFail?.({ ...(httpStatus !== undefined ? { httpStatus } : {}), ...(error !== undefined ? { error } : {}) });

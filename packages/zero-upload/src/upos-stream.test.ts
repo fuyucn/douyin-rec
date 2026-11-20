@@ -184,6 +184,50 @@ describe("uploadChunks", () => {
   });
 });
 
+describe("chunk retry policy + transport diagnostics", () => {
+  it("按 retryDelaysMs 重试,第 N 次 transport 成功后返回", async () => {
+    fakeCookies();
+    const mod = await import("./upos-stream.js");
+    const { impl } = makeFetch();
+    const session = await mod.preupload({ cookiesPath: COOKIES, fileName: "t.mkv", totalSize: 1024, fetchImpl: impl });
+    let puts = 0;
+    const waits: number[] = [];
+    const flaky = (async (input: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? "GET").toUpperCase() === "PUT" && ++puts <= 4) throw new TypeError("fetch failed");
+      return impl(input, init);
+    }) as unknown as typeof fetch;
+    const parts = await mod.uploadChunks({
+      session, totalSize: 1024, fetchImpl: flaky, retries: 4,
+      retryDelaysMs: [1, 2, 3, 4], retrySleep: async (ms: number) => { waits.push(ms); },
+      readChunk: async () => new Uint8Array(1024),
+    });
+    expect(parts).toHaveLength(1);
+    expect(puts).toBe(5);
+    expect(waits).toEqual([1, 2, 3, 4]);
+  });
+
+  it("fetch failed 保留 cause code,错误消息与 onChunkFailure 都带", async () => {
+    fakeCookies();
+    const mod = await import("./upos-stream.js");
+    const { impl } = makeFetch();
+    const session = await mod.preupload({ cookiesPath: COOKIES, fileName: "t.mkv", totalSize: 1024, fetchImpl: impl });
+    const failing = (async (input: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? "GET").toUpperCase() !== "PUT") return impl(input, init);
+      const e = new TypeError("fetch failed");
+      (e as { cause?: unknown }).cause = { code: "ECONNRESET" };
+      throw e;
+    }) as unknown as typeof fetch;
+    const failures: Array<{ chunk: number; error?: string }> = [];
+    const err = await mod.uploadChunks({
+      session, totalSize: 1024, fetchImpl: failing, retries: 0,
+      onChunkFailure: (f: { chunk: number; error?: string }) => failures.push(f),
+      readChunk: async () => new Uint8Array(1024),
+    }).catch((e: Error) => e);
+    expect((err as Error).message).toMatch(/fetch failed \(ECONNRESET\)/);
+    expect(failures).toEqual([{ chunk: 0, error: expect.stringContaining("ECONNRESET") }]);
+  });
+});
+
 describe("chunk failure reporting (#461)", () => {
   it("PUT 重试耗尽:onChunkFailure 带块号与最后一次 HTTP 状态,错误消息也带状态", async () => {
     fakeCookies();
