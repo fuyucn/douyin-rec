@@ -17,6 +17,10 @@ import { getStream, getLiving, getRoomInfo, getUname, BILIBILI_QUALITIES } from 
 
 export { BILIBILI_QUALITIES } from "./stream/index.js";
 
+const BILIBILI_URL_PATTERN = "(?:live\\.bilibili\\.com|b23\\.tv)\\/";
+const BILIBILI_URL_FLAGS = "i";
+const BILIBILI_URL_RE = new RegExp(BILIBILI_URL_PATTERN, BILIBILI_URL_FLAGS);
+
 /** URL / 房间号 → 房间号(live.bilibili.com/{roomid});已是房间号则原样。 */
 export function extractRoomSlug(url: string): string {
   const m = url.match(/live\.bilibili\.com\/(\d+)/);
@@ -52,8 +56,9 @@ export async function resolveBilibiliShortUrl(url: string): Promise<string | nul
 
 export const bilibiliPlatform: Platform = {
   id: "bilibili",
-  matchUrl: (url) => /live\.bilibili\.com\//.test(url) || /b23\.tv\//i.test(url),
-  urlPattern: "(?:live\\.bilibili\\.com|b23\\.tv)\\/",
+  matchUrl: (url) => BILIBILI_URL_RE.test(url),
+  urlPattern: BILIBILI_URL_PATTERN,
+  urlPatternFlags: BILIBILI_URL_FLAGS,
   roomToUrl,
   extractRoomSlug,
   resolveShortUrl: resolveBilibiliShortUrl,
