@@ -25,6 +25,17 @@ describe("下载引擎注册表(按 id 注册/查找)", () => {
     expect(listEngines().map((e) => e.id).sort()).toEqual(["ffmpeg", "mesio"]);
   });
 
+  it("拒绝空 id 与重复 id，且不覆盖已有实现", () => {
+    expect(() => registerEngine(fakeEngine(""))).toThrow("id 不能为空");
+    expect(() => registerEngine(fakeEngine("  "))).toThrow("id 不能为空");
+
+    const original = fakeEngine("ffmpeg");
+    registerEngine(original);
+    expect(() => registerEngine(fakeEngine("ffmpeg"))).toThrow("重复注册: ffmpeg");
+    expect(getEngine("ffmpeg")).toBe(original);
+    expect(engineNames()).toEqual(["ffmpeg"]);
+  });
+
   it("未知 id → undefined（调用方可回退平台默认）", () => {
     expect(getEngine("nope")).toBeUndefined();
   });

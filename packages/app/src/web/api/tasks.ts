@@ -371,6 +371,7 @@ export function buildTasks(ctx: ApiCtx) {
       const platforms = listPlatforms().map((p) => ({
         id: p.id,
         urlPattern: p.urlPattern ?? null,
+        urlPatternFlags: p.urlPatternFlags ?? "",
         qualities: p.qualities,
         engines: p.engines,
         defaultQuality: p.defaultQuality,

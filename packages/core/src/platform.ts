@@ -74,6 +74,8 @@ export interface Platform {
   matchUrl(url: string): boolean;
   /** matchUrl 的**可序列化**正则源(供前端按 URL 客户端判平台用;应与 matchUrl 同源)。 */
   urlPattern?: string;
+  /** urlPattern 的 RegExp flags(如 i);省略等同空字符串。 */
+  urlPatternFlags?: string;
   /** 房间号或 URL → 本平台规范直播 URL。 */
   roomToUrl(room: string): string;
   /** URL / 房间号 → 平台内部房间 id(slug);短链需先 resolveShortUrl。 */
@@ -126,11 +128,21 @@ export interface Platform {
 
 const platforms = new Map<string, Platform>();
 let defaultId: string | undefined;
+let hasExplicitDefault = false;
 
-/** 注册平台;首个注册的(或显式 default)成为默认平台。 */
+/** 注册平台;首个注册的(或唯一显式 default)成为默认平台。 */
 export function registerPlatform(p: Platform, opts?: { default?: boolean }): void {
+  if (!p.id.trim()) throw new Error("[platform] id 不能为空");
+  if (platforms.has(p.id)) throw new Error(`[platform] 重复注册: ${p.id}`);
+  if (opts?.default && hasExplicitDefault) throw new Error(`[platform] 默认平台重复指定: ${p.id}`);
+
   platforms.set(p.id, p);
-  if (opts?.default || defaultId === undefined) defaultId = p.id;
+  if (opts?.default) {
+    defaultId = p.id;
+    hasExplicitDefault = true;
+  } else if (defaultId === undefined) {
+    defaultId = p.id;
+  }
 }
 
 export function getPlatform(id: string): Platform | undefined {
@@ -138,12 +150,19 @@ export function getPlatform(id: string): Platform | undefined {
 }
 
 export function listPlatforms(): Platform[] {
-  return [...platforms.values()];
+  const registered = [...platforms.values()];
+  const defaultIndex = registered.findIndex((p) => p.id === defaultId);
+  if (defaultIndex > 0) registered.unshift(...registered.splice(defaultIndex, 1));
+  return registered;
 }
 
-/** 按 URL 反查平台(无命中返 undefined)。 */
+/** 按 URL 反查平台(无命中返 undefined;多重命中视为注册配置错误)。 */
 export function matchPlatform(url: string): Platform | undefined {
-  return [...platforms.values()].find((p) => p.matchUrl(url));
+  const matches = [...platforms.values()].filter((p) => p.matchUrl(url));
+  if (matches.length > 1) {
+    throw new Error(`[platform] URL 同时匹配多个平台: ${matches.map((p) => p.id).join(", ")}`);
+  }
+  return matches[0];
 }
 
 /** 默认平台(未注册任何平台时抛错)。 */
@@ -163,4 +182,5 @@ export function platformForRoom(room: string): Platform {
 export function _resetPlatforms(): void {
   platforms.clear();
   defaultId = undefined;
+  hasExplicitDefault = false;
 }
