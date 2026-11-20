@@ -7,25 +7,15 @@ import { STAGE_READY } from "@drec/core";
 import { needsManualPhaseOf } from "./hub-jobs.js";
 import { activeHubJobKeys, buildQueueView, latestRunPerRoom, listHubJobs, readHubJobLog, jobLogPath, jobLogPaths } from "./hub-jobs.js";
 // Deletion moved to the ledger owner (orchestrator); the fixtures below pin its SQL contract.
-import { deleteHubHistory } from "../../orchestrator/src/index.js";
+import { deleteHubHistory, SyncLedger } from "../../orchestrator/src/index.js";
 
-/** 手工建台账 fixture(表结构与 orchestrator SyncLedger 对齐——结构即契约,不 import 它保分层)。 */
+/** 初始化由台账 owner 提供,避免 app fixture 与真实 schema 漂移。 */
 function makeSyncDb(): { dbPath: string; db: DatabaseSync } {
   const dir = mkdtempSync(join(tmpdir(), "hubjobs-"));
   const dbPath = join(dir, "x-sync.db");
-  const db = new DatabaseSync(dbPath);
-  db.exec(`CREATE TABLE sync_jobs(streamKey TEXT PRIMARY KEY, state TEXT NOT NULL,
-    winnerWorker TEXT, bv TEXT, error TEXT, fails INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL)`);
-  db.exec(`CREATE TABLE sync_job_events(streamKey TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL)`);
-  db.exec(`CREATE TABLE sync_job_steps(streamKey TEXT NOT NULL, step TEXT NOT NULL, phase TEXT NOT NULL, at INTEGER NOT NULL, detail TEXT)`);
-  db.exec(`CREATE TABLE sync_candidates(streamKey TEXT NOT NULL, workerId TEXT NOT NULL,
-    coverage REAL NOT NULL, durationSec REAL NOT NULL, startMs INTEGER NOT NULL, endMs INTEGER NOT NULL,
-    totalGapSec REAL NOT NULL, danmuCount INTEGER, isWinner INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
-    PRIMARY KEY(streamKey, workerId))`);
-  db.exec(`CREATE TABLE sync_node_states(streamKey TEXT NOT NULL, node TEXT NOT NULL, state TEXT NOT NULL,
-    error TEXT, attempts INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL,
-    PRIMARY KEY(streamKey, node))`);
-  return { dbPath, db };
+  const ledger = new SyncLedger(dbPath);
+  ledger.close();
+  return { dbPath, db: new DatabaseSync(dbPath) };
 }
 
 const T0 = 1_700_000_000_000;
@@ -320,8 +310,21 @@ describe("latestRunPerRoom", () => {
     expect(byKey["douyin:200"].state).toBe("merging");
   });
 
-  it("无 sync db / 空表 → 空数组,不炸", () => {
+  it("库文件不存在或真实 ledger schema 查询成功但无行 → 空结果", () => {
     expect(latestRunPerRoom("/nonexistent/x-sync.db")).toEqual([]);
+    const { dbPath, db } = makeSyncDb();
+    db.close();
+    expect(latestRunPerRoom(dbPath)).toEqual([]);
+    expect(listHubJobs(dbPath)).toEqual({ jobs: [], total: 0 });
+  });
+
+  it("已有库缺必需 schema 时 latest-runs 不伪装成空数组", () => {
+    const dir = mkdtempSync(join(tmpdir(), "latest-runs-invalid-"));
+    const dbPath = join(dir, "invalid.db");
+    const db = new DatabaseSync(dbPath);
+    db.exec("CREATE TABLE sync_jobs(streamKey TEXT PRIMARY KEY, state TEXT NOT NULL)");
+    db.close();
+    expect(() => latestRunPerRoom(dbPath)).toThrow(/缺少必需列/);
   });
 });
 
@@ -969,19 +972,7 @@ describe("T5 批量读取", () => {
   });
 
   it("附加表查询次数与 job 数**无关**(N+1 已消除)", () => {
-    const dir = mkdtempSync(join(tmpdir(), "hubjobs-nplus1-"));
-    const dbPath = join(dir, "x-sync.db");
-    const db = new DatabaseSync(dbPath);
-    db.exec(`CREATE TABLE sync_jobs(streamKey TEXT PRIMARY KEY, state TEXT NOT NULL,
-      winnerWorker TEXT, bv TEXT, error TEXT, fails INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL)`);
-    db.exec(`CREATE TABLE sync_job_events(streamKey TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL)`);
-    db.exec(`CREATE TABLE sync_job_steps(streamKey TEXT NOT NULL, step TEXT NOT NULL, phase TEXT NOT NULL, at INTEGER NOT NULL, detail TEXT)`);
-    db.exec(`CREATE TABLE sync_candidates(streamKey TEXT NOT NULL, workerId TEXT NOT NULL,
-      coverage REAL NOT NULL, durationSec REAL NOT NULL, startMs INTEGER NOT NULL, endMs INTEGER NOT NULL,
-      totalGapSec REAL NOT NULL, danmuCount INTEGER, isWinner INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
-      PRIMARY KEY(streamKey, workerId))`);
-    db.exec(`CREATE TABLE sync_node_states(streamKey TEXT NOT NULL, node TEXT NOT NULL, state TEXT NOT NULL,
-      error TEXT, attempts INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL, PRIMARY KEY(streamKey, node))`);
+    const { dbPath, db } = makeSyncDb();
     for (let i = 0; i < 200; i++) {
       seedJob(db, `douyin:${i}:2026-10-01`, [["merging", T0 + i]], 100);
       db.prepare("INSERT INTO sync_node_states(streamKey,node,state,attempts,updatedAt) VALUES(?,?,?,1,?)")
@@ -1006,8 +997,8 @@ describe("T5 批量读取", () => {
       DatabaseSync.prototype.prepare = orig;
     }
     const countFor10 = n;
-    // 200 个 job 的附加表查询**不是** 200×4(旧实现 ≈800 条)。余量给 historicalRates(按 done job
-    // 数线性,fixture 里 done 为 0)与 jobs 的 count/select 两条。
+    // 200 个 job 的附加表查询**不是** 200×4(旧实现 ≈800 条)。总数含两次 schema 能力核对、
+    // 历史速率读与 jobs 的 count/select,始终与 job 数无关。
     expect(countFor200).toBeLessThanOrEqual(10);
     // 关键性质:200 与 10 个 job 的语句数**基本相同** → 确实与 job 数解耦。
     expect(countFor200).toBeLessThanOrEqual(countFor10 + 1);
@@ -1019,21 +1010,104 @@ describe("T5 批量读取", () => {
     expect(listHubJobs(dbPath, { states: ["nonexistent-state"] })).toEqual({ jobs: [], total: 0 });
   });
 
-  it("旧库缺 steps 表(含 detail 列)→ 空步骤,不抛;其余表照常", () => {
-    const dir = mkdtempSync(join(tmpdir(), "hubjobs-nosteps-"));
-    const dbPath = join(dir, "old-sync.db");
-    const db = new DatabaseSync(dbPath);
-    db.exec(`CREATE TABLE sync_jobs(streamKey TEXT PRIMARY KEY, state TEXT NOT NULL,
-      winnerWorker TEXT, bv TEXT, error TEXT, fails INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL)`);
-    db.prepare("INSERT INTO sync_jobs(streamKey,state,fails,updatedAt) VALUES(?,?,0,?)").run("douyin:1:2026-10-01", "merging", T0);
-    db.prepare("CREATE TABLE sync_job_events(streamKey TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL)").run();
-    db.prepare("INSERT INTO sync_job_events(streamKey,state,at) VALUES(?,?,?)").run("douyin:1:2026-10-01", "pending", T0);
+  it("指定旧 schema 缺 steps 与 review/upload 列时只降级对应字段", () => {
+    const { dbPath, db } = makeSyncDb();
+    db.exec("DROP TABLE sync_job_steps");
+    db.exec("ALTER TABLE sync_jobs DROP COLUMN uploadStatus");
+    db.exec("ALTER TABLE sync_jobs DROP COLUMN ackedAt");
+    db.exec("ALTER TABLE sync_jobs DROP COLUMN ackNote");
+    db.prepare("INSERT INTO sync_jobs(streamKey,state,winnerWorker,bv,error,fails,updatedAt) VALUES(?,?,?,?,?,0,?)")
+      .run("douyin:1:2026-10-01", "merging", "local", null, null, T0);
+    db.prepare("INSERT INTO sync_job_events(streamKey,state,at) VALUES(?,?,?)")
+      .run("douyin:1:2026-10-01", "pending", T0);
+    db.prepare(`INSERT INTO sync_candidates(streamKey,workerId,coverage,durationSec,startMs,endMs,totalGapSec,danmuCount,isWinner,updatedAt)
+      VALUES(?,?,1,100,0,100,0,3,1,?)`).run("douyin:1:2026-10-01", "local", T0);
     db.close();
     const { jobs, total } = listHubJobs(dbPath, { now: T0 });
     expect(total).toBe(1);
-    expect(jobs[0].steps).toEqual([]);           // 缺表降级
-    expect(jobs[0].events).toHaveLength(1);       // 有表的照常
-    expect(jobs[0].startedAt).toBe(T0);
+    expect(jobs[0].steps).toEqual([]);           // 仅缺失表对应的字段降级
+    expect(jobs[0].events).toEqual([{ state: "pending", at: T0 }]);
+    expect(jobs[0].candidates).toMatchObject([{ worker: "local", danmuCount: 3 }]);
+    expect(jobs[0]).toMatchObject({ startedAt: T0, nodeUpload: null, ackedAt: null, ackNote: null });
+    expect(listHubJobs(dbPath, { acked: true }).total).toBe(0);
+    expect(listHubJobs(dbPath, { acked: false }).total).toBe(1);
+  });
+
+  it("旧可选列仅降级对应字段,非缺失的 steps/candidates 仍完整读取", () => {
+    const { dbPath, db } = makeSyncDb();
+    db.exec("ALTER TABLE sync_job_steps DROP COLUMN detail");
+    db.exec("ALTER TABLE sync_candidates DROP COLUMN danmuCount");
+    db.prepare("INSERT INTO sync_jobs(streamKey,state,winnerWorker,bv,error,fails,updatedAt) VALUES(?,?,?,?,?,0,?)")
+      .run("douyin:1:2026-10-01", "merging", "local", null, null, T0);
+    db.prepare("INSERT INTO sync_job_events(streamKey,state,at) VALUES(?,?,?)")
+      .run("douyin:1:2026-10-01", "pending", T0);
+    db.prepare("INSERT INTO sync_job_steps(streamKey,step,phase,at) VALUES(?,?,?,?)")
+      .run("douyin:1:2026-10-01", "merge", "done", T0);
+    db.prepare(`INSERT INTO sync_candidates(streamKey,workerId,coverage,durationSec,startMs,endMs,totalGapSec,isWinner,updatedAt)
+      VALUES(?,?,1,100,0,100,0,1,?)`).run("douyin:1:2026-10-01", "local", T0);
+    db.close();
+    const { jobs } = listHubJobs(dbPath, { now: T0 });
+    expect(jobs[0].steps).toEqual([{ step: "merge", phase: "done", at: T0, detail: undefined }]);
+    expect(jobs[0].candidates).toMatchObject([{ worker: "local", danmuCount: null }]);
+    expect(jobs[0].nodeStates).toEqual([]);
+  });
+
+  it("events/candidates/nodeStates 必需表缺失时拒绝伪造空投影", () => {
+    for (const table of ["sync_job_events", "sync_candidates", "sync_node_states"]) {
+      const { dbPath, db } = makeSyncDb();
+      db.exec(`DROP TABLE ${table}`);
+      db.close();
+      expect(() => listHubJobs(dbPath), table).toThrow(new RegExp(`缺少必需表 ${table}`));
+    }
+  });
+
+  it("已存在的附属表缺 projection 必需列时失败,不退化为空数组", () => {
+    for (const { table, column, index } of [
+      { table: "sync_job_events", column: "at", index: "idx_job_events_key" },
+      { table: "sync_candidates", column: "totalGapSec" },
+      { table: "sync_node_states", column: "updatedAt" },
+    ]) {
+      const { dbPath, db } = makeSyncDb();
+      if (index) db.exec(`DROP INDEX ${index}`);
+      db.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+      db.close();
+      expect(() => listHubJobs(dbPath), `${table}.${column}`).toThrow(/缺少必需列/);
+    }
+  });
+
+  it("已有但空白/缺少必需列的 SQLite 文件不是合法空库", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hubjobs-invalid-schema-"));
+    const dbPath = join(dir, "invalid.db");
+    const db = new DatabaseSync(dbPath);
+    db.exec("CREATE TABLE sync_jobs(streamKey TEXT PRIMARY KEY, state TEXT NOT NULL)");
+    db.close();
+    expect(() => listHubJobs(dbPath)).toThrow(/缺少必需列/);
+
+    const emptyPath = join(dir, "empty.db");
+    new DatabaseSync(emptyPath).close();
+    expect(() => listHubJobs(emptyPath)).toThrow(/缺少必需表 sync_jobs/);
+  });
+
+  it("损坏文件不作为空结果", () => {
+    const dbPath = join(mkdtempSync(join(tmpdir(), "hubjobs-corrupt-")), "bad.db");
+    writeFileSync(dbPath, "not a sqlite database");
+    expect(() => listHubJobs(dbPath)).toThrow();
+  });
+
+  it("附属表查询发生运行时错误时抛出而非返回部分空投影", () => {
+    const { dbPath, db } = makeSyncDb();
+    seedJob(db, "douyin:1:2026-10-01", [["merging", T0]], 100);
+    db.close();
+    const original = DatabaseSync.prototype.prepare;
+    DatabaseSync.prototype.prepare = function (this: DatabaseSync, sql: string) {
+      if (sql.includes("FROM sync_job_events WHERE streamKey IN")) throw new Error("simulated read failure");
+      return original.call(this, sql);
+    } as typeof DatabaseSync.prototype.prepare;
+    try {
+      expect(() => listHubJobs(dbPath, { now: T0 })).toThrow("simulated read failure");
+    } finally {
+      DatabaseSync.prototype.prepare = original;
+    }
   });
 
   it("limit/offset/states 过滤仍正确(批量化没动分页语义)", () => {
