@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChildProcess } from "node:child_process";
-import { registerPlatform, type DownloadEngine, type Platform, type RecorderEvents } from "@drec/core";
+import { _resetPlatforms, registerPlatform, type DownloadEngine, type Platform, type RecorderEvents } from "@drec/core";
 import {
   PollingRecorder, stamp, describeStreamIdentity, POLL_MS, STALL_CHECK_MS, STALL_GRACEFUL_EXIT_MS, STALL_TIMEOUT_MS, THROTTLE_POLL_MS,
   THROTTLE_MAX_POLL_MS,
@@ -35,6 +35,13 @@ class FakeProc extends EventEmitter {
     this.killed = true;
     return true;
   }
+}
+
+
+/** Every test registers a fresh fake platform; reset first so the new duplicate-id guard stays honest. */
+function usePlatform(p: Platform): void {
+  _resetPlatforms();
+  registerPlatform(p);
 }
 
 function makePlatform(living: boolean | "error"): Platform {
@@ -84,7 +91,7 @@ afterEach(() => {
 describe("platform live id (issue #320)", () => {
   it("onLive carries the live id the platform returned with the stream", async () => {
     vi.useFakeTimers();
-    registerPlatform(makePlatform(true));
+    usePlatform(makePlatform(true));
     const proc = new FakeProc();
     const { ev, outDir } = await startRecorder(proc);
     expect(ev.onLive).toHaveBeenCalledWith(expect.objectContaining({ liveSessionId: "live-9" }));
@@ -106,7 +113,7 @@ describe("recording directory layout (issue #336)", () => {
 
   async function dirFor(outputLayout: "legacy" | "room" | undefined, setup?: (outDir: string) => void, owner = "AnchorA"): Promise<{ dir: string; outDir: string }> {
     vi.useFakeTimers();
-    registerPlatform(layoutPlatform(owner));
+    usePlatform(layoutPlatform(owner));
     const proc = new FakeProc();
     let dir = "";
     const engine: DownloadEngine = {
@@ -153,7 +160,7 @@ describe("recording directory layout (issue #336)", () => {
 describe("卡死看门狗(正常下播不误报)", () => {
   it("进程已 exit 但 close 晚到 → 不误报录制卡死", async () => {
     vi.useFakeTimers();
-    registerPlatform(makePlatform(false));
+    usePlatform(makePlatform(false));
     const proc = new FakeProc();
     const { rec, ev, outDir } = await startRecorder(proc);
     (rec as unknown as { lastAdvanceAt: number }).lastAdvanceAt = Date.now() - 120_000;
@@ -173,7 +180,7 @@ describe("卡死看门狗(正常下播不误报)", () => {
 
   it("主播已下播但进程仍吊着 → 先 SIGINT 优雅收尾(不报卡死);宽限内没退再 SIGKILL", async () => {
     vi.useFakeTimers();
-    registerPlatform(makePlatform(false));
+    usePlatform(makePlatform(false));
     const proc = new FakeProc();
     const { rec, ev, outDir } = await startRecorder(proc);
     (rec as unknown as { lastAdvanceAt: number }).lastAdvanceAt = Date.now() - 120_000;
@@ -195,7 +202,7 @@ describe("卡死看门狗(正常下播不误报)", () => {
 
   it("仍在播但无输出 → 保留卡死告警并杀进程重连", async () => {
     vi.useFakeTimers();
-    registerPlatform(makePlatform(true));
+    usePlatform(makePlatform(true));
     const proc = new FakeProc();
     const { rec, ev, outDir } = await startRecorder(proc);
     (rec as unknown as { lastAdvanceAt: number }).lastAdvanceAt = Date.now() - 120_000;
@@ -216,7 +223,7 @@ describe("卡死看门狗(正常下播不误报)", () => {
 
   it("判活 API 不可达 → 告警说明无法确认状态,不误称录制卡死", async () => {
     vi.useFakeTimers();
-    registerPlatform(makePlatform("error"));
+    usePlatform(makePlatform("error"));
     const proc = new FakeProc();
     const { rec, ev, outDir } = await startRecorder(proc);
     (rec as unknown as { lastAdvanceAt: number }).lastAdvanceAt = Date.now() - 120_000;
@@ -236,7 +243,7 @@ describe("卡死看门狗(正常下播不误报)", () => {
 describe("停滞提前探活(不依赖弹幕:弹幕关闭/无弹幕平台同样生效)", () => {
   it("停滞达提前阈值且已下播 → 提前 SIGINT 收尾(不必等满 60s)", async () => {
     vi.useFakeTimers();
-    registerPlatform(makePlatform(false)); // getLiving=false
+    usePlatform(makePlatform(false)); // getLiving=false
     const proc = new FakeProc();
     const { rec, ev, outDir } = await startRecorder(proc);
     // 停滞 20s:未达 STALL_TIMEOUT_MS(60s),但已达提前阈值(15s)
@@ -252,7 +259,7 @@ describe("停滞提前探活(不依赖弹幕:弹幕关闭/无弹幕平台同样�
 
   it("停滞达提前阈值但仍在播 → 不干预(等看门狗原逻辑,不杀进程)", async () => {
     vi.useFakeTimers();
-    registerPlatform(makePlatform(true)); // getLiving=true(流抖动)
+    usePlatform(makePlatform(true)); // getLiving=true(流抖动)
     const proc = new FakeProc();
     const { rec, outDir } = await startRecorder(proc);
     (rec as unknown as { lastAdvanceAt: number }).lastAdvanceAt = Date.now() - 20_000;
@@ -268,7 +275,7 @@ describe("停滞提前探活(不依赖弹幕:弹幕关闭/无弹幕平台同样�
 describe("hintStreamEnded(弹幕旁路提示 → 权威复核)", () => {
   it("权威判活=下播 → 立刻 SIGINT 收尾(不等看门狗 60s)", async () => {
     vi.useFakeTimers();
-    registerPlatform(makePlatform(false)); // getLiving = false
+    usePlatform(makePlatform(false)); // getLiving = false
     const proc = new FakeProc();
     const { rec, ev, outDir } = await startRecorder(proc);
     (rec as unknown as { lastAdvanceAt: number }).lastAdvanceAt = Date.now() - 1_000; // 刚还在推进,看门狗远未触发
@@ -283,7 +290,7 @@ describe("hintStreamEnded(弹幕旁路提示 → 权威复核)", () => {
 
   it("权威判活=仍在播 → 忽略(网络抖动不误判收播,不杀进程)", async () => {
     vi.useFakeTimers();
-    registerPlatform(makePlatform(true)); // getLiving = true(只是断流)
+    usePlatform(makePlatform(true)); // getLiving = true(只是断流)
     const proc = new FakeProc();
     const { rec, ev, outDir } = await startRecorder(proc);
 
@@ -297,7 +304,7 @@ describe("hintStreamEnded(弹幕旁路提示 → 权威复核)", () => {
 
   it("判活 API 不可达 → 忽略(未知不当收播)", async () => {
     vi.useFakeTimers();
-    registerPlatform(makePlatform("error")); // getLiving 抛错
+    usePlatform(makePlatform("error")); // getLiving 抛错
     const proc = new FakeProc();
     const { rec, outDir } = await startRecorder(proc);
 
@@ -319,7 +326,7 @@ describe("风控降频轮询(platform.getStream 返回 throttledReason)", () => 
       calls++;
       return state.throttled ? { living: false, throttledReason: "请求过快，请稍后重试" } : { living: false };
     };
-    registerPlatform(p);
+    usePlatform(p);
     const { ev, outDir } = await startRecorder(new FakeProc());
     await vi.advanceTimersByTimeAsync(1); // 首次 poll
     expect(calls).toBe(1);
@@ -345,7 +352,7 @@ describe("风控降频轮询(platform.getStream 返回 throttledReason)", () => 
     const p = makePlatform(false);
     p.pollIntervalMs = 5 * 60_000;
     p.getStream = async () => { calls++; return { living: false }; };
-    registerPlatform(p);
+    usePlatform(p);
     const { outDir } = await startRecorder(new FakeProc());
     await vi.advanceTimersByTimeAsync(1);
     expect(calls).toBe(1);
@@ -362,7 +369,7 @@ describe("风控降频轮询(platform.getStream 返回 throttledReason)", () => 
     const p = makePlatform(false);
     // 用 30s 基础间隔,便于观察退避(快手常态 5 分钟会让第一次退避不显形)。
     p.getStream = async () => { at.push(Date.now()); return { living: false, throttledReason: "请求过快，请稍后重试" }; };
-    registerPlatform(p);
+    usePlatform(p);
     const { outDir } = await startRecorder(new FakeProc());
     // 每次都推进「够久」(> 最大间隔),到点自然探测;用探测时刻的**间隔**验证退避曲线。
     for (let i = 0; i < 6; i++) await vi.advanceTimersByTimeAsync(THROTTLE_MAX_POLL_MS + 1);
@@ -380,7 +387,7 @@ describe("风控降频轮询(platform.getStream 返回 throttledReason)", () => 
     const state = { throttled: true };
     const p = makePlatform(false);
     p.getStream = async () => (state.throttled ? { living: false, throttledReason: "请求过快" } : { living: false });
-    registerPlatform(p);
+    usePlatform(p);
     const { outDir } = await startRecorder(new FakeProc());
     await vi.advanceTimersByTimeAsync(1);                  // 进风控(1)
     await vi.advanceTimersByTimeAsync(THROTTLE_POLL_MS);   // 风控(2)→ 退避到 10 分钟
@@ -403,7 +410,7 @@ describe("风控降频轮询(platform.getStream 返回 throttledReason)", () => 
 describe("lastProgressAgeMs(T14 进度信号)", () => {
   it("无活跃进程(未 start / 已 stop)→ null", async () => {
     vi.useFakeTimers();
-    registerPlatform(makePlatform(false));
+    usePlatform(makePlatform(false));
     const engine: DownloadEngine = { id: "fake", spawn: () => ({ proc: new FakeProc() as unknown as ChildProcess, sessionFirstPath: "/out/a.ts" }) };
     const rec = new PollingRecorder(engine);
     expect(rec.lastProgressAgeMs()).toBeNull();   // 还没 start
@@ -418,7 +425,7 @@ describe("lastProgressAgeMs(T14 进度信号)", () => {
 
   it("录制中且从未 markProgress(lastAdvanceAt=0)→ null,不是 ~epoch 巨龄", async () => {
     vi.useFakeTimers();
-    registerPlatform(makePlatform(false));
+    usePlatform(makePlatform(false));
     const proc = new FakeProc();
     const { rec, outDir } = await startRecorder(proc);
     (rec as unknown as { lastAdvanceAt: number }).lastAdvanceAt = 0; // 极端态:从未有进度
@@ -428,7 +435,7 @@ describe("lastProgressAgeMs(T14 进度信号)", () => {
 
   it("录制中:进程已 exit(close 未到)也算无活跃进程 → null", async () => {
     vi.useFakeTimers();
-    registerPlatform(makePlatform(false));
+    usePlatform(makePlatform(false));
     const proc = new FakeProc();
     const { rec, outDir } = await startRecorder(proc);
     proc.exitCode = 0;
@@ -439,7 +446,7 @@ describe("lastProgressAgeMs(T14 进度信号)", () => {
 
   it("录制中:随 markProgress 刷新,龄随时间增长", async () => {
     vi.useFakeTimers();
-    registerPlatform(makePlatform(false));
+    usePlatform(makePlatform(false));
     const proc = new FakeProc();
     const { rec, outDir } = await startRecorder(proc);
     // startRecorder 里已 advance(1) 让 poll 完成 spawn;从此刻起算龄。
@@ -512,7 +519,7 @@ describe("新一场开播准入闸门(issue #96)", () => {
 
   it("拒绝 → 不起录、不触发 onLive、保持等待;下一轮轮询再判定,放行后自动开始(无需重启)", async () => {
     vi.useFakeTimers();
-    registerPlatform(makePlatform(true));
+    usePlatform(makePlatform(true));
     let decision: import("@drec/core").AdmitDecision = { ok: false, reason: "磁盘剩余 1.0GB,低于水位 10.0GB" };
     const admit = vi.fn(() => decision);
     const spawn = vi.fn();
@@ -534,7 +541,7 @@ describe("新一场开播准入闸门(issue #96)", () => {
 
   it("闸门抛错 → 视为放行(探测失败不误拦录制)", async () => {
     vi.useFakeTimers();
-    registerPlatform(makePlatform(true));
+    usePlatform(makePlatform(true));
     const spawn = vi.fn();
     const { ev, outDir } = await startWithAdmit(() => { throw new Error("boom"); }, spawn);
     expect(spawn).toHaveBeenCalledTimes(1);
@@ -544,7 +551,7 @@ describe("新一场开播准入闸门(issue #96)", () => {
 
   it("不提供闸门 → 行为与改动前一致(直接起录)", async () => {
     vi.useFakeTimers();
-    registerPlatform(makePlatform(true));
+    usePlatform(makePlatform(true));
     const spawn = vi.fn();
     const { ev, outDir } = await startWithAdmit(undefined, spawn);
     expect(spawn).toHaveBeenCalledTimes(1);
@@ -608,7 +615,7 @@ describe("确认在播但没有可播放地址(issue #476)", () => {
     vi.useFakeTimers();
     const state: { mode: Mode; calls: number } = { mode: "no-url", calls: 0 };
     const getLiving = vi.fn(async () => state.mode !== "offline");
-    registerPlatform(makeNoUrlPlatform(state, getLiving));
+    usePlatform(makeNoUrlPlatform(state, getLiving));
     const spawn = vi.fn(() => ({ proc: new FakeProc() as unknown as ChildProcess, sessionFirstPath: "/out/a.ts" }));
     const rec = new PollingRecorder({ id: "fake", spawn } as DownloadEngine);
     const ev: RecorderEvents = { onLive: vi.fn(), onSegment: vi.fn(), onOffline: vi.fn(), onError: vi.fn(), onProbeError: vi.fn() };

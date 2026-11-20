@@ -526,8 +526,6 @@ describe("buildQueueView", () => {
 
   it("issue #312: reviewed needs_manual runs leave the inbox and the timeline but stay in the ledger", () => {
     const { dbPath, db } = makeSyncDb();
-    db.exec("ALTER TABLE sync_jobs ADD COLUMN ackedAt INTEGER");
-    db.exec("ALTER TABLE sync_jobs ADD COLUMN ackNote TEXT");
     const stage = mkdtempSync(join(tmpdir(), "queue-ack-"));
     const now = T0 + 10_000_000;
     for (let i = 0; i < 40; i++) seedJob(db, `douyin:m${i}:2026-10-01`, [["needs_manual", now - 40_000 + i]], 100, { error: `e${i}` });
@@ -1205,7 +1203,6 @@ describe("queued node upload status (plan 038 PR5)", () => {
   });
   function seed(raw: string | null, state = "syncing") {
     const { dbPath, db } = makeSyncDb();
-    db.exec("ALTER TABLE sync_jobs ADD COLUMN uploadStatus TEXT");
     seedJob(db, KEY, [["pending", T0], [state, T0 + 1_000]], 3_600);
     db.prepare("UPDATE sync_jobs SET uploadStatus=? WHERE streamKey=?").run(raw, KEY);
     db.close();

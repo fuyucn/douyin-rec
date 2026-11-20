@@ -13,12 +13,12 @@
  * 直接构造所需 handler(**不进 `makeApi`**),故只依赖 store/manager/hub 台账路径 ——
  * 无需在 `Api`/`ApiDeps` 上加字段(`web/api/types.ts` 不在本次改动范围)。
  */
-import { listHubJobs, hubStageDir, jobLogPaths } from "../../hub-jobs.js";
+import { activeHubJobKeys, hubStageDir, jobLogPaths } from "../../hub-jobs.js";
 import { cleanupOrphans, scanOrphans, type ScanOptions, type ScanResult, type CleanupResult } from "../../orphan-cleanup.js";
 import { drecRoot, resolveOutputDir, rootLogsDir, rootStageDir } from "../../paths.js";
 import { join as pathJoin } from "node:path";
 import { cleanupJobLogs, parseJobLogDays, previewJobLogs } from "../../job-log-cleanup.js";
-import { HUB_TERMINAL_STATES, platformForRoom, recordingRoomDirCandidates, stageSessionDirCandidates } from "@drec/core";
+import { platformForRoom, recordingRoomDirCandidates, stageSessionDirCandidates } from "@drec/core";
 import type { ManagerLike, ApiResult } from "./types.js";
 import type { TaskStore } from "../../store.js";
 
@@ -73,15 +73,17 @@ export function buildMaintenance(deps: MaintenanceDeps): {
     const activeLogPaths: string[] = [];
     if (deps.syncDbPath) {
       try {
-        const terminal = new Set<string>(HUB_TERMINAL_STATES);
-        const { jobs } = listHubJobs(deps.syncDbPath, { limit: 200, excludeStates: [...terminal] });
+        // Active-path protection only needs the non-terminal stream keys. Calling the full job
+        // projection here would make an old ledger with no attached tables look like "no active
+        // work" and silently drop protection (the projection rightly rejects an incomplete schema).
+        const keys = activeHubJobKeys(deps.syncDbPath);
         const stage = deps.stageDir ?? hubStageDir();
         // Paths come from the core resolver (the pipeline builds them there too) and cover both the
         // legacy and the room layout: a mismatch would leave the active job unprotected, silently.
-        for (const j of jobs) {
-          activePaths.push(...stageSessionDirCandidates(stage, j.streamKey));
+        for (const key of keys) {
+          activePaths.push(...stageSessionDirCandidates(stage, key));
           // job.log 的全部候选位置(新 logs/hub + legacy stage):job-log 清理据此排除非终态 job(#429)。
-          activeLogPaths.push(...jobLogPaths(j.streamKey, stage, logsRoot));
+          activeLogPaths.push(...jobLogPaths(key, stage, logsRoot));
         }
       } catch {
         // 台账读不到(首次运行/损坏)→ 只靠「正在录制」+ 陈旧阈值兜底(宁可少删);
