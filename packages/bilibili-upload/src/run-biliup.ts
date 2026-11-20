@@ -239,11 +239,19 @@ export async function uploadPlain(o: {
   throw new Error(`upload plain 上传线路均失败 (${tried.join(",")}): ${String((last as Error)?.message ?? last)}`);
 }
 
+/** B 站稿件当前分 P 的标题/时长(最终回读的诊断信息;任何异常/无权限/风控 → null)。 */
+export interface ArchivePartInfo {
+  page: number;
+  title: string;
+  durationSec: number;
+}
+
 /**
- * B 站稿件当前分 P 数(append 幂等判定用)。任何异常/无权限/风控 → null(= 无法确认)。
+ * 读 B 站稿件当前分 P 的**标题与时长**(append 落地确认 / 最终回读诊断用)。
+ * 任何异常/无权限/风控 → null(= 无法确认)。
  * 注意:稿件是"仅自己可见"时匿名查不到,必须带上传者 cookie。
  */
-export async function countVideoParts(bv: string, cookiesPath: string): Promise<number | null> {
+export async function readVideoParts(bv: string, cookiesPath: string): Promise<ArchivePartInfo[] | null> {
   try {
     const cookie = readBiliupCookieHeader(cookiesPath);
     const res = await fetch(`https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bv)}`, {
@@ -253,12 +261,25 @@ export async function countVideoParts(bv: string, cookiesPath: string): Promise<
       },
     });
     if (!res.ok) return null;
-    const j = (await res.json()) as { code?: number; data?: { pages?: unknown[] } };
-    if (j?.code !== 0) return null;
-    return Array.isArray(j.data?.pages) ? j.data.pages.length : null;
+    const j = (await res.json()) as { code?: number; data?: { pages?: Array<Record<string, unknown>> } };
+    if (j?.code !== 0 || !Array.isArray(j.data?.pages)) return null;
+    return j.data.pages.map((p) => ({
+      page: Number(p.page ?? 0),
+      title: String(p.part ?? ""),
+      durationSec: Number(p.duration ?? 0),
+    }));
   } catch {
     return null;
   }
+}
+
+/**
+ * B 站稿件当前分 P 数(append 幂等判定用)。任何异常/无权限/风控 → null(= 无法确认)。
+ * 注意:稿件是"仅自己可见"时匿名查不到,必须带上传者 cookie。
+ */
+export async function countVideoParts(bv: string, cookiesPath: string): Promise<number | null> {
+  const parts = await readVideoParts(bv, cookiesPath);
+  return parts ? parts.length : null;
 }
 
 /** Re-read intervals after an append failure whose count looks unchanged (~10s total; list refresh lags). */
@@ -283,7 +304,8 @@ export const APPEND_UNREADABLE_REREAD_DELAYS_MS: readonly number[] = [5000, 1000
  *   读到 null(且有基线)→ 先按 APPEND_UNREADABLE_REREAD_DELAYS_MS 延迟重读(#310)等接口恢复,仍读不到才算结果不确定;
  *     恢复后若数量未变,同样要在完整的 APPEND_REREAD_DELAYS_MS 窗口内保持不变才算未提交,窗口内任一次 null 即不确定,
  *     抛 APPEND_AMBIGUOUS_MARKER(调用方不得自动重试,转人工);没有基线(before 为 null)直接不确定。
- * ② **成功后**确认真的落地(2026-11 线上事故):rc=0 不等于分 P 已增加,见 {@link confirmAppendLanded}。
+ * ② **成功后**确认真的落地:rc=0 只代表 biliup 的 `edit` 请求返回 code 0——append 是
+ *   「读当前整表 → 追加 → 整表覆盖」,列表读得早或分 P 随后被平台移除时返回码仍为 0,见 {@link confirmAppendLanded}。
  *   稳定不符 → 抛 APPEND_AMBIGUOUS_MARKER,**不换线、不重发**(提交已发出,重发可能重复分 P)。
  * 不传 countParts → 保持旧行为(仅换线,不判定)。
  */
@@ -357,6 +379,8 @@ export async function appendGroup(o: {
 
 /**
  * append 返回**成功**(rc=0)后的落地确认(2026-11 线上事故)。
+ * rc=0 证明的是 `edit` 接口返回 code 0,不是「分 P 已持久化」:append 会先读当前完整列表再整表覆盖,
+ * 列表读得早或分 P 随后被移除时,提交返回码仍为 0。
  *
  * 现场:段 4 的 append 返回成功,但 B 站稿件只有 5 个分 P(P1..P4 + 标题 P6 的段 5),
  * 缺的正是段 4;台账已把 6 段都记成 done,直到 10 分钟后的删源前回读「期望 6 实际 5」才转人工。

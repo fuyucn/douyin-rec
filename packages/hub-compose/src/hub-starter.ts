@@ -13,7 +13,7 @@ import {
 } from "@drec/app";
 import type { HubStarter } from "@drec/app";
 import type { PipelineCfg } from "@drec/orchestrator";
-import { createBiliupFileTarget } from "@drec/bilibili-upload";
+import { createBiliupFileTarget, readVideoParts } from "@drec/bilibili-upload";
 import { isUploadingMode, listProcessors, platformForRoom, registerChild, resolveDiskMinGB, resolveJobLogPath, throwIfAborted, ttlMemoAsync } from "@drec/core";
 import { normalizeSeasonSectionId, resolveSeasonSectionId } from "@drec/bilibili-api";
 import type { EnqueueRequest, HubResources, RecordingWorkerStatusDTO, RemoteTaskSpec, RollingDeliveryDTO, WorkerStatus } from "@drec/core";
@@ -419,6 +419,8 @@ export function createHubStarter(deps: HubStarterDeps): HubStarter {
         // 缺省不注入 = 不做回读;这里注入 = 主控路径删最后一份源之前延后回读分 P 数,不一致则保留源并转人工(issue #327)。
         // cookies 用 hubCfg.cookies(与 appendGroup 同源;per-job override 已在 pipeline 内传下去)。
         countParts: (bv: string) => countVideoParts(bv, hubCfg.cookies ?? ""),
+        // 最终回读失败时附上实际分 P 的标题/时长，便于直接定位缺哪一段（诊断用，不改变放行判定）。
+        readParts: (bv: string) => readVideoParts(bv, hubCfg.cookies ?? ""),
         // 延后回读总窗口(issues #92 / #327):首读约 2 分钟后,其后重读,至多 10 分钟;缺省 10 分钟。
         sideCheckDelayMs: hubCfg.sideCheckDelayMs,
         notify: opts.onEvent,
