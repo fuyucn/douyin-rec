@@ -128,9 +128,9 @@ describe("架构分层(依赖只能向下)", () => {
 
   it("README 里的包数量与 packages/ 实际数量一致(数字不靠人记)", () => {
     const doc = readFileSync(join(PKG_DIR, "..", "README.md"), "utf8");
-    const counts = [...doc.matchAll(/pnpm workspace\s*[,，（(]\s*(\d+)\s*包/g)].map((m) => Number(m[1]));
-    expect(counts.length, "README 里找不到包数量声明").toBeGreaterThanOrEqual(2);
-    // 口径 = 仓库里的子包总数（含 `web` 前端；pnpm workspace 把它排除了，但架构图与 AGENTS.md 都算它）。
+    const counts = [...doc.matchAll(/packages\/?`?\s*(?:共\s*)?(\d+)\s*个子包/g)].map((m) => Number(m[1]));
+    expect(counts.length, "README 里找不到 packages/ 子包数量声明").toBeGreaterThanOrEqual(2);
+    // 口径 = 仓库里的子包总数（含 `web` 前端；pnpm workspace 将它排除在外）。
     const total = readdirSync(PKG_DIR).filter((d) => existsSync(join(PKG_DIR, d, "package.json"))).length;
     const wrong = counts.filter((n) => n !== total);
     expect(wrong, `README 包数量与仓库不一致(实际 ${total}): ${wrong.join(", ")}`).toEqual([]);
