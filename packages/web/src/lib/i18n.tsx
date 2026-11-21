@@ -205,6 +205,14 @@ const DICT = {
       },
     },
     room: {
+      logs: {
+        hub: "hub（本机）", source: "来源", all: "全部来源", limit: "行数上限",
+        timeOrder: "按日志内含时区的时间戳排序（节点时钟可能有偏差）。",
+        grouped: "按来源分组；存在无明确时区时间戳的日志，不推断跨节点先后。",
+        capped: "显示 {shown} / {total} 行；分组时各来源均分尾部行数。",
+        noNodes: "当前没有参与的远端节点，仅展示本机来源。",
+        status: { loading: "读取中…", ready: "已读取", empty: "暂无日志", unavailable: "不可达 / 读取失败", unsupported: "旧节点或不支持日志读取", noTask: "未找到本房间任务", ambiguous: "匹配到多个任务，已跳过", missing: "参与节点未配置" },
+      },
       title: "房间", subtitle: "每个直播间一行:录制、处理、交付都在这里", add: "添加房间", all: "全部", filterGroup: "按状态筛选房间",
       status: { recording: "录制中", processing: "处理中", attention: "需处理", waiting: "等开播", paused: "已暂停" },
       run: { pending: "排队中", settling: "等收播", syncing: "拉取录像", merging: "合并 / 烧录", uploading: "上传中", retrying: "重跑中", done: "已完成", failed: "失败", needs_manual: "需人工处理" },
@@ -832,6 +840,14 @@ const DICT = {
       },
     },
     room: {
+      logs: {
+        hub: "hub (local)", source: "Source", all: "All sources", limit: "Line limit",
+        timeOrder: "Sorted by explicit timezone timestamps in logs (node clocks may differ).",
+        grouped: "Grouped by source: some lines have no timezone timestamp; no cross-node order is inferred.",
+        capped: "Showing {shown} / {total} lines; grouped tails share the line budget across sources.",
+        noNodes: "No participating remote nodes; showing the local source only.",
+        status: { loading: "Loading…", ready: "Loaded", empty: "No logs yet", unavailable: "Unreachable / read failed", unsupported: "Old node or log reading unsupported", noTask: "No task for this room", ambiguous: "Multiple matching tasks; skipped", missing: "Assigned node is not configured" },
+      },
       title: "Rooms", subtitle: "One row per live room: recording, processing and delivery in one place", add: "Add room", all: "All", filterGroup: "Filter rooms by status",
       status: { recording: "Recording", processing: "Processing", attention: "Needs action", waiting: "Waiting", paused: "Paused" },
       run: { pending: "Queued", settling: "Settling", syncing: "Pulling", merging: "Merge / burn", uploading: "Uploading", retrying: "Retrying", done: "Done", failed: "Failed", needs_manual: "Needs manual" },
