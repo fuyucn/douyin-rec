@@ -763,6 +763,11 @@ export class RecordingSession {
     } else {
       log.info(`会话收尾(${reason}):本会话未录制任何内容,跳过 recordEnd 通知`);
     }
+    // Issue #322 review: a hard stop can interrupt an active drain. The drain liveness tick exits on
+    // userStopped, and the recorder suppresses onOffline after a hard stop, so nobody else would settle the
+    // drain promise. Do it here, after the shared teardown (tail included) has completed.
+    if (this.drainTimer) { clearTimeout(this.drainTimer); this.drainTimer = null; }
+    if (this.draining) this._resolveDrain();
   }
 
   /**

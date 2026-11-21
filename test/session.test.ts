@@ -888,6 +888,33 @@ describe("RecordingSession.drain (窗口结束排空)", () => {
     await Promise.all([stopped, drained]);
   });
 
+  it("#322: hard stop during an active drain settles drainDone", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sess-drain-hardstop-"));
+    const rec = new DrainMock();
+    rec.isLiveResults = [true]; // drain starts its liveness poll; no natural end
+    let releaseTail!: () => void;
+    const tail = new Promise<void>((r) => { releaseTail = r; });
+    const sess = new RecordingSession(rec, {
+      drainPollSec: 999, reconnectDelaySec: 0.01, danmuEnabled: false,
+      makeRolling: () => ({ onSegment: (): void => {}, onSessionEnd: () => tail }),
+    });
+    await sess.start("https://live.douyin.com/1", makeOpts(dir), { anchorName: "A" });
+    const drained = sess.drain();
+    const stopped = sess.stop(); // hard stop while drain is waiting for the broadcast end
+    await Promise.resolve();
+    let drainDone = false;
+    void drained.then(() => { drainDone = true; });
+    expect(drainDone).toBe(false);
+
+    releaseTail();
+    await stopped;
+    const outcome = await Promise.race([
+      drained.then(() => "done"),
+      new Promise<string>((r) => setTimeout(() => r("timeout"), 200)),
+    ]);
+    expect(outcome).toBe("done"); // the old code left drainDone pending forever
+  });
+
   it("recorder 不支持 drain() → 退化为硬停", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sess-drain-nodrain-"));
     const rec = new NoDrainMock();
