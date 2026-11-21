@@ -7,6 +7,10 @@ export interface StreamAcquirer {
   headers?: Record<string, string>;
   title?: string;
   owner?: string;
+  /** Issue #496: live but no playable URL (CDN not ready / risk control). */
+  unplayableReason?: string;
+  /** Internal: the probe itself failed (timeout/exception), not a confirmed-offline answer. */
+  probeFailed?: boolean;
 }
 export interface AcquireStreamOpts {
   room: string;
@@ -28,14 +32,14 @@ export async function acquireStreamWithBackoff(o: AcquireStreamOpts): Promise<St
   for (;;) {
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<StreamAcquirer>(resolve => {
-      timer = setTimeout(() => resolve({ living: false }), timeoutMs);
+      timer = setTimeout(() => resolve({ living: false, probeFailed: true }), timeoutMs);
     });
     let s: StreamAcquirer;
     try {
       s = await Promise.race([o.fetch(o.room, o.quality), timeout]);
     }
     catch {
-      s = { living: false };
+      s = { living: false, probeFailed: true };
     }
     finally {
       if (timer)
@@ -56,6 +60,8 @@ export async function acquireStreamWithBackoff(o: AcquireStreamOpts): Promise<St
 export class LivePumpSource {
   private readonly idlePollMs: number;
   private readonly sleep: (ms: number) => Promise<void>;
+  /** Issue #496: one alert per broadcast while live but no playable URL. */
+  private unplayableAlerted = false;
   constructor(private readonly o: RunLivePumpOptions, private readonly log: (message: string) => void) {
     this.idlePollMs = o.idlePollMs ?? IDLE_POLL_MS;
     this.sleep = o.sleep ?? ((ms: number) => new Promise(resolve => setTimeout(resolve, ms)));
@@ -78,8 +84,27 @@ export class LivePumpSource {
         maxRetries: 0,
         sleep: this.sleep,
       });
-      if (s.living && s.url)
+      if (s.living && s.url) {
+        this.unplayableAlerted = false;
         return s;
+      }
+      // Only the no-URL path suppresses on stop: a usable URL must still open the broadcast (#308).
+      if (await this.stopRequested())
+        return null;
+      if (s.living) {
+        // Issue #496: do not let a live-but-no-URL probe look like offline. Alert once per broadcast
+        // and keep the normal poll cadence; a usable URL or a confirmed-offline probe re-arms it.
+        if (!this.unplayableAlerted) {
+          this.unplayableAlerted = true;
+          const why = s.unplayableReason?.trim();
+          const msg = `直播直传:平台显示直播中但取不到可播放地址${why ? `(${why})` : ""} —— 保持轮询,长时间不恢复即整场漏录,请检查。room=${this.o.room}`;
+          this.log(`[直播直传] ⚠️ ${msg}`);
+          try { this.o.onAlert?.(msg); } catch { /* alert sink is best-effort */ }
+        }
+      } else if (!s.probeFailed) {
+        // Confirmed offline re-arms; a timed-out/exception probe must not look like a broadcast end.
+        this.unplayableAlerted = false;
+      }
       if (misses % Math.max(1, Math.round(600000 / this.idlePollMs)) === 0) {
         this.log(`[直播直传] 未开播,每 ${this.idlePollMs / 1000}s 探测一次(留在进程内等待)`);
       }

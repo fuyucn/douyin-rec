@@ -64,6 +64,11 @@ export interface PlatformStream {
    * starts recording as soon as a URL shows up. Absent on probes that are offline or have a URL.
    */
   unplayableReason?: string;
+  /**
+   * `unplayableReason` and `throttledReason` are mutually exclusive: a confirmed-live probe without a URL
+   * uses unplayable (normal cadence); a risk-control/rate-limit probe uses throttled (backoff). When both
+   * are present the unplayable branch wins (see record-engine/stream acquisition).
+   */
 }
 
 /** 一个直播平台的能力契约。 */

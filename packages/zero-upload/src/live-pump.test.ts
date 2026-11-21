@@ -1470,6 +1470,53 @@ describe("outcome:区分「一场都没录到」与「分 P 都已进稿」", ()
     expect(Date.now() - started).toBeLessThan(5_000);
   });
 
+  it("#496: live without a playable URL alerts once per broadcast and re-arms after offline", async () => {
+    const alerts: string[] = [];
+    const drain = new AbortController();
+    let calls = 0;
+    const r = await runLivePump({
+      ...base(), submit: false, waitForBroadcast: true, drainSignal: drain.signal,
+      idlePollMs: 1, sleep: async () => {},
+      fetch: async () => {
+        calls++;
+        if (calls <= 2) return { living: true, unplayableReason: "CDN 未就绪" };
+        if (calls === 3) return { living: false, probeFailed: true }; // failed probe must NOT re-arm
+        if (calls === 4) return { living: true, unplayableReason: "仍无地址" };
+        if (calls === 5) return { living: false }; // confirmed offline re-arms the alert
+        if (calls === 6) return { living: true, unplayableReason: "再次无地址" };
+        drain.abort(); // stop arrives while the probe is in flight; no new alert may be sent
+        return { living: true, unplayableReason: "不应告警" };
+      },
+      onAlert: (m) => alerts.push(m), log: () => {},
+    } as Parameters<typeof runLivePump>[0]);
+    expect(r.outcome).toBe("idle");
+    expect(alerts).toHaveLength(2); // no-URL alert, failed-probe (no re-arm), offline reset, second alert, stop
+    expect(alerts[0]).toContain("取不到可播放地址");
+    expect(alerts[0]).toContain("CDN 未就绪");
+    expect(alerts[1]).toContain("再次无地址");
+  });
+
+  it("#496: stop during an in-flight no-URL probe suppresses the alert", async () => {
+    const alerts: string[] = [];
+    const drain = new AbortController();
+    let calls = 0;
+    const r = await runLivePump({
+      ...base(), submit: false, waitForBroadcast: true, drainSignal: drain.signal,
+      idlePollMs: 1, sleep: async () => {},
+      fetch: async () => {
+        calls++;
+        if (calls === 1) return { living: true, unplayableReason: "CDN 未就绪" };
+        if (calls === 2) return { living: false }; // re-arm before the cancelled probe
+        drain.abort();
+        return { living: true, unplayableReason: "停后不应告警" };
+      },
+      onAlert: (m) => alerts.push(m), log: () => {},
+    } as Parameters<typeof runLivePump>[0]);
+    expect(r.outcome).toBe("idle");
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toContain("CDN 未就绪");
+  });
+
   it("刚探测到开播随即断流 → 走正常退避后以 idle 收尾,不再带着已打开的稿件会话继续等(#308)", async () => {
     let calls = 0;
     const r = await runLivePump({
