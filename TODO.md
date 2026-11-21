@@ -16,6 +16,7 @@
 ## 进行中
 
 
+
 - [~] **T-237 2026-11-20 全项目架构审查与改进批次（epic [#720](https://github.com/fuyucn/douyin-rec/issues/720) / sub #721–#728，2026-11-20）** — **做什么**: 由 xingchiapi/gpt-6.1-sol xhigh 做全项目架构审查，拆 6 个小审查；把确认的 8 个可独立项拆成 sub issue 并实现：配置坏文件 fail-closed、配置 RMW 事务、Hub 重试 UI/分段状态、台账读错误/DTO、平台注册/URL 匹配、直播直传 DB 路径、文档校准。**为什么**: 审查发现多处“看似成功/静默为空/前后端能力漂移”，且不能与既有 #419/#420/#484/#49/plans 049/051/052 重复。**验收**: 每项先补失败测试；集成分支通过全量 test/typecheck/arch/web build/bundle；PR 过 pr-gate/pr-risk-scan 与独立 review；不部署、不改上传投稿/删源/hub 规则。**计划**: [plans/056](plans/056_architecture_review_2026-11.md)。
 
 
@@ -629,6 +630,7 @@
     是无效操作 —— 要改概率得调 weight。本轮未改 priority。
 
 ## 待办（Next）
+- [~] **T-244 Non-blocking append visibility (issue [#737](https://github.com/fuyucn/douyin-rec/issues/737), 2026-11-21)** — **What/why**: accepted master-pipeline appends no longer block later uploads while public visibility lags. **Acceptance/results**: accepted remains distinct from observed; final reader plus plain baseline required; default queue/rolling behavior, unknown-submission handling and final source retention remain intact. Merged/segmented/resume paths covered; 137 focused tests pass, mutation yields 4 expected failures, restored full regression passes 5660 tests / 42 skipped; root typecheck, web build/typecheck, bundle 0.0.402 and two independent reviews pass. **Publication**: the user explicitly authorized commit, push and PR publication on 2026-11-21; this supersedes the earlier publication hold. Published-head CI, merge and later runtime verification remain required. No deployment, source deletion or automatic recovery of existing manual jobs. Rules are documented in docs/append-verification.md.
 - [~] **T-243 直播直传错误通知补房间上下文（issue [#734](https://github.com/fuyucn/douyin-rec/issues/734)，2026-11-20）** — **做什么**:沿直播直传告警全链路补齐用户可见的直播间显示名、平台和来源；复用既有通知上下文契约，覆盖站内、外部通知、本机/受管节点及主控中继，并保留分段、分块、重试和原始错误。**为什么**:线上事件确认告警正文缺房间身份，多房间并行时无法定位问题。**验收**:旧事件兼容、缺名安全回退、并发房间归属测试；全量测试和类型检查通过，按涉及文件完成构建/打包与自审。仅改通知上下文，不改上传/重试/投稿/清理，不部署。**状态**:已认领，范围限定为通知上下文与回归测试。
   **Progress (2026-11-21)**: 实现与本地验收通过：5646 tests passed / 42 skipped、typecheck、web build、bundle、CI、issue-guard 与 PR gate。PR [#736](https://github.com/fuyucn/douyin-rec/pull/736) 已开；两个独立 reviewer 均 PASS、findings 为 none。risk scan 仍为 `RISK`（路径及上下文命中，reviewer 确认未改上传行为），issue 已转 `needs-decision` 等待合并拍板；未部署。
 - [~] **T-162 Queue 页同时展示主控场次与本机节点队列（2026-11-06）** — **做什么**:`/queue` 移入 master/worker 主导航;master 保留场次管线并在场次表格后新增本机 `/api/proc/active` 聚合区块,worker 只显示本节点队列与说明;节点卡片独立,后续可换行级数据源;中英词典、nav 纯函数测试、版本 patch+1。 **为什么**:worker 没有 Queue 入口,而 master 的 Queue 只显示主控 `sync_jobs` 台账,每台节点自己的上传/清理/转换队列不可见。 **验收**:master/worker 两分支导航断言、root typecheck、web build/typecheck、nav 与 i18n 测试、bundle、issue-guard 与 risk-scan 通过;worker 不请求 master-only 接口,master 原有各区块不退化。 **现状**:实现已推 origin 并开 PR [#545](https://github.com/fuyucn/douyin-rec/pull/545);首轮评审 4 个 P2(轮询重入守卫、陈旧数据冒充实时、kind 列表漏 `biliup`/`upload-prep` 且多 `cleanup-spool`、卡片位置跑到 Attention 之后)已返工并复审通过。**编号说明**:此前两次撞号(T-159 已被 #535 占用,T-160 已被节点本地交付开关设计占用),改为 T-162。
