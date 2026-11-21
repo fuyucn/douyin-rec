@@ -279,8 +279,9 @@ describe("runPipeline P0 execution trace (#49)", () => {
       expect(deps.notify.mock.calls.map(([event]) => event)).toEqual(baseline.mode === "node-side" ? [] : [
         { kind: "uploadDone", bv: "BV123", url: "https://www.bilibili.com/video/BV123", streamKey: STREAM_KEY },
       ]);
-      expect(deps.uploadPlain).toHaveBeenCalledTimes(baseline.mode === "node-side" ? 0 : 1);
-      expect(deps.appendGroup).toHaveBeenCalledTimes(baseline.mode === "segments" ? 1 : 0);
+      const upload = deps.upload as unknown as { uploadPlain: Mock; appendGroup: Mock };
+      expect(upload.uploadPlain).toHaveBeenCalledTimes(baseline.mode === "node-side" ? 0 : 1);
+      expect(upload.appendGroup).toHaveBeenCalledTimes(baseline.mode === "segments" ? 1 : 0);
       expect(deps.countParts).toHaveBeenCalledTimes(baseline.mode === "node-side" ? 0 : 1);
       expect(transport.pull).toHaveBeenCalledTimes(baseline.mode === "node-side" ? 0 : 1);
       expect(deps.sh).toHaveBeenCalledTimes(baseline.mode === "merge" ? 1 : 0);
@@ -310,8 +311,9 @@ describe("runPipeline P0 execution trace (#49)", () => {
       expect(transport.pull).not.toHaveBeenCalled();
       expect(transport.cleanup).not.toHaveBeenCalled();
       expect(deps.sh).not.toHaveBeenCalled();
-      expect(deps.uploadPlain).not.toHaveBeenCalled();
-      expect(deps.appendGroup).not.toHaveBeenCalled();
+      const upload = deps.upload as unknown as { uploadPlain: Mock; appendGroup: Mock };
+      expect(upload.uploadPlain).not.toHaveBeenCalled();
+      expect(upload.appendGroup).not.toHaveBeenCalled();
     } finally {
       deps.ledger.close();
       rmSync(deps.cfg.stageDir, { recursive: true, force: true });
