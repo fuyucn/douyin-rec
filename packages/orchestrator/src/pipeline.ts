@@ -12,7 +12,7 @@ import { selectWinner } from "./select.js";
 import { retry } from "./retry.js";
 import { humanBytes, sumBytes } from "./format.js";
 import { associateSeasonForJob, buildWorkflow, deriveStageProducts, runWorkflowNodes, ResourcePool, type StageProducts, type WorkflowNodeKey } from "./workflow.js";
-import { deriveSegmentPlan, stageProductPaths, UPLOAD_ALIAS_DIR } from "./session-plan.js";
+import { deriveSegmentPlan, repairStageProductsByAlias, stageProductPaths, UPLOAD_ALIAS_DIR } from "./session-plan.js";
 import { runSegmentPipeline } from "./segment-pipeline.js";
 // 节点侧上传(experimental,plans/027):全部逻辑隔离在 node-side-upload.ts,便于快速开关/回退。
 import { shouldUseNodeSideUpload, tryNodeSideUpload } from "./node-side-upload.js";
@@ -1489,6 +1489,24 @@ async function resumeAppends(
   if (wasDone) {
     jlog(`续跑:job 已 done → 只补收尾清理(不重跑上传 / append;不进入 append / 产物缺失转人工分支,回读不符仍按 #327 转人工)`);
     return await drainSeason(await finalizeOnly(streamKey, bv, deps, jlog, notify, members, stageSub));
+  }
+  // 别名残留修复(零拷贝):规范名被手删后数据可能只剩 `.upload/<分P标题>.mp4`。续跑一律以规范名判
+  // 产物在不在,不修就会被误判成「产物缺失」转人工(2026-11-21 线上真实发生);认不准(多候选)不动。
+  const aliasRepaired = repairStageProductsByAlias(
+    stageSub,
+    effectiveStageFormat(cfg.outputFormat, cfg.uploadMode),
+    jlog,
+    { stemHint: ledger.get(streamKey)?.outputStem },
+  );
+  if (aliasRepaired.length > 0) {
+    const names = aliasRepaired.slice(0, 3).map((p) => p.slice(p.lastIndexOf("/") + 1)).join(",");
+    jlog(`续跑前已从上传别名恢复 ${aliasRepaired.length} 个规范产物名(零拷贝,内容与占位未变):${names}`);
+    // 不静默:规范名是"被人删掉"的,恢复等于把用户的删除意图翻回来 → 必须让用户看见。
+    notify({
+      kind: "error",
+      stage: "上传",
+      message: `${streamKey} stage 规范产物缺失(可能被手删),已从 ${UPLOAD_ALIAS_DIR} 别名零拷贝恢复 ${aliasRepaired.length} 个(${names});将继续 append 缺失分P,若要放弃请先在主控停止该场`,
+    });
   }
   const prod = deriveStageProducts(stageSub, effectiveStageFormat(cfg.outputFormat, cfg.uploadMode));
   if (!prod) {

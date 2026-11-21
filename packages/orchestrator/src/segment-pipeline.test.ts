@@ -1,11 +1,12 @@
 // 分段上传路径的弹幕窗口/分组纯函数回归(2026-10-09「什么鱼」livechat 分 P 缺失根因)。
 import { describe, it, expect, vi } from "vitest";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { SyncLedger } from "./ledger.js";
 import type { PipelineDeps } from "./pipeline.js";
-import { runSegmentPipeline, sessionWindowOffsets, splitGroupsBySession, derivePartXmlPath, planPartXmlDerivation } from "./segment-pipeline.js";
+import { runSegmentPipeline, sessionWindowOffsets, splitGroupsBySession, derivePartXmlPath, planPartXmlDerivation, partsForUpload } from "./segment-pipeline.js";
+import { prepareUploadAlias } from "./session-plan.js";
 import { fakeUploadTarget } from "@drec/core";
 
 /** 供 planPartXmlDerivation 的构造件(window 为 null = 无弹幕段)。 */
@@ -188,5 +189,48 @@ describe("runSegmentPipeline season checkpoint", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe("partsForUpload：别名恢复 + 真缺失分开报(绝不静默少传)", () => {
+  const jlogOf = (): { jlog: (m: string) => void; lines: string[] } => {
+    const lines: string[] = [];
+    return { lines, jlog: (m: string) => lines.push(m) };
+  };
+
+  it("只剩别名的分段被零拷贝恢复 → 计入 kept、missing 为空", () => {
+    const dir = mkdtempSync(join(tmpdir(), "seg-parts-restore-"));
+    const p1 = join(dir, "主播_2026-11-21_000.mp4");
+    writeFileSync(p1, "seg-bytes");
+    prepareUploadAlias(dir, "plain-0", p1, "P1");
+    rmSync(p1); // 规范名被手删,只剩 .upload/P1.mp4 + 清单
+    const { jlog, lines } = jlogOf();
+    const r = partsForUpload([p1], "plain 段", jlog);
+    expect(r.missing).toEqual([]);
+    expect(r.kept).toEqual([p1]);
+    expect(readFileSync(p1, "utf8")).toBe("seg-bytes");
+    expect(lines.join("\n")).toContain("零拷贝恢复");
+  });
+
+  it("真缺失(无别名证据)→ 进 missing,并由调用方 fail-closed", () => {
+    const dir = mkdtempSync(join(tmpdir(), "seg-parts-missing-"));
+    const p1 = join(dir, "主播_2026-11-21_000.mp4");
+    const p2 = join(dir, "主播_2026-11-21_001.mp4");
+    writeFileSync(p1, "a");
+    const { jlog, lines } = jlogOf();
+    const r = partsForUpload([p1, p2], "plain 段", jlog);
+    expect(r.kept).toEqual([p1]);
+    expect(r.missing).toEqual([p2]); // 下标错位的风险由调用方处理,不由这里静默吞掉
+    expect(lines.join("\n")).toContain("缺失且无可恢复别名");
+  });
+
+  it("空路径(该场未烧录)不算缺失,也不触发 fail-closed", () => {
+    const dir = mkdtempSync(join(tmpdir(), "seg-parts-empty-"));
+    const p1 = join(dir, "主播_2026-11-21_000.mp4");
+    writeFileSync(p1, "a");
+    const { jlog } = jlogOf();
+    const r = partsForUpload(["", p1, undefined], "danmu 段", jlog);
+    expect(r.missing).toEqual([]);
+    expect(r.kept).toEqual([p1]);
   });
 });

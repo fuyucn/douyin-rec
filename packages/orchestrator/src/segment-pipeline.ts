@@ -16,13 +16,45 @@ import type { Broadcast } from "./identity.js";
 import type { JobState, SyncLedger } from "./ledger.js";
 import { canDeferAppendVerification } from "./verify.js";
 import { retry } from "./retry.js";
-import { prepareUploadAlias, SEG_WORK_DIR, segmentStem, segWorkPath, UPLOAD_ALIAS_DIR, type SegmentPlan } from "./session-plan.js";
+import { prepareUploadAlias, restoreProductFromAlias, SEG_WORK_DIR, segmentStem, segWorkPath, UPLOAD_ALIAS_DIR, type SegmentPlan } from "./session-plan.js";
 import { cleanupSourcesShared, clearCleanFailure, defaultRmStage, defaultSplitForUpload, finalizeAfterUpload, finalizeOnly, readdirSyncSafe, recordCleanFailure, removeEmptyStageDir, stageVideoLeftovers, videoOnly, xmlKeepRule, type CleanupOutcome, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
 import { appendArchive, createArchive } from "@drec/core";
 
 /** 默认单段 remux(ts/flv → mp4,无损,-c copy + 时基钉 90000)。 */
 const defaultRemuxSegment = (src: string, out: string): Promise<void> =>
   import("@drec/post-process").then((m) => m.remuxSegment(src, out));
+
+/**
+ * 逐段取上传用的产物集合：先尝试从 `.upload` 别名零拷贝恢复缺失的规范名，再把「真缺失」如实分开。
+ *
+ * 为什么：`filter(existsSync)` 遇到「数据还在、只是规范名被删（剩 `.upload` 别名）」的场次会
+ * 悄悄少传一个分P —— 分段模式下**下标会错位**（`doneParts` 按过滤后位置算），等于跳过一段、
+ * 其余段错位。这里不静默：能恢复的恢复（清单证据，见 `restoreProductFromAlias`），
+ * 恢复不了的必须由调用方 fail-closed 转人工，绝不带着少一段的清单继续传。
+ *
+ * 导出供单测(调用方只有本文件的 5 个上传点):恢复/缺失的分类必须能独立验。
+ */
+export function partsForUpload(
+  paths: readonly (string | undefined)[],
+  what: string,
+  jlog: (msg: string) => void,
+): { kept: string[]; missing: string[] } {
+  const restored: string[] = [];
+  for (const p of paths) {
+    if (p && !existsSync(p) && restoreProductFromAlias(p, jlog)) restored.push(p);
+  }
+  if (restored.length > 0) {
+    const names = restored.slice(0, 3).map((p) => p.slice(p.lastIndexOf("/") + 1)).join(",");
+    jlog(`分段:${what} 有 ${restored.length} 个规范产物只剩别名,已零拷贝恢复:${names}`);
+  }
+  const kept = paths.filter((p): p is string => !!p && existsSync(p));
+  const missing = paths.filter((p): p is string => !!p && !existsSync(p));
+  if (missing.length > 0) {
+    const names = missing.slice(0, 3).map((p) => p.slice(p.lastIndexOf("/") + 1)).join(",");
+    jlog(`⚠️ ${what}: ${missing.length} 个产物缺失且无可恢复别名:${names}`);
+  }
+  return { kept, missing };
+}
 
 /**
  * 中间产物 → 规范上传名:同盘**硬链接**优先,失败回落复制。
@@ -515,7 +547,15 @@ export async function runSegmentPipeline(o: {
   ledger.advanceState(streamKey, "uploading");
   ledger.logStep(streamKey, "upload_plain", "start");
   ledger.syncNodeState(streamKey, "upload_plain", "running");
-  const plainFiles = uploadParts.map((p) => p.plain).filter(existsSync);
+  const plainParts = partsForUpload(uploadParts.map((p) => p.plain), "plain 段", jlog);
+  if (plainParts.missing.length > 0) {
+    // 少一段就整场错位(下标/分P序号都会错),绝不带着缺失清单继续建稿。
+    jlog(`分段上传中止:${plainParts.missing.length} 个 plain 段缺失且不可恢复(转人工,保留全部源)`);
+    ledger.setState(streamKey, "needs_manual", { error: `分段上传:${plainParts.missing.length} 个 plain 段产物缺失,请人工核对` });
+    notify({ kind: "error", stage: "上传", message: `${streamKey} 分段上传中止:${plainParts.missing.length} 个 plain 段产物缺失且无可恢复别名,请人工核对` });
+    return { state: "needs_manual" };
+  }
+  const plainFiles = plainParts.kept;
   // 提交前自检:读不出时长的产物**绝不提交**(plain + 烧录产物)。B站会把坏容器照收下(建稿 `code: 0`),
   // 只在它自己的转码阶段暴露成 `state=-16 转码失败`(2026-10-15 incident)。检出即转失败、绝不删源。
   const partFiles = [
@@ -630,8 +670,17 @@ export async function runSegmentPipeline(o: {
     // ── 逐组 append:danmu 各段一组、livechat 各段一组(组内多段一次 append,顺序 = 段序)──
     // 分P标题按「整稿分P序号」渲染:plain 占 1..N,danmu 接着 N+1..,livechat 再接着。
     const plainCount = plainFiles.length;
-    const danmuFiles = uploadParts.map((p) => p.danmu).filter((f): f is string => !!f && existsSync(f));
-    const livechatFiles = uploadParts.map((p) => p.livechat).filter((f): f is string => !!f && existsSync(f));
+    const danmuParts = partsForUpload(uploadParts.map((p) => p.danmu), "danmu 段", jlog);
+    const livechatParts = partsForUpload(uploadParts.map((p) => p.livechat), "livechat 段", jlog);
+    if (danmuParts.missing.length > 0 || livechatParts.missing.length > 0) {
+      const n = danmuParts.missing.length + livechatParts.missing.length;
+      jlog(`分段上传中止:${n} 个烧录轨分P产物缺失且不可恢复(转人工,绝不带着少分P的清单 append)`);
+      ledger.setState(streamKey, "needs_manual", { error: `分段上传:${n} 个烧录轨分P产物缺失,请人工核对` });
+      notify({ kind: "error", stage: "上传", message: `${streamKey} 分段上传中止:${n} 个烧录轨分P产物缺失且无可恢复别名,请人工核对` });
+      return { state: "needs_manual", bv };
+    }
+    const danmuFiles = danmuParts.kept;
+    const livechatFiles = livechatParts.kept;
     const danmuPaths = danmuFiles.map((f, i) => aliasFor("danmu", f, plainCount + i + 1, totalParts));
     const livechatPaths = livechatFiles.map((f, i) => aliasFor("livechat", f, plainCount + danmuFiles.length + i + 1, totalParts));
     await appendSegmentGroup(streamKey, bv, "append_danmu", danmuPaths, burnDanmu, deps, jlog, isPublic, splitForUpload);
@@ -832,11 +881,26 @@ async function resumeSegmentAppends(
     await recoverBurnProducts(streamKey, uploadParts, deps, jlog, burnDanmu, burnLivechat);
   }
   // 先补 plain:已建稿但其余分 P 可能还没传完(上次在 append plain 中途失败)。
-  const plainFiles = uploadParts.map((p) => p.plain).filter((f) => f && existsSync(f));
+  const plainParts = partsForUpload(uploadParts.map((p) => p.plain), "plain 段(续跑)", jlog);
+  if (plainParts.missing.length > 0) {
+    // 续跑尤其致命:过滤后数组下标变短 → doneParts 的 checkpoint 与剩余段错位 → 跳过本该补传的分P。
+    jlog(`分段续跑中止:${plainParts.missing.length} 个 plain 段缺失且不可恢复(转人工,保留全部源)`);
+    ledger.setState(streamKey, "needs_manual", { error: `分段续跑:${plainParts.missing.length} 个 plain 段产物缺失,请人工核对` });
+    notify({ kind: "error", stage: "上传", message: `${streamKey} 分段续跑中止:${plainParts.missing.length} 个 plain 段产物缺失且无可恢复别名,请人工核对分P` });
+    return await drainSeason({ state: "needs_manual", bv });
+  }
+  const plainFiles = plainParts.kept;
   // 提交前自检:补 append 的产物同样不能是坏容器(稿件已建,绝不能追加坏分 P)→ 检出转人工。
+  const burnParts = partsForUpload(uploadParts.flatMap((p) => [p.danmu, p.livechat]), "danmu/livechat 段(续跑)", jlog);
+  if (burnParts.missing.length > 0) {
+    jlog(`分段续跑中止:${burnParts.missing.length} 个烧录轨分P产物缺失且不可恢复(转人工)`);
+    ledger.setState(streamKey, "needs_manual", { error: `分段续跑:${burnParts.missing.length} 个烧录轨分P产物缺失,请人工核对` });
+    notify({ kind: "error", stage: "上传", message: `${streamKey} 分段续跑中止:${burnParts.missing.length} 个烧录轨分P产物缺失且无可恢复别名,请人工核对分P` });
+    return await drainSeason({ state: "needs_manual", bv });
+  }
   const resumeFiles = [
     ...plainFiles,
-    ...uploadParts.flatMap((p) => [p.danmu, p.livechat]).filter((f): f is string => !!f && existsSync(f)),
+    ...burnParts.kept,
   ];
   const brokenResume = await unreadableParts(resumeFiles, deps.segmentDuration ?? defaultSegmentDuration);
   if (brokenResume.length > 0) {
@@ -863,8 +927,17 @@ async function resumeSegmentAppends(
     for (const k of idxs) ledger.markPartDone(streamKey, "plain", k);
   }
   ledger.syncNodeState(streamKey, "upload_plain", "done", { error: null });
-  const danmuFiles = uploadParts.map((p) => p.danmu).filter((f): f is string => !!f && existsSync(f));
-  const livechatFiles = uploadParts.map((p) => p.livechat).filter((f): f is string => !!f && existsSync(f));
+  const danmuPartsFinal = partsForUpload(uploadParts.map((p) => p.danmu), "danmu 段(续跑 append)", jlog);
+  const livechatPartsFinal = partsForUpload(uploadParts.map((p) => p.livechat), "livechat 段(续跑 append)", jlog);
+  if (danmuPartsFinal.missing.length > 0 || livechatPartsFinal.missing.length > 0) {
+    const n = danmuPartsFinal.missing.length + livechatPartsFinal.missing.length;
+    jlog(`分段续跑 append 中止:${n} 个烧录轨分P产物缺失且不可恢复(转人工,绝不追加少分P的清单)`);
+    ledger.setState(streamKey, "needs_manual", { error: `分段续跑:${n} 个烧录轨分P产物缺失,请人工核对分P` });
+    notify({ kind: "error", stage: "上传", message: `${streamKey} 分段续跑 append 中止:${n} 个烧录轨分P产物缺失且无可恢复别名,请人工核对分P` });
+    return await drainSeason({ state: "needs_manual", bv });
+  }
+  const danmuFiles = danmuPartsFinal.kept;
+  const livechatFiles = livechatPartsFinal.kept;
   await drainSeasonOnThrow(async () => {
     await appendSegmentGroup(streamKey, bv, "append_danmu", danmuFiles, burnDanmu, deps, jlog, isPublic, splitForUpload);
     await appendSegmentGroup(streamKey, bv, "append_livechat", livechatFiles, burnLivechat, deps, jlog, isPublic, splitForUpload);

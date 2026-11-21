@@ -273,6 +273,14 @@ hub 规则（`config/hub/{platform}.{roomSlug}.json`）新增 `recording.sourceT
 - 硬链接不可用时(跨设备)回落复制。
 - 别名目录在 `stageAfterDone` 时整体删除；保留 stage 时也不额外占盘(硬链接共享 inode)。
 - 未配置 `partTitleTemplate` → 完全不建别名，走原路径，行为与改动前一致。
+- **只剩别名的残留会自动修**：手删规范名（或清理只删了规范名）后数据仍由别名持有，此时续跑不会被
+  误判成「产物缺失」。证据是建别名时同写的清单（放在 `<stage>/.upload/` 目录内，记录「别名名 → 规范名 basename / 当时大小」）；`restoreProductFromAlias` 只认清单命中且大小一致，用**同目录 rename** 把别名改回规范名
+  （原子、零拷贝、不回落复制，也不与 ffmpeg 的原子写临时名撞）。**不按文件名后缀猜类型** ——
+  模板正文含 `_danmu`、`partTitleToFilename` 去掉尾部标点都会让 plain 与 danmu 的别名撞名，靠名字猜会把
+  plain 内容当弹幕分P 传上去。清单缺失 / 多候选 / 大小不符 → 不恢复、保持转人工。恢复后 job 日志与通知各留一条。
+- **分段路径绝不静默少传**：分段上传的 5 个产物交接点都走 `partsForUpload`：能按清单恢复的先恢复，
+  仍缺失的由调用方 fail-closed 转 `needs_manual`（续跑更关键：过滤后数组下标会与 `doneParts` 的 checkpoint
+  错位，等于跳过一段、其余段错位）。
 
 `pipeline.cleanup` 三个开关彼此独立，实测口径如下（房间 什么佳 50620112379，双节点链路）：
 
