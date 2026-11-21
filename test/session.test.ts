@@ -868,6 +868,26 @@ describe("RecordingSession.drain (窗口结束排空)", () => {
     expect(rec.stopCount).toBe(1);
   });
 
+  it("#322: drain after a hard stop waits for the same tail", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sess-drain-after-stop-"));
+    const rec = new MockDlrRecorder();
+    let releaseTail!: () => void;
+    const tail = new Promise<void>((r) => { releaseTail = r; });
+    const sess = new RecordingSession(rec, {
+      danmuEnabled: false,
+      makeRolling: () => ({ onSegment: (): void => {}, onSessionEnd: () => tail }),
+    });
+    await sess.start("https://live.douyin.com/1", makeOpts(dir), { anchorName: "A" });
+    const stopped = sess.stop();
+    const drained = sess.drain();
+    let drainDone = false;
+    void drained.then(() => { drainDone = true; });
+    await Promise.resolve();
+    expect(drainDone).toBe(false);
+    releaseTail();
+    await Promise.all([stopped, drained]);
+  });
+
   it("recorder 不支持 drain() → 退化为硬停", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sess-drain-nodrain-"));
     const rec = new NoDrainMock();

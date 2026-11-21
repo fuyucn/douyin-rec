@@ -779,7 +779,9 @@ export class RecordingSession {
    * the recorder can't drain (no drain()), it degrades to a hard stop().
    */
   async drain(): Promise<void> {
-    if (this.userStopped) return;
+    // Issue #322 review P2: a hard stop already in progress owns the one teardown. Returning immediately here
+    // would let a caller believe the tail is finished; wait for the same stop promise instead.
+    if (this.userStopped) return this.stopPromise ?? Promise.resolve();
     if (this.draining) return this.drainDone ?? Promise.resolve();
     this.draining = true;
     this.drainDone = new Promise<void>((r) => { this.resolveDrainDone = r; });
