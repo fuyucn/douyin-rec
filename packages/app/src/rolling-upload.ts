@@ -1928,14 +1928,37 @@ export function makeRollingUploadHookFactory(o: {
       // Queue mode must never take the upload slot (the runner owns the only uploader).
       slot: o.queueMode === true ? null : (o.slot ?? sharedNodeUploadSlot(o.log)),
     });
+    // Issue #322: the manager may hand us the predecessor's tail as a gate. Registering a segment must still
+    // happen immediately (the sidecar is the crash-recovery source), but the upload starts only after the gate.
+    let uploadGate: Promise<void> | null = null;
+    let gateSettled = false;
+    let uploadPending = false;
+    const flushActive = (): void => {
+      if (uploadGate && !gateSettled) { uploadPending = true; return; }
+      uploadPending = false;
+      void uploader.flush({ recordingActive: true }).catch(() => undefined);
+    };
+    const releaseGate = (): void => {
+      gateSettled = true;
+      if (uploadPending) flushActive();
+    };
     return {
+      setUploadGate: (gate: Promise<void>): void => {
+        uploadGate = gate;
+        gateSettled = false;
+        // finishRolling never rejects its barrier; the rejection branch is defensive for future implementations.
+        void gate.then(releaseGate, releaseGate);
+      },
       onSegment: (p: string): void => {
         uploader.noteSegment(p);
         // 每产生新段 → 尝试处理:新段存在即意味着**旧段已封口**(滚动即封口)。fire-and-forget,
         // 不阻塞录制;串行链保证同一会话不并发上传。失败/不确定在 uploader 内部转人工(保留源)。
-        void uploader.flush({ recordingActive: true }).catch(() => undefined);
+        flushActive();
       },
       onSessionEnd: async (): Promise<void> => {
+        if (uploadGate) { try { await uploadGate; } catch { /* defensive: flush below */ } }
+        gateSettled = true;
+        uploadPending = false;
         try {
           await uploader.flush({ recordingActive: false });
           await uploader.drainSeason();

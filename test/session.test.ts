@@ -447,6 +447,92 @@ describe("RecordingSession", () => {
     expect(startCount).toBe(2);   // still 2 — no extra reconnect after user stop
   });
 
+  it("#322: reconnect does not wait for the rolling session-end upload; the next hook is gated", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sess-322-"));
+    const rec = new OfflineMock();
+    rec.isLiveResults = [true]; // stream wobble: same broadcast, reconnect immediately
+    let resolveTail!: () => void;
+    const tail = new Promise<void>((r) => { resolveTail = r; });
+    const segments: string[] = [];
+    let hookSeq = 0;
+    const makeRolling = (): { onSegment(p: string): void; onSessionEnd(): Promise<void> } => {
+      const seq = hookSeq++;
+      return {
+        onSegment: (p) => segments.push(`${seq}:${p}`),
+        onSessionEnd: () => (seq === 0 ? tail : Promise.resolve()),
+      };
+    };
+    const sess = new RecordingSession(rec, { reconnectDelaySec: 0.01, makeRolling, danmuEnabled: false });
+    await sess.start("https://live.douyin.com/322", makeOpts(dir), { anchorName: "" });
+    await vi.waitFor(() => expect(segments.some((s) => s.startsWith("0:"))).toBe(true));
+    expect(rec.startCount).toBe(1);
+
+    rec.ev.onOffline();
+    // The old hook's onSessionEnd is still pending; reconnect must still happen.
+    await vi.waitFor(() => expect(rec.startCount).toBe(2), { timeout: 1000 });
+    expect(segments.some((s) => s.startsWith("1:"))).toBe(false); // second hook is gated, not uploading yet
+
+    resolveTail();
+    await vi.waitFor(() => expect(segments.some((s) => s.startsWith("1:"))).toBe(true));
+    await sess.stop();
+  });
+
+  it("#322: a hook with setUploadGate still registers its segment immediately", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sess-322-gate-"));
+    const rec = new OfflineMock();
+    rec.isLiveResults = [true];
+    let resolveTail!: () => void;
+    const tail = new Promise<void>((r) => { resolveTail = r; });
+    const segments: string[] = [];
+    const gates: Promise<void>[] = [];
+    let hookSeq = 0;
+    const makeRolling = (): { onSegment(p: string): void; onSessionEnd(): Promise<void>; setUploadGate(g: Promise<void>): void } => {
+      const seq = hookSeq++;
+      return {
+        onSegment: (p) => segments.push(`${seq}:${p}`),
+        setUploadGate: (g) => gates.push(g),
+        onSessionEnd: () => (seq === 0 ? tail : Promise.resolve()),
+      };
+    };
+    const sess = new RecordingSession(rec, { reconnectDelaySec: 0.01, makeRolling, danmuEnabled: false });
+    await sess.start("https://live.douyin.com/322", makeOpts(dir), { anchorName: "" });
+    await vi.waitFor(() => expect(segments.some((s) => s.startsWith("0:"))).toBe(true));
+
+    rec.ev.onOffline();
+    await vi.waitFor(() => expect(rec.startCount).toBe(2), { timeout: 1000 });
+    // Registration is not deferred: the second hook receives its segment while the first tail is pending.
+    expect(segments.some((s) => s.startsWith("1:"))).toBe(true);
+    expect(gates).toHaveLength(2);
+    let gateResolved = false;
+    void gates[1]!.then(() => { gateResolved = true; });
+    await Promise.resolve();
+    expect(gateResolved).toBe(false); // still the predecessor tail
+
+    resolveTail();
+    await vi.waitFor(() => expect(gateResolved).toBe(true));
+    await sess.stop();
+  });
+
+  it("#322: concurrent stop calls share one teardown and both wait for the tail", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sess-322-stop-"));
+    const rec = new MockDlrRecorder();
+    let releaseTail!: () => void;
+    const tail = new Promise<void>((r) => { releaseTail = r; });
+    const makeRolling = () => ({ onSegment: (): void => {}, onSessionEnd: () => tail });
+    const sess = new RecordingSession(rec, { makeRolling, danmuEnabled: false });
+    await sess.start("https://live.douyin.com/322", makeOpts(dir), { anchorName: "" });
+
+    const first = sess.stop();
+    const second = sess.stop();
+    let secondDone = false;
+    void second.then(() => { secondDone = true; });
+    await Promise.resolve();
+    expect(secondDone).toBe(false); // old code returned immediately because userStopped was already true
+
+    releaseTail();
+    await Promise.all([first, second]);
+  });
+
   it("onOffline 期间已在重连：重复事件被忽略，只重连一次", async () => {
     vi.useFakeTimers();
 
@@ -754,6 +840,79 @@ describe("RecordingSession.drain (窗口结束排空)", () => {
     await p;
     expect(rec.stopCount).toBe(1);
     expect(rec.startCount).toBe(1);            // 没有重连
+  });
+
+  it("#322: two drain finalizers await the same pending rolling tail", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sess-drain-322-"));
+    const rec = new DrainMock();
+    rec.isLiveResults = [true]; // keep the poll from finalizing on its own
+    let releaseTail!: () => void;
+    const tail = new Promise<void>((r) => { releaseTail = r; });
+    const sess = new RecordingSession(rec, {
+      drainPollSec: 999, reconnectDelaySec: 0.01, danmuEnabled: false,
+      makeRolling: () => ({ onSegment: (): void => {}, onSessionEnd: () => tail }),
+    });
+    await sess.start("https://live.douyin.com/1", makeOpts(dir), { anchorName: "A" });
+    const drained = sess.drain();
+    let drainedDone = false;
+    void drained.then(() => { drainedDone = true; });
+
+    rec.ev.onOffline(); // first finalizer starts stop and waits for the tail
+    await new Promise((r) => setTimeout(r, 20));
+    rec.ev.onOffline(); // second finalizer must join the same stop, not resolve drainDone early
+    await Promise.resolve();
+    expect(drainedDone).toBe(false);
+
+    releaseTail();
+    await drained;
+    expect(rec.stopCount).toBe(1);
+  });
+
+  it("#322: drain after a hard stop waits for the same tail", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sess-drain-after-stop-"));
+    const rec = new MockDlrRecorder();
+    let releaseTail!: () => void;
+    const tail = new Promise<void>((r) => { releaseTail = r; });
+    const sess = new RecordingSession(rec, {
+      danmuEnabled: false,
+      makeRolling: () => ({ onSegment: (): void => {}, onSessionEnd: () => tail }),
+    });
+    await sess.start("https://live.douyin.com/1", makeOpts(dir), { anchorName: "A" });
+    const stopped = sess.stop();
+    const drained = sess.drain();
+    let drainDone = false;
+    void drained.then(() => { drainDone = true; });
+    await Promise.resolve();
+    expect(drainDone).toBe(false);
+    releaseTail();
+    await Promise.all([stopped, drained]);
+  });
+
+  it("#322: hard stop during an active drain settles drainDone", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sess-drain-hardstop-"));
+    const rec = new DrainMock();
+    rec.isLiveResults = [true]; // drain starts its liveness poll; no natural end
+    let releaseTail!: () => void;
+    const tail = new Promise<void>((r) => { releaseTail = r; });
+    const sess = new RecordingSession(rec, {
+      drainPollSec: 999, reconnectDelaySec: 0.01, danmuEnabled: false,
+      makeRolling: () => ({ onSegment: (): void => {}, onSessionEnd: () => tail }),
+    });
+    await sess.start("https://live.douyin.com/1", makeOpts(dir), { anchorName: "A" });
+    const drained = sess.drain();
+    const stopped = sess.stop(); // hard stop while drain is waiting for the broadcast end
+    await Promise.resolve();
+    let drainDone = false;
+    void drained.then(() => { drainDone = true; });
+    expect(drainDone).toBe(false);
+
+    releaseTail();
+    await stopped;
+    const outcome = await Promise.race([
+      drained.then(() => "done"),
+      new Promise<string>((r) => setTimeout(() => r("timeout"), 200)),
+    ]);
+    expect(outcome).toBe("done"); // the old code left drainDone pending forever
   });
 
   it("recorder 不支持 drain() → 退化为硬停", async () => {
