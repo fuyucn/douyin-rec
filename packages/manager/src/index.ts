@@ -84,6 +84,13 @@ export interface SessionOpts {
 export interface RollingUploadHook {
   onSegment(filePath: string): void;
   onSessionEnd(): Promise<void>;
+  /**
+   * Optional issue #322 seam: implementations that register a segment and start an upload in the same call can
+   * separate the two. The manager sets the gate before any segment arrives; onSegment must still register and
+   * persist the segment immediately, but must not start uploading until the returned gate settles. Implementations
+   * without this method keep the manager-side buffering fallback (node remux hooks).
+   */
+  setUploadGate?(gate: Promise<void>): void;
 }
 
 export class RecordingSession {
@@ -419,6 +426,13 @@ export class RecordingSession {
    */
   private gateRolling(raw: RollingUploadHook): RollingUploadHook {
     const barrier = this.rollingTail;
+    if (raw.setUploadGate) {
+      // The implementation keeps registering every segment immediately (and persists its sidecar); only the
+      // upload start is deferred. This is required for crash recovery: a buffered-only path would lose B's
+      // sidecar and a later restart could skip its parts when it resumes A.
+      raw.setUploadGate(barrier);
+      return raw;
+    }
     const buffered: string[] = [];
     let ready = false;
     const release = (): void => {

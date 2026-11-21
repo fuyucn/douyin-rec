@@ -477,6 +477,42 @@ describe("RecordingSession", () => {
     await sess.stop();
   });
 
+  it("#322: a hook with setUploadGate still registers its segment immediately", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sess-322-gate-"));
+    const rec = new OfflineMock();
+    rec.isLiveResults = [true];
+    let resolveTail!: () => void;
+    const tail = new Promise<void>((r) => { resolveTail = r; });
+    const segments: string[] = [];
+    const gates: Promise<void>[] = [];
+    let hookSeq = 0;
+    const makeRolling = (): { onSegment(p: string): void; onSessionEnd(): Promise<void>; setUploadGate(g: Promise<void>): void } => {
+      const seq = hookSeq++;
+      return {
+        onSegment: (p) => segments.push(`${seq}:${p}`),
+        setUploadGate: (g) => gates.push(g),
+        onSessionEnd: () => (seq === 0 ? tail : Promise.resolve()),
+      };
+    };
+    const sess = new RecordingSession(rec, { reconnectDelaySec: 0.01, makeRolling, danmuEnabled: false });
+    await sess.start("https://live.douyin.com/322", makeOpts(dir), { anchorName: "" });
+    await vi.waitFor(() => expect(segments.some((s) => s.startsWith("0:"))).toBe(true));
+
+    rec.ev.onOffline();
+    await vi.waitFor(() => expect(rec.startCount).toBe(2), { timeout: 1000 });
+    // Registration is not deferred: the second hook receives its segment while the first tail is pending.
+    expect(segments.some((s) => s.startsWith("1:"))).toBe(true);
+    expect(gates).toHaveLength(2);
+    let gateResolved = false;
+    void gates[1]!.then(() => { gateResolved = true; });
+    await Promise.resolve();
+    expect(gateResolved).toBe(false); // still the predecessor tail
+
+    resolveTail();
+    await vi.waitFor(() => expect(gateResolved).toBe(true));
+    await sess.stop();
+  });
+
   it("onOffline 期间已在重连：重复事件被忽略，只重连一次", async () => {
     vi.useFakeTimers();
 
