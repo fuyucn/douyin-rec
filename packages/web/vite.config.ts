@@ -10,6 +10,7 @@ export default defineConfig({
   resolve: {
     alias: {
       "@drec/contracts": fileURLToPath(new URL("../core/src/api-types.ts", import.meta.url)),
+      "@drec/notify-context": fileURLToPath(new URL("../core/src/notify-context.ts", import.meta.url)),
       // 实验性功能注册表(纯数据,无 import):徽标文案的单一来源(issue #43)
       "@drec/experimental": fileURLToPath(new URL("../core/src/experimental.ts", import.meta.url)),
       // 边录边传生效判定(纯函数):表单的禁用原因与后端下发同源,不在前端另写一份(房间表单重设计 T1)

@@ -1,10 +1,8 @@
 /**
- * notify-context.ts — structured context for notifications (issue #53, step N1: contract only).
+ * notify-context.ts — shared structured context for notifications.
  *
- * Events today carry a bare streamKey or room id, so a reader cannot tell which live room a
- * notification is about. This module defines the shared vocabulary that later steps attach to
- * events (`NotifyEvent.ctx`) and render: the streamKey parser and the single display-name priority
- * chain. Nothing renders `ctx` yet, so existing messages are unchanged.
+ * This module defines the shared notification vocabulary, streamKey parser and display-name
+ * priority chain used to attach and render room context.
  */
 import { parseSessionStamp } from "./title-template.js";
 
@@ -100,8 +98,20 @@ export interface RecordNameFacts {
   taskName?: string | null;
   /** Anchor name the recorder resolved from the platform. */
   liveAnchor?: string | null;
+  cachedAnchor?: string | null;
   platform?: string | null;
   roomSlug?: string | null;
+}
+
+export function formatNotifySource(ctx?: NotifyContext): string {
+  if (!ctx) return "";
+  const name = clean(ctx.name);
+  const platform = clean(ctx.platform);
+  const roomSlug = clean(ctx.roomSlug);
+  const location = [platform, roomSlug].filter(Boolean).join(" ");
+  if (ctx.nameSource === "fallback") return location || name;
+  if (name && location) return name + " · " + (platform && roomSlug ? platform + "/" + roomSlug : location);
+  return name || location;
 }
 
 /**
@@ -111,7 +121,10 @@ export interface RecordNameFacts {
  * event's `ctx` win. The `room` field and everything else stay as they were.
  */
 export function decorateRecordEvent<E extends { kind: string; ctx?: NotifyContext; anchor?: string }>(e: E, f: RecordNameFacts): E {
-  const resolved = resolveDisplayName({ taskName: f.taskName, liveAnchor: f.liveAnchor, platform: f.platform, roomSlug: f.roomSlug });
+  const resolved = resolveDisplayName({
+    taskName: f.taskName, liveAnchor: f.liveAnchor, cachedAnchor: f.cachedAnchor,
+    platform: f.platform, roomSlug: f.roomSlug,
+  });
   const derived: NotifyContext = {
     name: resolved.name,
     nameSource: resolved.source,
@@ -120,6 +133,8 @@ export function decorateRecordEvent<E extends { kind: string; ctx?: NotifyContex
   };
   // Only defined event fields win (an explicit `undefined` must not erase a derived value).
   const own = Object.fromEntries(Object.entries(e.ctx ?? {}).filter(([, v]) => v !== undefined)) as NotifyContext;
+  if (own.name !== undefined && own.nameSource === undefined) delete derived.nameSource;
+  if (own.name === undefined) delete own.nameSource;
   const ctx = { ...derived, ...own };
   const isRecord = e.kind === "recordStart" || e.kind === "recordReconnect" || e.kind === "recordEnd";
   // Without any real name keep the event's own anchor text (the message already falls back to the room).

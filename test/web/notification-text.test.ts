@@ -20,8 +20,10 @@ describe("describeEvent (#53 N6)", () => {
     expect(describeEvent(ev({ kind: "recordStart", anchor: "A", room: "r", quality: "q" }), t)!.message).toBe('notif.evLive{"anchor":"A"}');
   });
   it("error with ctx names the room and appends the next step", () => {
-    const d = describeEvent(ev({ kind: "error", stage: "弹幕", message: "m", ctx: { name: "小苏", next: "检查登录" } }), t)!;
-    expect(d.message).toBe('notif.evErrorNamed{"message":"m","name":"小苏","stage":"弹幕"} notif.next{"next":"检查登录"}');
+    const d = describeEvent(ev({ kind: "error", stage: "弹幕", message: "m", ctx: {
+      name: "小苏", platform: "douyin", roomSlug: "room-a", next: "检查登录",
+    } }), t)!;
+    expect(d.message).toBe('notif.evErrorNamed{"message":"m","name":"小苏 · douyin/room-a","stage":"弹幕"} notif.next{"next":"检查登录"}');
   });
   it("hub events use ctx name + date/time over the raw room", () => {
     const d = describeEvent(ev({ kind: "hubTaskStart", streamKey: "k", room: "123", workers: ["a"], mode: "upload",
@@ -59,11 +61,17 @@ describe("describeEvent: deliberate changes for events without ctx (#53 N6 revie
     expect(describeEvent(ev({ kind: "recordStart", anchor: "主播", room: "r", quality: "q", ctx }), t)!.message).toBe('notif.evLive{"anchor":"任务名"}');
     expect(describeEvent(ev({ kind: "hubTaskStart", room: "r", workers: [], anchor: "主播", ctx }), t)!.message).toContain("任务名");
   });
-  it("a fallback ctx name never outranks the anchor and never prefixes an error", () => {
+  it("a fallback ctx name never outranks the anchor but identifies an error", () => {
     const ctx = { name: "未知直播间", nameSource: "fallback" };
     expect(describeEvent(ev({ kind: "recordStart", anchor: "主播", room: "r", quality: "q", ctx }), t)!.message).toBe('notif.evLive{"anchor":"主播"}');
     expect(describeEvent(ev({ kind: "recordStart", anchor: "", room: "r", quality: "q", ctx }), t)!.message).toBe('notif.evLive{"anchor":"未知直播间"}');
-    expect(describeEvent(ev({ kind: "error", stage: "s", message: "m", ctx }), t)!.message).toMatch(/^notif\.evError\{/);
+    expect(describeEvent(ev({ kind: "error", stage: "s", message: "m", ctx }), t)!.message)
+      .toBe('notif.evErrorNamed{"message":"m","name":"未知直播间","stage":"s"}');
+  });
+  it("error fallback includes platform and room so unknown anchors remain distinguishable", () => {
+    const ctx = { name: "douyin room-a", nameSource: "fallback", platform: "douyin", roomSlug: "room-a" };
+    expect(describeEvent(ev({ kind: "error", stage: "直播直传", message: "m", ctx }), t)!.message)
+      .toBe('notif.evErrorNamed{"message":"m","name":"douyin room-a","stage":"直播直传"}');
   });
   it("hub session label prefers the anchor over a fallback ctx name", () => {
     const ctx = { name: "未知直播间", nameSource: "fallback", date: "2026-10-18" };

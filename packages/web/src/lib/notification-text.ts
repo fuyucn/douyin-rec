@@ -5,6 +5,7 @@
  * Events without `ctx` (older servers / nodes) render exactly as before.
  */
 import type { AppEventDTO, NotifKey } from "@drec/contracts";
+import { formatNotifySource, type DisplayNameSource } from "@drec/notify-context";
 
 export type ToastKind = "success" | "error" | "warning" | "info";
 type T = (key: string, vars?: Record<string, string | number>) => string;
@@ -21,14 +22,24 @@ function baseName(p?: string): string {
  * when the shared chain resolved a real one; a fallback (unknown room / "platform room") lands in
  * `fallbackName` so it never outranks the event's own anchor and never prefixes an error.
  */
-function ctxOf(ev: Record<string, unknown>): { name?: string; fallbackName?: string; date?: string; time?: string; next?: string } {
+function ctxOf(ev: Record<string, unknown>): { name?: string; fallbackName?: string; source?: string; date?: string; time?: string; next?: string } {
   const c = ev.ctx;
   if (!c || typeof c !== "object" || Array.isArray(c)) return {};
   const o = c as Record<string, unknown>;
   const str = (k: string): string | undefined => (typeof o[k] === "string" && o[k] !== "" ? (o[k] as string) : undefined);
   const name = str("name");
   const fallback = o.nameSource === "fallback";
-  return { name: fallback ? undefined : name, fallbackName: fallback ? name : undefined, date: str("date"), time: str("time"), next: str("next") };
+  return {
+    name: fallback ? undefined : name,
+    fallbackName: fallback ? name : undefined,
+    source: formatNotifySource({
+      name,
+      nameSource: str("nameSource") as DisplayNameSource | undefined,
+      platform: str("platform"),
+      roomSlug: str("roomSlug"),
+    }),
+    date: str("date"), time: str("time"), next: str("next"),
+  };
 }
 
 /** Event → { toggle key, text, toast kind }; null = no toast for this kind. */
@@ -68,9 +79,8 @@ export function describeEvent(e: AppEventDTO, t: T): { key: NotifKey; message: s
       return { key: "hub", message: t("notif.evHubStart", { room: session(s("room")), count: workers }), type: "info" };
     }
     case "error": {
-      // Deliberately ctx.name only: error events carry no anchor, and a fallback name must not prefix.
-      const base = ctx.name
-        ? t("notif.evErrorNamed", { name: ctx.name, stage: s("stage"), message: s("message") })
+      const base = ctx.source
+        ? t("notif.evErrorNamed", { name: ctx.source, stage: s("stage"), message: s("message") })
         : t("notif.evError", { stage: s("stage"), message: s("message") });
       return { key: "error", message: ctx.next ? `${base} ${t("notif.next", { next: ctx.next })}` : base, type: "error" };
     }

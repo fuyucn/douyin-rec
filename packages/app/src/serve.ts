@@ -25,6 +25,7 @@ import { TaskDaemon, resolveDiskWatermark } from "./daemon.js";
 import { makeManualStartAdmit, currentDiskMinGB } from "./disk-gate.js";
 import { ProcQueueStore, ProcRunner, SimpleSlotLimiter } from "@drec/proc-queue";
 import { TaskManager } from "./task-manager.js";
+import { decorateTaskNotifyEvent } from "./task-notify-context.js";
 import { masterSendsTransition, roomIsLive, workerProbeUsable, type LiveTick } from "./live-notify.js";
 import { NotifyOutbox } from "./notify-outbox.js";
 import { watchFleetAgent, type FleetAgent, type FleetNodeCommand } from "./fleet-agent.js";
@@ -445,7 +446,10 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
                         }
                       })
                     : undefined;
-                  events.emit(t?.id ?? null, r.event, { webhook: r.wantWebhook });
+                  const event = t && r.event.kind === "error"
+                    ? decorateTaskNotifyEvent(r.event, t, manager.getAnchorName(t.id))
+                    : r.event;
+                  events.emit(t?.id ?? null, event, { webhook: r.wantWebhook });
                 }
                 // 发送后再确认,确认成功才推进游标:确认失败时下一轮会重发,而不是丢事件。
                 await hubStarter!.notifyOutbox!(w.id, max, 0, rows.map((r) => r.id));
