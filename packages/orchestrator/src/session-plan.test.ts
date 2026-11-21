@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, writeFileSync, readdirSync, existsSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolvePartAliasStem } from "@drec/core";
-import { deriveSegmentPlan, deriveStageProducts, prepareUploadAlias, segmentStem, sessionBaseOfFile, sessionBasesOfFiles, UPLOAD_ALIAS_DIR } from "./session-plan.js";
+import { deriveSegmentPlan, deriveStageProducts, prepareUploadAlias, repairStageProductsByAlias, restoreProductFromAlias, segmentStem, sessionBaseOfFile, sessionBasesOfFiles, UPLOAD_ALIAS_DIR } from "./session-plan.js";
 
 describe("sessionBaseOfFile", () => {
   it("ts/flv/xml/mp4 与 PART 分段归一到同一会话 base", () => {
@@ -213,5 +213,160 @@ describe("prepareUploadAlias(分P标题 → 文件名)", () => {
     expect(out1).not.toBe(out2);
     expect(out2.split("/").pop()!.length).toBeLessThanOrEqual(64); // 60-char stem + ".mp4"
     expect(out2.endsWith("-P2.mp4")).toBe(true);
+  });
+});
+
+describe("prepareUploadAlias:别名清单(恢复的唯一证据)", () => {
+  it("建别名时记下 src/size,同一 src 只留最新一条", () => {
+    const dir = mkdtempSync(join(tmpdir(), "alias-map-"));
+    const canonical = join(dir, "主播_2026-11-21.mp4");
+    writeFileSync(canonical, "plain-bytes");
+    prepareUploadAlias(dir, "plain", canonical, "P1");
+    prepareUploadAlias(dir, "plain", canonical, "Q1"); // 换模板后的第二个别名
+    const map = JSON.parse(readFileSync(join(dir, UPLOAD_ALIAS_DIR, ".aliases.json"), "utf8")) as Record<string, { src: string; size: number }>;
+    expect(map["Q1.mp4"]).toEqual({ src: "主播_2026-11-21.mp4", size: 11, at: expect.any(Number) });
+    expect(map["P1.mp4"]).toBeUndefined(); // 同一 src 只留最新
+  });
+
+  it("未配分P模板(desiredTitle 为空)→ 不建目录、不写清单", () => {
+    const dir = mkdtempSync(join(tmpdir(), "alias-nomap-"));
+    const canonical = join(dir, "a.mp4");
+    writeFileSync(canonical, "x");
+    prepareUploadAlias(dir, "plain", canonical, null);
+    expect(existsSync(join(dir, UPLOAD_ALIAS_DIR))).toBe(false);
+  });
+});
+
+describe("restoreProductFromAlias(只认清单,不猜文件名)", () => {
+  /** 建一场 stage:plain + danmu,并给两者建别名(真实路径,含清单)。 */
+  const seed = (): { dir: string; plain: string; danmu: string } => {
+    const dir = mkdtempSync(join(tmpdir(), "alias-restore-"));
+    const dateName = "主播_2026-11-21";
+    const plain = join(dir, `${dateName}.mp4`);
+    const danmu = join(dir, `${dateName}_danmu.mp4`);
+    writeFileSync(plain, "plain-bytes");
+    writeFileSync(danmu, "danmu-bytes");
+    prepareUploadAlias(dir, "plain", plain, "P1");
+    prepareUploadAlias(dir, "danmu", danmu, "P2_danmu");
+    return { dir, plain, danmu };
+  };
+
+  it("规范名被手删、清单命中且大小一致 → rename 零拷贝恢复(原位别名消失,内容不变)", () => {
+    const { dir, danmu } = seed();
+    const alias = join(dir, UPLOAD_ALIAS_DIR, "P2_danmu.mp4");
+    const aliasIno = statSync(alias).ino;
+    rmSync(danmu);
+    const logs: string[] = [];
+    expect(restoreProductFromAlias(danmu, (m) => logs.push(m))).toBe(true);
+    expect(existsSync(danmu)).toBe(true);
+    expect(statSync(danmu).ino).toBe(aliasIno); // 同一个 inode:没有复制
+    expect(existsSync(alias)).toBe(false);      // rename 后原位名字消失
+    expect(readFileSync(danmu, "utf8")).toBe("danmu-bytes");
+    expect(logs.join("\n")).toContain("零拷贝恢复");
+    // 清单里那条已被消费
+    const map = JSON.parse(readFileSync(join(dir, UPLOAD_ALIAS_DIR, ".aliases.json"), "utf8")) as Record<string, unknown>;
+    expect(map["P2_danmu.mp4"]).toBeUndefined();
+  });
+
+  it("没有清单(老目录 / 手放的别名)→ 不猜,保持原判定", () => {
+    const dir = mkdtempSync(join(tmpdir(), "alias-noguess-"));
+    writeFileSync(join(dir, "主播_2026-11-21.mp4"), "p");
+    mkdirSync(join(dir, UPLOAD_ALIAS_DIR), { recursive: true });
+    writeFileSync(join(dir, UPLOAD_ALIAS_DIR, "P2_danmu.mp4"), "whatever"); // 清单不存在
+    const canonical = join(dir, "主播_2026-11-21_danmu.mp4");
+    expect(restoreProductFromAlias(canonical)).toBe(false);
+    expect(existsSync(canonical)).toBe(false);
+  });
+
+  it("清单命中但大小不符(别名已被别的内容替换)→ 不恢复", () => {
+    const { dir, danmu } = seed();
+    writeFileSync(join(dir, UPLOAD_ALIAS_DIR, "P2_danmu.mp4"), "short"); // 覆盖别名,size 变了
+    rmSync(danmu);
+    const logs: string[] = [];
+    expect(restoreProductFromAlias(danmu, (m) => logs.push(m))).toBe(false);
+    expect(existsSync(danmu)).toBe(false);
+    expect(logs.join("\n")).toContain("不一致");
+  });
+
+  it("清单命中但别名已不存在 → 不恢复(没有第二份数据)", () => {
+    const { dir, danmu } = seed();
+    rmSync(join(dir, UPLOAD_ALIAS_DIR, "P2_danmu.mp4"));
+    rmSync(danmu);
+    expect(restoreProductFromAlias(danmu)).toBe(false);
+  });
+
+  it("plain 标题以 `_danmu` 结尾(与弹幕别名同名)→ 不会把 plain 内容当成 P2 恢复", () => {
+    const dir = mkdtempSync(join(tmpdir(), "alias-tail-"));
+    const dateName = "主播_2026-11-21";
+    const plain = join(dir, `${dateName}.mp4`);
+    const danmu = join(dir, `${dateName}_danmu.mp4`);
+    writeFileSync(plain, "plain-bytes");
+    writeFileSync(danmu, "danmu-bytes");
+    // 模板让 plain 的分P名也以 _danmu 结尾:别名文件叫 P1_danmu.mp4,但清单 src 是 plain
+    prepareUploadAlias(dir, "plain", plain, "P1_danmu");
+    rmSync(danmu);
+    expect(restoreProductFromAlias(danmu)).toBe(false);  // 清单里没有 src=danmu 的条目
+    expect(existsSync(danmu)).toBe(false);
+    rmSync(plain);
+    expect(restoreProductFromAlias(plain)).toBe(true);   // 但 plain 自己能恢复
+  });
+});
+
+describe("repairStageProductsByAlias(整场找回)", () => {
+  it("danmu + livechat 规范名被删 → 两个都恢复,plain 在则不动", () => {
+    const dir = mkdtempSync(join(tmpdir(), "alias-repair-all-"));
+    const dateName = "主播_2026-11-21";
+    const plain = join(dir, `${dateName}.mp4`);
+    const danmu = join(dir, `${dateName}_danmu.mp4`);
+    const livechat = join(dir, `${dateName}_livechat.mp4`);
+    for (const [p, body] of [[plain, "p-bytes"], [danmu, "d-bytes"], [livechat, "l-bytes"]] as const) writeFileSync(p, body);
+    prepareUploadAlias(dir, "plain", plain, "P1");
+    prepareUploadAlias(dir, "danmu", danmu, "P2_danmu");
+    prepareUploadAlias(dir, "livechat", livechat, "P3_livechat");
+    const plainIno = statSync(plain).ino;
+    rmSync(danmu); rmSync(livechat);
+    const logs: string[] = [];
+    expect(repairStageProductsByAlias(dir, "mp4", (m) => logs.push(m))).toEqual([danmu, livechat]);
+    expect(readFileSync(danmu, "utf8")).toBe("d-bytes");
+    expect(readFileSync(livechat, "utf8")).toBe("l-bytes");
+    expect(statSync(plain).ino).toBe(plainIno); // plain 未被碰过
+    expect(logs.length).toBe(2);
+  });
+
+  it("什么都齐全 → 空数组(不产生日志、不动任何文件)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "alias-repair-clean-"));
+    const dateName = "主播_2026-11-21";
+    writeFileSync(join(dir, `${dateName}.mp4`), "p");
+    writeFileSync(join(dir, `${dateName}_danmu.mp4`), "d");
+    prepareUploadAlias(dir, "danmu", join(dir, `${dateName}_danmu.mp4`), "P2_danmu");
+    const logs: string[] = [];
+    expect(repairStageProductsByAlias(dir, "mp4", (m) => logs.push(m))).toEqual([]);
+    expect(logs).toEqual([]);
+  });
+});
+
+describe("repairStageProductsByAlias:规范名全丢时的 stemHint 兜底", () => {
+  it("deriveStageProducts 推不出 dateName 时,用台账 stem 恢复", () => {
+    const dir = mkdtempSync(join(tmpdir(), "alias-hint-"));
+    const dateName = "主播_2026-11-21";
+    writeFileSync(join(dir, `${dateName}.mp4`), "p-bytes");
+    writeFileSync(join(dir, `${dateName}_danmu.mp4`), "d-bytes");
+    prepareUploadAlias(dir, "plain", join(dir, `${dateName}.mp4`), "P1");
+    prepareUploadAlias(dir, "danmu", join(dir, `${dateName}_danmu.mp4`), "P2_danmu");
+    rmSync(join(dir, `${dateName}.mp4`));        // 两个规范名都被手删
+    rmSync(join(dir, `${dateName}_danmu.mp4`));
+    const logs: string[] = [];
+    const repaired = repairStageProductsByAlias(dir, "mp4", (m) => logs.push(m), { stemHint: dateName });
+    expect(repaired.sort()).toEqual([join(dir, `${dateName}.mp4`), join(dir, `${dateName}_danmu.mp4`)].sort());
+    expect(readFileSync(join(dir, `${dateName}_danmu.mp4`), "utf8")).toBe("d-bytes");
+  });
+
+  it("没有 stemHint 又推不出 dateName → 不动(保持转人工)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "alias-nohint-"));
+    const dateName = "主播_2026-11-21";
+    writeFileSync(join(dir, `${dateName}.mp4`), "p");
+    prepareUploadAlias(dir, "plain", join(dir, `${dateName}.mp4`), "P1");
+    rmSync(join(dir, `${dateName}.mp4`));
+    expect(repairStageProductsByAlias(dir, "mp4")).toEqual([]);
   });
 });

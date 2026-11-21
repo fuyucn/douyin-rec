@@ -1679,6 +1679,38 @@ describe("runPipeline", () => {
       deps.ledger.close();
     });
 
+    it("续跑:规范名被手删、数据只剩 .upload 别名 → 零拷贝恢复并继续 append(不误判产物缺失)", async () => {
+      const { mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+      const stageDir = mkdtempSync(join(tmpdir(), "resume-alias-"));
+      const deps = makeDeps({ cfg: { ...makeDeps().cfg, stageDir } });
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey);
+      for (const st of ["syncing", "merging", "uploading"] as const) deps.ledger.setState(b.streamKey, st);
+      deps.ledger.setBv(b.streamKey, BV_EXISTING);
+      deps.ledger.logStep(b.streamKey, "append_danmu", "start"); // 两个 append 都还没做完
+      const dateName = "主播名_2026-06-27";
+      const sub = join(stageDir, "douyin_test-room_2026-06-27");
+      mkdirSync(sub, { recursive: true });
+      for (const suf of [".mp4", "_danmu.mp4", "_livechat.mp4", ".xml"]) writeFileSync(join(sub, dateName + suf), `x${suf}`);
+      // 模拟「手删规范名」:数据只由 .upload 别名(硬链接 + 清单)持有
+      const { prepareUploadAlias } = await import("./session-plan.js");
+      for (const [suf, alias] of [["_danmu.mp4", "P2_danmu"], ["_livechat.mp4", "P3_livechat"]] as const) {
+        const canonical = join(sub, dateName + suf);
+        prepareUploadAlias(sub, "danmu", canonical, alias);
+        rmSync(canonical);
+      }
+
+      const r = await runPipeline(b, deps);
+
+      expect((deps.upload as unknown as { uploadPlain: Mock }).uploadPlain).not.toHaveBeenCalled(); // 绝不重传 P1
+      const appended = ((deps.upload as unknown as { appendGroup: Mock }).appendGroup as Mock)
+        .mock.calls.map((c) => (c[0] as { files: string[] }).files.join(",")).join("|");
+      expect(appended).toContain("_danmu.mp4");    // 恢复后照常补 P2
+      expect(appended).toContain("_livechat.mp4"); // 恢复后照常补 P3
+      expect(r).toEqual({ state: "done", bv: BV_EXISTING });
+      deps.ledger.close();
+    });
+
     it("Critical: P1 成功后 burn 失败 → bv 已落库,pipeline 收口 failed,重试走续跑绝不重传 P1", async () => {
       const deps = makeDeps();
       // merge 成功、burn 抛错(模拟 P1 已建稿后烧录失败)

@@ -1,4 +1,4 @@
-import { readdirSync } from "node:fs";
+import { readFileSync, readdirSync, statSync, writeFileSync, renameSync } from "node:fs";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { linkOrCopy, partTitleToFilename, stageExt, stampedSessionBaseOf, STAGE_EXT_ALT, type StageFormat } from "@drec/core";
 
@@ -114,6 +114,141 @@ export function withOutputStem(p: StageProducts, stem: string): StageProducts {
   };
 }
 
+/**
+ * `.upload` 里的「别名 → 规范产物」清单(文件名就是清单自己的名字,放在别名目录里)。
+ * 它是**恢复的唯一证据**:恢复只认清单命中 + 大小一致,绝不按文件名后缀猜类型。
+ */
+export const ALIAS_MAP_FILE = ".aliases.json";
+
+/** 清单条目:alias 名 → 它指向的规范产物 basename / 当时大小 / 记录时间。 */
+interface AliasEntry {
+  src: string;
+  size: number;
+  at?: number;
+}
+
+const basenameOf = (p: string): string => p.slice(p.lastIndexOf("/") + 1);
+
+function readAliasMap(dir: string): Record<string, AliasEntry> {
+  try {
+    const v = JSON.parse(readFileSync(`${dir}/${ALIAS_MAP_FILE}`, "utf8")) as unknown;
+    if (!v || typeof v !== "object") return {};
+    const out: Record<string, AliasEntry> = {};
+    for (const [k, e] of Object.entries(v as Record<string, unknown>)) {
+      const src = typeof (e as { src?: unknown })?.src === "string" ? (e as { src: string }).src : "";
+      const size = Number((e as { size?: unknown })?.size);
+      if (!k || !src || !Number.isFinite(size) || size < 0) continue;
+      const at = Number((e as { at?: unknown })?.at);
+      out[k] = { src, size, ...(Number.isFinite(at) && at > 0 ? { at } : {}) };
+    }
+    return out;
+  } catch {
+    return {}; // 没有清单 = 老目录 / 未配模板:恢复一律保守不猜
+  }
+}
+
+function writeAliasMap(dir: string, map: Record<string, AliasEntry>): void {
+  const tmp = `${dir}/.${ALIAS_MAP_FILE}.part`;
+  writeFileSync(tmp, JSON.stringify(map));
+  renameSync(tmp, `${dir}/${ALIAS_MAP_FILE}`); // 原子替换:读者永远看到完整清单
+}
+
+/**
+ * 从 `.upload` 别名里找回**只剩别名的 stage 产物**(规范名被手删),返回恢复的规范路径。
+ *
+ * 为什么需要:上传别名是硬链接(`prepareUploadAlias`),删掉规范名**不会**释放空间、数据只剩
+ * `.upload/<分P标题>.mp4` 持有;而续跑/补跑一律以 `existsSync(规范名)` 判产物在不在 →
+ * 「数据还在、只是名字没了」被误判成「产物缺失」,白白转人工(2026-11-21 线上真实发生)。
+ *
+ * 规则(全部以清单为依据,认不准就不动):
+ * ① 规范名存在 → 跳过(正常情况,零成本,不建任何东西);
+ * ② 只认 `.upload/.aliases.json` 里 `src` 等于该产物 basename 的条目,且别名文件是**普通文件**、
+ *    大小与记录一致 —— 只靠文件名后缀推断类型会把 plain 内容当成弹幕分P(模板正文含 `_danmu`、
+ *    `partTitleToFilename` 去掉尾部标点都会撞名),所以类型启发式一律不用;
+ * ③ 清单缺失 / 无命中 / 大小不符 / 多个候选 → 不恢复、不改判定(宁可转人工,不可错传);
+ * ④ 恢复用**同目录 rename**(原子、零拷贝、不回落复制,也不会与 ffmpeg 的 `.X.part.mp4` 临时名撞);
+ *    别名名字因此消失,后续上传前 `prepareUploadAlias` 会重新建。
+ *
+ * 为什么重新挂规范名、而不是把别名路径往下传:后续 append / 校验 / 清理 / 删源全按规范名工作,
+ * 多一条「别名路径」通路会多一份判定(且 `clean_stage` 删的是规范名 → 别名会永久留下)。
+ *
+ * `stemHint`(`sync_jobs.outputStem`,台账锁定的产物名)只在**规范产物全丢**、`deriveStageProducts`
+ * 推不出 dateName 时兜底 —— 至少给恢复一个确定的目标路径,而不是直接判「产物缺失」。
+ *
+ * @returns 已恢复的规范路径(空数组 = 什么都没动)
+ */
+export function repairStageProductsByAlias(
+  stageSub: string,
+  fmt: StageFormat = "mp4",
+  log?: (msg: string) => void,
+  opts?: { stemHint?: string | null },
+): string[] {
+  const prod = deriveStageProducts(stageSub, fmt);
+  const hint = (opts?.stemHint ?? "").trim();
+  const trio = (p: Pick<StageProducts, "plain" | "danmuMp4" | "livechatMp4">) => ({
+    plain: p.plain,
+    danmu: p.danmuMp4,
+    livechat: p.livechatMp4,
+  });
+  const paths = prod ? trio(prod) : hint ? trio(stageProductPaths(stageSub, hint, fmt)) : null;
+  if (!paths) return [];
+  const targets = [paths.plain, paths.danmu, paths.livechat];
+  const repaired: string[] = [];
+  for (const path of targets) {
+    if (restoreProductFromAlias(path, log)) repaired.push(path);
+  }
+  return repaired;
+}
+
+/**
+ * 就**一个**规范产物做别名回找:缺失且清单里有唯一命中、大小一致 → 零拷贝挂回规范名。
+ *
+ * 只做清单命中:猜错的代价是把别的内容传成这个分 P,比转人工严重得多。
+ *
+ * @returns true = 刚刚恢复了(调用方应记一条日志/告警)
+ */
+export function restoreProductFromAlias(canonical: string, log?: (msg: string) => void): boolean {
+  if (existsSync(canonical)) return false;
+  const dir = `${dirnameOf(canonical)}/${UPLOAD_ALIAS_DIR}`;
+  const src = basenameOf(canonical);
+  const map = readAliasMap(dir);
+  const hits = Object.entries(map).filter(([, e]) => e.src === src);
+  if (hits.length === 0) return false; // 没有清单证据(未配模板 / 老目录)→ 不猜
+  if (hits.length > 1) {
+    log?.(`[alias] ${src} 缺失,但清单里有多条候选(${hits.map(([k]) => k).slice(0, 3).join(",")}),认不准,不恢复`);
+    return false;
+  }
+  const [aliasName, entry] = hits[0]!;
+  const aliasPath = `${dir}/${aliasName}`;
+  try {
+    const st = statSync(aliasPath);
+    if (!st.isFile() || st.size !== entry.size) {
+      log?.(`[alias] ${src} 缺失,别名 ${aliasName} 与清单记录不一致(大小 ${st.size}≠${entry.size}),不恢复`);
+      return false;
+    }
+  } catch {
+    return false; // 别名已被删/不可读:不再有第二份,保守转人工
+  }
+  try {
+    renameSync(aliasPath, canonical); // 同目录原子 rename:零拷贝,不回落复制
+  } catch {
+    return false; // 恢复失败 → 保持原判定(不静默把「产物缺失」翻成「产物在」)
+  }
+  try {
+    const m = readAliasMap(dir);
+    delete m[aliasName]; // 清单里这条已消费(名字已变成规范名)
+    writeAliasMap(dir, m);
+  } catch { /* 清单清理失败只影响下一次恢复,不影响本次 */ }
+  log?.(`[alias] 规范产物 ${src} 缺失,已从 ${UPLOAD_ALIAS_DIR}/${aliasName} 零拷贝恢复(内容与占位未变)`);
+  return true;
+}
+
+/** 取路径所在目录(只用 `/` 分割:stage 路径内部一律 POSIX 风格,与 `joinPath` 一致)。 */
+function dirnameOf(p: string): string {
+  const i = p.lastIndexOf("/");
+  return i < 0 ? "" : p.slice(0, i);
+}
+
 // ─── 分段产出(steps.mergeSegments=false):不合并,逐段产出 ─────────────────────
 
 /** 一个录制分段(一个 .ts/.flv)在 stage 内的产出计划。 */
@@ -185,6 +320,15 @@ export function prepareUploadAlias(
     // 续跑:上一次留下的别名先移除,保证指向最新产物(同名不同内容时不会串)。
     if (existsSync(dst)) rmSync(dst, { force: true });
     linkOrCopy(canonical, dst);
+    // 记一份「别名 → 规范名」清单:恢复时只认清单命中,绝不靠文件名猜(见 restoreProductFromAlias)。
+    try {
+      const src = canonical.slice(canonical.lastIndexOf("/") + 1);
+      const map = readAliasMap(dir);
+      // 一个规范产物只留最新一条(换模板后旧别名不再当候选):名单恒 ≤1 条/source。
+      for (const [k, e] of Object.entries(map)) if (e.src === src) delete map[k];
+      map[dst.slice(dst.lastIndexOf("/") + 1)] = { src, size: statSync(canonical).size, at: Date.now() };
+      writeAliasMap(dir, map);
+    } catch { /* 清单只是恢复用的增强证据:写不了不影响上传(恢复会保守转人工) */ }
     return dst;
   } catch {
     return canonical; // 别名失败不影响上传(回落原名)
