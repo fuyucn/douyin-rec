@@ -513,6 +513,26 @@ describe("RecordingSession", () => {
     await sess.stop();
   });
 
+  it("#322: concurrent stop calls share one teardown and both wait for the tail", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sess-322-stop-"));
+    const rec = new MockDlrRecorder();
+    let releaseTail!: () => void;
+    const tail = new Promise<void>((r) => { releaseTail = r; });
+    const makeRolling = () => ({ onSegment: (): void => {}, onSessionEnd: () => tail });
+    const sess = new RecordingSession(rec, { makeRolling, danmuEnabled: false });
+    await sess.start("https://live.douyin.com/322", makeOpts(dir), { anchorName: "" });
+
+    const first = sess.stop();
+    const second = sess.stop();
+    let secondDone = false;
+    void second.then(() => { secondDone = true; });
+    await Promise.resolve();
+    expect(secondDone).toBe(false); // old code returned immediately because userStopped was already true
+
+    releaseTail();
+    await Promise.all([first, second]);
+  });
+
   it("onOffline 期间已在重连：重复事件被忽略，只重连一次", async () => {
     vi.useFakeTimers();
 
@@ -820,6 +840,32 @@ describe("RecordingSession.drain (窗口结束排空)", () => {
     await p;
     expect(rec.stopCount).toBe(1);
     expect(rec.startCount).toBe(1);            // 没有重连
+  });
+
+  it("#322: two drain finalizers await the same pending rolling tail", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sess-drain-322-"));
+    const rec = new DrainMock();
+    rec.isLiveResults = [true]; // keep the poll from finalizing on its own
+    let releaseTail!: () => void;
+    const tail = new Promise<void>((r) => { releaseTail = r; });
+    const sess = new RecordingSession(rec, {
+      drainPollSec: 999, reconnectDelaySec: 0.01, danmuEnabled: false,
+      makeRolling: () => ({ onSegment: (): void => {}, onSessionEnd: () => tail }),
+    });
+    await sess.start("https://live.douyin.com/1", makeOpts(dir), { anchorName: "A" });
+    const drained = sess.drain();
+    let drainedDone = false;
+    void drained.then(() => { drainedDone = true; });
+
+    rec.ev.onOffline(); // first finalizer starts stop and waits for the tail
+    await new Promise((r) => setTimeout(r, 20));
+    rec.ev.onOffline(); // second finalizer must join the same stop, not resolve drainDone early
+    await Promise.resolve();
+    expect(drainedDone).toBe(false);
+
+    releaseTail();
+    await drained;
+    expect(rec.stopCount).toBe(1);
   });
 
   it("recorder 不支持 drain() → 退化为硬停", async () => {

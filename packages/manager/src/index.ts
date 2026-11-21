@@ -103,6 +103,12 @@ export class RecordingSession {
   private liveTitle = "";
   /** Set to true once stop() is called by the user — suppresses reconnect. */
   private userStopped = false;
+  /**
+   * Issue #322 review: repeated stop()/drain() callers must await the same teardown. A second stop used to
+   * return immediately because `userStopped` was already true, allowing the CLI to exit while the first call
+   * was still waiting for a rolling tail.
+   */
+  private stopPromise: Promise<void> | null = null;
   /** Guards against overlapping reconnect attempts. */
   private reconnecting = false;
   /** True once drain() is called (window-end) — onOffline finalizes instead of reconnecting. */
@@ -280,6 +286,7 @@ export class RecordingSession {
     // 直播标题也进 sidecar:hub 后处理在录制进程退出后才跑,内存里的值那时已失效。
     this.liveTitle = (info.title ?? "").trim();
     this.userStopped = false;
+    this.stopPromise = null;
     // 全新一轮(用户 start / 进程重启):健康计数从零开始,不继承上一轮的短命/失败计数。
     this.reconnectFails = 0;
     this.shortLivedCount = 0;
@@ -717,9 +724,16 @@ export class RecordingSession {
 
   /** @param reason 录制结束原因(进 recordEnd 通知)。缺省「手动停止」——SIGTERM/手动停止走这条;
    *  窗口结束排空由 drain 传「窗口结束收播」。 */
-  async stop(reason = "手动停止"): Promise<void> {
-    if (this.userStopped) return;
+  stop(reason = "手动停止"): Promise<void> {
+    // Issue #322 review: cache the one teardown promise. A concurrent stop/drain caller must wait for the same
+    // tail; returning early here would let the CLI process.exit before the rolling upload finished.
+    if (this.stopPromise) return this.stopPromise;
     this.userStopped = true;
+    this.stopPromise = this.stopOnce(reason);
+    return this.stopPromise;
+  }
+
+  private async stopOnce(reason: string): Promise<void> {
     setRecorderPhase("finalizing"); // stop pulling, then seal + wait for the tail hook; the process exits after
     if (!this.recorder.providesDanmu && this.danmu) {
       await this.danmu.stop().catch(() => {});
@@ -804,8 +818,10 @@ export class RecordingSession {
   /** Tear down after a drained broadcast ends; resolves drainDone exactly once. */
   private async _finishDrain(): Promise<void> {
     if (this.drainTimer) { clearTimeout(this.drainTimer); this.drainTimer = null; }
-    if (!this.userStopped) await this.stop("窗口结束收播");
-    this._resolveDrain();
+    // Issue #322 review: the offline path and the liveness poll may both enter here. Both must await the same
+    // stop promise, including when the first caller already set userStopped.
+    const stopping = this.stopPromise ?? this.stop("窗口结束收播");
+    try { await stopping; } finally { this._resolveDrain(); }
   }
 
   private _resolveDrain(): void {
