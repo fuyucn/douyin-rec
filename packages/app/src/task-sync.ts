@@ -433,14 +433,19 @@ export function applyRemoteTasks(
     // Issue #480 (review 2): a protected key only counts toward "how much of the desired set survived" when
     // this node actually has a managed task for that room. A protected room the node never had is not a reason
     // to keep tasks for other rooms alive (a batch of unknown-room garbage must still be rejected).
-    const localManagedKeys = new Set(
+    //
+    // Issue #501: only an *active* local task may contribute to the protected count. A disabled (and not
+    // recording) task is not an expectation the current round has to preserve: counting it made a lone bad spec
+    // for that disabled room look like a non-empty expected set, bypassing the empty-desired guard while
+    // enabledManaged <= 1 skipped the shrink guard — and the other enabled task got disabled.
+    const activeManagedKeys = new Set(
       managedTasks.flatMap((t) => {
         const s = trySlugOf(t.room);
-        return s ? [`${s.platform}:${s.roomSlug}`] : [];
+        return s && (t.enabled || liveStatuses.has(t.status)) ? [`${s.platform}:${s.roomSlug}`] : [];
       }),
     );
     const expectedKeys = new Set([...retainedKeys, ...protectedKeys].filter((k) => {
-      return retainedKeys.has(k) || localManagedKeys.has(k);
+      return retainedKeys.has(k) || activeManagedKeys.has(k);
     }));
     const expectedSize = expectedKeys.size;
     if (retainedKeys.size === 0 && !explicitDelete && expectedSize === 0) {
