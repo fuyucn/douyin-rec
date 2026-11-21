@@ -90,14 +90,15 @@ describe("RecordingSession state file phases", () => {
 
     ev.onOffline();
     await vi.advanceTimersByTimeAsync(0);
-    // Pulling stopped but the tail of s1 is still being handled: not recording, not idle.
-    expect(trail().at(-1)).toBe("finalizing/s1");
+    // Issue #322: pulling stopped and the s1 tail moved to the background; the session is already polling.
+    expect(trail().at(-1)).toBe("polling/-");
+    // The tail is still pending, yet the new session must start.
+    await vi.advanceTimersByTimeAsync(20);
+    expect(n).toBe(2);
+    expect(trail().at(-1)).toBe("recording/s2");
 
     releaseTail();
     await vi.advanceTimersByTimeAsync(0);
-    expect(trail().at(-1)).toBe("polling/-"); // reconnect wait: nothing of s1 is marked active any more
-    await vi.runAllTimersAsync();
-    expect(n).toBe(2);
 
     expect(trail()).toEqual([
       "polling/-", "recording/-", "recording/s1", "finalizing/s1", "polling/-", "recording/-", "recording/s2",

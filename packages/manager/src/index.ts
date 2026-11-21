@@ -76,8 +76,10 @@ export interface SessionOpts {
  * 原地替换容器(issue #137)也从 `makeRolling` 注入,与边录边传互斥(装配方二选一,rolling 优先)。
  * manager 只做「通知」:
  *   - {@link onSegment}:一个新分段产生(尚未封口;实现自己按封口规则决定何时上传);
- *   - {@link onSessionEnd}:本会话即将收尾(停录 / 断流重连前)—— 实现应处理最后一段并**等待完成**,
- *     返回后 session 才继续。实现必须**吞掉自身异常**(不得反噬录制),但要在自己的日志里留痕。
+ *   - {@link onSessionEnd}:本会话即将收尾(停录 / 断流重连前)—— 实现应处理最后一段并完成上传。
+ *     停录时 session **等待**它返回;断流重连时它转后台执行,新会话的 onSegment 会先缓冲,直到它
+ *     完成才开始上传(避免同进程两个上传器并发/重复追加)。实现必须**吞掉自身异常**(不得反噬录制),
+ *     但要在自己的日志里留痕。
  */
 export interface RollingUploadHook {
   onSegment(filePath: string): void;
@@ -149,6 +151,12 @@ export class RecordingSession {
   private lastAdmitDenied: string | null = null;
   /** 本会话的边录边传钩子(每次 _startInner 新建)。 */
   private rolling?: RollingUploadHook;
+  /**
+   * Issue #322: the previous session's tail upload. It runs in the background across a reconnect; the next
+   * session's hook holds its segment notifications until this settles, so two uploaders never work on the same
+   * predecessor submission in one process. Resolved (never rejected) after finishRolling.
+   */
+  private rollingTail: Promise<void> = Promise.resolve();
   /**
    * 当前这场的弹幕源(onLive 时经 platform.connectDanmu 取得、start;onOffline/stop 时 stop)。
    * 每场重新取一个(重连/下一场要重新解析 liveId)。null = 本场未抓弹幕。
@@ -289,7 +297,9 @@ export class RecordingSession {
     // (轮询等待期)解析到的是陈旧/上一场 liveId,WS 连上却整场 0 弹幕(本地空弹幕根因 2026-06-19)。
     let danmuStarted = false;
     // 边录边传(T-33):本会话专属钩子(工厂每次 _startInner 新建)。undefined = 未启用。
-    this.rolling = this.makeRolling?.();
+    // Issue #322: a reconnect may start while the previous session's tail upload is still running. Gate the
+    // new hook on that tail so recording resumes immediately without two uploaders appending concurrently.
+    this.rolling = this.makeRolling ? this.gateRolling(this.makeRolling()) : undefined;
 
     // 进程已起、录制器在轮询开播但尚未拿到流 → 「等待开播」。父进程 TaskManager 解析
     // `[状态] X` → UI 区分「等待开播中」vs「录制中」（避免未开播也显示录制中）。
@@ -403,6 +413,48 @@ export class RecordingSession {
   }
 
   /**
+   * Issue #322: buffer segment paths until the predecessor's tail upload settles. The hook factory itself is
+   * unchanged; only this session decides when the new uploader may start. Buffering paths (not file bytes) is
+   * enough: the uploader treats an unobserved segment as not yet known and will only plan what it has seen.
+   */
+  private gateRolling(raw: RollingUploadHook): RollingUploadHook {
+    const barrier = this.rollingTail;
+    const buffered: string[] = [];
+    let ready = false;
+    const release = (): void => {
+      if (ready) return;
+      ready = true;
+      for (const p of buffered.splice(0)) {
+        try { raw.onSegment(p); }
+        catch (e) { log.error("边录边传钩子 onSegment 抛错(忽略):", (e as Error)?.message ?? e); }
+      }
+    };
+    // Never reject the gate: a failed predecessor tail must not stop the new session from uploading forever.
+    void barrier.then(release, release);
+    return {
+      onSegment: (p: string): void => {
+        if (ready) raw.onSegment(p);
+        else buffered.push(p);
+      },
+      onSessionEnd: async (): Promise<void> => {
+        await barrier;
+        release();
+        await raw.onSessionEnd();
+      },
+    };
+  }
+
+  /** Run the hook's session-end work once, expose it as the next hook's barrier, and never reject. */
+  private finishRolling(rolling: RollingUploadHook): Promise<void> {
+    const tail = (async (): Promise<void> => {
+      try { await rolling.onSessionEnd(); }
+      catch (e) { log.error("边录边传钩子 onSessionEnd 抛错(忽略):", (e as Error)?.message ?? e); }
+    })();
+    this.rollingTail = tail;
+    return tail;
+  }
+
+  /**
    * Called when the recorder fires onOffline or onError.
    * If the user has NOT called stop(), waits reconnectDelaySec then restarts.
    * Guards against re-entry while a reconnect is already in progress.
@@ -452,14 +504,16 @@ export class RecordingSession {
     await this.recorder.stop().catch(() => {});
     if (this.writerOpen) { this.writer.close(); this.writerOpen = false; this.currentXmlPath = null; }
 
-    // 边录边传(T-33):本会话已收尾(进程已停、最后一段不再增长)→ 处理最后一段并等它上传完成,
-    // 再重连。**必须在 recorder.stop() 之后**调(否则最后一段还在写,封口判定不成立)。
+    // 边录边传(T-33):本会话已收尾(进程已停、最后一段不再增长)→ 处理最后一段。
+    // Issue #322: do NOT await this upload before reconnecting — a busy node upload slot may hold it for up to
+    // 30 minutes while the broadcast is still live. It continues in the background; the next session's hook is
+    // gated on `rollingTail` (see gateRolling) so the predecessor is settled before it uploads anything.
+    // 必须在 recorder.stop() 之后调(否则最后一段还在写,封口判定不成立)。
     // 钩子异常绝不反噬重连;失败/不确定由钩子内部转人工(保留源)。
     if (this.rolling) {
       const rolling = this.rolling;
       this.rolling = undefined; // 幂等:同一会话只收尾一次(stop 与 offline 竞态不重复处理)
-      try { await rolling.onSessionEnd(); }
-      catch (e) { log.error("边录边传钩子 onSessionEnd 抛错(忽略):", (e as Error)?.message ?? e); }
+      void this.finishRolling(rolling);
     }
 
     // Check again after async teardown — user may have called stop() during teardown
@@ -660,12 +714,14 @@ export class RecordingSession {
     await this.recorder.stop().catch(() => {});
     if (this.writerOpen) { this.writer.close(); this.writerOpen = false; this.currentXmlPath = null; }
     // 边录边传(T-33):停录后处理最后一段并等上传完成(在写 session sidecar 之前;失败/不确定
-    // 由钩子内部转人工)。钩子异常绝不反噬停止。
+    // 由钩子内部转人工)。Issue #322: on a hard stop we still wait for every tail upload, including one
+    // that was moved to the background during an earlier reconnect; otherwise process exit would truncate it.
     if (this.rolling) {
       const rolling = this.rolling;
       this.rolling = undefined;
-      try { await rolling.onSessionEnd(); }
-      catch (e) { log.error("边录边传钩子 onSessionEnd 抛错(忽略):", (e as Error)?.message ?? e); }
+      await this.finishRolling(rolling);
+    } else {
+      await this.rollingTail;
     }
     // 停录:同名覆盖 session.json,补上缺口(身份字段不变)。供多节点选优用。
     if (this.currentXmlPath || this.lastXmlPath) {

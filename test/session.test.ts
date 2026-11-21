@@ -447,6 +447,36 @@ describe("RecordingSession", () => {
     expect(startCount).toBe(2);   // still 2 — no extra reconnect after user stop
   });
 
+  it("#322: reconnect does not wait for the rolling session-end upload; the next hook is gated", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sess-322-"));
+    const rec = new OfflineMock();
+    rec.isLiveResults = [true]; // stream wobble: same broadcast, reconnect immediately
+    let resolveTail!: () => void;
+    const tail = new Promise<void>((r) => { resolveTail = r; });
+    const segments: string[] = [];
+    let hookSeq = 0;
+    const makeRolling = (): { onSegment(p: string): void; onSessionEnd(): Promise<void> } => {
+      const seq = hookSeq++;
+      return {
+        onSegment: (p) => segments.push(`${seq}:${p}`),
+        onSessionEnd: () => (seq === 0 ? tail : Promise.resolve()),
+      };
+    };
+    const sess = new RecordingSession(rec, { reconnectDelaySec: 0.01, makeRolling, danmuEnabled: false });
+    await sess.start("https://live.douyin.com/322", makeOpts(dir), { anchorName: "" });
+    await vi.waitFor(() => expect(segments.some((s) => s.startsWith("0:"))).toBe(true));
+    expect(rec.startCount).toBe(1);
+
+    rec.ev.onOffline();
+    // The old hook's onSessionEnd is still pending; reconnect must still happen.
+    await vi.waitFor(() => expect(rec.startCount).toBe(2), { timeout: 1000 });
+    expect(segments.some((s) => s.startsWith("1:"))).toBe(false); // second hook is gated, not uploading yet
+
+    resolveTail();
+    await vi.waitFor(() => expect(segments.some((s) => s.startsWith("1:"))).toBe(true));
+    await sess.stop();
+  });
+
   it("onOffline 期间已在重连：重复事件被忽略，只重连一次", async () => {
     vi.useFakeTimers();
 
