@@ -2,7 +2,7 @@
 
 > 本文件是本仓库 **agent 工作的唯一待办台账**。管理规则见 `AGENTS.md`「任务与 TODO 管理」。
 > 编号 `T-N` 稳定不变（引用/提交信息里用它指代条目）。
-> 最后更新：2026-11-19
+> 最后更新：2026-11-20
 
 ## 状态约定
 
@@ -14,6 +14,11 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+
+- [~] **T-242 #49 总索引与 P0 轨迹基线（issue [#49](https://github.com/fuyucn/douyin-rec/issues/49)）** — **做什么**：逐项对账 U0–U12，复用现有 pipeline 假依赖冻结 merge / node-side / segments 的步骤、事件与 skipped/detail。**为什么**：防止旧总票与 plans/032、034、049、051、052 重复推进或误报完成。**验收**：索引列明实现、测试、替代票与剩余验收；仅文档/测试，不改运行时；本轮只做 diff/static 检查，vitest 交主会话错峰执行。索引：[plans/057](plans/057_issue_49_index.md)。**本轮交付**：13 项对账 + 3 路正常轨迹与 1 条边车 skipped 轨迹已编写；定向 4 passed / 146 skipped；全量 5635 passed / 42 skipped（仅 1 条无关 CLI 鉴权 flake，隔离复跑 4/4 通过）；`pnpm typecheck` 通过；无运行时改动；PR 使用 `Part of #49`，不关闭总票。
+
+- [~] **T-237 2026-11-20 全项目架构审查与改进批次（epic [#720](https://github.com/fuyucn/douyin-rec/issues/720) / sub #721–#728，2026-11-20）** — **做什么**: 由 xingchiapi/gpt-6.1-sol xhigh 做全项目架构审查，拆 6 个小审查；把确认的 8 个可独立项拆成 sub issue 并实现：配置坏文件 fail-closed、配置 RMW 事务、Hub 重试 UI/分段状态、台账读错误/DTO、平台注册/URL 匹配、直播直传 DB 路径、文档校准。**为什么**: 审查发现多处“看似成功/静默为空/前后端能力漂移”，且不能与既有 #419/#420/#484/#49/plans 049/051/052 重复。**验收**: 每项先补失败测试；集成分支通过全量 test/typecheck/arch/web build/bundle；PR 过 pr-gate/pr-risk-scan 与独立 review；不部署、不改上传投稿/删源/hub 规则。**计划**: [plans/056](plans/056_architecture_review_2026-11.md)。
+
 
 - [~] **T-234 Offline dev archive readback (issue [#714](https://github.com/fuyucn/douyin-rec/issues/714), 2026-11-19)** — **Scope**: provide a dev-only view of simulated archive operations and update S3 to the current fail-closed readback contract. **Why**: the offline fixture has no matching view response, blocking S2 recovery and both pending PRs. **Acceptance**: recognized fake archives reflect actual part counts; unknown, malformed and mismatched observations preserve sources; no fake hook in real-interaction mode; focused and full regression, isolated S2/S3 evidence and independent review. No production runtime or policy changes and no deployment.
   **Progress (2026-11-19)**: 21 focused regressions pass, including four real-shell-phase timing checks. Latest full recheck: 5492 passed / 42 skipped, 118.17s; type, architecture, privacy and risk checks pass. The initial full run timed out in one unchanged queue test; its focused 32 tests and unchanged full recheck pass without raising a timeout or adding a skip. Warning-timing mutation: two failures; restored: four passes. Internal doctor/smoke pass and unknown archives are rejected. Corrected S3 passed 42/42. Final corrected S2 passed 28/28: both stop and pause preserve disconnected-node safety, recover to done with both candidates, retain sources and submit once. Earlier runs each failed one premature warning deadline; the patch checks both warnings within existing alert windows, preserves every budget and captures its baseline before the fault. The accepted scenario and image fixture hashes match the source; all three dedicated containers are running and unpaused. Independent review remains outstanding. Follow-up edits are uncommitted; no push, merge or deployment.
@@ -42,6 +47,10 @@
   **Local checkpoint (2026-11-16)**: Local restructuring and whole-candidate readiness are complete; live stability acceptance is not. The candidate is 0.0.390-4fc287, exactly one patch above verified remote main 0.0.389; other uncommitted drafts do not reserve versions. All 60 touched production files pass strict structure (max function 60 lines; nesting 4), and all 66 pump exports are preserved. Final full regression: 5432 passed, 42 existing skips, 128.18s; typecheck, architecture, bundle, isolated HTTP smoke and whitespace pass. Full tracked-plus-untracked privacy scan now passes after anonymizing a copied help example and mapping local evidence; no rule relaxation or added skips. Independent Standards and Spec reviews found no actionable issues within their stated scope. Upload/cleanup RISK and authorized exact-artifact real acceptance remain open. Plan 055 contains the bounded private canary proposal and exact-artifact evidence map. No commit, push, deployment or production mutation.
 
 
+
+- [x] **T-235 append 返回成功但分 P 未落地（2026-11 线上事故，issue [#716](https://github.com/fuyucn/douyin-rec/issues/716) → PR [#717](https://github.com/fuyucn/douyin-rec/pull/717)）** — **做什么**: `appendGroup` 在 rc=0 后按 `countParts` 确认服务端分 P 数真的增加 `files.length`；整窗稳定不符 → `[append-ambiguous]` 不换线重发（会重复分 P）；整窗读不到 → 回落 rc=0（删源前 10 分钟回读仍兜底）。**为什么**: 某场分段上传中某段的 append 返回成功、B站少一个分 P（后续段标题跳号），台账把全部段记成 done，直到删源前回读才转人工。**验收**: 成功路径新增 +N / 刷新后到位 / 整窗未变 / 多文件部分落地 / null 回落用例；e2e 新增「rc=0 但服务端未落地」故障场景；全量 5506 passed / 48 skipped，typecheck 通过。**现状（2026-11-20）**: 代码已提交并开 PR #717（0.0.394，已 bundle）；本地 stage 与节点源已按用户要求删除；线上稿件已补传缺失段并重排为 P1..P6（无需再处理）。**残余**: `before` 读不到时仍回落 rc=0（仅靠删源前回读兜底）；部署未做。**合并（2026-11-20）**: PR #717 merge `a279f87a`；bundle `0.0.394-76afa4` 已重建；未部署；issue #716 仍开（待验证）。
+
+- [~] **T-236 直播直传整文件回退重试窗口 + fetch cause（issue [#718](https://github.com/fuyucn/douyin-rec/issues/718)，2026-11-20）** — **做什么**: 已封口后的整文件回退/未确认补传改用 6 次 2/5/10/20/30/30s 的有界重试；`putChunk` 保留 `error.cause`；直播路径保持 3 次 1/2/3s 快速降级。**为什么**: 线上日志显示短时 `fetch failed` 使首次回退在 36s 后即可恢复的窗口内误判失败，且错误只有 `fetch failed` 无法定位网络层原因。**验收**: 单测覆盖短抖动后成功、重试耗尽、cause 保留；全量 test/typecheck/bundle；issue #718，PR [#719](https://github.com/fuyucn/douyin-rec/pull/719)。
 
 - [x] **T-227 plans/051 管线步骤注册表设计评审（2026-11-18）**
   — 评审 [plans/051](plans/051_pipeline_step_registry.md)，结论方向成立但不能按原稿直接 P1：分段模式不是单张 DAG、执行器 `PipelineDeps` 依赖边界未落地、上传驱动与低层包互相矛盾、步骤数写成 14（实际 13）、`select`/`pull` 不是执行器节点、清理失败语义未定。修订阶段为 P0 execution-trace 对拍 → P1 纯数据注册表 → P2 merge/node 执行器 → P3 分段模型 → P4 上传 port；评审见 [051_review_2026-11-18.md](plans/051_review_2026-11-18.md)。
@@ -1004,6 +1013,13 @@
   属模型取舍，不是可顺手加的功能。**为什么**：冗余模型把轮询量乘了 N，是 VPS 被限流的根因之一。
 
 ## 已完成
+
+- [x] **T-239 断流重连不等待 rolling 收尾（issue [#322](https://github.com/fuyucn/douyin-rec/issues/322) → PR [#731](https://github.com/fuyucn/douyin-rec/pull/731)，2026-11-21）**
+  — **做什么**: 断流时 `onSessionEnd` 转后台并立即重连；`setUploadGate` 让新会话分段即时登记/持久化、只延后上传；stop/drain 共享唯一 teardown Promise，排空被硬停打断后 drainDone 仍 settle。**为什么**: 上传槽忙时收尾可阻塞重连 30 分钟，直播仍在继续但没录。**验收**: 定向 143 passed；全量 5597 passed / 42 skipped；typecheck、bundle、CI 通过；relay-xingchiapi 6.1 sol 复审 APPROVE。**合并**: PR #731 merge `f3a1ca55`；未部署。
+- [x] **T-238 骤减守卫只统计活跃受管房间（issue [#501](https://github.com/fuyucn/douyin-rec/issues/501) → PR [#730](https://github.com/fuyucn/douyin-rec/pull/730)，2026-11-21）**
+  — **做什么**: `decideGuard` 的 `expectedSize` 中，`protectedKeys` 只与本机「已启用或在播（running/pending/draining）」的受管任务求交；补「一个启用 + 一个停用房间，坏条目只指向停用房间」回归。**为什么**: 停用房间被保护集合计入后，空期望守卫被绕过，另一个已启用任务被误停用。**验收**: 新用例撤修复即红；定向 64 passed；全量 5590 passed / 42 skipped；typecheck、bundle、risk-scan 通过。**合并**: PR #730 merge `2538b92f`；未部署。
+- [x] **T-240 房间多来源日志（issue [#399](https://github.com/fuyucn/douyin-rec/issues/399) → PR [#732](https://github.com/fuyucn/douyin-rec/pull/732)，2026-11-21）** — 独立 RoomLogPanel 复用现有接口与 LogTerminal：按平台＋roomSlug 匹配参与节点自己的 taskId，拒绝歧义；各来源独立读取/失败，区分旧节点、空日志、无任务及不可达；支持来源过滤、全局行数上限；仅完整含时区时间戳跨来源排序，其余按来源分组；切房销毁会话并丢弃旧结果。**验收**: test/web 473 用例通过（含新增 32 用例）；全量 5629 passed / 42 skipped；前端 build（含 tsc）、typecheck、bundle 0.0.399-a15ea5 通过；relay-xingchiapi 6.1 sol 复审 APPROVE。**合并**: PR #732 merge `96e45095`；未部署。**未覆盖**: 浏览器窄屏实测与真实节点连接未做。 （2026-11-21）
+- [x] **T-241 直播直传在播无地址告警与重臂（issue [#496](https://github.com/fuyucn/douyin-rec/issues/496) → PR [#733](https://github.com/fuyucn/douyin-rec/pull/733)，2026-11-21）** — **做什么**: `StreamAcquirer` 携带 `unplayableReason`；生产适配器透传；`waitForBroadcast` 在 living 但无 url 时每场告警一次，正常 cadence 轮询；可用 url 或确认下播后重臂；超时/异常的失败探测不重臂；停止发生在途探测不再告警；core 注释写明与 throttledReason 互斥。**为什么**: 直播直传原先把「在播无地址」当未开播，静默等到整场漏录。**验收**: 定向 3 passed；全量 5632 passed / 42 skipped（retry=2）；typecheck、bundle 0.0.400-126419 通过；relay-xingchiapi 6.1 sol 复审 APPROVE。**合并**: PR #733；未部署。
 
 - [x] **T-231 Read-callback copy acceptance (issue [#353](https://github.com/fuyucn/douyin-rec/issues/353))** （2026-11-19）
   — **What/why**: pin the existing Buffer-reuse reader with identity and byte-exact regressions, plus a reproducible same-machine CPU control comparison. Preserve per-chunk detach copies; no preallocation or runtime changes.

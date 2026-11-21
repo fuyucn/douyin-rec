@@ -19,7 +19,7 @@ import { MergeJobStore } from "../../packages/app/src/merge-jobs.js";
 import { EventCenter } from "../../packages/observability/src/bus.js";
 import { listHubJobs } from "../../packages/app/src/hub-jobs.js";
 // Ledger deletion is injected by the entry point in production; tests inject the real owner.
-import { deleteHubHistory } from "../../packages/orchestrator/src/index.js";
+import { deleteHubHistory, SyncLedger } from "../../packages/orchestrator/src/index.js";
 import { upsertHubRule } from "../../packages/app/src/hub-store.js";
 import {
   makeApi,
@@ -115,6 +115,66 @@ beforeEach(() => {
   manager = new MockManager();
   const deps: ApiDeps = { store, manager };
   api = makeApi(deps);
+});
+
+describe("hub job read API error boundaries (issue #725)", () => {
+  it("hub 未启用与缺失 ledger 文件保留 200 空 JSON", () => {
+    expect(api.listHubJobs()).toMatchObject({ status: 200, body: { jobs: [], total: 0 } });
+    const missing = join(mkdtempSync(join(tmpdir(), "hubjobs-api-missing-")), "sync.db");
+    const response = makeApi({ store, manager, syncDbPath: missing }).listHubJobs();
+    expect(response.status).toBe(200);
+    expect(JSON.stringify(response.body)).toBe(JSON.stringify({ jobs: [], total: 0 }));
+  });
+
+  it("真实 SyncLedger 空库与嵌套投影保持公开 JSON", () => {
+    const syncDbPath = join(mkdtempSync(join(tmpdir(), "hubjobs-api-ledger-")), "sync.db");
+    const ledger = new SyncLedger(syncDbPath);
+    const streamKey = "douyin:api-room:2026-11-20";
+    ledger.upsertPending(streamKey);
+    ledger.recordCandidates(streamKey, [{ workerId: "local", coverage: 1, durationSec: 60,
+      startMs: 0, endMs: 60_000, totalGapSec: 0, danmuCount: 2 }], "local");
+    ledger.logStep(streamKey, "merge", "done", "merged");
+    ledger.syncNodeState(streamKey, "merge", "done");
+    ledger.close();
+
+    const response = makeApi({ store, manager, syncDbPath }).listHubJobs();
+    expect(response.status).toBe(200);
+    const body = response.body as { jobs: Array<Record<string, unknown>>; total: number };
+    expect(body.total).toBe(1);
+    expect(Object.keys(body.jobs[0]).sort()).toEqual([
+      "streamKey", "state", "winnerWorker", "candidates", "bv", "error", "fails", "updatedAt", "startedAt",
+      "events", "steps", "nodeStates", "currentStepSec", "etaSec", "videoDurationSec", "hasLog", "nodeUpload", "ackedAt", "ackNote",
+    ].sort());
+    expect(body.jobs[0]).toMatchObject({
+      streamKey,
+      candidates: [{ worker: "local", coverage: 1, durationSec: 60, danmuCount: 2, complete: true, isWinner: true }],
+      events: [{ state: "pending" }],
+      steps: [{ step: "merge", phase: "done", detail: "merged" }],
+      nodeStates: [{ node: "merge", state: "done", attempts: 0 }],
+      nodeUpload: null,
+      ackedAt: null,
+      ackNote: null,
+    });
+  });
+
+  it("已有但损坏或不兼容的库返回可诊断 500,而不是 200 空列表", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hubjobs-api-invalid-"));
+    const malformed = join(dir, "malformed.db");
+    const invalidDb = new DatabaseSync(malformed);
+    invalidDb.exec("CREATE TABLE sync_jobs(streamKey TEXT PRIMARY KEY, state TEXT NOT NULL)");
+    invalidDb.close();
+    const invalidApi = makeApi({ store, manager, syncDbPath: malformed });
+    const invalid = invalidApi.listHubJobs();
+    expect(invalid.status).toBe(500);
+    expect((invalid.body as { error: string }).error).toContain("sync_jobs");
+    expect(invalidApi.latestRuns().status).toBe(500);
+
+    const corrupt = join(dir, "corrupt.db");
+    writeFileSync(corrupt, "not a sqlite database");
+    const broken = makeApi({ store, manager, syncDbPath: corrupt }).listHubJobs();
+    expect(broken.status).toBe(500);
+    expect((broken.body as { error: string }).error).toContain("数据库损坏");
+  });
 });
 
 describe("判活闸门设置端点与 TaskDTO.gated", () => {
@@ -2804,6 +2864,22 @@ describe("T15 /api/hub/resources", () => {
     expect(JSON.parse(saved!).resources.maxCpuParallel).toBe(3);
     // 文件没被动
     expect(readFileSync(cfgPath, "utf-8")).not.toContain("maxCpuParallel");
+    s.close();
+  });
+
+  it("source=settings 的 JSON 根不是对象 → 400 且不写 settings", () => {
+    const s = new TaskStore(":memory:");
+    for (const bad of ["[]", "null", '"text"']) {
+      const a = makeApi({
+        store: s, manager: new MockManager(),
+        hubDir: mkdtempSync(join(tmpdir(), "hubres-bad-")),
+        hubConfigSource: () => ({ json: bad, source: "settings" as const }),
+      });
+      const r = a.putHubResources({ maxCpuParallel: 3 });
+      expect(r.status).toBe(400);
+      expect(String((r.body as { error: string }).error)).toContain("JSON");
+      expect(s.getSetting("hubConfig")).toBeNull();
+    }
     s.close();
   });
 

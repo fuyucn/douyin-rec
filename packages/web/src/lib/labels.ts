@@ -106,7 +106,8 @@ export function fmtStartedAt(epochMs: number | null | undefined, tz: string): st
 
 /**
  * 按直播间地址判平台(客户端):http(s) URL 用各平台 urlPattern 匹配;裸房间号或无命中
- * → 回落 platforms[0](默认平台,与后端 platformForRoom 一致)。平台决定画质/录制器/弹幕选项。
+ * → 回落 platforms[0](默认平台,与后端 platformForRoom 一致)。多重命中视为配置错误,不按顺序猜测。
+ * 平台决定画质/录制器/弹幕选项。
  *
  * **放在这里而不是各自 dialog 里**:RoomEditor 与 HubRuleDialog(T10)都要用,
  * 两份拷贝迟早会漂移(某一处加了新平台的兼容处理,另一处没加 → 同一房间两个页面显示不同画质)。
@@ -114,14 +115,19 @@ export function fmtStartedAt(epochMs: number | null | undefined, tz: string): st
 export function pickPlatform(room: string, platforms: PlatformDTO[]): PlatformDTO | undefined {
   if (!platforms.length) return undefined;
   if (/^https?:\/\//.test(room)) {
-    for (const p of platforms) {
-      if (!p.urlPattern) continue;
+    const matches = platforms.filter((p) => {
+      if (!p.urlPattern) return false;
       try {
-        if (new RegExp(p.urlPattern).test(room)) return p;
+        return new RegExp(p.urlPattern, p.urlPatternFlags ?? "").test(room);
       } catch {
         /* 坏 pattern 跳过 */
+        return false;
       }
+    });
+    if (matches.length > 1) {
+      throw new Error(`[platform] URL 同时匹配多个平台: ${matches.map((p) => p.id).join(", ")}`);
     }
+    if (matches.length === 1) return matches[0];
   }
   return platforms[0];
 }

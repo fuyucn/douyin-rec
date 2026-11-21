@@ -61,7 +61,11 @@ export function buildSettings(ctx: ApiCtx) {
       }
       if (resolved.source === "settings") {
         try {
-          const cfg = JSON.parse(resolved.json ?? "{}") as Record<string, unknown>;
+          const parsed: unknown = JSON.parse(resolved.json ?? "{}");
+          if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+            throw new Error("根必须是 JSON 对象");
+          }
+          const cfg = parsed as Record<string, unknown>;
           cfg.resources = { ...(cfg.resources as object ?? {}), ...patch };
           store.setSetting("hubConfig", JSON.stringify(cfg, null, 2));
         } catch (e) {

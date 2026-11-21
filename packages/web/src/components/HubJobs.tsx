@@ -15,6 +15,7 @@ import { buildFlow, pickMetric, type FlowCfg } from "./flow-build";
 import { RunTreeView } from "./RunTree";
 import { pipelineTree, rootStateOf } from "../lib/run-tree";
 import { deriveStepStatuses, stepDetail, type NodeStatus } from "../lib/hub-job-steps";
+import { isRetryableNode, retryRequest } from "../lib/hub-job-retry";
 
 type TFunc = (key: string, vars?: Record<string, string | number>) => string;
 
@@ -89,23 +90,6 @@ const ALL_STEP_KEYS = ["select", "pull", "node_upload", "merge", "burn_danmu", "
 type _MissingStepKey = Exclude<HubStepName, (typeof ALL_STEP_KEYS)[number]>;
 /** 覆盖全部 HubStepName 才可赋值(漏一个 → 类型塌成 never → 编译失败)。 */
 const ALL_STEP_KEYS_TYPED: _MissingStepKey extends never ? typeof ALL_STEP_KEYS : never = ALL_STEP_KEYS;
-
-/**
- * 上传后收尾未完成的节点(T12):清理失败(clean_* = failed)与核验待重试(clean_verify = pending)。
- *
- * **从 nodeStates 派生**而不是新增 DTO 字段 —— nodeStates 已是这些状态的唯一真理源
- * (orchestrator 的 syncNodeState 写、app 的 hub-jobs 只读同一张库),派生可避免两份真相漂移。
- */
-const CLEANUP_BACKFILL_KEYS = new Set(["clean_source", "clean_stage_src", "clean_stage"]);
-export function pendingFinalizeNodes(job: HubJobDTO): string[] {
-  const out: string[] = [];
-  for (const n of job.nodeStates) {
-    if (n.state === "done" || n.state === "skipped") continue;
-    const isVerifyPending = n.node === "clean_verify" && n.state === "pending";
-    if (isVerifyPending || (CLEANUP_BACKFILL_KEYS.has(n.node) && n.state === "failed")) out.push(n.node);
-  }
-  return out;
-}
 
 /** Derive node states from ledger events. Exported via the pure helper for regression coverage. */
 function stepStatuses(job: HubJobDTO): Record<string, { status: NodeStatus; sec: number | null }> {
@@ -271,12 +255,11 @@ function PipelineFlowInner({
   const detailOf = (key: string): string | undefined => stepDetail(job.steps, key);
   const nodeErrorOf = (key: string): string | undefined =>
     job.nodeStates.find((n) => n.node === key && n.state !== "done")?.error ?? undefined;
-  // clean_*/clean_verify 的重跑 = 「补跑收尾」(删源/核验,幂等,不会重传)→ 与核心节点同口径可重试。
-  const RETRYABLE = new Set(["merge", "burn_danmu", "burn_livechat", "upload_plain", "append_danmu", "append_livechat",
-    "clean_verify", "clean_source", "clean_stage_src", "clean_stage"]);
   // 运行中 run 的失败节点可能是上一轮崩溃残留,而续跑已经在处理该轨道(append 中);
   // 此刻点重跑会排队/与续跑冲突,故只在终态(failed / needs_manual)才显示节点级重跑。
   const nodeRetryVisible = TERMINAL.has(job.state) && onRetry != null;
+  // 分段模式整体拒绝单节点重跑(后端 retryNode 同样条件返回 400),UI 不再给必然失败的按钮。
+  const retryModeOk = cfg?.steps?.mergeSegments !== false;
   const termStatus: NodeStatus =
     job.state === "failed" ? "failed" : job.state === "done" ? "done" : job.state === "needs_manual" ? "done" : "todo";
   const termLabel = job.state === "needs_manual" ? labels.needs_manual : job.state === "failed" ? labels.failed : t("hub.jobs.termDone");
@@ -290,7 +273,7 @@ function PipelineFlowInner({
         status: st[n.key]?.status ?? "todo",
         sec: st[n.key]?.sec ?? null,
         detail: nodeErrorOf(n.key) ?? detailOf(n.key),
-        onRetry: (st[n.key]?.status === "failed" || st[n.key]?.status === "blocked") && RETRYABLE.has(n.key) && nodeRetryVisible
+        onRetry: (st[n.key]?.status === "failed" || st[n.key]?.status === "blocked") && retryModeOk && isRetryableNode(n.key) && nodeRetryVisible
           ? () => onRetry(n.key)
           : undefined,
         metric: n.key === "select"
@@ -397,16 +380,15 @@ export function RunCard({
   // 若每帧新建箭头函数会击穿 memo → 每次轮询冲刷 React Flow 导致偶发空白。
   const requestRetry = useCallback((node: string): void => {
     if (!onRetry) return;
-    if (node === "upload_plain" || node === "append_danmu" || node === "append_livechat") {
-      setPendingRetry({ node });
-      return;
-    }
-    void onRetry(job.streamKey, node, false);
+    const outcome = retryRequest(node, job.streamKey, (key, n, force) => onRetry(key, n, force));
+    if (outcome === "needs-confirm") setPendingRetry({ node });
   }, [onRetry, job.streamKey]);
   const confirmRetry = (): void => {
     const p = pendingRetry;
     setPendingRetry(null);
-    if (p && onRetry) void onRetry(job.streamKey, p.node, true);
+    if (!p || !onRetry) return;
+    // 确认后才带 force 发一次(不重复发)。
+    retryRequest(p.node, job.streamKey, (key, n, force) => onRetry(key, n, force), { confirmed: true });
   };
   return (
     <div
@@ -451,19 +433,6 @@ export function RunCard({
               }}
             >
               <Play className="w-3.5 h-3.5" />
-            </IconButton>
-          )}
-          {/* 上传已完成但收尾(清理/核验)没做完:源或 stage 还占着磁盘,reconciler 会按节流自动补跑,
-              这里也给出手动入口(补跑是幂等的,不会重传)。 */}
-          {job.state === "done" && pendingFinalizeNodes(job).length > 0 && onRunNow && (
-            <IconButton
-              title={t("hub.jobs.retryFinalize")}
-              onClick={(e) => {
-                e.stopPropagation();
-                void onRunNow(job.streamKey);
-              }}
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
             </IconButton>
           )}
           {job.hasLog && (

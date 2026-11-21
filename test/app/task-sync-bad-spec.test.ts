@@ -113,6 +113,23 @@ describe("applyRemoteTasks: bad spec is skipped, batch still applies (issue #480
   });
 
 
+  it("#501: a lone bad spec for a disabled local room still triggers empty-desired", () => {
+    seedManaged(["1", "2"]);
+    const disabled = store.listTasks().find((t) => t.room === "https://live.douyin.com/2")!;
+    store.setEnabled(disabled.id, false);
+    const logs: string[] = [];
+    // A truncated spec for the disabled room is derivable (protected), but a disabled task is not an active
+    // expectation. With the old count it made expectedSize=1, bypassing empty-desired; enabledManaged=1 then
+    // skipped mass-shrink and the unrelated enabled room was disabled.
+    const r = applyRemoteTasks(store, [{ room: "https://live.douyin.com/2" } as never], (m) => logs.push(m));
+    expect(r.rejected).toBe("empty-desired");
+    expect(r.removed).toEqual([]);
+    expect(r.pending).toEqual([]);
+    expect(store.listTasks().find((t) => t.room === "https://live.douyin.com/1")!.enabled).toBe(true);
+    expect(store.listTasks().find((t) => t.room === "https://live.douyin.com/2")!.enabled).toBe(false);
+    expect(logs.some((m) => m.includes("rejected=empty-desired"))).toBe(true);
+  });
+
   it("(a2) non-force, healthy ratio: the normal two-phase delete loop must not touch the broken room", () => {
     seedManaged(["1", "2", "3"]);
     // 2 good rooms retained + 1 protected = 3 of 3 enabled → no shrink rejection, so the deletion loop really

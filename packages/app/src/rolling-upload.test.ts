@@ -935,6 +935,33 @@ describe("session-end hook closes the session (issue #309)", () => {
   });
 });
 
+describe("issue #322 upload gate", () => {
+  it("registers segments and persists the sidecar immediately, but uploads only after the gate", async () => {
+    const { dir, paths } = mkSession(segNames(2));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const up = vi.fn(async () => FAKE_BV);
+    const hook = makeRollingUploadHookFactory({
+      enabled: true, platform: "douyin", roomSlug: "123", gate: new FakeGate(), now: futureNow, minSegmentSec: 0,
+      removeFile: noRemove,
+      upload: fakeUploadTarget({ uploadPlain: up as never, appendGroup: noopAppend as never }),
+    })!();
+
+    hook.setUploadGate!(gate);
+    hook.onSegment(paths[0]!);
+    hook.onSegment(paths[1]!);
+    // The sidecar must exist before the predecessor tail settles; crash recovery depends on it.
+    const saved = JSON.parse(readFileSync(sidecarPath(dir), "utf-8")) as { segments: unknown[] };
+    expect(saved.segments).toHaveLength(2);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(up).not.toHaveBeenCalled();
+
+    release();
+    await vi.waitFor(() => expect(up).toHaveBeenCalledTimes(1));
+    await hook.onSessionEnd();
+  });
+});
+
 describe("0 落盘稿件 metadata 与边录边传同口径(规则 > hub.config > 内置默认)", () => {
   const prevRoot = process.env.DOUYIN_REC_ROOT;
   let root: string;

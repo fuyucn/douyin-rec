@@ -77,7 +77,9 @@ describe("biliup target: argv 与旧链逐字一致（golden 期望值）", () =
 
   it("append 走 appendGroup：argv 含线路参数，与 golden 一致", async () => {
     const { calls, run } = capture();
-    const target = createBiliupFileTarget({ run, exists: () => true, countParts: async () => 1 });
+    // 成功路径会回读分 P 数确认落地：before=1 → after=2。
+    let parts = 1;
+    const target = createBiliupFileTarget({ run, exists: () => true, countParts: async () => (parts++ < 2 ? 1 : 2) });
     await target.append({
       cred: CRED,
       ref: { targetId: BILIUP_TARGET_ID, id: FAKE_BV },

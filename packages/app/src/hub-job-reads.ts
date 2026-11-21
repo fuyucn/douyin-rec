@@ -4,7 +4,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { HUB_ROOM_STREAM_PREDICATE, STAGE_READY, USER_STOP, jobLogPathCandidates, roomKeyToStreamPrefix, type NodeUploadStatusDTO, type QueuePhase } from "@drec/core";
 import { rootHubConfig, rootLogsDir, rootStageDir } from "./paths.js";
-import { openLedger, hasAckColumns, historicalRates, batchAttached, TERMINAL, FALLBACK_RATE } from "./hub-job-ledger.js";
+import { openLedger, inspectHubJobLedger, jobProjectionColumns, historicalRates, batchAttached, TERMINAL, FALLBACK_RATE } from "./hub-job-ledger.js";
 import type { AttachedTables, HubJobView, RawJob, ListHubJobsOpts, HubJobsResult, LatestRunPerRoom } from "./hub-job-types.js";
 
 export function hubStageDir(): string {
@@ -87,56 +87,64 @@ function estimateRemaining(rate: number, videoDurationSec: number, currentStepSe
   return remaining > 0 ? remaining : null;
 }
 
-function selectJobPage(db: DatabaseSync, opts: ListHubJobsOpts): { jobs: RawJob[]; total: number } | null {
+function databaseFileExists(path: string): boolean {
+  if (!path.trim()) throw new Error("hub 台账路径为空");
+  try {
+    statSync(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function selectJobPage(db: DatabaseSync, schema: ReturnType<typeof inspectHubJobLedger>, opts: ListHubJobsOpts): { jobs: RawJob[]; total: number } {
   const { room, limit = 10, offset = 0 } = opts;
   const prefix = room ? roomKeyToStreamPrefix(room) : null;
-  try {
-    const where: string[] = [];
-    const params: Array<string | number> = [];
-    if (prefix) { where.push(HUB_ROOM_STREAM_PREDICATE); params.push(prefix, prefix); }
-    if (opts.states && opts.states.length > 0) {
-      where.push(`state IN (${Array(opts.states.length).fill("?").join(",")})`);
-      params.push(...opts.states);
-    } else if (opts.excludeStates && opts.excludeStates.length > 0) {
-      where.push(`state NOT IN (${Array(opts.excludeStates.length).fill("?").join(",")})`);
-      params.push(...opts.excludeStates);
-    }
-    // Error filters compose with state filters; NULL and empty both mean unmarked.
-    // Match STAGE_READY verbatim, without trimming, as the queue row projection does.
-    if (opts.excludeError !== undefined) {
-      where.push("COALESCE(error, '') <> ?");
-      params.push(opts.excludeError);
-    }
-    if (opts.onlyError !== undefined) {
-      where.push("error = ?");
-      params.push(opts.onlyError);
-    }
-    if (opts.acked !== undefined) {
-      const hasAck = hasAckColumns(db);
-      if (hasAck) where.push(opts.acked ? "ackedAt IS NOT NULL" : "ackedAt IS NULL");
-      if (!hasAck && opts.acked) return null; // Older ledgers have no reviewed rows.
-    }
-    const whereSql = where.length ? ` WHERE ${where.join(" AND ")}` : "";
-    const total = Number((db.prepare(`SELECT COUNT(*) AS n FROM sync_jobs${whereSql}`)
-      .get(...params) as unknown as { n: number }).n);
-    const jobs = db.prepare(`SELECT * FROM sync_jobs${whereSql} ORDER BY updatedAt DESC LIMIT ? OFFSET ?`)
-      .all(...params, limit, offset) as unknown as RawJob[];
-    return { jobs, total };
-  } catch { return null; } // Older ledgers may not have this table.
+  const where: string[] = [];
+  const params: Array<string | number> = [];
+  if (prefix) { where.push(HUB_ROOM_STREAM_PREDICATE); params.push(prefix, prefix); }
+  if (opts.states && opts.states.length > 0) {
+    where.push(`state IN (${Array(opts.states.length).fill("?").join(",")})`);
+    params.push(...opts.states);
+  } else if (opts.excludeStates && opts.excludeStates.length > 0) {
+    where.push(`state NOT IN (${Array(opts.excludeStates.length).fill("?").join(",")})`);
+    params.push(...opts.excludeStates);
+  }
+  // Error filters compose with state filters; NULL and empty both mean unmarked.
+  // Match STAGE_READY verbatim, without trimming, as the queue row projection does.
+  if (opts.excludeError !== undefined) {
+    where.push("COALESCE(error, '') <> ?");
+    params.push(opts.excludeError);
+  }
+  if (opts.onlyError !== undefined) {
+    where.push("error = ?");
+    params.push(opts.onlyError);
+  }
+  if (opts.acked !== undefined) {
+    if (schema.jobs.has("ackedAt")) where.push(opts.acked ? "ackedAt IS NOT NULL" : "ackedAt IS NULL");
+    else if (opts.acked) where.push("0"); // The supported pre-review schema has no reviewed rows.
+  }
+  const whereSql = where.length ? ` WHERE ${where.join(" AND ")}` : "";
+  const total = Number((db.prepare(`SELECT COUNT(*) AS n FROM sync_jobs${whereSql}`)
+    .get(...params) as unknown as { n: number }).n);
+  const columns = jobProjectionColumns(schema).join(", ");
+  const jobs = db.prepare(`SELECT ${columns} FROM sync_jobs${whereSql} ORDER BY updatedAt DESC LIMIT ? OFFSET ?`)
+    .all(...params, limit, offset) as unknown as RawJob[];
+  return { jobs, total };
 }
 
 export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): HubJobsResult {
   const { now = Date.now(), stageDir = hubStageDir(), logsDir = hubLogsDir() } = opts;
-  if (!existsSync(syncDbPath)) return { jobs: [], total: 0 };
+  if (!databaseFileExists(syncDbPath)) return { jobs: [], total: 0 };
   const db = openLedger(syncDbPath);
   try {
-    const page = selectJobPage(db, opts);
-    if (!page) return { jobs: [], total: 0 };
-    const { jobs, total } = page;
-    const rates = historicalRates(db);
+    const schema = inspectHubJobLedger(db);
+    const { jobs, total } = selectJobPage(db, schema, opts);
+    const rates = historicalRates(db, schema);
     // Fetch related tables in batches and bucket rows in memory. The previous per-job approach
     // issued four queries per job, slowing queue reads at the 200-active-job limit.
-    const attached = batchAttached(db, jobs.map((j) => j.streamKey));
+    const attached = batchAttached(db, jobs.map((j) => j.streamKey), schema);
     const views = jobs.map((job) => jobViewOf(job, attached, rates, now, stageDir, logsDir));
     return { jobs: views, total };
   } finally {
@@ -151,10 +159,10 @@ export function needsManualPhaseOf(error: string | null | undefined): QueuePhase
 }
 
 export function latestRunPerRoom(syncDbPath: string): LatestRunPerRoom[] {
-  if (!existsSync(syncDbPath)) return [];
+  if (!databaseFileExists(syncDbPath)) return [];
   const db = openLedger(syncDbPath);
   try {
-
+    inspectHubJobLedger(db);
     const rows = db.prepare(`
       SELECT
         substr(streamKey, 1,
@@ -180,8 +188,6 @@ export function latestRunPerRoom(syncDbPath: string): LatestRunPerRoom[] {
       updatedAt: Number(r.updatedAt),
       manualPhase: r.state === "needs_manual" ? needsManualPhaseOf(error) : null,
     }));
-  } catch {
-    return [];
   } finally {
     db.close();
   }

@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, statfsSync } from "node:fs";
 import { join } from "node:path";
 import { createLogger, freeBytesOf, freeGBOf, listPlatforms, platformForRoom } from "@drec/core";
 import { TaskStore, resolveTaskWebhook } from "./store.js";
-import { resolveDbPath } from "./db.js";
+import { resolveServeDbPath } from "./db.js";
 import { EventCenter } from "@drec/observability";
 import { drecRoot, procQueueDbPath, ensureHubConfigExample, ensureNodeIdentity, rootConfigDir, rootHubConfig, rootHubDir, resolveOutputDir } from "./paths.js";
 import { localSuppressedSourceTaskIds } from "./hub-store.js";
@@ -79,7 +79,10 @@ export interface ServeDeps {
 /** 跑起 Web 控制台(+ 可选调度 + 可选 hub)。行为与拆分前 `task serve` 完全一致。 */
 export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
   const { getWebhook, hubStarter } = deps;
-    const store = new TaskStore(o.db);
+    // Resolve once and absolutize before any child is spawned: relative --db/env paths must not
+    // drift if a spawner ever uses a different cwd. Only the child receives this value in its env.
+    const dbPath = resolveServeDbPath(o.db);
+    const store = new TaskStore(dbPath);
     const port = o.port !== undefined ? Number(o.port) : 7860;
     // issue #600:默认只监听回环；远程访问必须显式 --host + 共享密钥(见 resolveWebAuth)。
     // `all` 是给部署模板用的别名（listen 时用 undefined = 所有网卡）。
@@ -142,6 +145,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
         : resolveWebhookToggles(store.getSetting("notifWebhookToggles")),
       onLog: (m) => console.log(m),
       hubMaster: () => spawnerFlags.hubMaster,
+      dbPath,
     });
     // Per-task log ring buffer shared with the manager so the Web 详情/日志
     // 页面 can tail each recorder subprocess's captured output.
@@ -256,7 +260,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
           })
         : null;
     // hub 台账路径与 cli hubStarter 同一推导(<db>-sync.db)——「hub 任务」端点读它展示进度/ETA/日志。
-    const syncDbPath = resolveDbPath(o.db).replace(/\.db$/, "-sync.db");
+    const syncDbPath = dbPath.replace(/\.db$/, "-sync.db");
     // T4:台账变更监视 → SSE(/api/hub/stream)。
     // **只在 master 起**:sync 台账的唯一写端是本节点的 orchestrator,slave 上那份文件永远不变
     // → 白白空转 1s 定时器、永远不推。不注入则该路由显式 503(而非静默 404/空流)。
@@ -593,7 +597,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
         hubConfigArg: o.hubConfig,
         // 解析后的 db 路径(--db 省略+DOUYIN_REC_ROOT 时 → <root>/db/douyin-rec.db),
         // 使 hub 台账 <…>-sync.db 落数据根而非 cwd。
-        dbPath: resolveDbPath(o.db),
+        dbPath,
         store,
         manager,
         // 发送前补主播名/日期/节点名:hub 事件原本只带房间号与 streamKey,webhook 里看不出是哪个直播间。

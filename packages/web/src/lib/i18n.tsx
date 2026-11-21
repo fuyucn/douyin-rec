@@ -205,6 +205,14 @@ const DICT = {
       },
     },
     room: {
+      logs: {
+        hub: "hub（本机）", source: "来源", all: "全部来源", limit: "行数上限",
+        timeOrder: "按日志内含时区的时间戳排序（节点时钟可能有偏差）。",
+        grouped: "按来源分组；存在无明确时区时间戳的日志，不推断跨节点先后。",
+        capped: "显示 {shown} / {total} 行；分组时各来源均分尾部行数。",
+        noNodes: "当前没有参与的远端节点，仅展示本机来源。",
+        status: { loading: "读取中…", ready: "已读取", empty: "暂无日志", unavailable: "不可达 / 读取失败", unsupported: "旧节点或不支持日志读取", noTask: "未找到本房间任务", ambiguous: "匹配到多个任务，已跳过", missing: "参与节点未配置" },
+      },
       title: "房间", subtitle: "每个直播间一行:录制、处理、交付都在这里", add: "添加房间", all: "全部", filterGroup: "按状态筛选房间",
       status: { recording: "录制中", processing: "处理中", attention: "需处理", waiting: "等开播", paused: "已暂停" },
       run: { pending: "排队中", settling: "等收播", syncing: "拉取录像", merging: "合并 / 烧录", uploading: "上传中", retrying: "重跑中", done: "已完成", failed: "失败", needs_manual: "需人工处理" },
@@ -475,7 +483,7 @@ const DICT = {
         runNowMode: "执行方式", runNowResume: "续跑同任务（同 id 补传）", runNowNew: "新建任务（-1/-2 完整重跑）",
         runNowNewHint: "将以 {key} 新建 hub 任务并完整重跑；原任务保留。若原任务已上传，B 站会另建一份稿件。",
         runNowWorker: "选优节点", runNowWorkerAuto: "自动选优",
-        started: "已启动后处理", rerun: "重跑此场", retryFinalize: "补跑收尾(清理/核验,可安全重试)",
+        started: "已启动后处理", rerun: "重跑此场",
       },
       ruleDialog: {
         createTitle: "新建 Hub 规则", editTitle: "编辑 Hub 规则", desc: "按直播间配置多节点选优合并 → 烧录 → 上传的后处理流程",
@@ -832,6 +840,14 @@ const DICT = {
       },
     },
     room: {
+      logs: {
+        hub: "hub (local)", source: "Source", all: "All sources", limit: "Line limit",
+        timeOrder: "Sorted by explicit timezone timestamps in logs (node clocks may differ).",
+        grouped: "Grouped by source: some lines have no timezone timestamp; no cross-node order is inferred.",
+        capped: "Showing {shown} / {total} lines; grouped tails share the line budget across sources.",
+        noNodes: "No participating remote nodes; showing the local source only.",
+        status: { loading: "Loading…", ready: "Loaded", empty: "No logs yet", unavailable: "Unreachable / read failed", unsupported: "Old node or log reading unsupported", noTask: "No task for this room", ambiguous: "Multiple matching tasks; skipped", missing: "Assigned node is not configured" },
+      },
       title: "Rooms", subtitle: "One row per live room: recording, processing and delivery in one place", add: "Add room", all: "All", filterGroup: "Filter rooms by status",
       status: { recording: "Recording", processing: "Processing", attention: "Needs action", waiting: "Waiting", paused: "Paused" },
       run: { pending: "Queued", settling: "Settling", syncing: "Pulling", merging: "Merge / burn", uploading: "Uploading", retrying: "Retrying", done: "Done", failed: "Failed", needs_manual: "Needs manual" },
@@ -1097,7 +1113,7 @@ const DICT = {
         runNowMode: "Run mode", runNowResume: "Resume same task (same id)", runNowNew: "New task (-1/-2 full rerun)",
         runNowNewHint: "Will create a new hub task as {key} and run fully; the old task stays. If the old task already uploaded, Bilibili gets a new submission.",
         runNowWorker: "Winner node", runNowWorkerAuto: "Auto-select",
-        started: "Post-process started", rerun: "Rerun this broadcast", retryFinalize: "Retry finalize (cleanup/verify, safe)",
+        started: "Post-process started", rerun: "Rerun this broadcast",
       },
       ruleDialog: {
         createTitle: "New Hub rule", editTitle: "Edit Hub rule", desc: "Configure the multi-node select → merge → burn → upload pipeline for this room",

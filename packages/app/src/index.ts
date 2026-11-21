@@ -31,7 +31,7 @@ export type { NodeIdentity } from "./paths.js";
 export { recordRoomSessions, readStatsSessions, lastCollectionAt, buildStats, roomStatsDbPath, STATS_RETAIN_MS, STATS_MERGE_GAP_MS } from "./room-stats.js";
 export type { StoredSession, StatsRoomInfo, BuildStatsInput } from "./room-stats.js";
 export { rootConfigDir } from "./paths.js";
-export { resolveDbPath } from "./db.js";
+export { resolveDbPath, resolveServeDbPath } from "./db.js";
 export { readManagedState, writeManagedState, clearManagedState, MANAGED_STATE_FILE } from "./managed-state.js";
 export type { ManagedState } from "./managed-state.js";
 export {

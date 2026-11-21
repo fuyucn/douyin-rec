@@ -367,7 +367,7 @@ describe("biliup processor progress", () => {
     }));
     const p = makeBiliupProcessor(base({
       run, progressEveryMs: 0, sizeOf: () => 1000, readAcked: () => new Map([["s", (acked += 400)]]),
-      lookup: { run: async () => "[]", trustNo: true }, countParts: async () => 1,
+      lookup: { run: async () => "[]", trustNo: true }, countParts: (() => { let n = 0; return async () => ++n === 1 ? 1 : 2; })(),
     }));
     const { c, setState } = ctx();
     const done = p.run(job(files(2), {}, { stallMs: 60_000 }), c);
@@ -432,7 +432,7 @@ describe("biliup processor upload slot", () => {
       bvSeen.push(argv.includes("upload") ? "create" : "append");
       return argv.includes("upload") ? "BV1aaaaaaaaa" : "ok"; // issue-guard: allow (fake BV fixture)
     });
-    const p = makeBiliupProcessor(base({ run, slot: fakeSlot(held) as never, lookup: { run: async () => "[]", trustNo: true }, countParts: async () => 1 }));
+    const p = makeBiliupProcessor(base({ run, slot: fakeSlot(held) as never, lookup: { run: async () => "[]", trustNo: true }, countParts: (() => { const seq = [1, 2, 2, 3]; let i = 0; return async () => seq[Math.min(i++, seq.length - 1)]!; })() }));
     const r = await p.run(job(files(3), {}, { stallMs: 60_000 }), ctx().c);
     expect(r.bv).toBe("BV1aaaaaaaaa"); // issue-guard: allow (fake BV fixture)
     expect(overlap).toEqual([true, true, true]);

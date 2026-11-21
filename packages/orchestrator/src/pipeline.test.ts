@@ -187,6 +187,140 @@ function writePlainArtifacts(deps: TestDeps): void {
   writeFileSync(join(sub, `${dateName}.xml`), "x");
 }
 
+// plans/051 P0 / issue #49: characterization, not a new executor or an idealized DAG.
+// Keep these beside the existing helpers instead of cloning a second PipelineDeps fixture.
+describe("runPipeline P0 execution trace (#49)", () => {
+  const noBurn = { burnDanmu: false, burnLivechat: false };
+  const skippedBurns = [
+    ["append_danmu", "skipped"], ["append_livechat", "skipped"],
+    ["burn_danmu", "skipped"], ["burn_livechat", "skipped"],
+  ];
+  const selectTrace = [["select", "start", null], ["select", "done", null]];
+  const sourceTrace = [["clean_source", "start", null], ["clean_source", "done", "删 1 节点 · 2 文件"]];
+  const cases = [
+    {
+      mode: "merge",
+      steps: [
+        ...selectTrace,
+        ["pull", "start", null], ["pull", "done", "2 文件 ← node-1"],
+        ["merge", "start", null], ["merge", "done", "2 段 → 1B"],
+        ["upload_plain", "start", null], ["upload_plain", "done", "→ 1B"],
+        ["clean_verify", "start", "删源前延后回读分 P 数(期望 1,窗口 0 分钟)"],
+        ["clean_verify", "done", "删源前回读通过:1 个分 P"],
+        ...sourceTrace,
+        ["clean_stage_src", "start", null], ["clean_stage_src", "done", "删 2 文件"],
+      ],
+      events: ["pending", "syncing", "merging", "done"],
+      nodes: [...skippedBurns, ["clean_verify", "done"], ["merge", "done"], ["upload_plain", "done"]],
+    },
+    {
+      mode: "segments",
+      steps: [
+        ...selectTrace,
+        ["pull", "start", null], ["pull", "done", "2 文件 · 2B ← node-1"],
+        ["merge", "start", null], ["merge", "done", "2 段 → 2 个分 P"],
+        ["upload_plain", "start", null], ["upload_plain", "done", "P1 + 1 段"],
+        ["clean_verify", "start", "删源前延后回读分 P 数(期望 2,窗口 0 分钟)"],
+        ["clean_verify", "done", "删源前回读通过:2 个分 P"],
+        ...sourceTrace,
+        ["clean_stage_src", "start", null], ["clean_stage_src", "done", "删 3 文件"],
+      ],
+      events: ["pending", "syncing", "merging", "uploading", "done"],
+      nodes: [...skippedBurns, ["clean_verify", "done"], ["merge", "done"], ["upload_plain", "done"]],
+    },
+    {
+      mode: "node-side",
+      steps: [
+        ...selectTrace,
+        ["node_upload", "start", null], ["node_upload", "done", "节点侧完成 0s · 1 产物"],
+        ...sourceTrace,
+      ],
+      events: ["pending", "syncing", "done"],
+      // Current blocking node-side path has no sync_parts baseline / clean_verify and no uploadDone notification.
+      // Absent burn/append rows are NOT synthetic skipped steps; freeze the difference, don't fix it in P0.
+      nodes: [["node_upload", "done"]],
+    },
+  ] as const;
+
+  it.each(cases)("$mode: freezes ledger steps/detail, state events, skipped nodes and notifications", async (baseline) => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.UTC(2026, 5, 27, 9));
+    const deps = makeDeps({
+      remuxSegment: async (_src, out) => { writeFileSync(out, "x"); },
+      segmentDuration: async () => 60,
+      rmStage: vi.fn(async () => {}),
+      countParts: vi.fn(async () => baseline.mode === "segments" ? 2 : 1),
+      sideCheckDelayMs: 0,
+    });
+    try {
+      deps.cfg.steps = { ...noBurn, mergeSegments: baseline.mode !== "segments", nodeSideUpload: baseline.mode === "node-side" };
+      deps.cfg.cleanup = { sourceAfterDone: true, stageSourceAfterMerge: true };
+      const rec = makeRec({ xmlPath: undefined });
+      const broadcast = makeBroadcast([{ workerId: "node-1", rec }]);
+      const transport = deps.transports.get("node-1")!;
+      if (baseline.mode === "node-side") {
+        // Same capability/result seam as test/orchestrator/node-side-upload.test.ts; no SSH or child process.
+        transport.nodeCapabilities = vi.fn(async () => ({ biliup: true, cookies: true, diskFreeGB: 100 }));
+        transport.nodePipeline = vi.fn(async () => ({ ok: true, bv: "BV123", products: ["plain.mp4"] }));
+      } else if (baseline.mode === "segments") {
+        vi.mocked(transport.pull).mockImplementation(async (_files, dest) => {
+          mkdirSync(dest, { recursive: true });
+          for (const f of ["a.ts", "b.ts"]) writeFileSync(join(dest, f), "x");
+        });
+      } else {
+        writePlainArtifacts(deps); // Existing merge fixture: fake sh produces bytes, never runs ffmpeg.
+      }
+      deps.ledger.upsertPending(STREAM_KEY);
+
+      expect(await runPipeline(broadcast, deps)).toEqual({ state: "done", bv: "BV123" });
+      // Strip only timestamps and the constant streamKey; preserve order, null detail and every event.
+      expect(deps.ledger.getSteps(STREAM_KEY).map(({ step, phase, detail }) => [step, phase, detail])).toEqual(baseline.steps);
+      expect(deps.ledger.getEvents(STREAM_KEY).map(({ state }) => state)).toEqual(baseline.events);
+      expect(deps.ledger.getNodeStates(STREAM_KEY).map(({ node, state }) => [node, state]).sort()).toEqual([...baseline.nodes].sort());
+      expect(deps.notify.mock.calls.map(([event]) => event)).toEqual(baseline.mode === "node-side" ? [] : [
+        { kind: "uploadDone", bv: "BV123", url: "https://www.bilibili.com/video/BV123", streamKey: STREAM_KEY },
+      ]);
+      const upload = deps.upload as unknown as { uploadPlain: Mock; appendGroup: Mock };
+      expect(upload.uploadPlain).toHaveBeenCalledTimes(baseline.mode === "node-side" ? 0 : 1);
+      expect(upload.appendGroup).toHaveBeenCalledTimes(baseline.mode === "segments" ? 1 : 0);
+      expect(deps.countParts).toHaveBeenCalledTimes(baseline.mode === "node-side" ? 0 : 1);
+      expect(transport.pull).toHaveBeenCalledTimes(baseline.mode === "node-side" ? 0 : 1);
+      expect(deps.sh).toHaveBeenCalledTimes(baseline.mode === "merge" ? 1 : 0);
+      expect(transport.cleanup).toHaveBeenCalledWith(rec.tsFiles);
+    } finally {
+      deps.ledger.close();
+      rmSync(deps.cfg.stageDir, { recursive: true, force: true });
+      clock.mockRestore();
+    }
+  });
+
+  it("missing sidecar: records a real skipped phase/detail without advancing the job or doing work", async () => {
+    const deps = makeDeps();
+    const transport = deps.transports.get("node-1")!;
+    vi.mocked(transport.exists!).mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    const rec = makeRec({ sessionJsonPath: "/remote/session.session.json" });
+    deps.ledger.upsertPending(STREAM_KEY);
+    try {
+      expect(await runPipeline(makeBroadcast([{ workerId: "node-1", rec }]), deps)).toEqual({ state: "pending" });
+      expect(deps.ledger.getSteps(STREAM_KEY).map(({ step, phase, detail }) => [step, phase, detail])).toEqual([
+        ...selectTrace,
+        ["pull", "skipped", "跳过·会话边车扫描后消失(session.session.json),第 1/3 次"],
+      ]);
+      expect(deps.ledger.getEvents(STREAM_KEY).map(({ state }) => state)).toEqual(["pending"]);
+      expect(deps.ledger.getNodeStates(STREAM_KEY)).toEqual([]);
+      expect(deps.notify).not.toHaveBeenCalled();
+      expect(transport.pull).not.toHaveBeenCalled();
+      expect(transport.cleanup).not.toHaveBeenCalled();
+      expect(deps.sh).not.toHaveBeenCalled();
+      const upload = deps.upload as unknown as { uploadPlain: Mock; appendGroup: Mock };
+      expect(upload.uploadPlain).not.toHaveBeenCalled();
+      expect(upload.appendGroup).not.toHaveBeenCalled();
+    } finally {
+      deps.ledger.close();
+      rmSync(deps.cfg.stageDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("runPipeline", () => {
   it("merged resume reconciles a pending season once, without re-uploading", async () => {
     vi.mocked(addArchiveToSeasonIfConfigured).mockClear();

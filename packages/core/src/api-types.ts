@@ -1012,6 +1012,8 @@ export interface PlatformDTO {
   id: string;
   /** matchUrl 的正则源(客户端 new RegExp 判平台);null = 该平台未提供(只能靠后端默认回落)。 */
   urlPattern: string | null;
+  /** urlPattern 的 RegExp flags(旧服务缺省按空字符串处理)。 */
+  urlPatternFlags?: string;
   qualities: readonly string[];
   /** 可用下载引擎 id(ffmpeg / mesio)。 */
   engines: readonly string[];

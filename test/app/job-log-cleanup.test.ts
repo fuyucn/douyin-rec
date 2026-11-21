@@ -239,7 +239,7 @@ describe("job log cleanup excludes non-terminal jobs (issue #429)", () => {
     expect(ok.status).toBe(200);
     expect(ok.body.count).toBe(1); // only old.log; the active job's log is protected
 
-    // ledger unreadable → conservatively no exclusion, no error
+    // 台账不可读 → 拒绝；不再把“未知活动”当成“没有活动”而放行破坏性日志清理。
     const bad = join(root, "bad.db");
     writeFileSync(bad, "not a database");
     const api2 = buildMaintenance({
@@ -251,8 +251,8 @@ describe("job log cleanup excludes non-terminal jobs (issue #429)", () => {
       stageDir: join(root, "stage"),
       auditDir: join(root, "audit-ledger"),
     });
-    const r = api2.previewJobLogs(7) as { status: number; body: { count: number } };
-    expect(r.status).toBe(200);
-    expect(r.body.count).toBe(2); // conservative: nothing excluded
+    const r = api2.previewJobLogs(7) as { status: number; body: { error?: string } };
+    expect(r.status).toBe(500);
+    expect(r.body.error).toBe("场次日志扫描失败");
   });
 });

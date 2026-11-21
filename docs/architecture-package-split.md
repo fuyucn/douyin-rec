@@ -14,9 +14,9 @@
 | S2 manager 通用化为 `SegmentSink` | 仍有效，待 #57 R2–R5 落地后再做 | — | R2–R5 |
 | S3 `resolveRollingPolicy` 唯一判定 | 已完成（#40 / #42） | — | — |
 | S4 规则 `mode="rolling"` | 已完成（#40 / #42） | — | — |
-| S5 抽出 `@drec/uploader` | 仍有效 | U4 | — |
+| S5 抽出 `@drec/uploader` | 已被 [plans/049](../plans/049_upload_target_contract.md) 上传目标方案替代（非完成项） | U4 | — |
 | S6 执行体搬入 orchestrator | 仍有效，待 #57 R2–R5 落地后再做 | U9 | R2–R5 |
-| S7 拆分 cli 的 hub 装配 | 仍有效 | — | — |
+| S7 拆分 cli 的 hub 装配 | 已由 [plans/050](../plans/050_hub_compose.md) 完成 | — | — |
 | S8 hub 状态存储搬入 orchestrator | 仍有效 | — | — |
 | S9 master 下发 `rollingUploadMeta` | 仍有效 | U8 | — |
 | S10 孤儿清理搬迁 / 分段事件化 | 部分被取代：与 U2、U12 重叠，以 #49 为准 | U2 / U12 | — |

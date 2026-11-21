@@ -73,6 +73,7 @@ export function createStreamUploadMedia(ctx: PreparedStreamUpload) {
         ...(stream.headers ? { headers: stream.headers } : {}),
         ...(stream.title ? { title: stream.title } : {}),
         ...(stream.owner ? { owner: stream.owner } : {}),
+        ...(stream.unplayableReason ? { unplayableReason: stream.unplayableReason } : {}),
       };
     },
     spoolName: (segment: number) => {

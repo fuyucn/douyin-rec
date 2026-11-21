@@ -19,7 +19,7 @@ import { useAtomValue } from "jotai";
 import { serverTimezoneAtom } from "../atoms";
 import { Button, IconButton } from "../components/Button";
 import { HubStreamBanner } from "../components/HubStreamBanner";
-import { TaskLogPanel } from "../components/LogTerminal";
+import { RoomLogPanel } from "../components/RoomLogPanel";
 import { MergePanel } from "../components/MergePanel";
 import { useRoomRolling } from "../components/RollingProgress";
 import { RoomRunsPanel } from "../components/RoomRunsPanel";
@@ -67,7 +67,7 @@ export function RoomPage(): ReactNode {
   // Below the `lg` breakpoint the page is one column. Bring the opened console into view when it
   // opens via the list's ?logs=1 arrival (not for the default-open of a recording room — that would
   // yank the user past the progress section).
-  const logsMounted = logsOpen && !!room && taskId !== null;
+  const logsMounted = logsOpen && !!room;
   useEffect(() => {
     if (!logsMounted || !window.matchMedia("(max-width: 1023px)").matches) return;
     if (params.get("logs") !== "1") return;
@@ -192,9 +192,7 @@ export function RoomPage(): ReactNode {
           {view.drain && rec && enabled && live && (
             <Button small variant="secondary" onClick={() => actions.drain(room)}>{t("room.detail.drain")}</Button>
           )}
-          {taskId !== null && (
-            <Link className="btn-icon" to={`/rooms/${encodeURIComponent(room.key)}?logs=1`} title={t("room.detail.logs")}><FileText className="w-4 h-4" /></Link>
-          )}
+          <Link className="btn-icon" to={`/rooms/${encodeURIComponent(room.key)}?logs=1`} title={t("room.detail.logs")}><FileText className="w-4 h-4" /></Link>
           {view.edit && <IconButton title={t("room.detail.edit")} onClick={() => actions.edit(room)}><Pencil className="w-4 h-4" /></IconButton>}
         </div>
       </div>
@@ -223,11 +221,9 @@ export function RoomPage(): ReactNode {
             />
           </div>
         )}
-        {taskId !== null && (
-          <div className="mt-4" id="logs">
-            <TaskLogPanel taskId={taskId} running={!!task?.running} open={logsOpen} onToggle={toggleLogs} />
-          </div>
-        )}
+        <div className="mt-4 min-w-0" id="logs">
+          <RoomLogPanel room={room} workers={data.workers} nodes={vis.nodes} running={!!task?.running} open={logsOpen} onToggle={toggleLogs} />
+        </div>
       </section>
 
       {/* ── 配置四域:低频,默认收起 + 一句话摘要 + 常用/更多两层(#557) ── */}

@@ -17,6 +17,13 @@ describe("bilibili URL helpers", () => {
     expect(bilibiliPlatform.matchUrl("https://example.com/room/1")).toBe(false);
   });
 
+  it("后端正则源及显式 flags 与 matchUrl 对大小写短链保持一致", () => {
+    const url = "https://B23.TV/b2nQfPy";
+    expect(bilibiliPlatform.urlPatternFlags).toBe("i");
+    expect(bilibiliPlatform.matchUrl(url)).toBe(true);
+    expect(new RegExp(bilibiliPlatform.urlPattern!, bilibiliPlatform.urlPatternFlags).test(url)).toBe(true);
+  });
+
   it("房间号与直播 URL 互转", () => {
     expect(extractRoomSlug("https://live.bilibili.com/31372993?x=1")).toBe("31372993");
     expect(roomToUrl("31372993")).toBe("https://live.bilibili.com/31372993");

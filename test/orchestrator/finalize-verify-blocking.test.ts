@@ -67,6 +67,21 @@ describe("finalizeAfterUpload read-back gate x real SyncLedger (#327)", () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
+  it("mismatch 时附上实际分 P 的标题/时长（诊断），不改变放行判定", async () => {
+    seedUploading();
+    const cleanupSources = vi.fn(async () => ({ ok: true }) as never);
+    await finalizeAfterUpload({
+      streamKey: KEY, bv: "BV1", log: () => {}, notify: () => {}, cleanupSources, on,
+      deps: {
+        ledger, countParts: async () => 0, sleep: async () => {},
+        readParts: async () => [{ page: 1, title: "P1", durationSec: 3601 }],
+      } as unknown as PipelineDeps,
+    });
+    expect(ledger.get(KEY)?.state).toBe("needs_manual");
+    expect(ledger.get(KEY)?.error).toContain("实际分P: P1(3601s)");
+    expect(cleanupSources).not.toHaveBeenCalled();
+  });
+
   it("already-done job (cleanup backfill), persistent mismatch -> forced to needs_manual, sources kept, no illegal-transition warn", async () => {
     seedUploading();
     ledger.markDone(KEY, "BV1");

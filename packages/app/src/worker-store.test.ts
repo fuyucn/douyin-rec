@@ -1,8 +1,23 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { mkdtempSync, writeFileSync, readFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { listWorkers, createWorker, updateWorker, deleteWorker, reorderWorkers } from "./worker-store.js";
+import { writeResources } from "./hub-config-store.js";
+
+const readFailure = vi.hoisted(() => ({ path: null as string | null, code: null as string | null }));
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    readFileSync: (path: any, ...args: any[]) => {
+      if (readFailure.path === String(path)) {
+        throw Object.assign(new Error(`mock read failure: ${readFailure.code}`), { code: readFailure.code });
+      }
+      return actual.readFileSync(path, ...args);
+    },
+  };
+});
 
 let cfg: string;
 const read = (): any => JSON.parse(readFileSync(cfg, "utf-8"));
@@ -62,11 +77,15 @@ describe("worker-store(文件版 CRUD)", () => {
   it("默认 name 无 host → `Worker N`", () => {
     expect(createWorker(cfg, { kind: "local", dataRoot: "/d" }).name).toBe("Worker 1");
   });
-  it("update 部分改;不存在返回 null", () => {
+  it("update 部分改;不存在时 update/delete 不落盘", () => {
     createWorker(cfg, { kind: "ssh", host: "h", dataRoot: "/d" });
     expect(updateWorker(cfg, "worker-1", { name: "新名", host: "h2" })!.name).toBe("新名");
     expect(updateWorker(cfg, "worker-1", {})!.host).toBe("h2");
+    writeFileSync(cfg, JSON.stringify(read())); // 紧凑格式,意外 rename 会改变原始字节
+    const original = readFileSync(cfg);
     expect(updateWorker(cfg, "nope", { name: "x" })).toBeNull();
+    expect(deleteWorker(cfg, "nope")).toBe(false);
+    expect(readFileSync(cfg)).toEqual(original);
   });
   it("local 保护:拒删 + 拒改 kind;name/dataRoot 可改", () => {
     expect(() => deleteWorker(cfg, "local")).toThrow();
@@ -94,6 +113,68 @@ describe("worker-store(文件版 CRUD)", () => {
     expect(j.workers.map((w: any) => w.id)).toEqual(["local", "vps2", "worker-1"]); // grandfather 值不变
     expect(j.tenants).toBeUndefined();       // 迁移后删旧键
     expect(j.workerSeq).toBe(1);
+  });
+  it("缺失配置首次创建仍分配 worker-1,后续 writer 延续序号", () => {
+    unlinkSync(cfg);
+    expect(createWorker(cfg, { kind: "ssh", host: "h", dataRoot: "/d" }).id).toBe("worker-1");
+    writeResources(cfg, { maxCpuParallel: 4 });
+    expect(createWorker(cfg, { kind: "ssh", host: "h2", dataRoot: "/d" }).id).toBe("worker-2");
+    expect(read().resources.maxCpuParallel).toBe(4);
+  });
+  it.each([
+    ["坏 JSON", "{ not json"],
+    ["空文件", ""],
+    ["数组根形状", "[]"],
+    ["null 根形状", "null"],
+  ])("写入遇到 %s 时拒绝所有 worker CRUD 且原字节不变", (_label, contents) => {
+    writeFileSync(cfg, contents, "utf-8");
+    const original = readFileSync(cfg);
+    const writes = [
+      () => createWorker(cfg, { kind: "ssh", host: "h", dataRoot: "/d" }),
+      () => updateWorker(cfg, "missing", { name: "changed" }),
+      () => deleteWorker(cfg, "missing"),
+      () => reorderWorkers(cfg, []),
+    ];
+    for (const write of writes) {
+      expect(write).toThrow(/配置|JSON|根/);
+      expect(readFileSync(cfg)).toEqual(original);
+    }
+  });
+  it.each(["EACCES", "EPERM", "EIO"])("读取 %s 时拒绝写且保留原文件", (code) => {
+    const original = readFileSync(cfg);
+    readFailure.path = cfg;
+    readFailure.code = code;
+    try {
+      const writes = [
+        () => createWorker(cfg, { kind: "ssh", host: "h", dataRoot: "/d" }),
+        () => updateWorker(cfg, "missing", { name: "changed" }),
+        () => deleteWorker(cfg, "missing"),
+        () => reorderWorkers(cfg, []),
+      ];
+      for (const write of writes) expect(write).toThrow(code);
+      expect(listWorkers(cfg)).toEqual([]); // 展示读取仍宽松
+    } finally {
+      readFailure.path = null;
+      readFailure.code = null;
+    }
+    expect(readFileSync(cfg)).toEqual(original);
+  });
+  it("交替 CRUD 保留未知顶层字段与未修改 worker 的扩展字段", () => {
+    writeFileSync(cfg, JSON.stringify({
+      platform: "douyin", extraTopLevel: { keep: true }, workerSeq: 4,
+      workers: [
+        { id: "local", name: "本机", kind: "local", dataRoot: "/data", extension: "local-extra" },
+        { id: "worker-4", name: "old", kind: "ssh", host: "h", dataRoot: "/d", extension: "worker-extra" },
+      ],
+    }), "utf-8");
+    updateWorker(cfg, "worker-4", { name: "updated" });
+    createWorker(cfg, { kind: "ssh", host: "h2", dataRoot: "/d" });
+    reorderWorkers(cfg, ["worker-5", "worker-4", "local"]);
+    deleteWorker(cfg, "worker-5");
+    const saved = read();
+    expect(saved.extraTopLevel).toEqual({ keep: true });
+    expect(saved.workers.find((w: any) => w.id === "worker-4").extension).toBe("worker-extra");
+    expect(saved.workers.find((w: any) => w.id === "local").extension).toBe("local-extra");
   });
   it("reorder:按 ids 整体重排数组(顺序 = 显示序),集合不匹配则拒绝", () => {
     createWorker(cfg, { kind: "ssh", host: "h2", dataRoot: "/d" }); // worker-1
