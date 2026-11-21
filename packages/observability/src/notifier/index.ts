@@ -1,6 +1,6 @@
 // observability/src/notifier/index.ts
 import type { Notifier, NotifyEvent } from "@drec/core";
-import { notifKeyOf, type NotifWebhookToggles } from "@drec/core";
+import { formatNotifySource, notifKeyOf, type NotifWebhookToggles } from "@drec/core";
 export type { Notifier, NotifyEvent, NotifKey, NotifWebhookToggles } from "@drec/core";
 
 /** 子进程 webhook 类型开关的注入环境变量(serve → record)。JSON 串,缺省全关。 */
@@ -85,7 +85,10 @@ export function formatMessage(e: NotifyEvent): string {
       return `📋 Hub 任务开始：${e.anchor || e.room}${e.date ? ` · ${e.date}` : ""}（${roomInfo}${nodes}）· ${mode}`;
     }
     case "stageReady":   return `📦 合成完成待人工上传：${e.anchor ? `${e.anchor} · ${e.date ?? ""}` : e.streamKey}`;
-    case "error":       return `⚠️ 出错（${e.stage}）：${e.message}`;
+    case "error": {
+      const source = formatNotifySource(e.ctx);
+      return "⚠️ 出错（" + e.stage + "）" + (source ? " · " + source : "") + "：" + e.message;
+    }
   }
 }
 

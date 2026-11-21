@@ -62,7 +62,10 @@ export function createStreamUploadMedia(ctx: PreparedStreamUpload) {
     }),
     fetch: async (room: string, quality: string) => {
       const stream = await platform.getStream(room, quality);
-      if (stream.owner?.trim()) anchorName = stream.owner.trim();
+      if (stream.owner?.trim()) {
+        anchorName = stream.owner.trim();
+        if (ctx.notifyFacts) ctx.notifyFacts.liveAnchor = anchorName;
+      }
       if (stream.living && stream.url) {
         console.log(`[session-id] ${describeStreamIdentity(stream)}`);
         if (!started) { startMs = Date.now(); started = true; }

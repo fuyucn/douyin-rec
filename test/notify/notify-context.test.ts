@@ -3,6 +3,7 @@ import { describe, it, expect } from "vitest";
 import {
   contextForStream,
   decorateRecordEvent,
+  formatNotifySource,
   sanitizeNotifyContext,
   parseStreamKey,
   resolveDisplayName,
@@ -76,7 +77,11 @@ describe("old events render exactly as before (ctx is ignored until renderers op
   ];
   for (const e of events) {
     it(`${e.kind}: same text with or without ctx`, () => {
-      expect(formatMessage({ ...e, ctx })).toBe(formatMessage(e));
+      if (e.kind === "error") {
+        expect(formatMessage({ ...e, ctx })).toContain("N · douyin/abc");
+      } else {
+        expect(formatMessage({ ...e, ctx })).toBe(formatMessage(e));
+      }
     });
   }
   it("hub enrichment keeps an explicit ctx on the event", () => {
@@ -112,6 +117,23 @@ describe("decorateRecordEvent (#53 N4)", () => {
       { platform: "douyin", roomSlug: "abc" },
     );
     expect(e).toMatchObject({ anchor: "", ctx: { name: "douyin abc", nameSource: "fallback", step: "record" } });
+  });
+});
+
+describe("formatNotifySource (#734)", () => {
+  it("combines a resolved display name with its platform and room slug", () => {
+    expect(formatNotifySource({ name: "房间甲", nameSource: "cached", platform: "douyin", roomSlug: "room-a" }))
+      .toBe("房间甲 · douyin/room-a");
+  });
+
+  it("does not duplicate the platform and room already present in a fallback name", () => {
+    expect(formatNotifySource({ name: "douyin room-a", nameSource: "fallback", platform: "douyin", roomSlug: "room-a" }))
+      .toBe("douyin room-a");
+  });
+
+  it("uses the platform and room even when an older event has only partial context", () => {
+    expect(formatNotifySource({ platform: "douyin", roomSlug: "room-a" })).toBe("douyin room-a");
+    expect(formatNotifySource()).toBe("");
   });
 });
 

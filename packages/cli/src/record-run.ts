@@ -23,7 +23,7 @@ export async function runRecord(options: RecordCliOpts, globals: RecordGlobalOpt
   }
   if (await runStreamUploadRecord({
     enabled: ctx.streamUploadEnabled, options, platform: ctx.platform,
-    recording: ctx.recording, notifier: ctx.notifier,
+    recording: ctx.recording, notifier: ctx.notifier, notifyFacts: ctx.notifyFacts,
   })) return;
   await runFileRecord(ctx, rolling);
 }

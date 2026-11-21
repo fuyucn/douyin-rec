@@ -1,5 +1,5 @@
 import { mkdirSync, readFileSync } from "node:fs";
-import { ZERO_DISK_DELIVERY_ENV, type Notifier, type Platform, type RecordOpts } from "@drec/core";
+import { ZERO_DISK_DELIVERY_ENV, type Notifier, type Platform, type RecordNameFacts, type RecordOpts } from "@drec/core";
 import {
   readOutputLayout, resolveZeroDiskPumpDirs, zeroDiskNodePreflight, writeZeroDiskStatus,
   resolveStreamUploadMeta, zeroDiskStreamMeta, rootBiliupCookies, effectiveHubConfig,
@@ -15,6 +15,7 @@ export interface StreamUploadInput {
   platform: Platform;
   recording: RecordOpts;
   notifier: Notifier;
+  notifyFacts?: RecordNameFacts;
 }
 
 async function prepareStorage(input: StreamUploadInput) {

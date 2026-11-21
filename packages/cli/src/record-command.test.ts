@@ -132,7 +132,10 @@ it("starts file recording with sticky layout, CLI precedence and the inline disk
 
 it("stream mode forwards the parsed switch and state before short-circuiting file recording", async () => {
   await record(["--stream-upload", " On ", "--task-id", "7", "--output-format", "invalid"]);
-  expect(runStreamUploadRecord).toHaveBeenCalledWith(expect.objectContaining({ enabled: true }));
+  expect(runStreamUploadRecord).toHaveBeenCalledWith(expect.objectContaining({
+    enabled: true,
+    notifyFacts: { taskName: undefined, platform: "douyin", roomSlug: "test-room" },
+  }));
   expect(core.initRecorderState).toHaveBeenCalledWith(expect.objectContaining({ mode: "live" }));
   expect(fake.exitHook.mock.invocationCallOrder[0])
     .toBeLessThan(vi.mocked(runStreamUploadRecord).mock.invocationCallOrder[0]);

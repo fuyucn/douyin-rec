@@ -13,6 +13,7 @@
 import { type Task, type TaskStore } from "./store.js";
 import { platformForRoom, sanitizeNotifyContext, STREAM_UPLOAD_SPOOL_REQUIRED, type NotifyContext, type OutputFormat } from "@drec/core";
 import { resolveTaskStreamCookies } from "./stream-cookies.js";
+import { decorateTaskNotifyEvent } from "./task-notify-context.js";
 import type { Spawner } from "./process/spawner.js";
 import type { RecorderProcess, ExitInfo } from "./process/recorder-process.js";
 import { TaskLogStore } from "@drec/observability";
@@ -704,7 +705,12 @@ export class TaskManager {
           const a = JSON.parse(alert[1]) as { stage?: string; message?: string; ctx?: unknown };
           // ctx comes from a child that may be older or newer: only known string fields are forwarded.
           const ctx = sanitizeNotifyContext(a.ctx);
-          this.onAlert?.(taskId, a.stage ?? "error", a.message ?? "", ctx);
+          const stage = a.stage ?? "error";
+          const message = a.message ?? "";
+          const task = this.store.getTask(taskId);
+          const event = { kind: "error" as const, stage, message, ...(ctx ? { ctx } : {}) };
+          const contextual = task ? decorateTaskNotifyEvent(event, task, this.anchorNames.get(taskId)) : event;
+          this.onAlert?.(taskId, stage, message, contextual.ctx);
         } catch { /* 解析失败忽略 */ }
         return;
       }

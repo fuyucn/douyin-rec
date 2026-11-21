@@ -8,6 +8,9 @@ describe("notifier", () => {
     expect(formatMessage({ kind: "recordStart", anchor: "A", room: "123", quality: "origin" })).toContain("A");
     expect(formatMessage({ kind: "uploadDone", bv: "BV1x", url: "https://b/BV1x" })).toContain("BV1x");
     expect(formatMessage({ kind: "error", stage: "burn", message: "boom" })).toContain("boom");
+    expect(formatMessage({ kind: "error", stage: "直播直传", message: "chunk failed", ctx: {
+      name: "房间甲", nameSource: "cached", platform: "douyin", roomSlug: "room-a",
+    } })).toContain("房间甲 · douyin/room-a");
     expect(formatMessage({ kind: "burnDone", style: "danmu", file: "/o/x_danmu.mp4" })).toContain("danmu");
     // stage 正常终点:不再是「出错」文案
     const stageMsg = formatMessage({ kind: "stageReady", streamKey: "douyin:1:2026-09-28" });

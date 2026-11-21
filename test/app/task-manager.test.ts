@@ -499,18 +499,44 @@ describe("TaskManager", () => {
     expect(down[0].reason).toContain("放弃");
   });
 
-  it("告警带 ctx(#53 N4):只转发已知字符串字段;非对象丢弃;旧子进程无 ctx → undefined", () => {
-    const id = addTask();
+  it("fills task room context for current and legacy child alerts while sanitizing caller ctx", () => {
+    const id = addTask({ room: "https://live.douyin.com/room-a", name: "任务甲" });
     const spawner = new MockSpawner();
     const got: unknown[] = [];
     const mgr = new TaskManager(store, spawner, { log: () => {}, onAlert: (_t, _s, _m, ctx) => got.push(ctx) });
     mgr.start(id);
     const p = spawner.last(id);
-    p.emitLog(`@@DREC_ALERT@@${JSON.stringify({ stage: "弹幕", message: "m", ctx: { name: "T", platform: "douyin", bad: 1, roomSlug: 5 } })}`);
+    p.emitLog(`@@DREC_ALERT@@${JSON.stringify({ stage: "弹幕", message: "m", ctx: { name: "T", platform: "douyin", bad: 1, roomSlug: "room-a" } })}`);
     p.emitLog(`@@DREC_ALERT@@${JSON.stringify({ stage: "弹幕", message: "m", ctx: "bogus" })}`);
     p.emitLog(`@@DREC_ALERT@@${JSON.stringify({ stage: "弹幕", message: "m", ctx: ["x"] })}`);
     p.emitLog(`@@DREC_ALERT@@${JSON.stringify({ stage: "弹幕", message: "m" })}`);
-    expect(got).toEqual([{ name: "T", platform: "douyin" }, undefined, undefined, undefined]);
+    p.emitLog(`@@DREC_ALERT@@${JSON.stringify({ stage: "弹幕", message: "m", ctx: { name: "stale", platform: "douyin", roomSlug: 5 } })}`);
+    expect(got[0]).toMatchObject({ name: "T", platform: "douyin", roomSlug: "room-a" });
+    for (const ctx of got.slice(1)) {
+      expect(ctx).toMatchObject({ name: "任务甲", nameSource: "task", platform: "douyin", roomSlug: "room-a" });
+    }
+    expect(got).toHaveLength(5);
+  });
+
+  it("keeps legacy child alerts attached to their own room when two tasks run concurrently", () => {
+    const firstId = addTask({ room: "https://live.douyin.com/room-a", anchorName: "房间甲" });
+    const secondId = addTask({ room: "https://live.douyin.com/room-b", anchorName: "房间乙" });
+    const spawner = new MockSpawner();
+    const alerts: Array<{ id: number; name?: string; nameSource?: string; platform?: string; roomSlug?: string }> = [];
+    const mgr = new TaskManager(store, spawner, {
+      log: () => {},
+      onAlert: (id, _stage, _message, ctx) => alerts.push({ id, ...ctx }),
+    });
+
+    mgr.start(firstId);
+    mgr.start(secondId);
+    spawner.last(firstId).emitLog("@@DREC_ALERT@@" + JSON.stringify({ stage: "直播直传", message: "first" }));
+    spawner.last(secondId).emitLog("@@DREC_ALERT@@" + JSON.stringify({ stage: "直播直传", message: "second" }));
+
+    expect(alerts).toEqual([
+      { id: firstId, name: "房间甲", nameSource: "cached", platform: "douyin", roomSlug: "room-a" },
+      { id: secondId, name: "房间乙", nameSource: "cached", platform: "douyin", roomSlug: "room-b" },
+    ]);
   });
 
   it("解析子进程 @@DREC_ALERT@@ 结构化告警 → onAlert,且不进日志", () => {

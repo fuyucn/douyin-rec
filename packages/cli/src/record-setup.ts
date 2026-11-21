@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { getEngine, loadConfig, platformForRoom, type DownloadEngine } from "@drec/core";
+import { getEngine, loadConfig, platformForRoom, type DownloadEngine, type RecordNameFacts } from "@drec/core";
 import type { RecordOpts } from "@drec/core";
 import { PollingRecorder } from "@drec/record-engine";
 import {
@@ -72,9 +72,14 @@ export function prepareRecord(o: RecordCliOpts, globals: RecordGlobalOpts) {
   const webhook = (globals.discordWebhookFile
     ? readFileSync(globals.discordWebhookFile, "utf-8").trim() || undefined : undefined)
     ?? globals.discordWebhook ?? cfg.discordWebhook ?? process.env.DISCORD_WEBHOOK;
+  const notifyFacts: RecordNameFacts = {
+    taskName: recording.name,
+    platform: platform.id,
+    roomSlug: platform.extractRoomSlug(roomUrl),
+  };
   return {
     options: o, platform, roomUrl, recording, recorder, danmuEnabled, reconnectDelaySec,
-    notifier: recordNotifier(webhook), ...modes,
+    notifier: recordNotifier(webhook, () => notifyFacts), notifyFacts, ...modes,
     taskId: o.taskId !== undefined && /^\d+$/.test(o.taskId) ? Number(o.taskId) : undefined,
   };
 }
