@@ -416,7 +416,7 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
             files: req.files,
             policy: req.policy,
           });
-          if (res.proof === "unknown") {
+          if (res.proof === "unknown" || res.proof === "accepted") {
             throw new UploadDriverError("needs-manual", "追加结果不确定（分 P 可能已提交）");
           }
           if (res.proof === "confirmed-not-submitted") {

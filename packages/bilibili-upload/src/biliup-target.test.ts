@@ -176,6 +176,43 @@ describe("biliup target: proof 与旧链的重试语义", () => {
     expect(isUploadRateLimited(new Error('{"code":601}'))).toBe(true);
     expect(target.classifyError(new Error('{"code":601}')).kind).toBe("rate-limited");
   });
+
+  it("reports accepted rather than observed when final readback owns verification", async () => {
+    const { calls, run } = capture();
+    let reads = 0;
+    const target = createBiliupFileTarget({
+      run, exists: () => true, countParts: async () => { reads++; return 1; },
+      sleep: async () => { throw new Error("unexpected visibility wait"); },
+    });
+    await expect(target.append({
+      cred: CRED, ref: { targetId: BILIUP_TARGET_ID, id: FAKE_BV },
+      files: [{ path: X1 }, { path: X2 }], policy: POLICY, deferVerificationUntilCleanup: true,
+    })).resolves.toEqual({ proof: "accepted" });
+    expect(calls).toHaveLength(1);
+    expect(reads).toBe(1);
+  });
+
+  it("keeps immediate verification as the default", async () => {
+    const { calls, run } = capture();
+    const target = createBiliupFileTarget({ run, exists: () => true, countParts: async () => 1, sleep: async () => {} });
+    await expect(target.append({
+      cred: CRED, ref: { targetId: BILIUP_TARGET_ID, id: FAKE_BV }, files: [{ path: X1 }], policy: POLICY,
+    })).resolves.toEqual({ proof: "unknown" });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("does not report accepted after a lost submission response", async () => {
+    let calls = 0;
+    const target = createBiliupFileTarget({
+      exists: () => true, countParts: async () => null, sleep: async () => {},
+      run: async () => { calls++; throw new Error("connection reset, start=0 end=1 uploader.rs:12"); },
+    });
+    await expect(target.append({
+      cred: CRED, ref: { targetId: BILIUP_TARGET_ID, id: FAKE_BV }, files: [{ path: X1 }],
+      policy: POLICY, deferVerificationUntilCleanup: true,
+    })).resolves.toEqual({ proof: "unknown" });
+    expect(calls).toBe(1);
+  });
 });
 
 describe("biliup target: 错误分类顺序", () => {

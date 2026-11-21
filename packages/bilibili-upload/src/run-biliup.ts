@@ -321,6 +321,7 @@ export async function appendGroup(o: {
   hooks?: BiliupHooks;
   /** 查询当前分 P 数;返回 null = 无法确认。 */
   countParts?: () => Promise<number | null>;
+  deferVerificationUntilCleanup?: boolean;
   /** 重读间隔的等待实现(测试注入以免真等)。 */
   sleep?: (ms: number) => Promise<void>;
 }): Promise<void> {
@@ -367,7 +368,7 @@ export async function appendGroup(o: {
       continue; // 失败且确认未提交 → 换下一条线路
     }
     // run 返回成功:rc=0 不等于分 P 已落地。有基线时确认服务端真的多了 files.length 个。
-    if (!o.countParts || before == null) return;
+    if (o.deferVerificationUntilCleanup || !o.countParts || before == null) return;
     const v = await confirmAppendLanded({ before, added: o.files.length, countParts: o.countParts, sleep });
     if (v.kind === "ok" || v.kind === "unknown") return;
     throw new Error(

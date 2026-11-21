@@ -142,13 +142,14 @@ export interface AppendPartsInput {
   hooks?: UploadChildHooks;
   /** 幂等核对用的分 P 数回读;缺省由目标自己实现。编排层有更严的读法时要显式传。 */
   countParts?: () => Promise<number | null>;
+  deferVerificationUntilCleanup?: boolean;
   ref: ArchiveRef;
   files: UploadFile[];
   policy: UploadPolicy;
 }
 
-/** append 结果必须带 proof：unknown 时驱动转人工，不重试、不删源。 */
-export type AppendProof = "observed" | "confirmed-not-submitted" | "unknown";
+/** Accepted submission is not observed persistence; only callers with final cleanup verification may defer it. */
+export type AppendProof = "observed" | "accepted" | "confirmed-not-submitted" | "unknown";
 
 export interface AppendPartsResult {
   proof: AppendProof;

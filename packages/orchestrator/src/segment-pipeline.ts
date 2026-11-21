@@ -14,6 +14,7 @@ import { addArchiveToSeasonIfConfigured, seasonCheckpointState } from "@drec/bil
 import { isCompleteMedia, planSegmentGroups, renderXmlWindowToXml, unreadableParts } from "@drec/post-process";
 import type { Broadcast } from "./identity.js";
 import type { JobState, SyncLedger } from "./ledger.js";
+import { canDeferAppendVerification } from "./verify.js";
 import { retry } from "./retry.js";
 import { prepareUploadAlias, SEG_WORK_DIR, segmentStem, segWorkPath, UPLOAD_ALIAS_DIR, type SegmentPlan } from "./session-plan.js";
 import { cleanupSourcesShared, clearCleanFailure, defaultRmStage, defaultSplitForUpload, finalizeAfterUpload, finalizeOnly, readdirSyncSafe, recordCleanFailure, removeEmptyStageDir, stageVideoLeftovers, videoOnly, xmlKeepRule, type CleanupOutcome, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
@@ -618,7 +619,7 @@ export async function runSegmentPipeline(o: {
       jlog(`append plain 段 ${idxs.join(",")}: ${batch.length} 文件`);
       const tries = batch.length === 1 ? 5 : 1;
       await retry(
-        () => runUpload(deps, () => appendArchive(deps.upload, { ...plainOpts, bv, files: batch }), streamKey),
+        () => runUpload(deps, () => appendArchive(deps.upload, { ...plainOpts, bv, files: batch, deferVerificationUntilCleanup: canDeferAppendVerification(deps, streamKey) }), streamKey),
         { tries, backoffMs: 60_000, sleep: deps.sleep, shouldRetry: (e) => isUploadRateLimited(e) || (batch.length === 1 && !isAppendAmbiguous(e)) },
       );
       for (const k of idxs) ledger.markPartDone(streamKey, "plain", k);
@@ -724,7 +725,7 @@ async function appendSegmentGroup(
     const tries = batch.length === 1 ? 5 : 1;
     // retry 包在 runUpload 外:每次重试都重新获取上传配额(命中 601 后队列已记冷却)。
     await retry(
-      () => runUpload(deps, () => appendArchive(deps.upload, { bv, files: batch, cookies: deps.cfg.cookies, public: isPublic }), streamKey),
+      () => runUpload(deps, () => appendArchive(deps.upload, { bv, files: batch, cookies: deps.cfg.cookies, public: isPublic, deferVerificationUntilCleanup: canDeferAppendVerification(deps, streamKey) }), streamKey),
       {
         tries,
         backoffMs: 60_000,
@@ -856,7 +857,7 @@ async function resumeSegmentAppends(
     if (batch.length === 0) continue;
     jlog(`续跑 append plain 分 P ${idxs.join(",")}`);
     await drainSeasonOnThrow(() => retry(
-      () => runUpload(deps, () => appendArchive(deps.upload, { bv, files: batch, cookies: cfg.cookies, public: isPublic }), streamKey),
+      () => runUpload(deps, () => appendArchive(deps.upload, { bv, files: batch, cookies: cfg.cookies, public: isPublic, deferVerificationUntilCleanup: canDeferAppendVerification(deps, streamKey) }), streamKey),
       { tries: batch.length === 1 ? 5 : 1, backoffMs: 60_000, sleep: deps.sleep, shouldRetry: (e) => isUploadRateLimited(e) || (batch.length === 1 && !isAppendAmbiguous(e)) },
     ));
     for (const k of idxs) ledger.markPartDone(streamKey, "plain", k);

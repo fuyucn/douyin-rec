@@ -14,7 +14,7 @@ export function fakeUploadTarget(o: {
     video?: string; videos?: string[]; cookies: string; title: string; tid: number; tag: string;
     public: boolean; desc?: string; hooks?: UploadChildHooks;
   }) => Promise<string>;
-  appendGroup?: (o: { bv: string; files: string[]; cookies: string; public: boolean; countParts?: () => Promise<number | null> }) => Promise<void>;
+  appendGroup?: (o: { bv: string; files: string[]; cookies: string; public: boolean; countParts?: () => Promise<number | null>; deferVerificationUntilCleanup?: boolean }) => Promise<void>;
 } = {}): UploadTarget & { uploadPlain: unknown; appendGroup: unknown } {
   const t: UploadTarget = {
     id: "fake",
@@ -44,12 +44,13 @@ export function fakeUploadTarget(o: {
       await (o.appendGroup ?? (async () => {}))({
         ...(input.hooks ? { hooks: input.hooks } : {}),
         ...(input.countParts ? { countParts: input.countParts } : {}),
+        ...(input.deferVerificationUntilCleanup ? { deferVerificationUntilCleanup: true } : {}),
         bv: input.ref.id,
         files: input.files.map((f) => f.path),
         cookies: input.cred.locator,
         public: input.policy.visibility === "public",
       });
-      return { proof: "observed" as const };
+      return { proof: input.deferVerificationUntilCleanup ? "accepted" as const : "observed" as const };
     },
     inspect: async () => null,
     findRecent: async () => "none",

@@ -40,8 +40,15 @@ export async function createArchive(upload: UploadTarget, opts: UploadOpts, hook
   return r.ref.id;
 }
 
-/** append:成功即返回;`proof` 不是 observed 时抛 `[append-ambiguous]`,上层不重试(避免重复分 P)。 */
-export async function appendArchive(upload: UploadTarget, o: { bv: string; files: string[]; cookies: string; public: boolean; countParts?: () => Promise<number | null> }, hooks?: UploadChildHooks): Promise<void> {
+/** Accept deferred verification only when the caller owns the final readback before cleanup. */
+export async function appendArchive(upload: UploadTarget, o: {
+  bv: string;
+  files: string[];
+  cookies: string;
+  public: boolean;
+  countParts?: () => Promise<number | null>;
+  deferVerificationUntilCleanup?: boolean;
+}, hooks?: UploadChildHooks): Promise<void> {
   const r = await upload.append({
     cred: { targetId: upload.id, locator: o.cookies },
     ref: { targetId: upload.id, id: o.bv },
@@ -49,8 +56,9 @@ export async function appendArchive(upload: UploadTarget, o: { bv: string; files
     policy: { visibility: o.public ? "public" : "private", watermark: false, copyright: "self" },
     ...(hooks ? { hooks } : {}),
     ...(o.countParts ? { countParts: o.countParts } : {}),
+    ...(o.deferVerificationUntilCleanup ? { deferVerificationUntilCleanup: true } : {}),
   });
-  if (r.proof !== "observed") {
+  if (r.proof !== "observed" && !(r.proof === "accepted" && o.deferVerificationUntilCleanup)) {
     throw new Error(`${APPEND_AMBIGUOUS_MARKER} append 结果不确定(proof=${r.proof}),不重试,转人工核对`);
   }
 }

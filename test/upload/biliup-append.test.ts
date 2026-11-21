@@ -254,6 +254,20 @@ describe("appendGroup 成功返回后的落地确认（rc=0 但分 P 未落地�
     return "appended";
   };
 
+  it.each([{ files: ["d.mp4"] }, { files: ["d.mp4", "l.mp4"] }])("can defer visibility checks for a successful submission: $files", async ({ files }) => {
+    const calls: string[][] = [];
+    let reads = 0;
+    const sleeps: number[] = [];
+    await appendGroup({
+      cookies: "c.json", bv: "archive-a", files, run: succeed(calls),
+      countParts: async () => { reads++; return 1; },
+      sleep: async (ms) => { sleeps.push(ms); }, deferVerificationUntilCleanup: true,
+    });
+    expect(calls).toHaveLength(1);
+    expect(reads).toBe(1);
+    expect(sleeps).toEqual([]);
+  });
+
   it("分 P 数恰好 +N → 成功返回，只跑一次、不等待", async () => {
     const calls: string[][] = [];
     const sleeps: number[] = [];

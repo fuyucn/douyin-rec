@@ -20,6 +20,7 @@ export interface RealBiliup {
     cookies: string; bv: string; files: string[]; public?: boolean;
     run?: (argv: string[]) => Promise<string>;
     countParts?: () => Promise<number | null>;
+    deferVerificationUntilCleanup?: boolean;
   }): Promise<void>;
 }
 
@@ -197,6 +198,7 @@ export class FakeBiliup {
   readonly appendGroup = (o: {
     bv: string; files: string[]; cookies: string; public?: boolean;
     countParts?: () => Promise<number | null>;
+    deferVerificationUntilCleanup?: boolean;
   }): Promise<void> => this.real.appendGroup({ ...o, run: this.run, sleep: async () => {} });
 
   // ── 断言用视图 ──

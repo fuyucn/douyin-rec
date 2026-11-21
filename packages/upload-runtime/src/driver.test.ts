@@ -217,6 +217,14 @@ describe("upload driver: appendParts", () => {
     expect(store.parts).toEqual([]);
   });
 
+  it("does not confirm an accepted part without final-readback ownership", async () => {
+    const { d: uploadDriver, store, calls } = driver({ append: async () => ({ proof: "accepted" }) });
+    await expect(uploadDriver.appendParts({ cred: CRED, ref: REF, files: FILES, policy: POLICY }))
+      .rejects.toMatchObject({ failure: "needs-manual" });
+    expect(store.parts).toEqual([]);
+    expect(calls.append).toBe(1);
+  });
+
   it("retries only when the target proved nothing was submitted", async () => {
     let n = 0;
     const { d, sleeps } = driver({

@@ -16,7 +16,7 @@ import { deriveSegmentPlan, stageProductPaths, UPLOAD_ALIAS_DIR } from "./sessio
 import { runSegmentPipeline } from "./segment-pipeline.js";
 // 节点侧上传(experimental,plans/027):全部逻辑隔离在 node-side-upload.ts,便于快速开关/回退。
 import { shouldUseNodeSideUpload, tryNodeSideUpload } from "./node-side-upload.js";
-import { DEFAULT_READBACK_WINDOW_MS, PART_GROUP_CANONICAL, expectedPartsFromLedger, readbackWithDelays, type VerifyResult } from "./verify.js";
+import { canDeferAppendVerification, DEFAULT_READBACK_WINDOW_MS, PART_GROUP_CANONICAL, expectedPartsFromLedger, readbackWithDelays, type VerifyResult } from "./verify.js";
 import { launchFinalizeFormat, type FinalizeFormatDeps } from "./finalize-format.js";
 
 /** 每任务可配的流水线步骤(默认全开;false 则跳过该产出)。 */
@@ -1563,8 +1563,8 @@ async function resumeAppends(
     // 提交限速与 601 冷却,多场同时续跑时直接打爆 B 站频率限制。
     const submit = (): Promise<void> =>
       deps.pool
-        ? deps.pool.withUpload(() => appendArchive(deps.upload, { bv, files, cookies: cfg.cookies, public: isPublic }), streamKey)
-        : appendArchive(deps.upload, { bv, files, cookies: cfg.cookies, public: isPublic });
+        ? deps.pool.withUpload(() => appendArchive(deps.upload, { bv, files, cookies: cfg.cookies, public: isPublic, deferVerificationUntilCleanup: canDeferAppendVerification(deps, streamKey) }), streamKey)
+        : appendArchive(deps.upload, { bv, files, cookies: cfg.cookies, public: isPublic, deferVerificationUntilCleanup: canDeferAppendVerification(deps, streamKey) });
     await drainSeasonOnThrow(() => retry(submit, {
       tries,
       backoffMs: 60_000,
