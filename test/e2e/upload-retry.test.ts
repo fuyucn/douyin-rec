@@ -140,17 +140,55 @@ describe("e2e: 上传超时/故障后的重试与降级", () => {
     expect(await s.fake.countVideoParts(bv)).toBe(4);
   });
 
-  it("append 返回成功但分 P 未落地 → 停在上传,不再追加后续段,保留源", async () => {
-    s = await create(); rec(s);
+  it.each([true, false])("continues later uploads after accepted but missing parts, then retains sources (merge=%s)", async (mergeSegments) => {
+    s = await Scenario.create({ cfg: { steps: { mergeSegments }, cleanup: FULL_CLEANUP } }); rec(s);
     s.fake.inject({ op: "append", mode: "drop", match: (files) => files.some((f) => f.endsWith("_danmu.mp4")) });
     await s.reconcile();
     const key = s.onlyKey();
     const appended = s.fake.calls.filter((c) => c.op === "append");
-    expect(appended.filter((c) => c.files.some((f) => f.endsWith("_livechat.mp4"))), "后续段不得再追加").toHaveLength(0);
-    expect(s.fake.onlyArchive.parts, "只有 P1 落地").toHaveLength(1);
-    expect(s.jobState(key)).toBe("failed");
-    expect(s.ledger.get(key)?.error).toContain("append-ambiguous");
-    expect(tsLeft(s), "不得删源").toBe(3);
+    expect(appended.some((call) => call.files.some((file) => file.endsWith("_livechat.mp4")))).toBe(true);
+    expect(s.fake.onlyArchive.parts).toHaveLength(mergeSegments ? 2 : 8);
+    expect(s.jobState(key)).toBe("needs_manual");
+    expect(s.ledger.get(key)?.error).toContain("分 P 数不足");
+    expect(tsLeft(s)).toBe(3);
+    expectSourceSidecarsKept(s);
+    const calls = s.fake.calls.length;
+    await s.restart();
+    await s.reconcile();
+    expect(s.fake.calls).toHaveLength(calls);
+    expect(tsLeft(s)).toBe(3);
+  });
+
+  it.each([true, false])("uploads later parts while visibility lags and verifies before cleanup (merge=%s)", async (mergeSegments) => {
+    let finalReads = 0;
+    s = await Scenario.create({
+      cfg: { steps: { mergeSegments }, cleanup: FULL_CLEANUP },
+      deps: {
+        countParts: async () => {
+          finalReads++;
+          expect(tsLeft(s)).toBe(3);
+          expect(s.fake.calls.some((call) => call.files.some((file) => file.endsWith("_livechat.mp4")))).toBe(true);
+          return finalReads < 3 ? 1 : s.fake.onlyArchive.parts.length;
+        },
+      },
+    });
+    rec(s);
+    s.fake.countLagReads = 6;
+    await s.reconcile();
+    expect(finalReads).toBeGreaterThanOrEqual(3);
+    expectHealthyDone(s, s.onlyKey(), { parts: mergeSegments ? 3 : 9 });
+    const appendedFiles = s.fake.calls.filter((call) => call.op === "append").flatMap((call) => call.files);
+    expect(new Set(appendedFiles).size).toBe(appendedFiles.length);
+  });
+
+  it("keeps immediate append verification without a final reader", async () => {
+    s = await Scenario.create({ cfg: { cleanup: FULL_CLEANUP }, deps: { countParts: undefined } });
+    rec(s);
+    s.fake.inject({ op: "append", mode: "drop", match: (files) => files.some((file) => file.endsWith("_danmu.mp4")) });
+    await s.reconcile();
+    expect(s.jobState(s.onlyKey())).toBe("failed");
+    expect(s.fake.calls.some((call) => call.files.some((file) => file.endsWith("_livechat.mp4")))).toBe(false);
+    expect(tsLeft(s)).toBe(3);
   });
 
   it("append applied but response lost + delayed readback → must not append twice (#66)", async () => {

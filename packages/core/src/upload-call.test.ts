@@ -52,6 +52,22 @@ describe("upload-call: proof 判定与错误语义(阶段 1b 步 2)", () => {
       .rejects.toThrow(APPEND_AMBIGUOUS_MARKER);
   });
 
+  it("continues an accepted append only with explicit final verification ownership", async () => {
+    const append = vi.fn(fakeUploadTarget().append).mockResolvedValue({ proof: "accepted" });
+    const target = { ...fakeUploadTarget(), append };
+    const input = { bv: "archive-a", files: ["/s/a.mp4"], cookies: "/c", public: false };
+    await expect(appendArchive(target, input)).rejects.toThrow(APPEND_AMBIGUOUS_MARKER);
+    await expect(appendArchive(target, { ...input, deferVerificationUntilCleanup: true })).resolves.toBeUndefined();
+    expect(append.mock.calls[1]?.[0]).toMatchObject({ deferVerificationUntilCleanup: true });
+  });
+
+  it.each(["unknown", "confirmed-not-submitted"] as const)("does not defer a %s result", async (proof) => {
+    const target = { ...fakeUploadTarget(), append: async () => ({ proof }) };
+    await expect(appendArchive(target, {
+      bv: "archive-a", files: ["/s/a.mp4"], cookies: "/c", public: false, deferVerificationUntilCleanup: true,
+    })).rejects.toThrow(APPEND_AMBIGUOUS_MARKER);
+  });
+
   it("append: public 透传 → policy 可见性为 public(防 append 重置 P1 的公开设置)", async () => {
     const seen: Array<{ policy: { visibility: string } }> = [];
     const t = { ...fakeUploadTarget(), append: async (i: { policy: { visibility: string } }) => { seen.push(i); return { proof: "observed" as const }; } };

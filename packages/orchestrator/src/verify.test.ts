@@ -4,6 +4,7 @@
  */
 import { describe, it, expect } from "vitest";
 import {
+  canDeferAppendVerification,
   expectedPartCount,
   partCountOf,
   submittedPlanFromLedger,
@@ -16,6 +17,17 @@ import {
   PART_GROUP_CANONICAL,
   type PartsReader,
 } from "./verify.js";
+
+describe("deferred append verification eligibility", () => {
+  it("requires both a final reader and a plain-part ledger baseline", () => {
+    const ledger = fakeLedger({ plain: [0] });
+    const countParts = async () => 1;
+    expect(canDeferAppendVerification({ ledger, countParts }, "stream-a")).toBe(true);
+    expect(canDeferAppendVerification({ ledger }, "stream-a")).toBe(false);
+    expect(canDeferAppendVerification({ ledger: fakeLedger({}), countParts }, "stream-a")).toBe(false);
+    expect(canDeferAppendVerification({ ledger: fakeLedger({ append_danmu: [0] }), countParts }, "stream-a")).toBe(false);
+  });
+});
 
 /** 假台账:parts = {groupName: [段号...]}。 */
 function fakeLedger(parts: Record<string, number[]>): PartsReader {

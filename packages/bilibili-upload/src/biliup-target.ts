@@ -149,8 +149,9 @@ export function createBiliupFileTarget(deps: BiliupTargetDeps = {}): UploadTarge
           ...(input.hooks ? { hooks: input.hooks } : {}),
           ...(input.countParts ? { countParts: input.countParts } : { countParts: () => countParts(input.ref.id, credPath(input.cred)) }),
           sleep,
+          deferVerificationUntilCleanup: input.deferVerificationUntilCleanup,
         });
-        return { proof: "observed" };
+        return { proof: input.deferVerificationUntilCleanup ? "accepted" : "observed" };
       } catch (err) {
         if (isAppendAmbiguous(err)) return { proof: "unknown" };
         throw err;

@@ -9,7 +9,7 @@ import { addArchiveToSeasonIfConfigured, seasonCheckpointState } from "@drec/bil
 import { retry } from "./retry.js";
 import type { StageProducts } from "./session-plan.js";
 import { prepareUploadAlias } from "./session-plan.js";
-import { PART_GROUP_CANONICAL } from "./verify.js";
+import { canDeferAppendVerification, PART_GROUP_CANONICAL } from "./verify.js";
 import { sanitizeUploadLimitState, type UploadLimitStore } from "./upload-limits.js";
 import { UPLOAD_GATE_DEFAULT_KEY } from "@drec/core";
 
@@ -334,6 +334,7 @@ function sumBytesOf(files: string[]): number {
 
 async function appendGroupSafe(o: {
   deps: PipelineDeps;
+  streamKey: string;
   bv: string;
   files: string[];
   isPublic: boolean;
@@ -349,6 +350,7 @@ async function appendGroupSafe(o: {
   const tries = o.files.length === 1 ? 5 : 1;
   const fn = (): Promise<void> => appendArchive(o.deps.upload, {
     bv: o.bv, files: o.files, cookies: o.deps.cfg.cookies, public: o.isPublic,
+    deferVerificationUntilCleanup: canDeferAppendVerification(o.deps, o.streamKey),
   });
   await (o.retry ?? retry)(fn, {
     tries,
@@ -372,6 +374,7 @@ async function runAppendGroup(
   const files = await splitForUpload(mp4);
   await appendGroupSafe({
     deps: c.deps,
+    streamKey: c.streamKey,
     bv: c.get("bv")!,
     files,
     isPublic: c.cfg.uploadPrivate === false,

@@ -174,6 +174,13 @@ export function expectedPartsFromLedger(
   return plan.counts.plain === 0 ? 0 : expectedPartCount(plan);
 }
 
+export function canDeferAppendVerification(
+  deps: { ledger: PartsReader; countParts?: (bv: string) => Promise<number | null> },
+  streamKey: string,
+): boolean {
+  return !!deps.countParts && partCountOf(deps.ledger, streamKey, "plain") > 0;
+}
+
 /** 延后回读总窗口默认值(issue #327):即 `sideCheckDelayMs` 缺省,不另设旋钮。 */
 export const DEFAULT_READBACK_WINDOW_MS = 10 * 60_000;
 
