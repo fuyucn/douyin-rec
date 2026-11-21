@@ -201,7 +201,18 @@ export class SshTransport implements Transport {
     // 命令作**单个字符串**传:ssh 本就经远端 shell(`$SHELL -c`)执行命令,无需再包 bash -lc。
     // 旧写法 ["bash","-lc",cmd] 经 ssh 空格 join 成 `bash -lc node /path …` → bash -c 只取 "node"
     // 当命令、其余成位置参数 → 实际只跑 `node`(无脚本)→ 空输出 → JSON.parse 抛错 → 该节点恒缺席。
-    const out = await this.node("inventory");
+    // Match the existing reconciliation window without extending status or other command budgets.
+    const timeoutMs = 60_000;
+    const deadline = performance.now() + timeoutMs;
+    const out = await runOverFleet(
+      this.o.fleet?.() ?? null,
+      { nodeId: this.id, dataRoot: this.o.dataRoot, cmd: "inventory", args: [], timeoutMs },
+      () => {
+        const remainingMs = Math.ceil(deadline - performance.now());
+        if (remainingMs <= 0) throw new Error("node inventory exceeded " + timeoutMs + "ms budget");
+        return (this.o.run ?? defaultRun(this.o.host, remainingMs))([this.nodeLine("inventory")]);
+      },
+    );
     const parsed = JSON.parse(out) as { recordings: NodeRecording[]; unclaimedSegments?: unknown; unclaimedTruncated?: unknown };
     // Old workers omit the orphan fields and malformed ones are dropped: both mean "unknown".
     const extra = parseUnclaimedPayload(parsed);

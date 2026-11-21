@@ -4,7 +4,22 @@ PIPE_UP='{"upload":{"mode":"upload","private":true},"steps":{"burnDanmu":false,"
 
 # 节点源录像清单(名字+大小+mtime),用于断言「源文件不变」
 manifest() { nx "$1" sh -c "cd /output-data/recordings/$2 && find . -type f -exec stat -c '%n %s %Y' {} + | sort"; }
-alert_count() { api GET /api/events; printf '%s' "$API_BODY" | grep -o '节点 node-2 清单已连续' | wc -l | tr -d ' '; }
+alert_count() {
+  api GET /api/events
+  [[ $API_CODE == 200 ]] || return 1
+  # The API wraps notifications in .event; a room escalation has a room prefix.
+  printf '%s' "$API_BODY" | jq -er '[.events[].event | select(.kind == "error" and (.message | strings | startswith("节点 node-2 清单已连续 ")))] | length'
+}
+
+s2_blocked_round() {
+  api GET /api/hub/queue
+  [[ $API_CODE == 200 ]] || return 1
+  printf '%s' "$API_BODY" | jq -er --arg room "$1" '
+    [.blocked[] | select(.platform == "douyin" and .roomSlug == $room and .workers == ["node-2"])]
+    | select(length == 1) | .[0]
+    | select((.rounds | type) == "number" and (.threshold | type) == "number")
+    | select(.rounds >= 1 and .rounds == (.rounds | floor) and .rounds < .threshold) | .rounds'
+}
 arch_count() { cx sh -c "cat /output-data/config/biliup/fake-archive.jsonl 2>/dev/null | grep '$1' | grep -c '\"op\":\"upload\"'; true" | tr -d ' '; }
 lost_logs() { ctrl_logs | grep -c 'worker node-2 清单失联'; }
 node2_status() { api GET /api/hub/workers/status; printf '%s' "$API_BODY" | jq -r '.[]|select(.id=="node-2")|.ok'; }
@@ -17,7 +32,9 @@ s2_phase() {
   seed 1 "$anchor" "$room" "$END" 2 10; seed 2 "$anchor" "$room" "$END" 2 10
   local m1 m2; m1=$(manifest 1 "$anchor"); m2=$(manifest 2 "$anchor")
   # events / fake-archive 跨多次运行累积:本阶段一律按「相对基线的增量」断言
-  local alerts0 arch0 logs0; alerts0=$(alert_count); arch0=$(arch_count "$anchor"); logs0=$(lost_logs)
+  local alerts0 arch0 logs0
+  if ! alerts0=$(alert_count); then sc_fail "$label/API: could not read node warning baseline"; return; fi
+  arch0=$(arch_count "$anchor"); logs0=$(lost_logs)
   fault "$down" 2
   local t; t=$(mk_task "$room" "$anchor")
   mk_rule "$t" '["node-1","node-2"]' "$PIPE_UP" >/dev/null
@@ -30,14 +47,27 @@ s2_phase() {
   [[ $label == stop ]] || sc_info "[$label] pause 走超时路径:每轮 inventory 最长 60s,达阈值需约 6 轮,请耐心等"
   # 达阈值(默认 6 轮)后告警恰好 1 条。pause 路径每轮 ≥60s,故等待上限放宽。
   local lim=240; [[ $down == pause ]] || lim=150
-  hit() { [[ $(( $(alert_count) - alerts0 )) -ge 1 ]]; }
+  local alerts_seen
+  hit() { alerts_seen=$(alert_count) && (( alerts_seen > alerts0 )); }
   if [[ $down == pause ]]; then lim=720; fi
-  wait_for $lim hit && sc_pass "$label/API: 失联达阈值发出通知(本阶段新增 $(( $(alert_count) - alerts0 )) 条)" || sc_fail "$label/API: ${lim}s 内未见阈值告警"
+  wait_for $lim hit && sc_pass "$label/API: 失联达阈值发出通知(本阶段新增 $(( alerts_seen - alerts0 )) 条)" || sc_fail "$label/API: ${lim}s 内未见阈值告警"
   # Either fault can hold an existing settle pass before inventory runs.
   # Check its warning within the unchanged threshold deadline, not a separate 120s guess.
   expect_true "$label/log" "unreachable inventory warning is present at the alert threshold" have_lost
-  if [[ $down == pause ]]; then sleep 70; else sleep 50; fi
-  expect_eq "$label/API" "阈值后继续失联,通知不重复(本阶段新增条数)" "$(( $(alert_count) - alerts0 ))" 1
+  # Prove that the room stayed blocked after the warning without overshooting into manual escalation.
+  local first_round next_round follow_up=50
+  [[ $down != pause ]] || follow_up=70
+  another_blocked_round() { next_round=$(s2_blocked_round "$room") && (( next_round > first_round )); }
+  if first_round=$(s2_blocked_round "$room") && wait_for "$follow_up" another_blocked_round; then
+    sc_pass "$label/API: observed another blocked round before manual escalation ($first_round → $next_round)"
+  else
+    sc_fail "$label/API: no further blocked round observed before manual escalation"
+  fi
+  if alerts_seen=$(alert_count); then
+    expect_eq "$label/API" "阈值后继续失联,通知不重复(本阶段新增条数)" "$(( alerts_seen - alerts0 ))" 1
+  else
+    sc_fail "$label/API: could not read node warnings after the blocked round"
+  fi
   # 失联期间:不选优 / 不收口 / 不建 job / 源不变
   expect_eq "$label/台账" "失联期间该场不建 job" "$(job_count "$room")" 0
   expect_eq "$label/台账" "失联期间无候选" "$(ledger "SELECT COUNT(*) n FROM sync_candidates WHERE streamKey LIKE 'douyin:$room:%'" | jq -r '.[0].n')" 0
