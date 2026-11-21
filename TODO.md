@@ -15,6 +15,8 @@
 
 ## 进行中
 
+- [~] **T-238 #49 总索引与 P0 轨迹基线（issue [#49](https://github.com/fuyucn/douyin-rec/issues/49)）** — **做什么**：逐项对账 U0–U12，复用现有 pipeline 假依赖冻结 merge / node-side / segments 的步骤、事件与 skipped/detail。**为什么**：防止旧总票与 plans/032、034、049、051、052 重复推进或误报完成。**验收**：索引列明实现、测试、替代票与剩余验收；仅文档/测试，不改运行时；本轮只做 diff/static 检查，vitest 交主会话错峰执行。索引：[plans/057](plans/057_issue_49_index.md)。**本轮交付**：13 项对账 + 3 路正常轨迹与 1 条边车 skipped 轨迹已编写；diff/链接/隐私检查通过；共享依赖解析使全量 typecheck 仍有 180 条基线诊断，compiler API 对比新增 0、修改测试诊断 0；vitest 未跑，保留 `[~]` 待主会话错峰回归。不改 issue 状态、不评论、不 push/merge/部署。
+
 - [~] **T-237 2026-11-20 全项目架构审查与改进批次（epic [#720](https://github.com/fuyucn/douyin-rec/issues/720) / sub #721–#728，2026-11-20）** — **做什么**: 由 xingchiapi/gpt-6.1-sol xhigh 做全项目架构审查，拆 6 个小审查；把确认的 8 个可独立项拆成 sub issue 并实现：配置坏文件 fail-closed、配置 RMW 事务、Hub 重试 UI/分段状态、台账读错误/DTO、平台注册/URL 匹配、直播直传 DB 路径、文档校准。**为什么**: 审查发现多处“看似成功/静默为空/前后端能力漂移”，且不能与既有 #419/#420/#484/#49/plans 049/051/052 重复。**验收**: 每项先补失败测试；集成分支通过全量 test/typecheck/arch/web build/bundle；PR 过 pr-gate/pr-risk-scan 与独立 review；不部署、不改上传投稿/删源/hub 规则。**计划**: [plans/056](plans/056_architecture_review_2026-11.md)。
 
 
