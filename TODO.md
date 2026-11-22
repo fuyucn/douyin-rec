@@ -15,6 +15,8 @@
 
 ## 进行中
 
+- [~] **T-246 主控 SQLite I/O 故障时接口永久 500，只能重启容器（issue [#742](https://github.com/fuyucn/douyin-rec/issues/742)，2026-11-21）** — **做什么**: 新增 core `classifySqliteError` / `isSqliteIoError`（按 `errcode` 主码 + 文案兜底，区分 io/locked/corrupt）；web 分发层把 I/O 故障映射成 **503 + 挂载/重启提示**（SQLite 原文同时进文案与日志）；`/api/hub/jobs`、`/api/hub/queue` 复用同一判定；队列 `doneCount` 不再把「读不到」报成 `done=0`（台账文件不存在仍按 #561 空态返回 0）。**为什么**: 2026-11-21 17:16 前后主控 `/api/tasks`、`/api/hub/jobs`、`/api/hub/queue` 同时失败（`disk I/O error`），只有 `docker restart` 才恢复；宿主机 `pragma integrity_check` = ok、容器内新进程新连接可读 → 不是数据损坏，是 WAL 的 `-wal/-shm` 在绑定挂载上视图分叉。**验收**: 注入 `errcode=10` 与真实 CANTOPEN → 503；非 IO 错误仍 500；健康空台账仍 200；`pnpm test` 全绿、`pnpm typecheck` 干净；版本 0.0.404 + `pnpm bundle`。**顺手修**: `test/docs/workflow-baseline.test.ts` 的 pin 是文档两次改写前的旧句面（main 上本已红），已跟上现行文案。**明确不做（另票需人拍板）**: 把 `<root>/db` 挪 named volume 或主控库停 WAL、compose healthcheck 自动重启——都改变运维/并发口径。
+
 
 
 - [~] **T-237 2026-11-20 全项目架构审查与改进批次（epic [#720](https://github.com/fuyucn/douyin-rec/issues/720) / sub #721–#728，2026-11-20）** — **做什么**: 由 xingchiapi/gpt-6.1-sol xhigh 做全项目架构审查，拆 6 个小审查；把确认的 8 个可独立项拆成 sub issue 并实现：配置坏文件 fail-closed、配置 RMW 事务、Hub 重试 UI/分段状态、台账读错误/DTO、平台注册/URL 匹配、直播直传 DB 路径、文档校准。**为什么**: 审查发现多处“看似成功/静默为空/前后端能力漂移”，且不能与既有 #419/#420/#484/#49/plans 049/051/052 重复。**验收**: 每项先补失败测试；集成分支通过全量 test/typecheck/arch/web build/bundle；PR 过 pr-gate/pr-risk-scan 与独立 review；不部署、不改上传投稿/删源/hub 规则。**计划**: [plans/056](plans/056_architecture_review_2026-11.md)。
