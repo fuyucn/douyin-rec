@@ -185,7 +185,7 @@ issue #78 起，循环里的「状态变更」和「审查前检查」不再靠�
 
 **合法迁移**（唯一真相 = `scripts/issue-state.json`，改表必须同步改本文）：
 
-- `accept → in-progress`（认领）→ `in-review`（PR 已开）→ PASS：`待验证` ｜ FAIL：`rework-1` → `in-review` → 再 FAIL：`rework-2` → `in-review` → 再 FAIL：`needs-decision`。
+- `accept → in-progress`（认领）→ `in-review`（PR 已开）→ PASS：无部署验证项或已可验证 → `closed`；仍需部署后验证 → `待验证` → 验证后 `closed`。FAIL：`rework-1` → `in-review` → 再 FAIL：`rework-2` → `in-review` → 再 FAIL：`needs-decision`。
 - **分步票**（一张票按计划拆成多个 PR，例如 N1–N8）：**除最后一步之外的每一步都写 `Part of #N`**——base 是默认分支 `main`，写 `Fixes` 会让票在合并时自动关闭，后面的步骤就无处落脚了。某一步合并后由 **review agent** 转 `in-review → in-progress`（必须 `--reason-file` 写明哪步已合并、下一步做什么），下一步开 PR 再转 `in-review`；**最后一步也要看有没有部署验证项**：还有实跑要做的，仍然写 `Part of #N`，合并后转 `待验证`（写 `Fixes #N` 会被 GitHub 在合并时自动关票，直接跳过待验证）；只有「合并即完成、无实跑项」的最后一步才写 `Fixes #N`。
 - `待验证 → closed`（实现侧收口）；`decline → closed`（不做的票收口，需 `--reason-file`）。
 - 任意活跃状态 → `needs-decision` / `blocked`；`needs-decision` 由人改回 `accept` / `decline`。
