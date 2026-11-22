@@ -11,6 +11,7 @@ export * from "./log.js";
 export * from "./atomic-name.js";
 export * from "./atomic-write.js";
 export * from "./link-or-copy.js";
+export * from "./sqlite-errors.js";
 export * from "./job-abort.js";
 export * from "./title-template.js";
 export * from "./upload-contract.js";

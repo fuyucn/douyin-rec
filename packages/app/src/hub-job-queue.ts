@@ -1,7 +1,8 @@
 /** Queue-specific projections built on shared hub job and ledger readers. */
 
 import { DatabaseSync } from "node:sqlite";
-import { HUB_FLOW_ORDER, isSidecarSkipEvent, readyNodes, STAGE_READY, USER_STOP, type HubPoolSnapshotDTO, type HubQueueDTO, type HubQueueStats, type QueueItemDTO, type QueuePhase } from "@drec/core";
+import { existsSync } from "node:fs";
+import { HUB_FLOW_ORDER, isSidecarSkipEvent, isSqliteIoError, readyNodes, STAGE_READY, USER_STOP, type HubPoolSnapshotDTO, type HubQueueDTO, type HubQueueStats, type QueueItemDTO, type QueuePhase } from "@drec/core";
 import { openLedger, queueStats, tableExists, TERMINAL } from "./hub-job-ledger.js";
 import { hubStageDir, hubLogsDir, listHubJobs, needsManualPhaseOf } from "./hub-job-reads.js";
 import type { HubJobStep, HubJobView, BuildQueueOpts } from "./hub-job-types.js";
@@ -92,11 +93,18 @@ function compareStreamKeys(left: string, right: string): number {
 }
 
 function doneCount(syncDbPath: string): number {
+  // 台账文件还不存在 = hub 首次启动前的正常空态（#561），不是故障 → 0。
+  if (!existsSync(syncDbPath)) return 0;
   try {
     const db = openLedger(syncDbPath);
     try { return Number(db.prepare("SELECT COUNT(*) AS n FROM sync_jobs WHERE state = 'done'").all()[0]?.n ?? 0); }
     finally { db.close(); }
-  } catch { return 0; }
+  } catch (error) {
+    // issue #742: I/O 故障时不能报「已完成 0 个」——那是把「读不到」伪装成真实数据。
+    // 只放过「旧库没有该表」这类结构性缺失，其余上层按 503/500 报出去。
+    if (isSqliteIoError(error)) throw error;
+    return 0;
+  }
 }
 
 function phaseOf(job: HubJobView, waiting: (typeof EMPTY_POOL.waiting)[number] | undefined): QueuePhase {
