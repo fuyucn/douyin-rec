@@ -6,12 +6,16 @@
  * 这种情况下再包一层「重开重试」救不回来，只能：① 认清错误类别，② 回 503 + 写清
  * 「这不是数据坏了，是挂载/共享内存层的问题」，③ 把完整原文打进日志。
  *
+ * 库路径存在性判定也放这里，保证全仓只有一份口径。
+ *
  * Node 24 的 `DatabaseSync` 错误形状（实测）：`code: "ERR_SQLITE_ERROR"`、
  * `errcode: <数字主码/扩展码>`、`errstr: "disk I/O error"`、`message` 同名文案。
  * `errcode` 不保证在所有版本/路径上都存在 → 文案兜底。
  */
 
-/** node:sqlite 错误的可读字段（其它字段忽略）。 */
+import { statSync } from "node:fs";
+
+/** node:sqlite / fs 错误的可读字段（其它字段忽略）。 */
 export interface SqliteErrorLike {
   code?: unknown;
   errcode?: unknown;
@@ -19,7 +23,7 @@ export interface SqliteErrorLike {
   message?: unknown;
 }
 
-/** 归类：io=挂载/读写层出问题；locked=并发锁；corrupt=库损坏；other=其余（含非 SQLite 错误）。 */
+/** 归类：io=挂载/权限/读写层出问题；locked=并发锁；corrupt=库损坏；other=其余（含非 SQLite 错误）。 */
 export type SqliteFailure = "io" | "locked" | "corrupt" | "other";
 
 /** SQLite 主错误码（扩展码取其低 8 位主码）。 */
@@ -66,11 +70,15 @@ export function classifySqliteError(error: unknown): SqliteFailure {
     if (base === BASE.ioerr || base === BASE.readonly || base === BASE.cantOpen) return "io";
     return "other";
   }
+  // 文件系统层的错误（权限 / 只读挂载 / 磁盘故障）：同样是「库拿不到」，要回 503 + 挂载提示，
+  // 不能让 stat/open 失败落成「数据库查询失败」500（#742 review 第二轮 P2-3）。
+  const fsCode = pickString((error as { code?: unknown } | null)?.code);
+  if (/^(EACCES|EPERM|EROFS|EIO|ENOSPC|EDQUOT|ESTALE)$/.test(fsCode)) return "io";
   const text = sqliteErrorText(error);
   if (!text) return "other";
   if (/database disk image is malformed|file is not a database/i.test(text)) return "corrupt";
   if (/database (table )?is locked|database is busy/i.test(text)) return "locked";
-  if (/disk I\/O error|unable to open database|attempt to write a readonly database|readonly/i.test(text)) return "io";
+  if (/disk I\/O error|unable to open database|attempt to write a readonly database|read-only file system/i.test(text)) return "io";
   return "other";
 }
 
@@ -82,6 +90,32 @@ export function isSqliteIoError(error: unknown): boolean {
   return classifySqliteError(error) === "io";
 }
 
-/** IO 故障的运维提示：别重试、别翻数据、先看挂载。 */
+/**
+ * 库文件「确实不存在」的唯一判定（ENOENT/ENOTDIR）；其它 stat 失败一律上抛，
+ * 不能当成「文件不在」——否则权限/挂载故障会被伪装成空数据（#742 review 第二轮 P2-2）。
+ */
+export function dbPathMissing(path: string): boolean {
+  try {
+    statSync(path);
+    return false;
+  } catch (error) {
+    const code = (error as { code?: unknown })?.code;
+    if (code === "ENOENT" || code === "ENOTDIR") return true;
+    throw error;
+  }
+}
+
+/** IO 故障的运维提示：别重试、别翻数据、先看挂载（READONLY/CANTOPEN 先查权限与路径）。 */
 export const SQLITE_IO_HINT =
-  "这不是数据损坏：SQLite 库（WAL 模式）在绑定/共享挂载上会因 -wal/-shm 视图分叉而持续报 I/O 错误，进程内重开连接也救不回；请检查数据根所在挂载，通常需要重启主控容器";
+  "这不是数据损坏：SQLite 库（WAL 模式）在绑定/共享挂载上会因 -wal/-shm 视图分叉而持续报 I/O 错误，进程内重开连接也救不回；请检查数据根所在挂载，通常需要重启主控容器（若错误码是 8/14，先查只读挂载、文件权限与库路径）";
+
+/** 日志用标签：把「哪个错误码」写进日志，避免只剩一句 disk I/O error。 */
+export function sqliteErrorTag(error: unknown): string {
+  const e = error as SqliteErrorLike | null;
+  const code = pickString(e?.code);
+  const errcode = pickNumber(e?.errcode);
+  if (!code && errcode === undefined) return "";
+  const parts = [code || "ERR_SQLITE"];
+  if (errcode !== undefined) parts.push(`errcode=${errcode}`);
+  return `[${parts.join("/")}]`;
+}

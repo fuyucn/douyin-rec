@@ -7,7 +7,7 @@
  * 防止以后换 Node 版本或改判定时把 IO 故障误判成别的东西、或反过来把约束错误误判成 IO。
  */
 import { describe, it, expect } from "vitest";
-import { classifySqliteError, isSqliteIoError, sqliteBaseCode, sqliteErrorText } from "./sqlite-errors.js";
+import { classifySqliteError, dbPathMissing, isSqliteIoError, sqliteBaseCode, sqliteErrorTag, sqliteErrorText } from "./sqlite-errors.js";
 
 /** Node 24 `node:sqlite` 抛出的真实形状：code + errcode + errstr（message 同名）。 */
 function sqliteError(errcode: number, errstr: string): Error {
@@ -81,3 +81,42 @@ describe("classifySqliteError", () => {
     expect(isSqliteIoError(new Error("普通错误"))).toBe(false);
   });
 });
+
+describe("sqliteErrorTag", () => {
+  it("有 code/errcode → 带码标签；缺任何一项都不产出假标签", () => {
+    expect(sqliteErrorTag(sqliteError(10, "disk I/O error"))).toBe("[ERR_SQLITE_ERROR/errcode=10]");
+    expect(sqliteErrorTag(sqliteError(266, "disk I/O error"))).toBe("[ERR_SQLITE_ERROR/errcode=266]");
+    // 只有文案（无 code/errcode）→ 空串，不能拼成 [ERR_SQLITE/errcode=undefined]
+    expect(sqliteErrorTag(new Error("disk I/O error"))).toBe("");
+    expect(sqliteErrorTag({ code: "ERR_SQLITE_ERROR" })).toBe("[ERR_SQLITE_ERROR]");
+    expect(sqliteErrorTag(undefined)).toBe("");
+  });
+});
+
+describe("文件系统层错误与存在性判定", () => {
+  it("权限 / 只读挂载 / 磁盘故障也归 io（否则只会回 500 且没有挂载提示）", () => {
+    for (const code of ["EACCES", "EPERM", "EROFS", "EIO", "ENOSPC", "EDQUOT", "ESTALE"]) {
+      expect(classifySqliteError({ code })).toBe("io");
+    }
+    // 无关的 fs 码不算 io
+    expect(classifySqliteError({ code: "ENOENT" })).toBe("other");
+  });
+
+  it("readonly 文案只认 SQLite 原话（不把任何含 readonly 的字串判成 IO）", () => {
+    expect(classifySqliteError(new Error("attempt to write a readonly database"))).toBe("io");
+    expect(classifySqliteError(new Error("config is readonly, ignored"))).toBe("other");
+  });
+
+  it("dbPathMissing：ENOENT/ENOTDIR = 不存在；存在 = false；其它 stat 失败上抛", () => {
+    const fs = require("node:fs") as typeof import("node:fs");
+    const os = require("node:os") as typeof import("node:os");
+    const path = require("node:path") as typeof import("node:path");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dbpath-"));
+    const file = path.join(dir, "a.db");
+    fs.writeFileSync(file, "");
+    expect(dbPathMissing(path.join(dir, "missing.db"))).toBe(true);
+    expect(dbPathMissing(path.join(file, "child.db"))).toBe(true);   // ENOTDIR
+    expect(dbPathMissing(file)).toBe(false);
+  });
+});
+

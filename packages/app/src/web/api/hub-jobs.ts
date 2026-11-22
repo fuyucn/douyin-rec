@@ -6,25 +6,26 @@
  */
 import type { ApiCtx } from "./context.js";
 import type { ApiResult } from "./types.js";
-import { HUB_JOB_STATES, QUEUE_PHASES, isUploadingMode, platformForRoom, classifySqliteError, sqliteErrorText, SQLITE_IO_HINT, type HubJobsDTO, type QueuePhase } from "@drec/core";
+import { HUB_JOB_STATES, QUEUE_PHASES, isUploadingMode, isSqliteIoError, platformForRoom, classifySqliteError, sqliteErrorText, sqliteErrorTag, type HubJobsDTO, type QueuePhase } from "@drec/core";
 import { listHubJobs, readHubJobLog, latestRunPerRoom, buildQueueView } from "../../hub-jobs.js";
 import { HubJobLedgerSchemaError } from "../../hub-job-ledger.js";
 import * as hubStore from "../../hub-store.js";
 import { knownTaskName } from "../../hub-label-lookup.js";
 
 /**
- * 台账读失败 → (HTTP 状态, 文案)。I/O 类（issue #742）回 503 并点明挂载/Restart 提示；
- * 其余（锁/损坏/未知）沿用 500，文案保持原样。
+ * 台账/队列读失败的统一出口（issue #742）：
+ * - I/O 类**直接上抛**，交给 web 分发层统一回 503 + 挂载提示并落日志（错误码一起进日志）；
+ *   本层不再各自拼一套文案，避免同一故障在 /api/hub/jobs 与 /api/hub/queue 说两套话。
+ * - 其余（锁/损坏/未知）仍在本层回 500，文案保留原文与错误码（这些不表示「服务暂时不可用」）。
  */
-function ledgerFailure(error: unknown): { status: number; message: string } {
-  if (error instanceof HubJobLedgerSchemaError) return { status: 500, message: `读 hub 台账失败: ${error.message}` };
+function dbFailureMessage(label: string, error: unknown): string {
+  if (error instanceof HubJobLedgerSchemaError) return `${label}: ${error.message}`;
   const failure = classifySqliteError(error);
   const rawText = sqliteErrorText(error) || String((error as Error)?.message ?? error);
-  if (failure === "io") return { status: 503, message: `读 hub 台账失败 (数据库 I/O 错误): ${SQLITE_IO_HINT}（原文：${rawText}）` };
   const reason = failure === "locked" ? "数据库被锁定" : failure === "corrupt" ? "数据库损坏" : "数据库查询失败";
   const code = (error as { code?: unknown })?.code;
   const codeText = typeof code === "string" && /^[A-Z0-9_]{1,40}$/.test(code) ? code : "DB_ERROR";
-  return { status: 500, message: `读 hub 台账失败 (${codeText}): ${reason}；请检查文件状态、锁与存储 I/O（原文：${rawText}）` };
+  return `${label} (${codeText}): ${reason}；请检查文件状态、锁与存储 I/O${sqliteErrorTag(error)}（原文：${rawText}）`;
 }
 
 export function buildHubJobs(ctx: ApiCtx) {
@@ -47,8 +48,8 @@ export function buildHubJobs(ctx: ApiCtx) {
         const response = { jobs, total } satisfies HubJobsDTO;
         return { status: 200, body: response };
       } catch (e) {
-        const failure = ledgerFailure(e);
-        return err(failure.status, failure.message);
+        if (isSqliteIoError(e)) throw e;
+        return err(500, dbFailureMessage("读 hub 台账失败", e));
       }
     },
 
@@ -63,8 +64,8 @@ export function buildHubJobs(ctx: ApiCtx) {
       try {
         return { status: 200, body: { rooms: latestRunPerRoom(deps.syncDbPath) } };
       } catch (e) {
-        const failure = ledgerFailure(e);
-        return err(failure.status, failure.message);
+        if (isSqliteIoError(e)) throw e;
+        return err(500, dbFailureMessage("读 hub 最近运行失败", e));
       }
     },
 
@@ -129,11 +130,8 @@ export function buildHubJobs(ctx: ApiCtx) {
           .filter((b) => !q || `${b.anchorName ?? ""} ${b.roomSlug} ${b.streamKey} ${b.workers.join(" ")}`.toLowerCase().includes(q));
         return { status: 200, body: { ...view, delivering, blocked } };
       } catch (e) {
-        const failure = classifySqliteError(e);
-        const rawText = sqliteErrorText(e) || String((e as Error)?.message ?? e);
-        return failure === "io"
-          ? err(503, `读 hub 队列失败 (数据库 I/O 错误): ${SQLITE_IO_HINT}（原文：${rawText}）`)
-          : err(500, `读 hub 队列失败: ${rawText}`);
+        if (isSqliteIoError(e)) throw e;
+        return err(500, dbFailureMessage("读 hub 队列失败", e));
       }
     },
 

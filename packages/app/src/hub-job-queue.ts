@@ -1,8 +1,7 @@
 /** Queue-specific projections built on shared hub job and ledger readers. */
 
 import { DatabaseSync } from "node:sqlite";
-import { existsSync } from "node:fs";
-import { HUB_FLOW_ORDER, isSidecarSkipEvent, isSqliteIoError, readyNodes, STAGE_READY, USER_STOP, type HubPoolSnapshotDTO, type HubQueueDTO, type HubQueueStats, type QueueItemDTO, type QueuePhase } from "@drec/core";
+import { HUB_FLOW_ORDER, classifySqliteError, dbPathMissing, isSidecarSkipEvent, readyNodes, STAGE_READY, USER_STOP, type HubPoolSnapshotDTO, type HubQueueDTO, type HubQueueStats, type QueueItemDTO, type QueuePhase } from "@drec/core";
 import { openLedger, queueStats, tableExists, TERMINAL } from "./hub-job-ledger.js";
 import { hubStageDir, hubLogsDir, listHubJobs, needsManualPhaseOf } from "./hub-job-reads.js";
 import type { HubJobStep, HubJobView, BuildQueueOpts } from "./hub-job-types.js";
@@ -92,19 +91,26 @@ function compareStreamKeys(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-function doneCount(syncDbPath: string): number {
+/** 读台账内的 done 计数（测试可注入 read 观察 I/O 故障路径）。 */
+export function doneCount(syncDbPath: string, read: (path: string) => number = readDoneFromLedger): number {
   // 台账文件还不存在 = hub 首次启动前的正常空态（#561），不是故障 → 0。
-  if (!existsSync(syncDbPath)) return 0;
+  // 存在性判定与 hub-job-reads 共用 core 的同一份实现（#742 review 第二轮 P2-2）。
+  if (dbPathMissing(syncDbPath)) return 0;
   try {
-    const db = openLedger(syncDbPath);
-    try { return Number(db.prepare("SELECT COUNT(*) AS n FROM sync_jobs WHERE state = 'done'").all()[0]?.n ?? 0); }
-    finally { db.close(); }
+    return read(syncDbPath);
   } catch (error) {
-    // issue #742: I/O 故障时不能报「已完成 0 个」——那是把「读不到」伪装成真实数据。
-    // 只放过「旧库没有该表」这类结构性缺失，其余上层按 503/500 报出去。
-    if (isSqliteIoError(error)) throw error;
+    // issue #742: 「读不到」不能报成「已完成 0 个」。io / locked / corrupt 一律上抛
+    // （上游 /api/hub/queue 会回 503/500 并带原文）；只有结构性缺失（缺表/缺列等 other）
+    // 才退回空态 —— 与注释口径一致（#742 review 第二轮 P2-1）。
+    if (classifySqliteError(error) !== "other") throw error;
     return 0;
   }
+}
+
+function readDoneFromLedger(syncDbPath: string): number {
+  const db = openLedger(syncDbPath);
+  try { return Number(db.prepare("SELECT COUNT(*) AS n FROM sync_jobs WHERE state = 'done'").all()[0]?.n ?? 0); }
+  finally { db.close(); }
 }
 
 function phaseOf(job: HubJobView, waiting: (typeof EMPTY_POOL.waiting)[number] | undefined): QueuePhase {

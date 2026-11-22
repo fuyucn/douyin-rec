@@ -1,15 +1,17 @@
 /**
  * web-db-ioerr.test.ts — issue #742 回归：SQLite I/O 故障要回 503 + 明确文案，别再是笼统 500。
  *
- * 两条真实故障注入路径（都不 mock SQLite 本身）：
+ * 三条真实故障注入路径（都不 mock SQLite 本身）：
  *   ① TaskStore.listTasks() 抛 Node 24 `node:sqlite` 的真实形状错误（errcode=10 disk I/O error）；
- *   ② 把 hub 台账库路径指向一个**目录** → `new DatabaseSync(dir)` 真抛 errcode=14（unable to open）。
- * 另外钉住「非 IO 错误仍是 500、文案不变」，防止这次改动把别的错误也染成 503。
+ *   ② 把 hub 台账库路径指向一个**目录** → 真抛 errcode=14（unable to open）；
+ *   ③ 把台账库换成一个**不是数据库的文本文件** → 真抛 errcode=26（file is not a database，损坏类）。
+ * 再加上「非 IO 错误仍是 500、文案不变」与「健康台账 done 计数正确」，防止把别的错误染成 503、
+ * 或把计数读成 0。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TaskStore } from "../../packages/app/src/store.js";
@@ -32,11 +34,11 @@ class MockManager implements ManagerLike {
 }
 
 /** Node 24 `node:sqlite` 实测形状：code + errcode + errstr。 */
-function sqliteIoError(): Error {
-  const e = new Error("disk I/O error") as Error & { code: string; errcode: number; errstr: string };
+function sqliteError(errcode: number, errstr: string): Error {
+  const e = new Error(errstr) as Error & { code: string; errcode: number; errstr: string };
   e.code = "ERR_SQLITE_ERROR";
-  e.errcode = 10;
-  e.errstr = "disk I/O error";
+  e.errcode = errcode;
+  e.errstr = errstr;
   return e;
 }
 
@@ -73,53 +75,80 @@ describe("数据库 I/O 故障的 HTTP 语义（issue #742）", () => {
     return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   }
 
+  function okLedgerPath(): string {
+    const syncDbPath = join(hubDir, "sync.db");
+    new SyncLedger(syncDbPath).close();  // 真建表（空库只有结构、没有行）
+    return syncDbPath;
+  }
+
   it("任务库抛 SQLITE_IOERR → GET /api/tasks 回 503 且文案点明挂载/重启", async () => {
-    const base = await start(join(hubDir, "sync.db"));
-    vi.spyOn(store, "listTasks").mockImplementation(() => { throw sqliteIoError(); });
+    const base = await start(okLedgerPath());
+    vi.spyOn(store, "listTasks").mockImplementation(() => { throw sqliteError(10, "disk I/O error"); });
     const res = await fetch(`${base}/api/tasks`);
     expect(res.status).toBe(503);
     const body = await res.json() as { error: string };
     expect(body.error).toMatch(/数据库暂时不可用/);
     expect(body.error).toMatch(/挂载/);
-    // 不再是笼统 500 —— 值班据此判断「不是数据坏了」。
+    expect(body.error).toContain("errcode=10");  // 错误码要跟着回/进日志
     expect(body.error).not.toBe("服务器内部错误");
   });
 
-  it("非 IO 错误仍走 500 + 原文案（不误判成 503）", async () => {
-    const base = await start(join(hubDir, "sync.db"));
-    vi.spyOn(store, "listTasks").mockImplementation(() => { throw new TypeError("boom"); });
-    const res = await fetch(`${base}/api/tasks`);
-    expect(res.status).toBe(500);
-    expect(await res.json()).toEqual({ error: "服务器内部错误" });
+  it("非 IO 的 SQLite 错误仍走 500 + 原文案（不误判成 503）", async () => {
+    const base = await start(okLedgerPath());
+    // errcode=19（CONSTRAINT）与普通 TypeError 都不算 I/O
+    for (const err of [sqliteError(19, "constraint failed"), new TypeError("boom")]) {
+      vi.spyOn(store, "listTasks").mockImplementation(() => { throw err; });
+      const res = await fetch(`${base}/api/tasks`);
+      expect(res.status).toBe(500);
+      expect(await res.json()).toEqual({ error: "服务器内部错误" });
+    }
   });
 
   it("hub 台账库打不开（CANTOPEN）→ GET /api/hub/jobs 回 503，不是 500", async () => {
-    // 把库路径指向一个目录：真实触发 SQLITE_CANTOPEN(14) —— 归 IO 类。
+    // 库路径指向一个目录：真实触发 SQLITE_CANTOPEN(14) —— 归 IO 类。
     const base = await start(hubDir);
     const res = await fetch(`${base}/api/hub/jobs`);
     expect(res.status).toBe(503);
     const body = await res.json() as { error: string };
-    expect(body.error).toMatch(/读 hub 台账失败/);
-    expect(body.error).toContain("数据库 I/O 错误");
+    expect(body.error).toMatch(/数据库暂时不可用/);
     expect(body.error).toMatch(/挂载/);
+    expect(body.error).toMatch(/errcode=\d+/);
   });
 
-  it("hub 队列在台账 I/O 故障时同样 503（队列统计不静默报 done=0）", async () => {
+  it("hub 队列在台账 I/O 故障时同样 503", async () => {
     const base = await start(hubDir);
     const res = await fetch(`${base}/api/hub/queue`);
     expect(res.status).toBe(503);
-    const body = await res.json() as { error: string };
-    expect(body.error).toMatch(/读 hub 队列失败|数据库暂时不可用/);
+    expect((await res.json() as { error: string }).error).toMatch(/数据库暂时不可用/);
   });
 
-  it("正常的台账库路径不受影响（回归）", async () => {
-    const syncDbPath = join(hubDir, "sync.db");
-    // 真建表（空库只有表结构、没有行）→ 读路径应当正常返回空列表。
+  it("台账文件不是数据库（损坏类）→ 500 + 「数据库损坏」，不是 503", async () => {
+    const broken = join(hubDir, "broken.db");
+    writeFileSync(broken, "this is not a sqlite file\n");
+    const base = await start(broken);
+    const res = await fetch(`${base}/api/hub/jobs`);
+    expect(res.status).toBe(500);
+    const body = await res.json() as { error: string };
+    expect(body.error).toMatch(/读 hub 台账失败/);
+    expect(body.error).toMatch(/数据库损坏/);
+    expect(body.error).not.toMatch(/数据库暂时不可用/);
+  });
+
+  it("健康台账：job 列表 200 空、队列 done 计数是真实值而不是 0", async () => {
+    const syncDbPath = okLedgerPath();
     const ledger = new SyncLedger(syncDbPath);
+    ledger.upsertPending("douyin:10001:2026-01-01");
+    ledger.markDone("douyin:10001:2026-01-01", "fake-draft-id");
     ledger.close();
     const base = await start(syncDbPath);
-    const res = await fetch(`${base}/api/hub/jobs`);
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ jobs: [], total: 0 });
+
+    const jobs = await fetch(`${base}/api/hub/jobs`);
+    expect(jobs.status).toBe(200);
+    expect(await jobs.json()).toMatchObject({ total: 1 });
+
+    const queue = await fetch(`${base}/api/hub/queue`);
+    expect(queue.status).toBe(200);
+    const body = await queue.json() as { doneTotal: number };
+    expect(body.doneTotal).toBe(1);
   });
 });
