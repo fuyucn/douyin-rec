@@ -16,6 +16,7 @@
 ## 进行中
 
 - [~] **T-246 主控 SQLite I/O 故障时接口永久 500，只能重启容器（issue [#742](https://github.com/fuyucn/douyin-rec/issues/742)，2026-11-21）** — **做什么**: 新增 core `classifySqliteError` / `isSqliteIoError`（按 `errcode` 主码 + 文案兜底，区分 io/locked/corrupt）；web 分发层把 I/O 故障映射成 **503 + 挂载/重启提示**（SQLite 原文同时进文案与日志）；`/api/hub/jobs`、`/api/hub/queue` 复用同一判定；队列 `doneCount` 不再把「读不到」报成 `done=0`（台账文件不存在仍按 #561 空态返回 0）。**为什么**: 2026-11-21 17:16 前后主控 `/api/tasks`、`/api/hub/jobs`、`/api/hub/queue` 同时失败（`disk I/O error`），只有 `docker restart` 才恢复；宿主机 `pragma integrity_check` = ok、容器内新进程新连接可读 → 不是数据损坏，是 WAL 的 `-wal/-shm` 在绑定挂载上视图分叉。**验收**: 注入 `errcode=10` 与真实 CANTOPEN → 503；非 IO 错误仍 500；健康空台账仍 200；`pnpm test` 全绿、`pnpm typecheck` 干净；版本 0.0.404 + `pnpm bundle`。**顺手修**: `test/docs/workflow-baseline.test.ts` 的 pin 是文档两次改写前的旧句面（main 上本已红），已跟上现行文案。**明确不做（另票需人拍板）**: 把 `<root>/db` 挪 named volume 或主控库停 WAL、compose healthcheck 自动重启——都改变运维/并发口径。
+  **进度（2026-11-21）**: PR #743 已合并（两轮独立审查：首轮 BLOCK 7 条 → 返工 → 复审 APPROVE；CI 两个 job 通过、隐私闸门干净）。版本 0.0.404。issue #742 已转 `待验证`：还差部署后实跑（挑两节点无录制的窗口重建主控，确认同类故障回 503 + 挂载提示而不是笼统 500）。
 
 
 
