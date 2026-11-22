@@ -14,11 +14,11 @@ commander、esbuild 打包（`dist/douyin-rec.mjs`）、`node:sqlite`（内置�
 
 ## 任务与 TODO 管理（agent 必读）
 
-**`TODO.md`（仓库根）是本仓库 agent 工作的唯一待办台账。** 任何跨会话/多步工作都记在那里，
-不要只留在对话里。规则：
+**GitHub issue 是本仓库任务与开发记录的唯一真相；`TODO.md` 只是本地索引/进度快照。** 所有跨会话/多步工作必须有 issue，并在 TODO 用 `T-N` 链到它；没有 issue 的先查历史再开票。规则：
 
-- **开始任何任务前先读 `TODO.md`**，确认它是否已在台账里；是则用其编号 `T-N` 指代，不要另起一份。
-- **新任务**：在「待办（Next）」加一条，写清 **做什么 + 为什么 + 验收标准**；有正式计划的挂 `plans/NNN_*.md`。
+- **开工前先查重**：先搜 open + closed issue 和 PR。同一问题已在 open 票 → 直接在该票留言继续；已关闭 → `gh issue reopen` 并补「复现证据 / 原修复为何没覆盖 / 本次验收」，不要另开重复票；只有根因或范围不同才开新票，并写 `Refs #N`。
+- **开始任何任务前先读该 issue 与 `TODO.md`**，确认它是否已在台账里；是则用其编号 `T-N` 指代，不要另起一份。
+- **新任务**：先开 GitHub issue（写清 **做什么 + 为什么 + 验收标准**），再在「待办（Next）」加一条链到该 issue；有正式计划的挂 `plans/NNN_*.md`。
 - **开始做**：把 `[ ]` 改成 `[~]`（进行中）。**同时最多 1–2 项进行中。**
 - **完成**：`[x]` 并从「进行中/待办」**移到「已完成」**，行尾补完成日期 `（YYYY-MM-DD）`。
 - **删除/放弃**：直接删该行；若是被取代，在对应 plan 里写明替代关系。
@@ -28,13 +28,13 @@ commander、esbuild 打包（`dist/douyin-rec.mjs`）、`node:sqlite`（内置�
   Global Constraints），并**在 `TODO.md` 里挂链接**；plan 与 TODO 双向引用。
 - **提交**：`TODO.md` 与 plan 文件按仓库提交规范单独 commit（见「提交规范」），代码变更分开。
 
-**不要在这里维护台账速览**——它会过期（曾长期写着已完成的 T-1/T-3）。以 `TODO.md` 的
-「进行中」段为唯一真相；要指代某项，直接引用它的 `T-N`。
+**不要在这里维护台账速览**——它会过期（曾长期写着已完成的 T-1/T-3）。`TODO.md` 的「进行中」段只作本地索引，最终状态以 GitHub issue 为准；要指代某项，直接引用它的 `T-N`。
 
 ## Agent 开发流程（agent 必读）
 
-线上问题和优化走 GitHub issue，不在对话里直接开做。细则见 `docs/agent-workflow.md`。
+线上问题和优化走 GitHub issue：**issue 是任务记录、评论和验收的唯一入口**，不在对话里直接开做。细则见 `docs/agent-workflow.md`。
 
+- **发现新问题先查历史票。** 搜 open + closed issue 与 PR；相同问题已有票就在原票留言/引用，已关闭则 `gh issue reopen` 并补新证据，不另开重复票。
 - **值班 Audit 只读。** 可以查三节点录制、`/api/hub/queue`、`sync_jobs`、磁盘和日志。没有命令输出不算 issue。不改代码、不删文件、不重启、不另开上传。
 - **issue 不写隐私。** 禁止主播名、房间号、streamKey、文件名、BV、IP、主机名、路径、cookie、webhook。
   开票**和发评论前**都先跑 `python3 scripts/issue-guard.py <file>`（评论也过一遍），命中就脱敏。细节留在本地台账。
@@ -44,9 +44,8 @@ commander、esbuild 打包（`dist/douyin-rec.mjs`）、`node:sqlite`（内置�
 - **只有 `accept` 的 issue 才能改代码。** 一个 issue 一个分支；完成开 PR，PR 链到 issue（分步实现的票中间各步写 `Part of #N`、最后一步写 `Fixes #N`）。**不合并 PR（合并归 review 会话）、不部署。** `accept` 之后再在 `TODO.md` 记一条 `T-N`，并写上 issue 链接。
 - **issue 评论也算输入。** 实现前读完评论。可以不采纳，但 PR 里要写出理由。
 - **`accept` ≠ 有人在做。** 实现 heartbeat 自动认领：扫到 `accept` 且无 `in-progress` 的票即打 `in-progress` 并评论「哪个 agent、何时开始」；人只在想指定别的会话做时手动接管。
-- **做完要留言，然后可以 close。** 先总结结果和未采纳的理由，再按「四不 close」门禁自查（有证据 / 已验证 / 有回归测试 / 已回写经验）；**四条全过，agent 可直接 `gh issue close` 并写明关闭依据**，不必等人。缺任一条就不 close，改成在 issue 里写清缺口并保持 open。
-- **PR 由自动 review 会话审查，门禁全过即由 agent 合并**（`gh pr merge --merge`，base 保持
-  `feat/hub-optimization`）——不必等人手动合并；review 只打回、不代改代码。
+- **验证或完成后直接 close。** 先在 issue 留言总结结果、未采纳理由和证据；适用证据（回归测试 / CI / 独立 review / 合并 / 部署后验证）齐了就直接 `gh issue close --reason completed`。**不要为了等未来线上偶发场景长期挂 open**：真实场景尚未出现但部署已完成时，写清残余风险后关闭；后续同一问题复现，先 reopen 原票并补证据，再继续修。
+- **PR 由自动 review 会话审查，门禁全过即由 agent 合并**（`gh pr merge --merge`，base 保持 `main`）——不必等人手动合并；review 只打回、不代改代码。合并后由实现侧按上一条直接收口。
 - **RISK 门禁：** 合并前跑 `scripts/pr-risk-scan.sh`；输出 `RISK`（上传 / 清理删除 / 保留规则 / ledger、
   或改了敏感文件清单）→ 不自动合并，票转 `needs-decision` 并写「决定三行」，等人拍板。
 - **打回回路：** review 不过 → PR 保持 open、票转 `rework-1`（再不过 `rework-2`），实现会话在原分支返工后
