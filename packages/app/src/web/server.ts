@@ -27,7 +27,7 @@ import { fetchAnchorName, resolveShortUrl } from "../anchor.js";
 import type { TaskStore } from "../store.js";
 import { MergeJobStore } from "../merge-jobs.js";
 import type { EventCenter } from "@drec/observability";
-import type { RoomPayload } from "@drec/core";
+import { isSqliteIoError, sqliteErrorTag, SQLITE_IO_HINT, type RoomPayload } from "@drec/core";
 import { sseComment, sseFrame, type HubWatch } from "../hub-watch.js";
 import { buildMaintenance } from "./api/maintenance.js";
 import type { MaintenanceDeps } from "./api/maintenance.js";
@@ -1024,6 +1024,14 @@ export function createWebServer(deps: WebServerDeps): Server {
         }
         if (e instanceof SyntaxError) {
           sendJson(res, 400, { error: `请求体不是合法 JSON: ${e.message}` });
+          return;
+        }
+        // issue #742: SQLite I/O 故障（WAL 在绑定挂载上失效）不是「服务器内部错误」，
+        // 而是「库暂时拿不到、数据没坏、通常要重启主控」。回 503 + 原文进日志，避免值班只看到一句笼统 500。
+        if (isSqliteIoError(e)) {
+          // 带 code/errcode 一起打：只留一句 disk I/O error 分不清 IOERR_READ/FSYNC/CANTOPEN/READONLY。
+          log(`[web_server] 处理 ${method} ${pathname} 遇到数据库 I/O 故障: ${String(e)} ${sqliteErrorTag(e)}`);
+          sendJson(res, 503, { error: `数据库暂时不可用: ${SQLITE_IO_HINT} ${sqliteErrorTag(e)}` });
           return;
         }
         log(`[web_server] 处理 ${method} ${pathname} 出错: ${String(e)}`);

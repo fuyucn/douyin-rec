@@ -2,7 +2,7 @@
 
 import type { DatabaseSync } from "node:sqlite";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { HUB_ROOM_STREAM_PREDICATE, STAGE_READY, USER_STOP, jobLogPathCandidates, roomKeyToStreamPrefix, type NodeUploadStatusDTO, type QueuePhase } from "@drec/core";
+import { HUB_ROOM_STREAM_PREDICATE, STAGE_READY, USER_STOP, dbPathMissing, jobLogPathCandidates, roomKeyToStreamPrefix, type NodeUploadStatusDTO, type QueuePhase } from "@drec/core";
 import { rootHubConfig, rootLogsDir, rootStageDir } from "./paths.js";
 import { openLedger, inspectHubJobLedger, jobProjectionColumns, historicalRates, batchAttached, TERMINAL, FALLBACK_RATE } from "./hub-job-ledger.js";
 import type { AttachedTables, HubJobView, RawJob, ListHubJobsOpts, HubJobsResult, LatestRunPerRoom } from "./hub-job-types.js";
@@ -89,13 +89,8 @@ function estimateRemaining(rate: number, videoDurationSec: number, currentStepSe
 
 function databaseFileExists(path: string): boolean {
   if (!path.trim()) throw new Error("hub 台账路径为空");
-  try {
-    statSync(path);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw error;
-  }
+  // 与队列侧共用 core 的同一份存在性判定（ENOENT/ENOTDIR=不存在；其余 stat 失败上抛）。
+  return !dbPathMissing(path);
 }
 
 function selectJobPage(db: DatabaseSync, schema: ReturnType<typeof inspectHubJobLedger>, opts: ListHubJobsOpts): { jobs: RawJob[]; total: number } {
