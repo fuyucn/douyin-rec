@@ -41,7 +41,7 @@ commander、esbuild 打包（`dist/douyin-rec.mjs`）、`node:sqlite`（内置�
 - **优化建议单独开 `enhancement`。** 不和故障混在一条 issue 里。
 - **Triage 只打标签：** `accept` / `decline` / `needs-decision`。上传、删源、部署、改 hub 规则一律 `needs-decision`，不能自行 accept。
   `needs-decision` 的评论必须写「决定三行」：要决定什么 / 不做会怎样 / 建议选项。
-- **只有 `accept` 的 issue 才能改代码。** 一个 issue 一个分支；完成开 PR，PR 链到 issue（分步实现的票中间各步写 `Part of #N`、最后一步写 `Fixes #N`）。**不合并 PR（合并归 review 会话）、不部署。** `accept` 之后再在 `TODO.md` 记一条 `T-N`，并写上 issue 链接。
+- **只有 `accept` 的 issue 才能改代码。** 一个 issue 一个分支；完成开 PR，PR 链到 issue（分步实现的票中间各步写 `Part of #N`、最后一步写 `Fixes #N`；若最后一步必须部署后才能验，可仍用 `Part of #N`，部署验证后立即 close，不长期挂 open）。**不合并 PR（合并归 review 会话）、不部署。** `accept` 之后再在 `TODO.md` 记一条 `T-N`，并写上 issue 链接。
 - **issue 评论也算输入。** 实现前读完评论。可以不采纳，但 PR 里要写出理由。
 - **`accept` ≠ 有人在做。** 实现 heartbeat 自动认领：扫到 `accept` 且无 `in-progress` 的票即打 `in-progress` 并评论「哪个 agent、何时开始」；人只在想指定别的会话做时手动接管。
 - **验证或完成后直接 close。** 先在 issue 留言总结结果、未采纳理由和证据；适用证据（回归测试 / CI / 独立 review / 合并 / 部署后验证）齐了就直接 `gh issue close --reason completed`。**不要为了等未来线上偶发场景长期挂 open**：真实场景尚未出现但部署已完成时，写清残余风险后关闭；后续同一问题复现，先 reopen 原票并补证据，再继续修。
