@@ -26,10 +26,31 @@ services:
       - -c
       - |
         set -e
-        if [ -n "$$(ls -A /db 2>/dev/null)" ]; then echo "[db-seed] 卷内已有数据，跳过"; exit 0; fi
+        # 完成标记:只有全部拷完 + 完整性校验通过才落盘。半途失败/磁盘不足 → 下次 up 会重做,
+        # 不会因为「目录非空」就把半成品当成成功(F3)。
+        if [ -f /db/.seed-complete ]; then echo "[db-seed] 已完成过，跳过"; exit 0; fi
+        if [ -n "$$(ls -A /db 2>/dev/null | grep -v '^\.seed-tmp$')" ] && [ ! -d /db/.seed-tmp ]; then
+          echo "[db-seed] 卷内已有数据(非本次灌库)，跳过"; exit 0; fi
         if [ ! -d /src ] || [ -z "$$(ls -A /src 2>/dev/null)" ]; then echo "[db-seed] 宿主机 db/ 为空，跳过"; exit 0; fi
-        cp -a /src/. /db/
-        echo "[db-seed] 已把宿主机 db/ 灌入 named volume drec-db"
+        rm -rf /db/.seed-tmp && mkdir -p /db/.seed-tmp
+        cp -a /src/. /db/.seed-tmp/
+        # 一致性校验:每个 .db 跑 integrity_check(用镜像自带的 node:sqlite,不额外装 sqlite3)。
+        node -e '
+          const { DatabaseSync } = require("node:sqlite");
+          const fs = require("node:fs");
+          for (const f of fs.readdirSync("/db/.seed-tmp").filter((n) => n.endsWith(".db"))) {
+            const db = new DatabaseSync("/db/.seed-tmp/" + f, { readOnly: true });
+            const rows = db.prepare("PRAGMA integrity_check").all();
+            db.close();
+            const ok = rows.length === 1 && Object.values(rows[0])[0] === "ok";
+            if (!ok) { console.error("[db-seed] integrity_check 失败: " + f, rows); process.exit(1); }
+            console.log("[db-seed] integrity ok: " + f);
+          }
+        '
+        mv /db/.seed-tmp/* /db/ 2>/dev/null || true
+        rm -rf /db/.seed-tmp
+        : > /db/.seed-complete
+        echo "[db-seed] 已把宿主机 db/ 灌入 named volume drec-db（含完整性校验）"
 
   # Tailscale sidecar：容器内 tailscaled，让 docker 当 master 时够得到 VPS（100.x）。
   # 持久化：state 卷 + .env 里 Reusable TS_AUTHKEY → 容器重启不用重认证。
@@ -69,7 +90,11 @@ services:
     # 共享 tailscale sidecar 的网络 → 容器能 ssh 100.x VPS。端口在 tailscale 服务上。
     network_mode: service:tailscale
     depends_on:
-      - tailscale
+      tailscale:
+        condition: service_started
+      # 库目录改 named volume 后必须先灌库(issue #750):见下方 db-seed。
+      db-seed:
+        condition: service_completed_successfully
     environment:
       # 调度按本地时间算窗口；默认美西（自动处理 PST/PDT 夏令时），按需改。
       TZ: ${TZ:-Asia/Shanghai}
@@ -109,9 +134,6 @@ services:
       - ./remote/vps.key:/root/.ssh/vps.key:ro
     # master 模式:serve 带 --hub → 自动读 /output-data/config/hub.config.json(docker-data/config/hub.config.json)。
     # issue #600: 容器内显式监听所有网卡(端口经 tailscale sidecar 发布);非回环监听由服务端强制鉴权。
-    depends_on:
-      db-seed:
-        condition: service_completed_successfully
     command: ["node", "dist/douyin-rec.mjs", "task", "serve", "--port", "7860", "--host", "all", "--hub"]
 
 volumes:

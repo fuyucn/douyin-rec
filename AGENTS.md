@@ -85,6 +85,11 @@ commander、esbuild 打包（`dist/douyin-rec.mjs`）、`node:sqlite`（内置�
 
 ## 快速部署
 
+> **库目录已迁到 named volume（issue #750 / #747）**：`db/` 走 `drec-db` 卷，`recordings/stage/config` 仍 bind mount。
+> 首次升级由 compose 的 `db-seed` 一次性服务自动灌库（拷完跑 `PRAGMA integrity_check` 才落 `.seed-complete` 标记，失败下次重做）；
+> 备份：`docker run --rm -v drec-db:/db -v "$DATA_ROOT/backup":/bk node:24-bookworm-slim sh -c 'cp -a /db /bk'`；
+> 回滚：停容器 → `docker run --rm -v drec-db:/db node:24-bookworm-slim rm -rf /db/*` → 从备份还原 → 起容器。
+
 ### Docker master（推荐）
 
 ```bash

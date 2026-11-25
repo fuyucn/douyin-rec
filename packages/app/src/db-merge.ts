@@ -93,8 +93,8 @@ function copySchema(db: DatabaseSync, alias: string, table: string): void {
 function taskSelectExpr(sourceCols: string[]): Record<string, string> {
   const out: Record<string, string> = {};
   for (const c of sourceCols) out[c] = `"${c}"`;
-  if (sourceCols.includes("recorder")) {
-    // 老值是 `…-mesio-recorder` / `mesio` 之类;含 mesio 即 mesio,否则 ffmpeg(与 migrate 里原回填同口径)。
+  // 只有源表**没有** engine 时才从 recorder 派生(否则会覆盖掉源库已选好的引擎)。
+  if (sourceCols.includes("recorder") && !sourceCols.includes("engine")) {
     out["engine"] = `CASE WHEN "recorder" LIKE '%mesio%' THEN 'mesio' ELSE 'ffmpeg' END`;
   }
   return out;
@@ -117,7 +117,27 @@ function parseTimes(raw: string): number[] {
   } catch { return []; }
 }
 
+/**
+ * 目标库自己可能还是**老单行 schema**(`upload_limits(id=1)`,无 `key`)——显式 `--db` 复用旧主库时就会撞上。
+ * 先就地重建成新 schema(单行映射到 `default`),否则后面 `SELECT key` 直接报 no such column。
+ */
+function normalizeTargetLimits(db: DatabaseSync): void {
+  if (!tableExists(db, "upload_limits")) return;
+  const cols = columnsOf(db, "main", "upload_limits");
+  if (cols.includes("key")) return;
+  const rows = db.prepare(`SELECT * FROM upload_limits`).all() as Array<Record<string, unknown>>;
+  db.exec(`ALTER TABLE upload_limits RENAME TO upload_limits_legacy`);
+  db.exec(`CREATE TABLE upload_limits(key TEXT PRIMARY KEY, blockedUntil INTEGER NOT NULL DEFAULT 0,
+    times TEXT NOT NULL DEFAULT '[]', updatedAt INTEGER NOT NULL DEFAULT 0)`);
+  const ins = db.prepare(`INSERT OR REPLACE INTO upload_limits(key, blockedUntil, times, updatedAt) VALUES (?,?,?,?)`);
+  for (const r of rows) {
+    ins.run("default", Number(r["blockedUntil"]) || 0, String(r["times"] ?? "[]"), Number(r["updatedAt"]) || 0);
+  }
+  db.exec(`DROP TABLE upload_limits_legacy`);
+}
+
 function mergeUploadLimits(db: DatabaseSync, attached: readonly string[]): number {
+  normalizeTargetLimits(db);
   const rows = attached.flatMap((a) => limitRows(db, a));
   if (tableExists(db, "upload_limits")) {
     rows.push(...(db.prepare(`SELECT key, COALESCE(blockedUntil,0) AS blockedUntil, COALESCE(times,'[]') AS times, COALESCE(updatedAt,0) AS updatedAt FROM upload_limits`).all() as typeof rows));

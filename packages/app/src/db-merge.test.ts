@@ -139,6 +139,34 @@ it("显式 --db 自定义库:控制库自己不当 legacy 附加,但同目录 cu
     db.close();
   });
 
+  it("源表同时有 engine 与 recorder:不覆盖已有的 engine", () => {
+    const s = scene();
+    makeLegacy(s.legacy.main, `CREATE TABLE tasks(id INTEGER PRIMARY KEY AUTOINCREMENT, room TEXT NOT NULL, engine TEXT, recorder TEXT);`,
+      [{ sql: `INSERT INTO tasks(room,engine,recorder) VALUES ('douyin:roomJ','mesio',NULL)` }]);
+    const db = new DatabaseSync(s.control);
+    migrate(db);
+    mergeLegacyDatabases({ db, controlPath: s.control, legacy: s.legacy });
+    expect((db.prepare(`SELECT engine FROM tasks WHERE room='douyin:roomJ'`).get() as { engine: string }).engine).toBe("mesio");
+    db.close();
+  });
+
+  it("目标库自己还是老单行 upload_limits 时也能迁(先归一化目标)", () => {
+    const s = scene();
+    makeLegacy(s.legacy.main, `CREATE TABLE upload_limits(id INTEGER PRIMARY KEY CHECK (id = 1), blockedUntil INTEGER NOT NULL DEFAULT 0,
+      times TEXT NOT NULL DEFAULT '[]', updatedAt INTEGER NOT NULL DEFAULT 0);`,
+      [{ sql: `INSERT INTO upload_limits(id,blockedUntil,times,updatedAt) VALUES (1, 700, '[70]', 70)` }]);
+    makeLegacy(s.legacy.sync, `CREATE TABLE sync_jobs(streamKey TEXT PRIMARY KEY, state TEXT NOT NULL DEFAULT 'pending');`,
+      [{ sql: `INSERT INTO sync_jobs(streamKey,state) VALUES ('k3','done')` }]);
+    // 控制库自己就是那个老主库(显式 --db 复用的场景)
+    const db = new DatabaseSync(s.legacy.main);
+    const out = mergeLegacyDatabases({ db, controlPath: s.legacy.main, legacy: s.legacy });
+    expect(out).toBeDefined();
+    const lim = db.prepare(`SELECT blockedUntil, times FROM upload_limits WHERE key='default'`).get() as { blockedUntil: number; times: string };
+    expect(lim.blockedUntil).toBe(700);
+    expect(JSON.parse(lim.times)).toEqual([70]);
+    db.close();
+  });
+
   it("tasks 的 AUTOINCREMENT 高水位跟着迁(删过的高 ID 不会被重用)", () => {
     const s = scene();
     makeLegacy(s.legacy.main, `CREATE TABLE tasks(id INTEGER PRIMARY KEY AUTOINCREMENT, room TEXT NOT NULL);`,
