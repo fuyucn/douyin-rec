@@ -65,6 +65,28 @@ describe("startHub 并发守卫（防 reconcile fork 风暴）", () => {
     stop();
   });
 
+  it("主控重试5秒唤醒不受长对账阻塞,自身不重入且停止后清除定时器", async () => {
+    vi.useFakeTimers();
+    let releaseReconcile!: () => void;
+    let releaseRetry!: () => void;
+    const reconcileAll = vi.fn(() => new Promise<void>((r) => { releaseReconcile = r; }));
+    const pollUploadRetries = vi.fn(() => new Promise<void>((r) => { releaseRetry = r; }));
+    const stop = startHub({ tasks: () => [], isRecording: () => false, reconcileAll, pollUploadRetries,
+      settleMs: 10, pollMs: 100_000, reconcileIntervalMs: 1_000 });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(reconcileAll).toHaveBeenCalledTimes(1);
+    expect(pollUploadRetries).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(pollUploadRetries).toHaveBeenCalledTimes(1);
+    releaseRetry();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(pollUploadRetries).toHaveBeenCalledTimes(2);
+    stop(); releaseRetry(); releaseReconcile();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(pollUploadRetries).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("任务同步自身不重入(同一时刻最多 1 次在跑)", async () => {
     vi.useFakeTimers();
     let inFlight = 0, maxInFlight = 0, calls = 0;

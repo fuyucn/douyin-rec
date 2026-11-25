@@ -176,6 +176,9 @@ export class Scenario {
     this.opts.deps = { ...this.opts.deps, ...d };
   }
 
+  /** Simulate the same live configuration getter used by the production reconciler. */
+  patchConfig(patch: Partial<PipelineCfg>): void { this.cfg = { ...this.cfg, ...patch }; }
+
   /** 对账一轮(= 收播后触发一次完整后处理)。 */
   async reconcile(): Promise<void> {
     await this.reconciler.reconcileAll();

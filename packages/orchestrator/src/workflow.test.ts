@@ -58,6 +58,7 @@ interface TestDeps {
 
 function makeDeps(overrides: Partial<PipelineDeps> = {}): TestDeps {
   const ledger = freshLedger();
+  ledger.upsertPending(STREAM_KEY);
   const stageDir = mkdtempSync(join(tmpdir(), "workflow-stage-"));
   const stageSub = join(stageDir, "douyin_test-room_2026-06-27");
   mkdirSync(stageSub, { recursive: true });
@@ -272,9 +273,10 @@ describe("runWorkflowNodes — 安全阀与分支隔离", () => {
     t.ledger.close();
   });
 
-  it("forceRetry 单节点续跑:merge/burn 幂等跳过,只重传 P1,blocked append 自动恢复且 P2→P3 串行", async () => {
+  it("forceRetry 明确限流拒绝:merge/burn 幂等跳过,只重试 P1,blocked append 恢复且 P2→P3 串行", async () => {
     const t = makeDeps();
-    t.uploadPlain.mockRejectedValueOnce(new Error("network down"));
+    t.uploadPlain.mockRejectedValueOnce(new Error("code: 601 upload rate limit"));
+    t.deps.pool = new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, uploadCooldownMs: 0 });
     const workflow = build(t);
     const r1 = await runWorkflowNodes({
       streamKey: STREAM_KEY,

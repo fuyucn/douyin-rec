@@ -233,7 +233,7 @@ export async function uploadPlain(o: {
       return bv;
     } catch (e) {
       last = e;
-      if (!isRetryableLineError(e)) throw e;
+      if (o.plain.proofOnly || !isRetryableLineError(e)) throw e;
     }
   }
   throw new Error(`upload plain 上传线路均失败 (${tried.join(",")}): ${String((last as Error)?.message ?? last)}`);
@@ -322,6 +322,8 @@ export async function appendGroup(o: {
   /** 查询当前分 P 数;返回 null = 无法确认。 */
   countParts?: () => Promise<number | null>;
   deferVerificationUntilCleanup?: boolean;
+  /** Master submissions cannot infer non-submission from a stale count. Legacy callers keep their policy. */
+  proofOnly?: boolean;
   /** 重读间隔的等待实现(测试注入以免真等)。 */
   sleep?: (ms: number) => Promise<void>;
 }): Promise<void> {
@@ -358,14 +360,20 @@ export async function appendGroup(o: {
         }
         // A count below the baseline is a truncated/degraded list, not proof of anything: ambiguous (#318 review).
         if (before != null && after != null && after >= before) {
-          if (after > before) return;              // 服务端已追加成功(客户端只是没拿到响应)
+          if (after > before) {
+            if (o.proofOnly && after !== before + o.files.length) {
+              throw new Error(`${APPEND_AMBIGUOUS_MARKER} append 部分或异常落地,禁止重发`);
+            }
+            return;
+          }
         } else {
           throw new Error(
             `${APPEND_AMBIGUOUS_MARKER} append 失败且无法确认是否已提交(可能已追加分P),请人工核对稿件: ${String((e as Error)?.message ?? e)}`,
           );
         }
       }
-      continue; // 失败且确认未提交 → 换下一条线路
+      if (o.proofOnly) throw new Error(`${APPEND_AMBIGUOUS_MARKER} append 未取得提交结果,列表未变不证明未提交`);
+      continue; // Legacy policy: unchanged through the read window permits a different line.
     }
     // run 返回成功:rc=0 不等于分 P 已落地。有基线时确认服务端真的多了 files.length 个。
     if (o.deferVerificationUntilCleanup || !o.countParts || before == null) return;

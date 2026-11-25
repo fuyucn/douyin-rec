@@ -33,6 +33,7 @@ export async function createArchive(upload: UploadTarget, opts: UploadOpts, hook
     tags: opts.tag ? [opts.tag] : [],
     tid: opts.tid,
     ...(hooks ? { hooks } : {}),
+    ...(opts.proofOnly ? { proofOnly: true } : {}),
   });
   if (r.proof !== "created" || !r.ref?.id) {
     throw new Error(`${PLAIN_NO_BV_MARKER} 建稿结果不确定(proof=${r.proof}),不重试,转人工核对`);
@@ -48,6 +49,7 @@ export async function appendArchive(upload: UploadTarget, o: {
   public: boolean;
   countParts?: () => Promise<number | null>;
   deferVerificationUntilCleanup?: boolean;
+  proofOnly?: boolean;
 }, hooks?: UploadChildHooks): Promise<void> {
   const r = await upload.append({
     cred: { targetId: upload.id, locator: o.cookies },
@@ -57,6 +59,7 @@ export async function appendArchive(upload: UploadTarget, o: {
     ...(hooks ? { hooks } : {}),
     ...(o.countParts ? { countParts: o.countParts } : {}),
     ...(o.deferVerificationUntilCleanup ? { deferVerificationUntilCleanup: true } : {}),
+    ...(o.proofOnly ? { proofOnly: true } : {}),
   });
   if (r.proof !== "observed" && !(r.proof === "accepted" && o.deferVerificationUntilCleanup)) {
     throw new Error(`${APPEND_AMBIGUOUS_MARKER} append 结果不确定(proof=${r.proof}),不重试,转人工核对`);

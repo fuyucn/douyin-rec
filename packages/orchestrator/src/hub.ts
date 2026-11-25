@@ -15,6 +15,9 @@ export interface HubDeps {
   pollUploadQueue?: () => Promise<void>;
   /** Poll period (ms), default 60_000. */
   uploadQueuePollMs?: number;
+  /** Master safe-retry wakeups are independent of long-running inventory reconciliation. */
+  pollUploadRetries?: () => Promise<void>;
+  uploadRetryPollMs?: number;
 }
 
 /**
@@ -89,6 +92,14 @@ export function startHub(deps: HubDeps): () => void {
           .finally(() => { uploadPollRunning = false; });
       }, deps.uploadQueuePollMs ?? 60_000)
     : null;
+  let retryRunning = false;
+  const retryInterval = deps.pollUploadRetries ? setInterval(() => {
+    if (retryRunning) return;
+    retryRunning = true;
+    void deps.pollUploadRetries!()
+      .catch((error) => console.error("[hub] master upload retry poll failed:", error))
+      .finally(() => { retryRunning = false; });
+  }, deps.uploadRetryPollMs ?? 5_000) : null;
   // 启动即对账一次(不等第一个 tick):新增/改动的绑定任务尽快下发。
   if (deps.syncTasks) void runSync();
 
@@ -97,5 +108,6 @@ export function startHub(deps: HubDeps): () => void {
     clearInterval(reconcileInterval);
     if (syncInterval) clearInterval(syncInterval);
     if (uploadPollInterval) clearInterval(uploadPollInterval);
+    if (retryInterval) clearInterval(retryInterval);
   };
 }

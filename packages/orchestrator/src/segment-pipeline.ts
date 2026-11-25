@@ -9,16 +9,15 @@
  */
 import path from "node:path";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { effectiveStageFormat, linkOrCopy, burnFlags, isAppendAmbiguous, isUploadRateLimited, resolvePartAliasStem, stageExt, throwIfAborted, closeStageReady } from "@drec/core";
+import { effectiveStageFormat, linkOrCopy, burnFlags, resolvePartAliasStem, stageExt, throwIfAborted, closeStageReady } from "@drec/core";
 import { addArchiveToSeasonIfConfigured, seasonCheckpointState } from "@drec/bilibili-api";
 import { isCompleteMedia, planSegmentGroups, renderXmlWindowToXml, unreadableParts } from "@drec/post-process";
 import type { Broadcast } from "./identity.js";
 import type { JobState, SyncLedger } from "./ledger.js";
 import { canDeferAppendVerification } from "./verify.js";
-import { retry } from "./retry.js";
+import { createMasterArchive, appendMasterParts, prepareMasterUpload, bindMasterPlan } from "./master-upload.js";
 import { prepareUploadAlias, restoreProductFromAlias, SEG_WORK_DIR, segmentStem, segWorkPath, UPLOAD_ALIAS_DIR, type SegmentPlan } from "./session-plan.js";
 import { cleanupSourcesShared, clearCleanFailure, defaultRmStage, defaultSplitForUpload, finalizeAfterUpload, finalizeOnly, readdirSyncSafe, recordCleanFailure, removeEmptyStageDir, stageVideoLeftovers, videoOnly, xmlKeepRule, type CleanupOutcome, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
-import { appendArchive, createArchive } from "@drec/core";
 
 /** 默认单段 remux(ts/flv → mp4,无损,-c copy + 时基钉 90000)。 */
 const defaultRemuxSegment = (src: string, out: string): Promise<void> =>
@@ -338,6 +337,7 @@ export async function runSegmentPipeline(o: {
   };
 
   // 续跑:已建稿(bv 已落库)→ 只补没做完的 append,绝不重传 plain 组(会重复建稿)。
+  prepareMasterUpload(ledger, streamKey);
   const existing = ledger.get(streamKey);
 
   // 该场各段的 remux 输入(按会话序 → 段序,已由 winnerMembers.tsFiles 保证)。
@@ -435,6 +435,10 @@ export async function runSegmentPipeline(o: {
     : parts.map((_, i) => [i]);
   // 禁止分组跨会话(每个分 P 只能有一份 xml;见 splitGroupsBySession 注释)。
   const planGroups = splitGroupsBySession(plannedGroups, (k) => parts[k]?.xmlPath ?? "");
+  if (cfg.uploadMode === "upload" && ledger.get(streamKey)?.state !== "done") {
+    bindMasterPlan(ledger, streamKey, "parts", planGroups.map((group) => group.map((index) =>
+      [parts[index].src, parts[index].srcSegIndex, parts[index].xmlPath])));
+  }
   const mergeGroup = deps.mergeSegments ?? defaultMergeSegments;
   const uploadParts: SegmentUploadPart[] = [];
   for (let gi = 0; gi < planGroups.length; gi++) {
@@ -603,27 +607,10 @@ export async function runSegmentPipeline(o: {
     jlog(`建稿 P1: ${path.basename(plainFiles[0])}(${plainFiles.length} 个 plain 段待传)`);
     // 分P标题(可选):P1 是整稿第一个分P → partIndex=1,总数=plain+danmu+livechat 全部段数。
     const p1Path = aliasFor("plain", plainFiles[0], 1, totalParts);
-    // P1 建稿:可用 `uploadPlain` 建稿接缝(有线路换线),也可注入 `uploadPlainRaw`(测试用)。
-    // 601 频率限制 → 重试(队列会先冷却);其余错误不重试(避免重复建稿)。
-    bv = await retry(
-      () => runUpload(deps, () => createArchive(deps.upload, { ...plainOpts, video: p1Path, title: uploadTitle }), streamKey),
-      { tries: 3, backoffMs: 60_000, sleep: deps.sleep, shouldRetry: (e) => isUploadRateLimited(e) },
-    );
-    if (cfg.uploadMeta.seasonSectionId) {
-      let saved = false;
-      let lastError: unknown;
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try { ledger.setBvAndSeasonState(streamKey, bv, "pending"); saved = true; break; }
-        catch (e) { lastError = e; }
-      }
-      if (!saved) {
-        jlog(`season pending checkpoint not saved: ${String((lastError as Error)?.message ?? lastError).slice(0, 200)}`);
-        ledger.setBv(streamKey, bv);
-      }
-    } else {
-      ledger.setBv(streamKey, bv); // 建稿成功即刻落库(与合并路径同一幂等边界)
-    }
-    ledger.markPartDone(streamKey, "plain", 0); // P1 = 第 0 段
+    // One submission per upload slot; safe rejection returns through the persistent retry queue.
+    bv = await runUpload(deps, () => createMasterArchive(deps, streamKey,
+      { ...plainOpts, video: p1Path, title: uploadTitle }), streamKey);
+    // BV, season intent and P1 progress were committed atomically by createMasterArchive.
     jlog(`建稿完成: ${bv}`);
     // BV is durable now (setBv above); associate after the upload gate is released.
     if (cfg.uploadMeta.seasonSectionId) {
@@ -657,12 +644,8 @@ export async function runSegmentPipeline(o: {
       }
       if (batch.length === 0) continue;
       jlog(`append plain 段 ${idxs.join(",")}: ${batch.length} 文件`);
-      const tries = batch.length === 1 ? 5 : 1;
-      await retry(
-        () => runUpload(deps, () => appendArchive(deps.upload, { ...plainOpts, bv, files: batch, deferVerificationUntilCleanup: canDeferAppendVerification(deps, streamKey) }), streamKey),
-        { tries, backoffMs: 60_000, sleep: deps.sleep, shouldRetry: (e) => isUploadRateLimited(e) || (batch.length === 1 && !isAppendAmbiguous(e)) },
-      );
-      for (const k of idxs) ledger.markPartDone(streamKey, "plain", k);
+      await runUpload(deps, () => appendMasterParts(deps, streamKey, bv, "plain", idxs, batch,
+        canDeferAppendVerification(deps, streamKey)), streamKey);
     }
     ledger.logStep(streamKey, "upload_plain", "done", `P1 + ${plainFiles.length - 1} 段`);
     ledger.syncNodeState(streamKey, "upload_plain", "done", { error: null });
@@ -770,20 +753,8 @@ async function appendSegmentGroup(
     if (batch.length === 0) continue;
     batches++;
     jlog(`append ${step} 批 ${batches}: ${batch.length} 文件(段 ${idxs.join(",")})`);
-    // 单文件批(默认)→ 601 可安全重试(最多 5 次,每次重新排队 = 走冷却);多文件批不重试(可能已部分提交)。
-    const tries = batch.length === 1 ? 5 : 1;
-    // retry 包在 runUpload 外:每次重试都重新获取上传配额(命中 601 后队列已记冷却)。
-    await retry(
-      () => runUpload(deps, () => appendArchive(deps.upload, { bv, files: batch, cookies: deps.cfg.cookies, public: isPublic, deferVerificationUntilCleanup: canDeferAppendVerification(deps, streamKey) }), streamKey),
-      {
-        tries,
-        backoffMs: 60_000,
-        sleep: deps.sleep,
-        shouldRetry: (err) => isUploadRateLimited(err) || !isAppendAmbiguous(err),
-        onRetry: (attempt, err) => jlog(`append ${step} 第 ${attempt} 次失败,重试: ${String((err as Error)?.message ?? err).slice(0, 200)}`),
-      },
-    );
-    for (const k of idxs) ledger.markPartDone(streamKey, step, k);
+    await runUpload(deps, () => appendMasterParts(deps, streamKey, bv, step, idxs, batch,
+      canDeferAppendVerification(deps, streamKey)), streamKey);
   }
   ledger.logStep(streamKey, step, "done", `${finalFiles.length} 文件 · ${batches} 批`);
   ledger.syncNodeState(streamKey, step, "done", { error: null });
@@ -920,11 +891,8 @@ async function resumeSegmentAppends(
     }
     if (batch.length === 0) continue;
     jlog(`续跑 append plain 分 P ${idxs.join(",")}`);
-    await drainSeasonOnThrow(() => retry(
-      () => runUpload(deps, () => appendArchive(deps.upload, { bv, files: batch, cookies: cfg.cookies, public: isPublic, deferVerificationUntilCleanup: canDeferAppendVerification(deps, streamKey) }), streamKey),
-      { tries: batch.length === 1 ? 5 : 1, backoffMs: 60_000, sleep: deps.sleep, shouldRetry: (e) => isUploadRateLimited(e) || (batch.length === 1 && !isAppendAmbiguous(e)) },
-    ));
-    for (const k of idxs) ledger.markPartDone(streamKey, "plain", k);
+    await drainSeasonOnThrow(() => runUpload(deps, () => appendMasterParts(deps, streamKey, bv, "plain", idxs, batch,
+      canDeferAppendVerification(deps, streamKey)), streamKey));
   }
   ledger.syncNodeState(streamKey, "upload_plain", "done", { error: null });
   const danmuPartsFinal = partsForUpload(uploadParts.map((p) => p.danmu), "danmu 段(续跑 append)", jlog);

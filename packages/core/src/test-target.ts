@@ -12,9 +12,9 @@ import type { AppendPartsInput, CreateArchiveInput, UploadChildHooks, UploadTarg
 export function fakeUploadTarget(o: {
   uploadPlain?: (plain: {
     video?: string; videos?: string[]; cookies: string; title: string; tid: number; tag: string;
-    public: boolean; desc?: string; hooks?: UploadChildHooks;
+    public: boolean; desc?: string; hooks?: UploadChildHooks; proofOnly?: boolean;
   }) => Promise<string>;
-  appendGroup?: (o: { bv: string; files: string[]; cookies: string; public: boolean; countParts?: () => Promise<number | null>; deferVerificationUntilCleanup?: boolean }) => Promise<void>;
+  appendGroup?: (o: { bv: string; files: string[]; cookies: string; public: boolean; countParts?: () => Promise<number | null>; deferVerificationUntilCleanup?: boolean; proofOnly?: boolean }) => Promise<void>;
 } = {}): UploadTarget & { uploadPlain: unknown; appendGroup: unknown } {
   const t: UploadTarget = {
     id: "fake",
@@ -31,6 +31,7 @@ export function fakeUploadTarget(o: {
       const bv = await (o.uploadPlain ?? (async () => "BV1FAKE"))({
         ...payload,
         ...hookArg,
+        ...(input.proofOnly ? { proofOnly: true } : {}),
         cookies: input.cred.locator,
         title: input.title,
         tid: input.tid ?? 21,
@@ -45,6 +46,7 @@ export function fakeUploadTarget(o: {
         ...(input.hooks ? { hooks: input.hooks } : {}),
         ...(input.countParts ? { countParts: input.countParts } : {}),
         ...(input.deferVerificationUntilCleanup ? { deferVerificationUntilCleanup: true } : {}),
+        ...(input.proofOnly ? { proofOnly: true } : {}),
         bv: input.ref.id,
         files: input.files.map((f) => f.path),
         cookies: input.cred.locator,

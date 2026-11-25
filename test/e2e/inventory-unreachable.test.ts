@@ -86,7 +86,7 @@ describe("e2e: two nodes, one unreachable (#69)", () => {
     });
   }
 
-  it("runNow not forced: unreachable node and existing BV are listed in ONE 409; force bypasses both", async () => {
+  it("runNow reports unreachable node and existing BV; force cannot bypass a changed submitted source plan", async () => {
     mode = "ok";
     s = await Scenario.create({
       extraNodes: ["n2"],
@@ -108,8 +108,16 @@ describe("e2e: two nodes, one unreachable (#69)", () => {
     expect(r.error, "lists the unreachable node").toMatch(/n2.*清单失联/);
     expect(r.error, "lists the existing BV in the same 409").toContain(bv!);
 
+    const submissionsBefore = s.fake.calls.filter((call) => call.op === "append" || call.op === "upload").length;
+    const localBefore = s.recordingFiles(undefined, "local");
+    const n2Before = s.recordingFiles(undefined, "n2");
     const forced = await s.reconciler.runNow({ streamKey: key, force: true, wait: true });
-    expect(forced.ok).toBe(true);
+    expect(forced.ok).toBe(false);
+    expect(forced.error).toContain("source or part plan changed");
+    expect(s.jobState(key)).toBe("needs_manual");
+    expect(s.fake.calls.filter((call) => call.op === "append" || call.op === "upload")).toHaveLength(submissionsBefore);
+    expect(s.recordingFiles(undefined, "local")).toEqual(localBefore);
+    expect(s.recordingFiles(undefined, "n2")).toEqual(n2Before);
   });
 
   it("control: a reachable but empty n2 does not block local", async () => {

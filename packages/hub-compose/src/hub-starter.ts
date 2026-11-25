@@ -603,6 +603,7 @@ export function createHubStarter(deps: HubStarterDeps): HubStarter {
         isRecording: (id: number) => opts.manager.isRecording(id),
         reconcileAll: () => reconciler.reconcileAll(),
         pollUploadQueue: () => reconciler.pollUploadQueue(),
+        pollUploadRetries: () => reconciler.pollUploadRetries(),
         uploadQueuePollMs: nodeUploadCfg.pollMs,
         settleMs: hubCfg.settleMs ?? 90_000,
         pollMs: hubCfg.pollMs ?? 3_000,

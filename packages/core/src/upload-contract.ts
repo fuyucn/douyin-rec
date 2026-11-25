@@ -25,6 +25,8 @@ export interface UploadOpts {
   public: boolean;
   desc?: string;
   line?: UploadLine;
+  /** Require positive submission evidence; never retry an unknown result by switching transport lines. */
+  proofOnly?: boolean;
 }
 
 /**

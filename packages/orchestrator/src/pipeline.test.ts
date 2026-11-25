@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cleanupSourcesShared, consecutiveSidecarSkips, removeEmptyStageDir, xmlKeepRule, runPipeline, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
 import { ResourcePool } from "./workflow.js";
+import { masterUploadFailurePlan } from "./master-upload.js";
 import { SyncLedger } from "./ledger.js";
 import { APPEND_AMBIGUOUS_MARKER, closeStageReady, STAGE_READY } from "@drec/core";
 import { addArchiveToSeasonIfConfigured } from "@drec/bilibili-api";
@@ -397,6 +398,25 @@ describe("runPipeline", () => {
       for (const f of ["s_000.ts", "s_001.ts", "s_002.ts", "danmu.xml"]) writeFileSync(join(sub, f), "x");
       return deps;
     }
+
+    it.each(["plain", "danmu"] as const)("分段模式 %s 限流后只补未提交项,跳过成功checkpoint", async (track) => {
+      const deps = segmentDeps();
+      deps.pool = new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, uploadCooldownMs: 0 });
+      const target = deps.upload as unknown as { uploadPlain: Mock; appendGroup: Mock };
+      const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ tsFiles: ["/remote/s_000.ts", "/remote/s_001.ts"] }) }]);
+      deps.ledger.upsertPending(broadcast.streamKey);
+      if (track === "plain") target.appendGroup.mockRejectedValueOnce(new Error("code: 601 upload rate limit"));
+      else target.appendGroup.mockImplementationOnce(async () => {}).mockRejectedValueOnce(new Error("code: 601 upload rate limit"));
+      await expect(runPipeline(broadcast, deps)).rejects.toThrow("601");
+      expect(masterUploadFailurePlan(deps.ledger, broadcast.streamKey)?.class).toBe("resume-append");
+      deps.ledger.setState(broadcast.streamKey, "failed");
+      deps.ledger.setFailurePlan(broadcast.streamKey, { failureClass: "resume-append", nextAttemptAt: 0 });
+      expect((await runPipeline(broadcast, deps)).state).toBe("done");
+      expect(target.uploadPlain).toHaveBeenCalledTimes(1);
+      expect(deps.ledger.doneParts(broadcast.streamKey, "plain")).toEqual(new Set([0, 1]));
+      expect(deps.ledger.doneParts(broadcast.streamKey, "append_danmu")).toEqual(new Set([0, 1]));
+      deps.ledger.close();
+    });
 
     it("不合并:逐段 remux → 多文件 upload 建稿 → 逐组 append(顺序=段序)", async () => {
       const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0, tsFiles: ["/remote/s_000.ts", "/remote/s_001.ts", "/remote/s_002.ts"] }) }]);
@@ -1117,10 +1137,12 @@ describe("runPipeline", () => {
     const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
     const deps = makeDeps({
       // 模拟今天:danmu 超限切 2 段,livechat 不切
-      splitForUpload: async (mp4: string) =>
-        mp4.includes("_danmu")
-          ? [mp4.replace(/\.mp4$/, "_part0.mp4"), mp4.replace(/\.mp4$/, "_part1.mp4")]
-          : [mp4],
+      splitForUpload: async (mp4: string) => {
+        if (!mp4.includes("_danmu")) return [mp4];
+        const files = [mp4.replace(/\.mp4$/, "_part0.mp4"), mp4.replace(/\.mp4$/, "_part1.mp4")];
+        files.forEach((file) => writeFileSync(file, "part"));
+        return files;
+      },
     });
     deps.ledger.upsertPending(broadcast.streamKey);
 
@@ -1282,7 +1304,7 @@ describe("runPipeline", () => {
       deps.ledger.close();
     });
 
-    it("P1 上传失败 → 双轨跳过 append,不悬挂,收口 failed", async () => {
+    it("P1 提交结果未知 → 双轨跳过 append,不悬挂,转人工", async () => {
       const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
       const deps = makeDeps();
       (deps.upload as unknown as { uploadPlain: Mock }).uploadPlain.mockRejectedValue(new Error("network down"));
@@ -1291,10 +1313,10 @@ describe("runPipeline", () => {
         runPipeline(broadcast, deps),
         new Promise<never>((_, reject) => setTimeout(() => reject(new Error("deadlock timeout")), 3000)),
       ]);
-      expect(r.state).toBe("failed");
+      expect(r.state).toBe("needs_manual");
       expect((deps.upload as unknown as { appendGroup: Mock }).appendGroup).not.toHaveBeenCalled();
-      expect(deps.ledger.get(broadcast.streamKey)?.state).toBe("failed");
-      expect(deps.ledger.get(broadcast.streamKey)?.fails).toBe(1);
+      expect(deps.ledger.get(broadcast.streamKey)?.state).toBe("needs_manual");
+      expect(deps.ledger.get(broadcast.streamKey)?.fails).toBe(0);
       deps.ledger.close();
     });
   });
@@ -1450,6 +1472,24 @@ describe("runPipeline", () => {
   });
 
   describe("上传重试(主路径)", () => {
+    it.each(["create", "append"] as const)("合并模式 %s 明确拒绝后按持久证据续跑,不重复已提交分P", async (step) => {
+      const deps = makeDeps({ pool: new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, uploadCooldownMs: 0 }) });
+      const target = deps.upload as unknown as { uploadPlain: Mock; appendGroup: Mock };
+      (step === "create" ? target.uploadPlain : target.appendGroup)
+        .mockRejectedValueOnce(new Error("code: 601 upload rate limit"));
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey);
+      expect((await runPipeline(b, deps)).state).toBe("failed");
+      const plan = masterUploadFailurePlan(deps.ledger, b.streamKey)!;
+      expect(plan.class).toBe(step === "create" ? "safe-retry" : "resume-append");
+      deps.ledger.setFailurePlan(b.streamKey, { failureClass: plan.class, nextAttemptAt: 0 });
+      expect((await runPipeline(b, deps)).state).toBe("done");
+      expect(target.uploadPlain).toHaveBeenCalledTimes(step === "create" ? 2 : 1);
+      expect(target.appendGroup).toHaveBeenCalledTimes(step === "create" ? 2 : 3);
+      expect(deps.ledger.doneParts(b.streamKey, "plain")).toEqual(new Set([0]));
+      deps.ledger.close();
+    });
+
     it("P1 上传成功后立即 setBv 落库(append 之前 job.bv 已存在)", async () => {
       const deps = makeDeps();
       (deps.upload as unknown as { appendGroup: Mock }).appendGroup.mockImplementation(async () => {
@@ -1462,7 +1502,7 @@ describe("runPipeline", () => {
       deps.ledger.close();
     });
 
-    it("appendGroup 单文件组瞬时失败 → 就地重试后成功(不重传 P1)", async () => {
+    it("appendGroup 超时结果未知 → 只调用一次并保留提交意图(不重传 P1)", async () => {
       const deps = makeDeps({ sleep: async () => {} }); // 注入 noop sleep,免真等退避
       (deps.upload as unknown as { appendGroup: Mock }).appendGroup
         .mockRejectedValueOnce(new Error("Connection timed out"))
@@ -1471,21 +1511,25 @@ describe("runPipeline", () => {
       deps.ledger.upsertPending(b.streamKey);
       const r = await runPipeline(b, deps);
       expect((deps.upload as unknown as { uploadPlain: Mock }).uploadPlain).toHaveBeenCalledTimes(1);                    // 绝不重传 P1
-      expect((deps.upload as unknown as { appendGroup: Mock }).appendGroup.mock.calls.length).toBeGreaterThanOrEqual(2); // 至少重试一次
-      expect(r.state).toBe("done");
+      expect((deps.upload as unknown as { appendGroup: Mock }).appendGroup).toHaveBeenCalledTimes(1);
+      expect(r.state).toBe("needs_manual");
+      expect(deps.ledger.get(STREAM_KEY)?.uploadJournal).toContain('"state":"intent"');
       deps.ledger.close();
     });
 
-    it("appendGroup 多文件组失败 → 不整体重试(无 per-part checkpoint,重试会重复分P)", async () => {
+    it("appendGroup 多文件组结果未知 → 不整体重试(无 per-part checkpoint,重试会重复分P)", async () => {
       // 模拟 >16GB 切分:danmu / livechat 各 2 段
-      const deps = makeDeps({ sleep: async () => {}, splitForUpload: async (mp4: string) => [mp4, mp4 + ".part2"] });
+      const deps = makeDeps({ sleep: async () => {}, splitForUpload: async (mp4: string) => {
+        writeFileSync(mp4 + ".part2", "part");
+        return [mp4, mp4 + ".part2"];
+      } });
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
       deps.ledger.upsertPending(b.streamKey);
       (deps.upload as unknown as { appendGroup: Mock }).appendGroup.mockRejectedValue(new Error("Connection timed out"));
 
       const r = await runPipeline(b, deps);
 
-      expect(r.state).toBe("failed");
+      expect(r.state).toBe("needs_manual");
       expect((deps.upload as unknown as { appendGroup: Mock }).appendGroup).toHaveBeenCalledTimes(1); // 撤修复:3 次
       deps.ledger.close();
     });
@@ -1557,7 +1601,7 @@ describe("runPipeline", () => {
       deps.ledger.close();
     });
 
-    it("续跑:601 限流仍按冷却重试，不把限流当不确定", async () => {
+    it("续跑:601 单次拒绝退出上传槽,保留证据交给持久调度(不原地重试)", async () => {
       const { mkdirSync, writeFileSync } = await import("node:fs");
       const stageDir = mkdtempSync(join(tmpdir(), "resume-601-"));
       // 601 会让 pool 记冷却；测试把冷却压到 0，只验证「限流仍会重试」而非真等 30 分钟。
@@ -1575,10 +1619,9 @@ describe("runPipeline", () => {
       for (const suf of [".mp4", "_danmu.mp4", "_livechat.mp4", ".xml"]) writeFileSync(join(sub, "主播名_2026-06-27" + suf), "x");
       (deps.upload as unknown as { appendGroup: Mock }).appendGroup.mockRejectedValueOnce(new Error("code: 601 您上传视频过快")).mockResolvedValue(undefined);
 
-      const r = await runPipeline(b, deps);
-
-      expect((deps.upload as unknown as { appendGroup: Mock }).appendGroup).toHaveBeenCalledTimes(2); // 限流 → 重试一次后成功
-      expect(r).toEqual({ state: "done", bv: "BV" + "existing" });
+      await expect(runPipeline(b, deps)).rejects.toThrow("601");
+      expect((deps.upload as unknown as { appendGroup: Mock }).appendGroup).toHaveBeenCalledTimes(1);
+      expect(deps.ledger.get(STREAM_KEY)?.uploadJournal).toContain('"state":"not-submitted"');
       deps.ledger.close();
     });
 

@@ -2,11 +2,10 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { freemem } from "node:os";
 import type { SyncLedger, StepName } from "./ledger.js";
 import type { PipelineCfg, PipelineDeps } from "./pipeline.js";
-import { appendArchive, createArchive } from "@drec/core";
+import { createMasterArchive, appendMasterParts } from "./master-upload.js";
 import { humanBytes } from "./format.js";
-import { effectiveStageFormat, isAppendAmbiguous, isJobAbort, isUploadRateLimited, throwIfAborted, USER_STOP, UPLOAD_FAIL_CLOSED_MS } from "@drec/core";
+import { effectiveStageFormat, isJobAbort, isUploadRateLimited, throwIfAborted, USER_STOP, UPLOAD_FAIL_CLOSED_MS } from "@drec/core";
 import { addArchiveToSeasonIfConfigured, seasonCheckpointState } from "@drec/bilibili-api";
-import { retry } from "./retry.js";
 import type { StageProducts } from "./session-plan.js";
 import { prepareUploadAlias } from "./session-plan.js";
 import { canDeferAppendVerification, PART_GROUP_CANONICAL } from "./verify.js";
@@ -228,7 +227,7 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
       outputs: [{ name: "bv", kind: "ref", required: true }],
       resource: "upload",
       run: async (c: NodeRunContext): Promise<void> => {
-        const bv = await createArchive(deps.upload, {
+        const bv = await createMasterArchive(deps, streamKey, {
           video: prepareUploadAlias(stageSub, "plain", products.plain, products.partTitles?.plain),
           cookies: cfg.cookies,
           // 投稿标题用宽松渲染(含空格/标点);stage 文件名 stem 仍是严格的 dateName。
@@ -238,28 +237,7 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
           public: isPublic,
           desc: cfg.uploadMeta.desc,
         });
-        // checkpoint:P1 建稿成功即刻落库 bv —— 必须在这里(不能等 burn/split 完),
-        // 否则 P1 成功后若后续节点失败,bv 丢失 → 重试重传 P1 → 重复稿。
-        if (cfg.uploadMeta.seasonSectionId) {
-          let saved = false;
-          let lastError: unknown;
-          for (let attempt = 0; attempt < 2; attempt++) {
-            try { ledger.setBvAndSeasonState(streamKey, bv, "pending"); saved = true; break; }
-            catch (e) { lastError = e; }
-          }
-          if (!saved) {
-            c.log(`season pending checkpoint not saved: ${String((lastError as Error)?.message ?? lastError).slice(0, 200)}`);
-            ledger.setBv(streamKey, bv);
-          }
-        } else {
-          ledger.setBv(streamKey, bv);
-        }
-        // The BV is durable now. The executor associates the season after this upload slot is released
-        // (see runWorkflowNodes), so the bounded HTTP call never extends the global upload chain.
-        // 分P核验基线(T11):P1 = plain 组第 0 段。合并路径此前**完全不写** sync_parts →
-        // 期望段数恒 0、核验恒跳过(等于没核验),而分段路径有 —— 两条路径基线口径必须一致。
-        // 合并路径的 plain 是单文件(不切分),故恒 1 个分 P;段号 0 起(与分段路径同一口径)。
-        ledger.markPartDone(streamKey, PART_GROUP_CANONICAL.plain, 0);
+        // BV, season intent and P1 progress are durable atomically before the upload slot releases.
         c.set("bv", bv);
         const d3 = bytesDetail(products.plain);
         if (d3) c.stepDetail("upload_plain", d3);
@@ -337,31 +315,12 @@ async function appendGroupSafe(o: {
   streamKey: string;
   bv: string;
   files: string[];
-  isPublic: boolean;
   step: "append_danmu" | "append_livechat";
-  log(msg: string): void;
-  retry?: typeof retry;
 }): Promise<void> {
   if (o.files.length === 0) return;
-  // B站追加分 P 后稿件会短暂锁定(code 10010),单文件组退避 60s*2^n 等锁释放,避免几分钟的
-  // 上传白跑 3 次就转人工。
-  // 多文件组没有 per-part checkpoint:任何失败(含 601)都可能已提交部分段,重试会重复分 P,
-  // 因此只提交一次(与 segment-pipeline 的多文件 batch 同口径),失败交给上传类失败门禁转人工。
-  const tries = o.files.length === 1 ? 5 : 1;
-  const fn = (): Promise<void> => appendArchive(o.deps.upload, {
-    bv: o.bv, files: o.files, cookies: o.deps.cfg.cookies, public: o.isPublic,
-    deferVerificationUntilCleanup: canDeferAppendVerification(o.deps, o.streamKey),
-  });
-  await (o.retry ?? retry)(fn, {
-    tries,
-    backoffMs: 60_000,
-    sleep: o.deps.sleep,
-    // append 结果不确定(可能已提交)→ 绝不重试,直接转人工(否则会重复分P)。
-    // 601 频率限制 → 重试(队列会先冷却);其余按原规则(不确定结果不重试)。
-    shouldRetry: (err) => isUploadRateLimited(err) || !isAppendAmbiguous(err),
-    onRetry: (attempt, err) =>
-      o.log(`append ${o.step} 第 ${attempt} 次失败,重试: ${String((err as Error)?.message ?? err).slice(0, 200)}`),
-  });
+  // One attempt per slot; safe failures leave the slot and return through the persistent retry queue.
+  await appendMasterParts(o.deps, o.streamKey, o.bv, o.step,
+    o.files.map((_, index) => index), o.files, canDeferAppendVerification(o.deps, o.streamKey));
 }
 
 async function runAppendGroup(
@@ -377,15 +336,9 @@ async function runAppendGroup(
     streamKey: c.streamKey,
     bv: c.get("bv")!,
     files,
-    isPublic: c.cfg.uploadPrivate === false,
     step,
-    log: c.log,
   });
-  // 分P核验基线(T11):**append 成功后**才记 checkpoint —— 失败/未提交的分 P 不进基线。
-  // 组名用步骤名(`append_danmu`/`append_livechat`),与分段路径 `appendSegmentGroup` 完全一致
-  // (不能另起 `danmu`/`livechat`:那会让核验读不到分段路径写的行,恒 mismatch)。
-  const group = step === "append_danmu" ? PART_GROUP_CANONICAL.danmu : PART_GROUP_CANONICAL.livechat;
-  for (let i = 0; i < files.length; i++) c.ledger.markPartDone(c.streamKey, group, i);
+  // master-upload committed the accepted submission and sync_parts together.
   c.set(out, "done");
   c.stepDetail(step, `${files.length} 段${files.length ? ` · ${humanBytes(sumBytesOf(files))}` : ""}`);
 }
