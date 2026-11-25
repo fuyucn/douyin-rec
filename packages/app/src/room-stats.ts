@@ -51,9 +51,13 @@ export interface StoredSession {
   lastSeenAt: number;
 }
 
-/** `<dataRoot>/db/room-stats.db`。 */
+/**
+ * 统计表所在的库 = **控制库**(`<dataRoot>/db/drec-control.db`)。
+ * 曾经单独一个 `room-stats.db`,2026-11-25 起与控制库合并(见 issue #750):少一份 WAL/-shm、
+ * 少一个连接与备份点,也让「房间统计」与任务/台账用同一把锁以外的一致快照。
+ */
 export function roomStatsDbPath(dataRoot: string): string {
-  return `${dataRoot}/db/room-stats.db`;
+  return `${dataRoot}/db/drec-control.db`;
 }
 
 // 每个 reason 的最近一次告警时刻；5 分钟内同 reason 不重复刷屏，避免库长期不可用时日志被占满，
@@ -218,6 +222,12 @@ export function readStatsSessions(dbPath: string, sinceMs: number): StoredSessio
   if (!existsSync(dbPath)) return [];
   let db: DatabaseSync | undefined;
   try {
+    // 控制库里还没有 `room_sessions`(全新实例、尚未采集)是**健康空态**,不是读错。
+    // 直接把表查一遍:不存在就返回空,存在才走 readOnly 打开(issue #750 审查 F10)。
+    const probe = new DatabaseSync(dbPath, { readOnly: true });
+    const hasTable = probe.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='room_sessions'`).get() !== undefined;
+    probe.close();
+    if (!hasTable) return [];
     db = openDb(dbPath, true);
     const rows = db.prepare(`
       SELECT workerId, platform, roomSlug, startMs, endMs, durationSec, gapSec, danmuCount, bytes, title, lastSeenAt

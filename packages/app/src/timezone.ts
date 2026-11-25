@@ -83,13 +83,13 @@ export function applyTimezoneFromDb(dbPath: string = resolveDbPath()): string {
 
 /** 带 `<dataRoot>` 参数的隐藏命令(`_inventory` 等)读的库:`<dataRoot>/db/douyin-rec.db`(与命令本体同一路径,不看 cwd/env 默认根)。 */
 export function dbPathForDataRoot(dataRoot: string): string {
-  return join(dataRoot, "db", "douyin-rec.db");
+  return join(dataRoot, "db", "drec-control.db");
 }
 
 /**
- * hub 台账库路径:`<db>` → `<db>-sync.db`。与 serve 侧同一推导(`resolveDbPath(...).replace`),
- * 抽成函数免得两处漂移 —— 写错会让 0 落盘的上传结果记到另一个库、UI 永远看不到。
+ * hub 台账库路径 = **同一个控制库**(2026-11-25 起 sync_* 表与主库合并,见 issue #750)。
+ * 曾经是 `<db>-sync.db` 兄弟文件;现在返回入参本身,调用点无需再自己拼后缀。
  */
 export function syncDbPathFor(dbPath: string): string {
-  return dbPath.replace(/\.db$/, "-sync.db");
+  return dbPath;
 }

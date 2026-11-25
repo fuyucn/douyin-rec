@@ -259,15 +259,15 @@ describe("rolling-queue store adapters", () => {
   });
 
   it("the settings switch defaults to off and honours off/on values", () => {
-    const s = new TaskStore(path.join(root, "db", "douyin-rec.db"));
+    const s = new TaskStore(path.join(root, "db", "drec-control.db"));
     try {
-      expect(rollingQueueModeEnabled(path.join(root, "db", "douyin-rec.db"))).toBe(false);
+      expect(rollingQueueModeEnabled(path.join(root, "db", "drec-control.db"))).toBe(false);
       s.setSetting("rollingQueueMode", "off");
-      expect(rollingQueueModeEnabled(path.join(root, "db", "douyin-rec.db"))).toBe(false);
+      expect(rollingQueueModeEnabled(path.join(root, "db", "drec-control.db"))).toBe(false);
       s.setSetting("rollingQueueMode", "on");
-      expect(rollingQueueModeEnabled(path.join(root, "db", "douyin-rec.db"))).toBe(true);
+      expect(rollingQueueModeEnabled(path.join(root, "db", "drec-control.db"))).toBe(true);
       s.setSetting("rollingQueueMode", "0");
-      expect(rollingQueueModeEnabled(path.join(root, "db", "douyin-rec.db"))).toBe(false);
+      expect(rollingQueueModeEnabled(path.join(root, "db", "drec-control.db"))).toBe(false);
     } finally { s.close(); }
   });
 });
@@ -328,12 +328,12 @@ describe("rework findings (PR6 round 1)", () => {
   });
 
   it("HIGH 6: a misspelled switch value is OFF (explicit on-list)", () => {
-    const s = new TaskStore(path.join(root, "db", "douyin-rec.db"));
+    const s = new TaskStore(path.join(root, "db", "drec-control.db"));
     try {
       s.setSetting("rollingQueueMode", "ofl");
-      expect(rollingQueueModeEnabled(path.join(root, "db", "douyin-rec.db"))).toBe(false);
+      expect(rollingQueueModeEnabled(path.join(root, "db", "drec-control.db"))).toBe(false);
       s.setSetting("rollingQueueMode", "true");
-      expect(rollingQueueModeEnabled(path.join(root, "db", "douyin-rec.db"))).toBe(true);
+      expect(rollingQueueModeEnabled(path.join(root, "db", "drec-control.db"))).toBe(true);
     } finally { s.close(); }
   });
 

@@ -17,7 +17,7 @@ import {
 } from "@drec/core";
 import { BatchRejected, ProcQueueStore, procQueueDbPath } from "@drec/proc-queue";
 import { effectiveHubConfig } from "./disk-gate.js";
-import { readOutputLayout, rootStageDir } from "./paths.js";
+import { CONTROL_DB_NAME, readOutputLayout, rootStageDir } from "./paths.js";
 import { TaskStore } from "./store.js";
 
 /** 第一期远端只受理的处理器 kind。 */
@@ -56,7 +56,8 @@ export interface NodeRootsOpts {
 }
 
 function readTaskOutDirs(dataRoot: string): string[] {
-  const dbFile = join(dataRoot, "db", "douyin-rec.db");
+  // 控制库(issue #750);旧库名不再产生新数据,读了会拿到过时的 outDir。
+  const dbFile = join(dataRoot, "db", CONTROL_DB_NAME);
   if (!existsSync(dbFile)) return [];
   try {
     const store = new TaskStore(dbFile);

@@ -10,7 +10,7 @@
  *   <root>/config/biliup/cookies.json  biliup B站上传 cookie
  *   <root>/config/hub.config.json    hub 全局配置;<root>/config/hub/       hub 每房间任务配置
  *
- * **root 永远有值**:未设 `DOUYIN_REC_ROOT` 时默认 `DEFAULT_ROOT`("./output-data",相对启动 cwd)——
+ * **root 永远有值**:未设 `DOUYIN_REC_ROOT` 时默认 `DEFAULT_ROOT`(用户主目录下 `drec/`)——
  * 所有运行数据(db/recordings/stage/config)收进这一个目录,不再散落在项目根(旧默认各自 `./recordings`、
  * `./douyin-rec.db`、`./stage`、`./config/hub` 平铺在 cwd)。类比 docker 的 `docker-data/`(那里 root 固定
  * 由 compose 设为容器内 `/data`,不受此默认影响)。
@@ -23,10 +23,17 @@ import { randomBytes } from "node:crypto";
 import { parseOutputLayout, type PathLayout } from "@drec/core";
 import { procQueueDbPath as procQueueDbPathOf } from "@drec/proc-queue";
 import { roomStatsDbPath } from "./room-stats.js";
-import { hostname as osHostname } from "node:os";
+import { homedir, hostname as osHostname } from "node:os";
 
-/** 未设 DOUYIN_REC_ROOT 时的默认数据根(相对启动 cwd)。db/recordings/stage/config 都收在这一个目录下。 */
-export const DEFAULT_ROOT = "./output-data";
+/**
+ * 未设 `DOUYIN_REC_ROOT` 时的默认数据根 = 用户主目录下的 `drec/`（跨平台同一规则：
+ * macOS/Linux 取 `$HOME`，Windows 取 `%USERPROFILE%`，统一由 `os.homedir()` 给出）。
+ *
+ * 为什么不放「相对启动 cwd 的 `./output-data`」：裸跑/换 cwd 都会把数据根指偏（历史上出现过
+ * 节点侧产物落错目录、限流库父目录不存在 → sqlite 打不开）。**开发场景不吃这个默认**：
+ * `serve:local` / `dev` 脚本显式把根设成仓库内的 `./data-local`。
+ */
+export const DEFAULT_ROOT = join(homedir(), "drec");
 
 /**
  * hub 全局配置模板内容。**单一真相 = 仓库源文件 `configs/hub.config.example.json`**。
@@ -84,9 +91,32 @@ export function ensureHubConfigExample(): string | undefined {
   return path;
 }
 
-/** <root>/db/douyin-rec.db。 */
+/** 控制库文件名。tasks/settings/merge_jobs + hub 台账(sync_*)+ 房间统计(room_sessions) 全在这**一个**文件里。 */
+export const CONTROL_DB_NAME = "drec-control.db";
+
+/** <root>/db —— 库目录(容器里挂的是 named volume,不是宿主 bind mount)。 */
+export function dbDir(): string {
+  return join(drecRoot(), "db");
+}
+
+/** <root>/db/drec-control.db —— 唯一控制库(tasks、settings、merge_jobs、hub_rules、sync_* 全表、room_sessions、upload_limits)。 */
 export function rootDbPath(): string {
-  return join(drecRoot(), "db", "douyin-rec.db");
+  return join(dbDir(), CONTROL_DB_NAME);
+}
+
+/**
+ * 合并前的旧库(一次性迁移的输入;迁移后改名为 `<name>.merged-<ts>` 留着回滚,**不删**)。
+ * - `douyin-rec.db`: tasks/settings/merge_jobs/hub_rules/upload_limits
+ * - `douyin-rec-sync.db`: sync_* 7 表 + upload_limits
+ * - `room-stats.db`: room_sessions
+ */
+export function legacyDbPaths(): { main: string; sync: string; stats: string } {
+  const d = dbDir();
+  return {
+    main: join(d, "douyin-rec.db"),
+    sync: join(d, "douyin-rec-sync.db"),
+    stats: join(d, "room-stats.db"),
+  };
 }
 
 /** <root>/db/proc-queue.db —— 处理任务表;路径单点在 `@drec/proc-queue`,此处只转发(不受 `--db` 覆盖)。 */
@@ -94,7 +124,7 @@ export function procQueueDbPath(): string {
   return procQueueDbPathOf(drecRoot());
 }
 
-/** <root>/db/room-stats.db —— 直播统计(plans/041);路径单点在 `../room-stats.ts`。 */
+/** 直播统计(plans/041)现在与控制库同文件 → 返回同一路径(不再单独 `room-stats.db`)。 */
 export function rootStatsDbPath(): string {
   return roomStatsDbPath(drecRoot());
 }

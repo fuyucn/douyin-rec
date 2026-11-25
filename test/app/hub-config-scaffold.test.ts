@@ -95,7 +95,10 @@ describe("resolveHubConfigJson（配置解析优先级）", () => {
   });
 
   it("都没有 → undefined(serve --hub 会跳过)", () => {
-    delete process.env.DOUYIN_REC_ROOT;
+    // 2026-11-24: 默认数据根改成「家目录下的 drec」后，真实机器上可能已经存在该 root 的配置文件，
+    // 所以这个用例显式指到一个空 root，语义仍是「没有 ambient 配置 → undefined」。
+    process.env.DOUYIN_REC_ROOT = mkdtempSync(join(tmpdir(), "hub-none-"));
     expect(resolveHubConfigJson(undefined, fakeStore())).toBeUndefined();
+    delete process.env.DOUYIN_REC_ROOT;
   });
 });

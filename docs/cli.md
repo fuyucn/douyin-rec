@@ -49,7 +49,7 @@ node dist/douyin-rec.mjs --discord-webhook "https://discord.com/api/webhooks/...
 | `--danmu <0\|1>` | `1` | 弹幕开关：`1`=开 `0`=关（也接受 `on`/`off`、`true`/`false`、`none`）。弹幕来源由命中平台的 `connectDanmu` 提供，不再按 provider 名分派 |
 | `--cookies <s>` | - | 抖音 cookie 字符串 |
 | `--cookies-file <path>` | - | 从文件读取 cookie（读取后 trim；优先于 `--cookies`）|
-| `--out <dir>` | `<DOUYIN_REC_ROOT>/recordings`(未设根默认 `./output-data/recordings`) | 输出目录 |
+| `--out <dir>` | `<DOUYIN_REC_ROOT>/recordings`(未设根默认 `<家目录>/drec/recordings`) | 输出目录 |
 | `--segment <sec>` | `1800` | 分段时长（秒），`0`=不分段 |
 | `--reconnect <sec>` | `5` | 断流后快速重连前的等待秒数 |
 | `--config <path>` | - | YAML 配置文件；命令行选项优先覆盖（见下「配置文件」）|
@@ -169,7 +169,7 @@ FONTS_DIR=/path/to/fonts node dist/douyin-rec.mjs burn --video x.mp4 --xml x.xml
 | `--tid <n>` | `21` | 分区 tid（21=生活）|
 | `--public` | `false` | 公开（不加则仅自己可见，`--is-only-self 1`）|
 | `--desc <s>` | - | 稿件简介 |
-| `--cookies-file <path>` | `<DOUYIN_REC_ROOT>/config/biliup/cookies.json`(未设根默认 `./output-data/...`) | biliup 登录后的 cookies |
+| `--cookies-file <path>` | `<DOUYIN_REC_ROOT>/config/biliup/cookies.json`(未设根默认 `<家目录>/drec/...`) | biliup 登录后的 cookies |
 
 底层固定带 `--copyright 1`（自制）。上传成功发 `uploadDone` 通知（含 BV 号 + URL）。
 
@@ -191,7 +191,7 @@ node dist/douyin-rec.mjs upload --video x.mp4 --title "标题" --public --tag "�
 
 stateful app 层：任务持久化到 sqlite（`node:sqlite`，Node 24 内置），支持手动 CRUD、立即运行、Web 控制台、定时调度。app 层完整设计见 [app.md](./app.md)。
 
-**数据库路径解析**：`--db <path>` > 环境变量 `DOUYIN_REC_DB` > `<DOUYIN_REC_ROOT>/db/douyin-rec.db`（未设 `DOUYIN_REC_ROOT` 时根默认 `./output-data`，即 `./output-data/db/douyin-rec.db`；docker 固定 `DOUYIN_REC_ROOT=/output-data`）。多数 task 子命令都支持 `--db`。db/recordings/stage/config 都收在同一个数据根下，见 [paths.ts](../packages/app/src/paths.ts)。
+**数据库路径解析**：`--db <path>` > 环境变量 `DOUYIN_REC_DB` > `<DOUYIN_REC_ROOT>/db/douyin-rec.db`（未设 `DOUYIN_REC_ROOT` 时根默认「用户主目录下的 `drec/`」，即 `<家目录>/drec/db/douyin-rec.db`；docker 固定 `DOUYIN_REC_ROOT=/output-data`）。多数 task 子命令都支持 `--db`。db/recordings/stage/config 都收在同一个数据根下，见 [paths.ts](../packages/app/src/paths.ts)。
 
 ### `task add` — 新增任务
 

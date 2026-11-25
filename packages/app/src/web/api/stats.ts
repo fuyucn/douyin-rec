@@ -61,12 +61,12 @@ export function buildStats(ctx: ApiCtx) {
 
       let sessions: ReturnType<typeof roomStats.readStatsSessions>;
       try {
-        sessions = roomStats.readStatsSessions(rootStatsDbPath(), now - days * 86_400_000);
+        sessions = roomStats.readStatsSessions(ctx.deps?.syncDbPath ?? rootStatsDbPath(), now - days * 86_400_000);
       } catch (readErr) {
         return err(500, String((readErr as Error)?.message ?? readErr));
       }
       const dto = roomStats.buildStats({
-        dbPath: rootStatsDbPath(),
+        dbPath: ctx.deps?.syncDbPath ?? rootStatsDbPath(),
         sessions,
         rooms,
         workerNames,

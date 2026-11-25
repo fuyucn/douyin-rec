@@ -309,7 +309,8 @@ export function createHubStarter(deps: HubStarterDeps): HubStarter {
       const buildTransports = (): Map<string, ReturnType<typeof getTransport>> =>
         new Map(loadWorkers().map((w) => [w.id, getTransport(w)]));
       const transports = buildTransports();     // 初始 Map(pipelineDeps 也用它)
-      const dbPath = (opts.dbPath ?? "douyin-rec.db").replace(/\.db$/, "-sync.db");
+      // 台账与控制库同文件(issue #750):未显式给路径就用同一控制库,不再拼 -sync 后缀。
+      const dbPath = opts.dbPath ?? "drec-control.db";
       const ledger = new SyncLedger(dbPath);
       // Zero-disk orchestration (issue #331): capability gate, receipt poll and console view live in
       // zero-disk-sync.ts; the starter only assembles the instance and hands its delivery book to the
@@ -541,7 +542,8 @@ export function createHubStarter(deps: HubStarterDeps): HubStarter {
           : {}),
         observeInventory: (workerId, sessions) => {
           try {
-            recordRoomSessions(rootStatsDbPath(), workerId, sessions);
+            // 与控制库同一文件(issue #750);显式 `--db` 时也必须跟着走,否则统计落到第二个库。
+            recordRoomSessions(dbPath, workerId, sessions);
           } catch (e) {
             console.warn(`[stats] ${workerId} 采集失败:${String((e as Error)?.message ?? e)}`);
           }

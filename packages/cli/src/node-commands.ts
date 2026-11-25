@@ -15,6 +15,7 @@
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { CONTROL_DB_NAME } from "@drec/app";
 import {
   EXITED_STATE_IGNORE_AFTER_MS, freeGBOf, linuxProcProbe, listProcessors, platformForRoom, readRecorderStates, redactLogLines,
   roomActivities, type ProcActiveDTO, type ProcProbe, type RecorderStateFile,
@@ -47,7 +48,8 @@ const guarded = (run: NodeCommand): NodeCommand => async (dataRoot, args) => {
  */
 async function withTaskStore<T>(dataRoot: string, fn: (store: import("@drec/app").TaskStore) => T | Promise<T>): Promise<T> {
   const { TaskStore } = await import("@drec/app");
-  const store = new TaskStore(join(dataRoot, "db", "douyin-rec.db"));
+  // 与控制库同一文件(issue #750):节点侧 tasks/settings/sync_*/room_sessions 都在 drec-control.db。
+  const store = new TaskStore(join(dataRoot, "db", CONTROL_DB_NAME));
   try {
     return await fn(store);
   } finally {

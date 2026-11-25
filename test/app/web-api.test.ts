@@ -7,7 +7,7 @@
  * start/stop calls) so assertions stay deterministic.
  */
 import { buildRecordArgs } from "../../packages/app/src/process/record-args.js";
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { platformForRoom } from "@drec/core";
 import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
@@ -1574,6 +1574,16 @@ describe("streamUpload 与 rollingUpload 互斥(plans/039 写入侧门禁)", () 
 });
 
 describe("hub workers 端点(CRUD + hubEnabled 门)", () => {
+  // 2026-11-24: 生产默认数据根改到「家目录下的 drec」后，worker 保护逻辑会顺带读**真实**的
+  // 房间规则目录（本机 worker 参与了真实房间的 hub 规则 → 返回 409 冲突）。这些用例只测端点语义，
+  // 因此把数据根固定到一次性临时目录，避免依赖运行机的真实配置。
+  const savedRoot = process.env.DOUYIN_REC_ROOT;
+  beforeEach(() => { process.env.DOUYIN_REC_ROOT = mkdtempSync(join(tmpdir(), "wapi-root-")); });
+  afterEach(() => {
+    if (savedRoot === undefined) delete process.env.DOUYIN_REC_ROOT;
+    else process.env.DOUYIN_REC_ROOT = savedRoot;
+  });
+
   function apiWith(hubEnabled: boolean): { api: ReturnType<typeof makeApi>; cfg: string } {
     const cfg = join(mkdtempSync(join(tmpdir(), "wapi-")), "hub.config.json");
     writeFileSync(cfg, JSON.stringify({ platform: "douyin",

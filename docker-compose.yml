@@ -3,6 +3,9 @@
 # 用法：
 #   cp .env.example .env   # 改 TZ / 宿主机路径 / 端口 / Discord
 #   # 部署最新版（GIT_SHA 让 About 页显示正确版本号 0.0.0-{commit后6位};不传则 0.0.0-dev）：
+#   # 已有部署请先停旧容器再起：db-seed 会把宿主机 db/ 一次性灌进 named volume(issue #750),
+#   # 旧容器还在写库时热拷 .db/-wal 可能不一致。
+#   docker compose stop douyin-rec
 #   GIT_SHA=$(git rev-parse HEAD) docker compose up -d --build
 #   docker compose logs -f            # 看日志
 #   docker compose down               # 停
@@ -10,6 +13,50 @@
 # 数据都在挂载卷上（DB / 录像 / config），容器重建不丢。
 
 services:
+  # 一次性把 **宿主机上已有的 db/** 灌进 named volume(issue #750)。
+  # 为什么必须有这一步:库改成 named volume 后,`${DATA_ROOT}/db` 会被卷**遮住**;若不先灌库,
+  # 升级后会看到空库(任务/台账/统计全"消失",还能正常跑,最危险的那种静默)。
+  # 幂等:卷里已有内容就什么都不做。用同镜像的 node 执行(不额外拉镜像)。
+  db-seed:
+    image: node:24-bookworm-slim
+    container_name: drec-db-seed
+    restart: "no"
+    volumes:
+      - drec-db:/db
+      - ${DATA_ROOT:-./docker-data}/db:/src:ro
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        # 完成标记:只有全部拷完 + 完整性校验通过才落盘。半途失败/磁盘不足 → 下次 up 会重做,
+        # 不会因为「目录非空」就把半成品当成成功(F3)。
+        if [ -f /db/.seed-complete ]; then echo "[db-seed] 已完成过，跳过"; exit 0; fi
+        if [ -n "$$(ls -A /db 2>/dev/null | grep -v '^\.seed-tmp$')" ] && [ ! -d /db/.seed-tmp ]; then
+          echo "[db-seed] 卷内已有数据(非本次灌库)，跳过"; exit 0; fi
+        if [ ! -d /src ] || [ -z "$$(ls -A /src 2>/dev/null)" ]; then echo "[db-seed] 宿主机 db/ 为空，跳过"; exit 0; fi
+        rm -rf /db/.seed-tmp && mkdir -p /db/.seed-tmp
+        cp -a /src/. /db/.seed-tmp/
+        # 一致性校验:每个 .db 跑 integrity_check(用镜像自带的 node:sqlite,不额外装 sqlite3)。
+        node -e '
+          const { DatabaseSync } = require("node:sqlite");
+          const fs = require("node:fs");
+          for (const f of fs.readdirSync("/db/.seed-tmp").filter((n) => n.endsWith(".db"))) {
+            const db = new DatabaseSync("/db/.seed-tmp/" + f, { readOnly: true });
+            const rows = db.prepare("PRAGMA integrity_check").all();
+            db.close();
+            const ok = rows.length === 1 && Object.values(rows[0])[0] === "ok";
+            if (!ok) { console.error("[db-seed] integrity_check 失败: " + f, rows); process.exit(1); }
+            console.log("[db-seed] integrity ok: " + f);
+          }
+        '
+        # 发布阶段也要 fail-closed:任何一个文件 mv 失败就退出(临时目录保留、不写标记),
+        # 主服务因 depends_on 条件不满足而不会启动,下次 up 重做。
+        for f in $$(ls -A /db/.seed-tmp); do mv "/db/.seed-tmp/$$f" "/db/$$f"; done
+        rmdir /db/.seed-tmp
+        : > /db/.seed-complete
+        echo "[db-seed] 已把宿主机 db/ 灌入 named volume drec-db（含完整性校验）"
+
   # Tailscale sidecar：容器内 tailscaled，让 docker 当 master 时够得到 VPS（100.x）。
   # 持久化：state 卷 + .env 里 Reusable TS_AUTHKEY → 容器重启不用重认证。
   # douyin-rec 经 network_mode: service:tailscale 共享它的 netns，故 Web UI 端口绑在本服务上。
@@ -48,7 +95,11 @@ services:
     # 共享 tailscale sidecar 的网络 → 容器能 ssh 100.x VPS。端口在 tailscale 服务上。
     network_mode: service:tailscale
     depends_on:
-      - tailscale
+      tailscale:
+        condition: service_started
+      # 库目录改 named volume 后必须先灌库(issue #750):见下方 db-seed。
+      db-seed:
+        condition: service_completed_successfully
     environment:
       # 调度按本地时间算窗口；默认美西（自动处理 PST/PDT 夏令时），按需改。
       TZ: ${TZ:-Asia/Shanghai}
@@ -74,10 +125,16 @@ services:
       #   DREC_ALLOWED_HOSTS=rec.example.com
       DREC_ALLOWED_HOSTS: ${DREC_ALLOWED_HOSTS:-}
     volumes:
-      # 单一挂载卷：所有持久数据(db/录像/config)都在它下面，容器重建不丢。宿主机侧目录名(docker-data/)
-      # 与容器内挂载点名(/output-data)不必一致——bind mount 只是把这块磁盘的两个入口对上,改容器内
-      # 名字不影响宿主机上的文件,也不需要迁移数据。
+      # 录像/配置/stage 走宿主机 bind mount(大文件,不需要 SQLite 的共享内存)。
+      # 宿主机侧目录名(docker-data/)与容器内挂载点名(/output-data)不必一致——bind mount 只是把这块磁盘的
+      # 两个入口对上,改容器内名字不影响宿主机上的文件,也不需要迁移数据。
       - ${DATA_ROOT:-./docker-data}:/output-data
+      # ⚠️ 库目录单独走 **named volume**(issue #750 / #747):SQLite 的 -wal/-shm 必须在同一个
+      # Linux VM 文件系统内,经 macOS bind mount 转发时宿主侧看不到 -shm → 周期性
+      # `disk I/O error [ERR_SQLITE_ERROR/errcode=522]`,API 503 且不自愈,只能重建容器。
+      # named volume 把主库 + -wal + -shm 全部留在 VM 里,从根上消除该故障。
+      # 备份:docker run --rm -v drec-db:/db -v $DATA_ROOT/backup:/bk alpine cp -a /db /bk
+      - drec-db:/output-data/db
       # VPS ssh key(只读)→ master 经 SshTransport 拉流时认证(配合镜像内 /root/.ssh/config)。
       - ./remote/vps.key:/root/.ssh/vps.key:ro
     # master 模式:serve 带 --hub → 自动读 /output-data/config/hub.config.json(docker-data/config/hub.config.json)。
@@ -85,5 +142,9 @@ services:
     command: ["node", "dist/douyin-rec.mjs", "task", "serve", "--port", "7860", "--host", "all", "--hub"]
 
 volumes:
+  # SQLite 控制库 + 处理队列库(issue #750):不落在宿主 bind mount 上,避免 -shm 视图分叉(#747)。
+  # 固定卷名(不带 compose 项目前缀),这样备份/回滚命令与文档里的 `drec-db` 永远指同一个卷。
+  drec-db:
+    name: drec-db
   # tailscale 持久 state（节点身份）→ 容器重启免重认证。
   tailscale-state:
