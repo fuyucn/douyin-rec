@@ -328,7 +328,9 @@ export class SyncLedger {
     const at = this.now();
     // A state change (or a new needs_manual reason) is a new case: drop any earlier review mark.
     const clearAck = reopen(cur) ? "ackedAt=NULL, ackNote=NULL, " : "";
-    const r = this.db.prepare(`UPDATE sync_jobs SET state=?, ${set}, ${clearAck}updatedAt=? WHERE streamKey=? AND state=?`)
+    // 收口(done / needs_manual)时清掉失败处置计划,避免过期唤醒把已定案的场重新拉起来。
+    const clearPlan = to === "done" || to === "needs_manual" ? "failureClass=NULL, nextAttemptAt=NULL, " : "";
+    const r = this.db.prepare(`UPDATE sync_jobs SET state=?, ${set}, ${clearAck}${clearPlan}updatedAt=? WHERE streamKey=? AND state=?`)
       .run(to, ...args, at, streamKey, cur.state);
     if (Number(r.changes) === 0) {
       console.warn(`[ledger] 拒绝状态转换 ${streamKey}: ${cur.state} → ${to}(状态已被并发改写)`);
@@ -375,8 +377,11 @@ export class SyncLedger {
    * 只写这两列,不改 state(状态由 `setState` 按分类决定:retrying / needs_manual)。
    */
   setFailurePlan(streamKey: string, plan: { failureClass: JobRow["failureClass"]; nextAttemptAt?: number | null }): boolean {
+    // 人工分类不许带唤醒时间(带了也不会被取,但留着会在页面上误导);未分类同理。
+    const retryable = plan.failureClass === "safe-retry" || plan.failureClass === "resume-append";
+    const next = retryable ? (plan.nextAttemptAt ?? null) : null;
     const r = this.db.prepare("UPDATE sync_jobs SET failureClass=?, nextAttemptAt=?, updatedAt=? WHERE streamKey=?")
-      .run(plan.failureClass ?? null, plan.nextAttemptAt ?? null, this.now(), streamKey);
+      .run(plan.failureClass ?? null, next, this.now(), streamKey);
     return Number(r.changes) > 0;
   }
 
@@ -389,8 +394,14 @@ export class SyncLedger {
 
   /** 到期该被唤醒的 job(按 nextAttemptAt 升序;喂给调度 tick)。 */
   dueForRetry(now = this.now(), limit = 20): JobRow[] {
+    // 只取「可自动重试」且「还没收口」的行:人工分类 / done / needs_manual 即使残留时间戳也不许进队列,
+    // 否则最早的几条会永久占住 LIMIT、把后面真正到期的任务饿死。
     return (this.db.prepare(
-      "SELECT * FROM sync_jobs WHERE nextAttemptAt IS NOT NULL AND nextAttemptAt <= ? ORDER BY nextAttemptAt LIMIT ?",
+      `SELECT * FROM sync_jobs
+         WHERE nextAttemptAt IS NOT NULL AND nextAttemptAt <= ?
+           AND failureClass IN ('safe-retry','resume-append')
+           AND state IN ('failed','retrying')
+         ORDER BY nextAttemptAt LIMIT ?`,
     ).all(now, limit) as unknown as JobRow[]);
   }
 

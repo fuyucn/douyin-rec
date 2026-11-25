@@ -40,6 +40,33 @@ describe("SyncLedger 失败处置计划(failureClass / nextAttemptAt)", () => {
     ledger.close();
   });
 
+  it("人工分类即使带了 nextAttemptAt 也不进队列;收口后计划被清掉", () => {
+    const p = path();
+    const ledger = new SyncLedger(p);
+    ledger.upsertPending("k1");
+    ledger.setFailurePlan("k1", { failureClass: "verify-manual", nextAttemptAt: 10 });
+    expect(ledger.dueForRetry(1e9)).toEqual([]);
+    // 可重试行在收口(done / needs_manual)后也不许复活
+    ledger.upsertPending("k2");
+    ledger.setFailurePlan("k2", { failureClass: "safe-retry", nextAttemptAt: 10 });
+    ledger.setState("k2", "done", {});
+    expect(ledger.dueForRetry(1e9)).toEqual([]);
+    ledger.close();
+  });
+
+  it("dueForRetry 只取到期且可自动重试的行,并按 nextAttemptAt 升序截断", () => {
+    const p = path();
+    const ledger = new SyncLedger(p);
+    for (const [k, at] of [["a", 30], ["b", 10], ["c", 20]] as Array<[string, number]>) {
+      ledger.upsertPending(k);
+      ledger.setState(k, "failed", { error: "boom" });
+      ledger.setFailurePlan(k, { failureClass: "safe-retry", nextAttemptAt: at });
+    }
+    expect(ledger.dueForRetry(20, 2).map((r) => r.streamKey)).toEqual(["b", "c"]);
+    expect(ledger.dueForRetry(20, 1).map((r) => r.streamKey)).toEqual(["b"]);
+    ledger.close();
+  });
+
   it("verify-manual 不写 nextAttemptAt → 永不进自动队列", () => {
     const p = path();
     const ledger = new SyncLedger(p);

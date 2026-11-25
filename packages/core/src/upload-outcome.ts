@@ -13,7 +13,9 @@
  *
  * 这里只做判定,不做 IO;调度(退避/到期唤醒/占闸)在调用方(reconciler / 节点 runner)。
  */
-import { classifyRetryableFailure, type RetryFailureCode } from "./processor.js";
+import { classifyRetryableFailure, isUncertainOutcome, type RetryFailureCode } from "./processor.js";
+import { isAppendAmbiguous } from "./upload-contract.js";
+import { isJobAbort } from "./job-abort.js";
 
 /** 失败处置:安全重试 / 幂等续跑 / 只读核验后转人工。 */
 export type UploadFailureClass = "safe-retry" | "resume-append" | "verify-manual";
@@ -50,8 +52,13 @@ const MANUAL = (code: UploadFailurePlan["code"], reason: string): UploadFailureP
  * 判定一次上传失败该怎么处置。**顺序敏感**:不确定/用户停止/凭据问题优先于一切重试。
  */
 export function classifyUploadOutcome(evidence: UploadFailureEvidence = {}): UploadFailurePlan {
-  if (evidence.userStop) return MANUAL("user-stop", "用户主动停止,不自动复活");
-  if (evidence.ambiguous) return MANUAL("ambiguous", "结果不确定(可能已提交),只读核验,禁止自动重发");
+  // 原始错误里带的**权威标记**优先于调用方传的布尔值(避免两套判定漂移):
+  // 用户停止 / append-ambiguous / 不确定回执 → 一律只读核验,永不自动重发。
+  const err = evidence.error;
+  if (evidence.userStop || isJobAbort(err)) return MANUAL("user-stop", "用户主动停止,不自动复活");
+  if (evidence.ambiguous || isAppendAmbiguous(err) || isUncertainOutcome(err)) {
+    return MANUAL("ambiguous", "结果不确定(可能已提交),只读核验,禁止自动重发");
+  }
 
   const retry = classifyRetryableFailure(evidence.error);
   if (retry.kind === "deterministic") {
@@ -73,12 +80,13 @@ export function classifyUploadOutcome(evidence: UploadFailureEvidence = {}): Upl
     return MANUAL("bv-unconfirmed", `已建稿 ${bv} 但逐P证据不完整,需只读回读确认后再补`);
   }
 
-  if (evidence.intentCommitted) {
-    // 请求发出去了但没拿到 BV:建稿可能已在平台侧成功,重发会造第二个稿。
-    return MANUAL("intent-unknown", "提交意图已落盘但未拿到 BV,需只读核验是否已建稿");
+  if (evidence.intentCommitted !== false) {
+    // 意图**已落盘或未知**(缺省 = 未知,旧数据 / 读不到)都不能证明「请求没发出」:
+    // 建稿可能已在平台侧成功,重发会造第二个稿 → 只读核验。
+    return MANUAL("intent-unknown", evidence.intentCommitted ? "提交意图已落盘但未拿到 BV,需只读核验" : "无法证明未提交(缺 intent 证据),先只读核验");
   }
 
-  // 既没 BV、也没落过提交意图 ⇒ 确定没有副作用,可以安全重发。
+  // 明确 `intentCommitted === false` 且没有 BV ⇒ 确定没有副作用,可以安全重发。
   return {
     class: "safe-retry",
     retryable: true,
