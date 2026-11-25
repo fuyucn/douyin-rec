@@ -14,6 +14,7 @@ import { TaskStore, resolveTaskWebhook } from "./store.js";
 import { resolveServeDbPath } from "./db.js";
 import { EventCenter } from "@drec/observability";
 import { drecRoot, procQueueDbPath, ensureHubConfigExample, ensureNodeIdentity, rootConfigDir, rootHubConfig, rootHubDir, resolveOutputDir } from "./paths.js";
+import { syncDbPathFor } from "./timezone.js";
 import { localSuppressedSourceTaskIds } from "./hub-store.js";
 import { refreshLocalRollingEffective } from "./rolling-effective.js";
 import { resolveNodeOutputFormat } from "./node-remux.js";
@@ -260,8 +261,8 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
             log: (m) => serveLog.info(m),
           })
         : null;
-    // hub 台账路径与 cli hubStarter 同一推导(<db>-sync.db)——「hub 任务」端点读它展示进度/ETA/日志。
-    const syncDbPath = dbPath.replace(/\.db$/, "-sync.db");
+    // 台账与控制库同文件(issue #750);仍走 syncDbPathFor 保持单一推导点。
+    const syncDbPath = syncDbPathFor(dbPath);
     // T4:台账变更监视 → SSE(/api/hub/stream)。
     // **只在 master 起**:sync 台账的唯一写端是本节点的 orchestrator,slave 上那份文件永远不变
     // → 白白空转 1s 定时器、永远不推。不注入则该路由显式 503(而非静默 404/空流)。

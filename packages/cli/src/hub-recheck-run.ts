@@ -16,8 +16,8 @@ import { rootConfigDir } from "@drec/app";
 import { join } from "node:path";
 
 export async function runRecheck(opts: { apply: boolean; keys?: string[]; cookies?: string }): Promise<RecheckOutcome[]> {
-  // 台账路径与 serve.ts 同推导(<db>-sync.db);cookies 用数据根下的 hub 权威那份。
-  const dbPath = resolveDbPath().replace(/\.db$/, "-sync.db");
+  // 台账与控制库同文件(issue #750):路径即主库路径,不再拼 -sync 后缀。
+  const dbPath = resolveDbPath();
   const cookies = opts.cookies ?? join(rootConfigDir(), "biliup", "cookies.json");
   const ledger = new SyncLedger(dbPath);
   // 默认只查 needs_manual(工具内部再按错误文本二次过滤,真故障自动跳过)。

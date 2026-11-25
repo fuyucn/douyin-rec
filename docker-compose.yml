@@ -74,10 +74,16 @@ services:
       #   DREC_ALLOWED_HOSTS=rec.example.com
       DREC_ALLOWED_HOSTS: ${DREC_ALLOWED_HOSTS:-}
     volumes:
-      # 单一挂载卷：所有持久数据(db/录像/config)都在它下面，容器重建不丢。宿主机侧目录名(docker-data/)
-      # 与容器内挂载点名(/output-data)不必一致——bind mount 只是把这块磁盘的两个入口对上,改容器内
-      # 名字不影响宿主机上的文件,也不需要迁移数据。
+      # 录像/配置/stage 走宿主机 bind mount(大文件,不需要 SQLite 的共享内存)。
+      # 宿主机侧目录名(docker-data/)与容器内挂载点名(/output-data)不必一致——bind mount 只是把这块磁盘的
+      # 两个入口对上,改容器内名字不影响宿主机上的文件,也不需要迁移数据。
       - ${DATA_ROOT:-./docker-data}:/output-data
+      # ⚠️ 库目录单独走 **named volume**(issue #750 / #747):SQLite 的 -wal/-shm 必须在同一个
+      # Linux VM 文件系统内,经 macOS bind mount 转发时宿主侧看不到 -shm → 周期性
+      # `disk I/O error [ERR_SQLITE_ERROR/errcode=522]`,API 503 且不自愈,只能重建容器。
+      # named volume 把主库 + -wal + -shm 全部留在 VM 里,从根上消除该故障。
+      # 备份:docker run --rm -v drec-db:/db -v $DATA_ROOT/backup:/bk alpine cp -a /db /bk
+      - drec-db:/output-data/db
       # VPS ssh key(只读)→ master 经 SshTransport 拉流时认证(配合镜像内 /root/.ssh/config)。
       - ./remote/vps.key:/root/.ssh/vps.key:ro
     # master 模式:serve 带 --hub → 自动读 /output-data/config/hub.config.json(docker-data/config/hub.config.json)。
@@ -85,5 +91,7 @@ services:
     command: ["node", "dist/douyin-rec.mjs", "task", "serve", "--port", "7860", "--host", "all", "--hub"]
 
 volumes:
+  # SQLite 控制库 + 处理队列库(issue #750):不落在宿主 bind mount 上,避免 -shm 视图分叉(#747)。
+  drec-db:
   # tailscale 持久 state（节点身份）→ 容器重启免重认证。
   tailscale-state:

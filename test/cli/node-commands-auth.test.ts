@@ -114,7 +114,7 @@ describe("node command internal auth (issue #641)", () => {
     const root = makeRoot();
     writeKeyFile(root, TOKEN);
     const { TaskStore } = await import("../../packages/app/src/store.js");
-    const store = new TaskStore(join(root, "db", "douyin-rec.db"));
+    const store = new TaskStore(join(root, "db", "drec-control.db"));
     store.addTask({ room: "https://live.douyin.com/555001", status: "running", enabled: true, anchorName: "A", managedBy: "hub" });
     store.addTask({ room: "https://live.douyin.com/555002", status: "running", enabled: true, anchorName: "B", managedBy: "hub" });
     store.addTask({ room: "https://live.douyin.com/555003", status: "running", enabled: true, managedBy: "hub" });

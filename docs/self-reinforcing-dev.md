@@ -144,7 +144,7 @@ python3 scripts/reinforce-metrics.py                      # 打印到 stdout
 python3 scripts/reinforce-metrics.py --days 7 --write     # 写 docs/metrics/2026-10-12.md
 python3 scripts/reinforce-metrics.py --node vps --node vps2
 python3 scripts/reinforce-metrics.py --db-container douyin-rec   # 显式指定容器；失败即报错退出
-python3 scripts/reinforce-metrics.py --db-container-path /output-data/db/douyin-rec-sync.db
+python3 scripts/reinforce-metrics.py --db-container-path /output-data/db/drec-control.db
 ```
 
 ### 指标记录

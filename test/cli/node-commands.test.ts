@@ -61,7 +61,7 @@ describe("NODE_COMMANDS", () => {
     expect(out.warnings![0]).toContain("旧 master 下发了已废弃的真 0 落盘");
     expect(out.warnings![0]).not.toContain("424242"); // no room number leaks
     const { TaskStore } = await import("../../packages/app/src/store.js");
-    const store = new TaskStore(join(root, "db", "douyin-rec.db"));
+    const store = new TaskStore(join(root, "db", "drec-control.db"));
     try {
       expect(store.listTasks()[0]).toMatchObject({ streamUpload: true, streamUploadSpool: true });
     } finally {
@@ -72,7 +72,7 @@ describe("NODE_COMMANDS", () => {
   it("apply-tasks: enabled=false + drain → pending 不硬停,交给节点 daemon 录到自然收播(issue #569)", async () => {
     const root = makeRoot();
     const { TaskStore } = await import("../../packages/app/src/store.js");
-    const store = new TaskStore(join(root, "db", "douyin-rec.db"));
+    const store = new TaskStore(join(root, "db", "drec-control.db"));
     store.addTask({ room: "https://live.douyin.com/777777", status: "running", enabled: true, anchorName: "A" });
     store.close();
     const spec = {
@@ -92,7 +92,7 @@ describe("NODE_COMMANDS", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(String(fetchSpy.mock.calls[0][0])).toContain("/drain?internal=1");
     fetchSpy.mockRestore();
-    const after = new TaskStore(join(root, "db", "douyin-rec.db"));
+    const after = new TaskStore(join(root, "db", "drec-control.db"));
     try {
       expect(after.listTasks()[0]).toMatchObject({ enabled: false, status: "running", drainRequested: true });
     } finally {
@@ -103,7 +103,7 @@ describe("NODE_COMMANDS", () => {
   it("apply-tasks: enabled=false 且无 drain → pending 仍立即硬停(旧行为)", async () => {
     const root = makeRoot();
     const { TaskStore } = await import("../../packages/app/src/store.js");
-    const store = new TaskStore(join(root, "db", "douyin-rec.db"));
+    const store = new TaskStore(join(root, "db", "drec-control.db"));
     store.addTask({ room: "https://live.douyin.com/888888", status: "running", enabled: true, anchorName: "A" });
     store.close();
     const spec = {
@@ -121,7 +121,7 @@ describe("NODE_COMMANDS", () => {
     expect(String(fetchSpy.mock.calls[0][0])).toContain("/api/tasks/");
     expect(String(fetchSpy.mock.calls[0][0])).toContain("/stop?internal=1");
     fetchSpy.mockRestore();
-    const after = new TaskStore(join(root, "db", "douyin-rec.db"));
+    const after = new TaskStore(join(root, "db", "drec-control.db"));
     try {
       expect(after.listTasks()[0]).toMatchObject({ enabled: false, drainRequested: false });
     } finally {
@@ -132,7 +132,7 @@ describe("NODE_COMMANDS", () => {
   it("cross-seam: master 的 drainRequested → desired spec → 节点 apply 走 /drain 并落库(issue #569 review P2)", async () => {
     const root = makeRoot();
     const { TaskStore } = await import("../../packages/app/src/store.js");
-    const store = new TaskStore(join(root, "db", "douyin-rec.db"));
+    const store = new TaskStore(join(root, "db", "drec-control.db"));
     store.addTask({ room: "https://live.douyin.com/999111", status: "running", enabled: true, anchorName: "A", managedBy: "hub" });
     store.close();
 
@@ -172,7 +172,7 @@ describe("NODE_COMMANDS", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(String(fetchSpy.mock.calls[0][0])).toContain("/drain?internal=1");
     fetchSpy.mockRestore();
-    const after = new TaskStore(join(root, "db", "douyin-rec.db"));
+    const after = new TaskStore(join(root, "db", "drec-control.db"));
     try {
       expect(after.listTasks()[0]).toMatchObject({ enabled: false, status: "running", drainRequested: true });
     } finally {
@@ -183,7 +183,7 @@ describe("NODE_COMMANDS", () => {
   it("apply-tasks: 点名删除(deleted:true)即使有排空标记也仍走 /stop(删除是显式意图)", async () => {
     const root = makeRoot();
     const { TaskStore } = await import("../../packages/app/src/store.js");
-    const store = new TaskStore(join(root, "db", "douyin-rec.db"));
+    const store = new TaskStore(join(root, "db", "drec-control.db"));
     store.addTask({ room: "https://live.douyin.com/999000", status: "running", enabled: true, anchorName: "A", managedBy: "hub" });
     store.close();
     const spec = {

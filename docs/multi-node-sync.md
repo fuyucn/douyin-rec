@@ -152,7 +152,7 @@ Transport 查询各 worker 的活动录制房间，按房间规则选出参与�
 
 ### 台账 sqlite 的并发口径（WAL）：宿主机禁止读写打开 `-sync.db`（issue #428）
 
-`<db>-sync.db`（master 侧台账）由 SyncLedger 切成 **WAL + busy_timeout**：写端有三个（serve 长连接、
+`drec-control.db`（master 侧台账）由 SyncLedger 切成 **WAL + busy_timeout**：写端有三个（serve 长连接、
 直播直传收尾的 record 子进程、删除房间历史），撞上他人写事务时等锁（至多约 5s）而不是报 BUSY。
 由此对**人工 / 脚本在宿主机上直接开库**有一条硬约束：
 
@@ -161,10 +161,10 @@ Transport 查询各 worker 的活动录制房间，按房间规则选出参与�
   `-readonly` 连接仍会写/重建 `-shm`，锁也不跨 VM 共享，可能干扰甚至损坏容器侧正在使用的台账。
   宿主**只允许** `file:<db>?immutable=1` 只读快照（不建 `-shm`、不加锁；可能读到旧/撕裂数据，仅作参考）。
 - **查台账**进容器只读（与 [dev-multi-node.md](./dev-multi-node.md)「台账状态」同款；`douyin-rec` = docker-compose 的 container_name）：
-  `docker exec douyin-rec node -e "const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync('/output-data/db/douyin-rec-sync.db',{readOnly:true});console.log(JSON.stringify(d.prepare('select streamKey,state,bv,error from sync_jobs').all()))"`；
+  `docker exec douyin-rec node -e "const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync('/output-data/db/drec-control.db',{readOnly:true});console.log(JSON.stringify(d.prepare('select streamKey,state,bv,error from sync_jobs').all()))"`；
   `scripts/reinforce-metrics.py` 默认走这条通道（`--db-container` / `--db-container-path` 可改）。
 - **备份在容器内执行**（`VACUUM INTO` 产出一致的单文件快照，目标文件须不存在）：
-  `docker exec douyin-rec node -e "const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync('/output-data/db/douyin-rec-sync.db',{readOnly:true});d.exec(\"VACUUM INTO '/output-data/db/backup-$(date +%Y%m%d%H%M%S).db'\");d.close()"`
+  `docker exec douyin-rec node -e "const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync('/output-data/db/drec-control.db',{readOnly:true});d.exec(\"VACUUM INTO '/output-data/db/backup-$(date +%Y%m%d%H%M%S).db'\");d.close()"`
   （备份文件落在挂载目录，宿主侧直接拷走；`$(date …)` 由宿主 shell 展开）。
   或先停 `serve`，再把主文件 **连同 `-wal`** 一起拷走；**只拷主文件会漏 `-wal`** —— WAL 里已提交但未
   checkpoint 的事务全丢，恢复出来的是旧账。

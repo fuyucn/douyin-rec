@@ -18,7 +18,7 @@ describe("applyTimezoneFromDb 无库(issue #158)", () => {
     delete process.env.TZ;
     expect(applyTimezoneFromDb(join(mkdtempSync(join(tmpdir(), "tzdb-")), "none.db"))).toBe("Asia/Shanghai");
   });
-  it("dbPathForDataRoot = <dataRoot>/db/douyin-rec.db", () => {
-    expect(dbPathForDataRoot("/r")).toBe(join("/r", "db", "douyin-rec.db"));
+  it("dbPathForDataRoot = <dataRoot>/db/drec-control.db", () => {
+    expect(dbPathForDataRoot("/r")).toBe(join("/r", "db", "drec-control.db"));
   });
 });

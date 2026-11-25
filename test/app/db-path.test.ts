@@ -45,7 +45,7 @@ describe("默认数据根（生产约定）", () => {
   it("设了 DOUYIN_REC_ROOT 就按 env（默认值不抢戏）", () => {
     const saved = process.env.DOUYIN_REC_ROOT;
     process.env.DOUYIN_REC_ROOT = "/tmp/somewhere";
-    try { expect(resolveDbPath(undefined)).toBe("/tmp/somewhere/db/douyin-rec.db"); }
+    try { expect(resolveDbPath(undefined)).toBe("/tmp/somewhere/db/drec-control.db"); }
     finally { if (saved === undefined) delete process.env.DOUYIN_REC_ROOT; else process.env.DOUYIN_REC_ROOT = saved; }
   });
 });
@@ -66,10 +66,10 @@ describe("serve database path resolution", () => {
       : envDb
         ? resolve(temp, envDb)
         : rootName
-          ? resolve(temp, rootName, "db/douyin-rec.db")
-          : resolve(DEFAULT_ROOT, "db/douyin-rec.db");
+          ? resolve(temp, rootName, "db/drec-control.db")
+          : resolve(DEFAULT_ROOT, "db/drec-control.db");
     expect(resolveServeDbPath(explicit)).toBe(expected);
-    expect(resolveDbPath(explicit)).toBe(explicit ?? (envDb ? join(temp, envDb) : rootName ? join(temp, rootName, "db/douyin-rec.db") : join(DEFAULT_ROOT, "db/douyin-rec.db")));
+    expect(resolveDbPath(explicit)).toBe(explicit ?? (envDb ? join(temp, envDb) : rootName ? join(temp, rootName, "db/drec-control.db") : join(DEFAULT_ROOT, "db/drec-control.db")));
   });
 
   it("fake recording child receives serve's resolved path without mutating the parent env", async () => {
@@ -123,12 +123,13 @@ describe("stream-upload ledger database path", () => {
       }
       expect(recordStreamUpload).toHaveBeenCalledTimes(cases.length);
       const calls = vi.mocked(recordStreamUpload).mock.calls;
+      // issue #750:台账与控制库同文件,不再有 -sync 兄弟文件。
       expect(calls.map(([input]) => input.syncDbPath)).toEqual([
-        join(DEFAULT_ROOT, "db/douyin-rec-sync.db"),
-        resolve(temp, "root/db/douyin-rec-sync.db"),
-        resolve(temp, "env-sync.db"),
-        resolve(temp, "serve-sync.db"),
-        resolve(temp, "explicit-sync.db"),
+        join(DEFAULT_ROOT, "db/drec-control.db"),
+        resolve(temp, "root/db/drec-control.db"),
+        resolve(temp, "env.db"),
+        resolve(temp, "serve.db"),
+        resolve(temp, "explicit.db"),
       ]);
     } finally {
       process.chdir(previousCwd);

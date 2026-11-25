@@ -8,9 +8,10 @@
  * DB path resolution: explicit arg > env DOUYIN_REC_DB > <DOUYIN_REC_ROOT ?? DEFAULT_ROOT>/db/douyin-rec.db.
  */
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { existsSync, mkdirSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { rootDbPath } from "./paths.js";
+import { mergeLegacyDatabases } from "./db-merge.js";
 
 /** Resolve the db path: explicit arg > env DOUYIN_REC_DB > <root>/db/douyin-rec.db (root always resolves, see paths.ts). */
 export function resolveDbPath(path?: string): string {
@@ -39,8 +40,41 @@ export function openDb(path?: string): DatabaseSync {
   // 节点侧 task serve 常驻持库，hub 的 _inventory/_apply-tasks 会以第二连接短时打开。
   // 不设 busy_timeout 时一旦撞上写事务就立刻 SQLITE_BUSY，导致该轮对账把节点当成缺席。
   db.exec("PRAGMA busy_timeout = 5000");
+  if (p !== ":memory:") {
+    // 控制库统一 PRAGMA(issue #750):WAL + NORMAL。SQLite 在绑定挂载上跑 WAL 会因 -shm 视图分叉报
+    // IOERR_SHORT_READ(#747),所以库目录必须是 named volume(见 docker-compose.yml);这里只管参数一致。
+    try {
+      db.exec("PRAGMA journal_mode = WAL");
+      db.exec("PRAGMA synchronous = NORMAL");
+    } catch { /* 只读介质 / 内存库:保持原状,后续写会显式报错 */ }
+  }
   migrate(db);
+  if (p !== ":memory:") mergeLegacyOnce(db, p);
   return db;
+}
+
+/** 已尝试过历史库合并的控制库路径(同一进程内不重复迁移;迁移本身也幂等)。 */
+const mergeAttempted = new Set<string>();
+
+/**
+ * 把历史的兄弟库(tasks/台账/统计)一次性并进控制库(issue #750)。
+ * 失败**向上抛**(fail-closed):宁可启动失败并看到原因,也不能让「看起来迁完其实没迁」的状态上线。
+ */
+function mergeLegacyOnce(db: DatabaseSync, dbPath: string): void {
+  const abs = resolve(dbPath);
+  if (mergeAttempted.has(abs)) return;
+  mergeAttempted.add(abs);
+  const dir = dirname(abs);
+  const base = basename(abs);
+  // 自定义路径(DOUYIN_REC_DB 指到别处):旧库是同目录的 douyin-rec*.db / room-stats.db。
+  const legacy = base === "drec-control.db"
+    ? { main: join(dir, "douyin-rec.db"), sync: join(dir, "douyin-rec-sync.db"), stats: join(dir, "room-stats.db") }
+    : { main: join(dir, "douyin-rec.db"), sync: join(dir, "douyin-rec-sync.db"), stats: join(dir, "room-stats.db") };
+  if (!existsSync(legacy.main) && !existsSync(legacy.sync) && !existsSync(legacy.stats)) return;
+  const outcome = mergeLegacyDatabases({ db, legacy, log: (m) => console.log(m) });
+  if (outcome) {
+    console.log(`[db-merge] 已并入 ${outcome.mergedFiles.join(", ")};备份:${outcome.backups.join(", ")}`);
+  }
 }
 
 /** Idempotent schema creation + column backfill. Safe to run on every open. */

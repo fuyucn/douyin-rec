@@ -390,7 +390,12 @@ node dist/douyin-rec.mjs _apply-tasks <dataRoot> <base64>   # 远端应用 maste
 `dist/douyin-rec.mjs`）。vitest 无法 import 这些包 → 平台实例**零单测**，
 靠 store/hub/orchestrator 测 + `test/setup.ts` 注册假平台 + 真实录制覆盖。
 
-📁 **数据目录**：db / recordings / stage / logs（hub 场次日志，永久保留，不在 stage 内）/ config（含 hub 规则、biliup cookies）全收在**一个数据根**
+📁 **数据目录**：db / recordings / stage / logs（hub 场次日志，永久保留，不在 stage 内）/ config（含 hub 规则、biliup cookies）全收在**一个数据根**。
+**库里只有一个控制库**：`<root>/db/drec-control.db`（tasks/settings/merge_jobs/hub_rules + hub 台账 `sync_*` + `room_sessions` + `upload_limits`），
+外加**保持独立**的 `<root>/db/proc-queue.db`（多进程 claim/租约，独占一条 WAL，避免与业务写互抢）。
+历史上是 4 个库（`douyin-rec.db` / `douyin-rec-sync.db` / `room-stats.db` / `proc-queue.db`），`openDb()` 首次打开时会**自动并入控制库**（旧文件原样保留，可人工删除）；见 issue #750。
+**容器里 `db/` 必须挂 named volume（`drec-db`），不能走宿主 bind mount**：SQLite 的 `-wal`/`-shm` 经 macOS bind mount 转发时宿主侧看不到 `-shm`，
+会周期性报 `disk I/O error [ERR_SQLITE_ERROR/errcode=522]` → `/api/tasks` 503 且不自愈（#747）。
 
 📂 **房间目录布局**（`<名>_<平台>_<房间号>/`，节点本地开关，默认关）：规则、开关文件、回滚与上线顺序见 `docs/output-layout.md`；路径只经 core 的输出路径解析模块，不要手拼。
 `DOUYIN_REC_ROOT` 下（见 `packages/app/src/paths.ts`），不散落项目里。**未设时默认「用户主目录下的 `drec/`」**

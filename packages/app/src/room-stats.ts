@@ -51,9 +51,13 @@ export interface StoredSession {
   lastSeenAt: number;
 }
 
-/** `<dataRoot>/db/room-stats.db`。 */
+/**
+ * 统计表所在的库 = **控制库**(`<dataRoot>/db/drec-control.db`)。
+ * 曾经单独一个 `room-stats.db`,2026-11-25 起与控制库合并(见 issue #750):少一份 WAL/-shm、
+ * 少一个连接与备份点,也让「房间统计」与任务/台账用同一把锁以外的一致快照。
+ */
 export function roomStatsDbPath(dataRoot: string): string {
-  return `${dataRoot}/db/room-stats.db`;
+  return `${dataRoot}/db/drec-control.db`;
 }
 
 // 每个 reason 的最近一次告警时刻；5 分钟内同 reason 不重复刷屏，避免库长期不可用时日志被占满，

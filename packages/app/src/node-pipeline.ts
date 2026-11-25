@@ -29,7 +29,7 @@ import { procQueueDbPath, rootBiliupCookies, rootDbPath, rootStageDir, readOutpu
  * 历史上等于「不限速投稿」→ 与 master 侧互不感知地猛传 → 反复撞 601/21566 风控。
  * 现在节点侧走 **core 的 UploadGate(与 master 同一判定实现)**,并用**同一个账号键**
  * (`bilibili:<DedeUserID>`,从本机 biliup cookies 解析)—— 同账号在 master 与节点上是**同一个限流桶**;
- * 状态落在**节点本地** `<dataRoot>/db/douyin-rec.db` 的 `upload_limits` 表(跨重启保留)。
+ * 状态落在**节点本地** `<dataRoot>/db/drec-control.db` 的 `upload_limits` 表(跨重启保留)。
  *
  * 诚实边界:master 与节点是两台机器,**不共享文件系统** → 各持久化各的;跨节点的**即时**互斥
  * 需要 master→节点下发冷却(后续里程碑)。本任务保证:两侧都不再无限速、各自重启不丢冷却、
@@ -68,7 +68,7 @@ export const NODE_UPLOAD_RATE_LIMIT = 5;
 export const NODE_UPLOAD_WINDOW_MS = 600_000;
 export const NODE_UPLOAD_COOLDOWN_MS = 1_800_000;
 
-/** 装配节点侧 UploadGate;store 缺省打开 `<dataRoot>/db/douyin-rec.db`。 */
+/** 装配节点侧 UploadGate;store 缺省打开 `<dataRoot>/db/drec-control.db`。 */
 export function openNodeUploadGate(opts: NodeUploadGateOpts = {}): UploadGate {
   const warn = opts.warn ?? ((m: string) => console.error(m));
   return new UploadGate({

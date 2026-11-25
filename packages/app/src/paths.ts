@@ -91,9 +91,32 @@ export function ensureHubConfigExample(): string | undefined {
   return path;
 }
 
-/** <root>/db/douyin-rec.db。 */
+/** 控制库文件名。tasks/settings/merge_jobs + hub 台账(sync_*)+ 房间统计(room_sessions) 全在这**一个**文件里。 */
+export const CONTROL_DB_NAME = "drec-control.db";
+
+/** <root>/db —— 库目录(容器里挂的是 named volume,不是宿主 bind mount)。 */
+export function dbDir(): string {
+  return join(drecRoot(), "db");
+}
+
+/** <root>/db/drec-control.db —— 唯一控制库(tasks、settings、merge_jobs、hub_rules、sync_* 全表、room_sessions、upload_limits)。 */
 export function rootDbPath(): string {
-  return join(drecRoot(), "db", "douyin-rec.db");
+  return join(dbDir(), CONTROL_DB_NAME);
+}
+
+/**
+ * 合并前的旧库(一次性迁移的输入;迁移后改名为 `<name>.merged-<ts>` 留着回滚,**不删**)。
+ * - `douyin-rec.db`: tasks/settings/merge_jobs/hub_rules/upload_limits
+ * - `douyin-rec-sync.db`: sync_* 7 表 + upload_limits
+ * - `room-stats.db`: room_sessions
+ */
+export function legacyDbPaths(): { main: string; sync: string; stats: string } {
+  const d = dbDir();
+  return {
+    main: join(d, "douyin-rec.db"),
+    sync: join(d, "douyin-rec-sync.db"),
+    stats: join(d, "room-stats.db"),
+  };
 }
 
 /** <root>/db/proc-queue.db —— 处理任务表;路径单点在 `@drec/proc-queue`,此处只转发(不受 `--db` 覆盖)。 */
@@ -101,7 +124,7 @@ export function procQueueDbPath(): string {
   return procQueueDbPathOf(drecRoot());
 }
 
-/** <root>/db/room-stats.db —— 直播统计(plans/041);路径单点在 `../room-stats.ts`。 */
+/** 直播统计(plans/041)现在与控制库同文件 → 返回同一路径(不再单独 `room-stats.db`)。 */
 export function rootStatsDbPath(): string {
   return roomStatsDbPath(drecRoot());
 }

@@ -50,7 +50,7 @@ describe.skipIf(!existsSync(BUNDLE))("独立 CLI 入口应用设置时区(issue 
   it("隐藏命令带数据根:按 <dataRoot>/db 的时区,不读默认库路径(issue #158)", () => {
     const root = mkdtempSync(join(tmpdir(), "cli-tz-root-"));
     mkdirSync(join(root, "db"), { recursive: true });
-    const s = new TaskStore(join(root, "db", "douyin-rec.db"));
+    const s = new TaskStore(join(root, "db", "drec-control.db"));
     s.setSetting("timezone", "Asia/Tokyo");
     s.db.close();
     // ssh 会话形态:无 DOUYIN_REC_DB / DOUYIN_REC_ROOT,cwd 下无默认库;宿主机 TZ 为美西
