@@ -3,6 +3,9 @@
 # 用法：
 #   cp .env.example .env   # 改 TZ / 宿主机路径 / 端口 / Discord
 #   # 部署最新版（GIT_SHA 让 About 页显示正确版本号 0.0.0-{commit后6位};不传则 0.0.0-dev）：
+#   # 已有部署请先停旧容器再起：db-seed 会把宿主机 db/ 一次性灌进 named volume(issue #750),
+#   # 旧容器还在写库时热拷 .db/-wal 可能不一致。
+#   docker compose stop douyin-rec
 #   GIT_SHA=$(git rev-parse HEAD) docker compose up -d --build
 #   docker compose logs -f            # 看日志
 #   docker compose down               # 停
@@ -47,8 +50,10 @@ services:
             console.log("[db-seed] integrity ok: " + f);
           }
         '
-        mv /db/.seed-tmp/* /db/ 2>/dev/null || true
-        rm -rf /db/.seed-tmp
+        # 发布阶段也要 fail-closed:任何一个文件 mv 失败就退出(临时目录保留、不写标记),
+        # 主服务因 depends_on 条件不满足而不会启动,下次 up 重做。
+        for f in $$(ls -A /db/.seed-tmp); do mv "/db/.seed-tmp/$$f" "/db/$$f"; done
+        rmdir /db/.seed-tmp
         : > /db/.seed-complete
         echo "[db-seed] 已把宿主机 db/ 灌入 named volume drec-db（含完整性校验）"
 

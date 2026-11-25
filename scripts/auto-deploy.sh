@@ -70,9 +70,10 @@ if wait_idle local "$MAXS"; then
   say "  master 空闲 → 重建镜像"
   if [[ $DRY == 1 ]]; then say "  [dry] 跳过 docker compose up"; else
     # 先停服务再起(issue #750):库目录换成 named volume 后,`db-seed` 会在起容器前把宿主机 db/ 灌进卷;
-    # 旧容器还在写库时热拷 `.db`/`-wal` 可能不一致。这里已经等过空闲,先停一次是安全的。
-    docker compose stop douyin-rec >> "$LOG" 2>&1 || true
-    if GIT_SHA=$(git rev-parse HEAD) docker compose up -d --build >> "$LOG" 2>&1; then
+    # 旧容器还在写库时热拷 `.db`/`-wal` 可能不一致。**停不下来就中止本次更新**(不能带着写库的旧容器去灌库)。
+    if ! docker compose stop douyin-rec >> "$LOG" 2>&1; then
+      say "  ✗ 停止旧容器失败 → 跳过 master 更新"; note "master 未更新(停止失败)"
+    elif GIT_SHA=$(git rev-parse HEAD) docker compose up -d --build >> "$LOG" 2>&1; then
       say "  ✓ master 已更新"; sleep 15
     else
       say "  ✗ master 重建失败(见 $LOG)"; note "master 重建失败"
