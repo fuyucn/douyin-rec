@@ -18,7 +18,8 @@ const WAL_RETRIES = 200;
  */
 const EXPECTED_SCHEMA: ReadonlyArray<readonly [string, readonly string[]]> = [
   ["sync_jobs", ["streamKey", "state", "winnerWorker", "bv", "error", "fails", "startMs", "outputStem",
-    "followups", "uploadPlan", "uploadStatus", "ackedAt", "ackNote", "seasonState", "updatedAt"]],
+    "followups", "uploadPlan", "uploadStatus", "ackedAt", "ackNote", "seasonState", "failureClass", "nextAttemptAt",
+    "updatedAt"]],
   ["sync_candidates", ["streamKey", "workerId", "coverage", "durationSec", "startMs", "endMs",
     "totalGapSec", "isWinner", "danmuCount", "updatedAt"]],
   ["sync_job_events", ["streamKey", "state", "at"]],
@@ -96,6 +97,14 @@ export interface JobRow {
    * "done" = the archive is confirmed in the section; "failed" = a definite failure, surfaced to a human.
    */
   seasonState?: "pending" | "done" | "failed" | null;
+  /**
+   * 上传失败的处置分类(issue #752,见 core `classifyUploadOutcome`):
+   * `safe-retry` = 无副作用可重试;`resume-append` = 已建稿且逐P证据完整、只补缺段;
+   * `verify-manual` = 结果不确定,只能只读核验或人工。NULL = 未分类(旧行,按人工处理)。
+   */
+  failureClass?: "safe-retry" | "resume-append" | "verify-manual" | null;
+  /** 下一次自动唤醒时刻(ms;仅 safe-retry / resume-append 有意义)。NULL = 不排队。 */
+  nextAttemptAt?: number | null;
   updatedAt: number;
 }
 
@@ -173,6 +182,9 @@ export class SyncLedger {
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN ackedAt INTEGER"); } catch { /* column exists */ }
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN ackNote TEXT"); } catch { /* column exists */ }
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN seasonState TEXT"); } catch { /* column exists */ }
+    // 上传失败处置(issue #752):分类结果 + 下一次该被唤醒的时刻(ms)。旧行 NULL = 未分类(等价「未知 → 人工」)。
+    try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN failureClass TEXT"); } catch { /* column exists */ }
+    try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN nextAttemptAt INTEGER"); } catch { /* column exists */ }
     // 选优候选明细:每场每节点一行,记 coverage/时长/起止/缺口 + 是否胜出,供事后复盘选优依据。
     this.db.exec(`CREATE TABLE IF NOT EXISTS sync_candidates(
       streamKey TEXT NOT NULL, workerId TEXT NOT NULL,
@@ -358,6 +370,30 @@ export class SyncLedger {
     if (this.get(streamKey)?.state === "done") return false;
     return this.setState(streamKey, state, patch);
   }
+  /**
+   * 记录上传失败的处置计划(issue #752):分类 + 下次唤醒时刻。
+   * 只写这两列,不改 state(状态由 `setState` 按分类决定:retrying / needs_manual)。
+   */
+  setFailurePlan(streamKey: string, plan: { failureClass: JobRow["failureClass"]; nextAttemptAt?: number | null }): boolean {
+    const r = this.db.prepare("UPDATE sync_jobs SET failureClass=?, nextAttemptAt=?, updatedAt=? WHERE streamKey=?")
+      .run(plan.failureClass ?? null, plan.nextAttemptAt ?? null, this.now(), streamKey);
+    return Number(r.changes) > 0;
+  }
+
+  /** 清掉处置计划(收口/转入新阶段时调用,避免过期唤醒)。 */
+  clearFailurePlan(streamKey: string): boolean {
+    const r = this.db.prepare("UPDATE sync_jobs SET failureClass=NULL, nextAttemptAt=NULL, updatedAt=? WHERE streamKey=?")
+      .run(this.now(), streamKey);
+    return Number(r.changes) > 0;
+  }
+
+  /** 到期该被唤醒的 job(按 nextAttemptAt 升序;喂给调度 tick)。 */
+  dueForRetry(now = this.now(), limit = 20): JobRow[] {
+    return (this.db.prepare(
+      "SELECT * FROM sync_jobs WHERE nextAttemptAt IS NOT NULL AND nextAttemptAt <= ? ORDER BY nextAttemptAt LIMIT ?",
+    ).all(now, limit) as unknown as JobRow[]);
+  }
+
   markDone(streamKey: string, bv: string): boolean {
     return this.transition(streamKey, "done", "bv=?, error=NULL", [bv]);
   }
