@@ -63,6 +63,14 @@ describe("classifyUploadOutcome", () => {
     expect(p.code).toBe("intent-unknown");
   });
 
+  it("错误带 uncertain 回执标记(pending 未确认)→ 只读核验,不自动重发", () => {
+    const err = Object.assign(new Error("upload pending"), { uncertain: true });
+    const p = classifyUploadOutcome({ intentCommitted: false, error: err });
+    expect(p.class).toBe("verify-manual");
+    expect(p.code).toBe("ambiguous");
+    expect(p.retryable).toBe(false);
+  });
+
   it("append-ambiguous 永远不自动重发", () => {
     const p = classifyUploadOutcome({ ambiguous: true, intentCommitted: true, bv: "BV1abc", partsConfirmed: true });
     expect(p.class).toBe("verify-manual");

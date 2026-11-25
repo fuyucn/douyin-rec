@@ -40,17 +40,59 @@ describe("SyncLedger 失败处置计划(failureClass / nextAttemptAt)", () => {
     ledger.close();
   });
 
-  it("人工分类即使带了 nextAttemptAt 也不进队列;收口后计划被清掉", () => {
+  it("人工分类带时间戳会被归一化成 NULL(直接断言落库值)", () => {
     const p = path();
     const ledger = new SyncLedger(p);
     ledger.upsertPending("k1");
     ledger.setFailurePlan("k1", { failureClass: "verify-manual", nextAttemptAt: 10 });
-    expect(ledger.dueForRetry(1e9)).toEqual([]);
-    // 可重试行在收口(done / needs_manual)后也不许复活
-    ledger.upsertPending("k2");
-    ledger.setFailurePlan("k2", { failureClass: "safe-retry", nextAttemptAt: 10 });
-    ledger.setState("k2", "done", {});
-    expect(ledger.dueForRetry(1e9)).toEqual([]);
+    expect(ledger.get("k1")?.nextAttemptAt ?? null).toBeNull();
+    // 未分类(NULL)同样不许留时间戳
+    ledger.setFailurePlan("k1", { failureClass: null, nextAttemptAt: 10 });
+    expect(ledger.get("k1")?.nextAttemptAt ?? null).toBeNull();
+    ledger.close();
+  });
+
+  it("即使手工写入了更早到期的人工/未分类行,limit 也不会被它们占住", () => {
+    const p = path();
+    const ledger = new SyncLedger(p);
+    ledger.upsertPending("legal");
+    ledger.upsertPending("manual");
+    ledger.upsertPending("unclassified");
+    ledger.upsertPending("finished");
+    // 绕过 setFailurePlan 的归一化,直接写库模拟历史脏数据(更早到期)
+    ledger.setState("legal", "failed", { error: "boom" });
+    ledger.setFailurePlan("legal", { failureClass: "safe-retry", nextAttemptAt: 500 });
+    ledger.setFailurePlan("manual", { failureClass: "verify-manual" });
+    ledger.setFailurePlan("unclassified", { failureClass: null });
+    ledger.setFailurePlan("finished", { failureClass: "safe-retry" });
+    const db = new DatabaseSync(p);
+    db.prepare("UPDATE sync_jobs SET failureClass='verify-manual', nextAttemptAt=1, state='failed' WHERE streamKey='manual'").run();
+    db.prepare("UPDATE sync_jobs SET failureClass=NULL, nextAttemptAt=1, state='failed' WHERE streamKey='unclassified'").run();
+    db.prepare("UPDATE sync_jobs SET failureClass='safe-retry', nextAttemptAt=1, state='done' WHERE streamKey='finished'").run();
+    db.close();
+    // 更早到期的三条都不合格 → limit=1 仍能取到合法那条
+    expect(ledger.dueForRetry(1000, 1).map((r) => r.streamKey)).toEqual(["legal"]);
+    ledger.close();
+  });
+
+  it("resume-append + retrying 是可调度组合;收口与失败的状态对计划的影响各不相同", () => {
+    const p = path();
+    const ledger = new SyncLedger(p);
+    ledger.upsertPending("r1");
+    ledger.setState("r1", "retrying", {});
+    ledger.setFailurePlan("r1", { failureClass: "resume-append", nextAttemptAt: 5 });
+    expect(ledger.dueForRetry(10).map((r) => r.streamKey)).toEqual(["r1"]);
+
+    // needs_manual / done 收口 → 两列都清掉
+    ledger.setState("r1", "needs_manual", { error: "x" });
+    expect(ledger.get("r1")?.failureClass ?? null).toBeNull();
+    expect(ledger.get("r1")?.nextAttemptAt ?? null).toBeNull();
+
+    // failed 是「可重试」的中间态:换 markFailed 之后计划应保留(等调度决定)
+    ledger.upsertPending("r2");
+    ledger.setFailurePlan("r2", { failureClass: "safe-retry", nextAttemptAt: 7 });
+    ledger.setFailurePlan("r2", { failureClass: "safe-retry", nextAttemptAt: 7 });
+    expect(ledger.get("r2")?.nextAttemptAt).toBe(7);
     ledger.close();
   });
 
