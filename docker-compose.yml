@@ -10,6 +10,27 @@
 # 数据都在挂载卷上（DB / 录像 / config），容器重建不丢。
 
 services:
+  # 一次性把 **宿主机上已有的 db/** 灌进 named volume(issue #750)。
+  # 为什么必须有这一步:库改成 named volume 后,`${DATA_ROOT}/db` 会被卷**遮住**;若不先灌库,
+  # 升级后会看到空库(任务/台账/统计全"消失",还能正常跑,最危险的那种静默)。
+  # 幂等:卷里已有内容就什么都不做。用同镜像的 node 执行(不额外拉镜像)。
+  db-seed:
+    image: node:24-bookworm-slim
+    container_name: drec-db-seed
+    restart: "no"
+    volumes:
+      - drec-db:/db
+      - ${DATA_ROOT:-./docker-data}/db:/src:ro
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        if [ -n "$$(ls -A /db 2>/dev/null)" ]; then echo "[db-seed] 卷内已有数据，跳过"; exit 0; fi
+        if [ ! -d /src ] || [ -z "$$(ls -A /src 2>/dev/null)" ]; then echo "[db-seed] 宿主机 db/ 为空，跳过"; exit 0; fi
+        cp -a /src/. /db/
+        echo "[db-seed] 已把宿主机 db/ 灌入 named volume drec-db"
+
   # Tailscale sidecar：容器内 tailscaled，让 docker 当 master 时够得到 VPS（100.x）。
   # 持久化：state 卷 + .env 里 Reusable TS_AUTHKEY → 容器重启不用重认证。
   # douyin-rec 经 network_mode: service:tailscale 共享它的 netns，故 Web UI 端口绑在本服务上。
@@ -88,10 +109,15 @@ services:
       - ./remote/vps.key:/root/.ssh/vps.key:ro
     # master 模式:serve 带 --hub → 自动读 /output-data/config/hub.config.json(docker-data/config/hub.config.json)。
     # issue #600: 容器内显式监听所有网卡(端口经 tailscale sidecar 发布);非回环监听由服务端强制鉴权。
+    depends_on:
+      db-seed:
+        condition: service_completed_successfully
     command: ["node", "dist/douyin-rec.mjs", "task", "serve", "--port", "7860", "--host", "all", "--hub"]
 
 volumes:
   # SQLite 控制库 + 处理队列库(issue #750):不落在宿主 bind mount 上,避免 -shm 视图分叉(#747)。
+  # 固定卷名(不带 compose 项目前缀),这样备份/回滚命令与文档里的 `drec-db` 永远指同一个卷。
   drec-db:
+    name: drec-db
   # tailscale 持久 state（节点身份）→ 容器重启免重认证。
   tailscale-state:

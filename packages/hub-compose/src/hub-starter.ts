@@ -542,7 +542,8 @@ export function createHubStarter(deps: HubStarterDeps): HubStarter {
           : {}),
         observeInventory: (workerId, sessions) => {
           try {
-            recordRoomSessions(rootStatsDbPath(), workerId, sessions);
+            // 与控制库同一文件(issue #750);显式 `--db` 时也必须跟着走,否则统计落到第二个库。
+            recordRoomSessions(dbPath, workerId, sessions);
           } catch (e) {
             console.warn(`[stats] ${workerId} 采集失败:${String((e as Error)?.message ?? e)}`);
           }

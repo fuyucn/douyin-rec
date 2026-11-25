@@ -9,9 +9,9 @@
  */
 import { DatabaseSync } from "node:sqlite";
 import { existsSync, mkdirSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { rootDbPath } from "./paths.js";
-import { mergeLegacyDatabases } from "./db-merge.js";
+import { legacyCandidates, mergeLegacyDatabases } from "./db-merge.js";
 
 /** Resolve the db path: explicit arg > env DOUYIN_REC_DB > <root>/db/douyin-rec.db (root always resolves, see paths.ts). */
 export function resolveDbPath(path?: string): string {
@@ -64,14 +64,16 @@ function mergeLegacyOnce(db: DatabaseSync, dbPath: string): void {
   const abs = resolve(dbPath);
   if (mergeAttempted.has(abs)) return;
   mergeAttempted.add(abs);
-  const dir = dirname(abs);
-  const base = basename(abs);
-  // 自定义路径(DOUYIN_REC_DB 指到别处):旧库是同目录的 douyin-rec*.db / room-stats.db。
-  const legacy = base === "drec-control.db"
-    ? { main: join(dir, "douyin-rec.db"), sync: join(dir, "douyin-rec-sync.db"), stats: join(dir, "room-stats.db") }
-    : { main: join(dir, "douyin-rec.db"), sync: join(dir, "douyin-rec-sync.db"), stats: join(dir, "room-stats.db") };
+  // 旧库候选:同目录默认名 + 显式 `--db` 派生名(见 legacyCandidates)。
+  const legacy = legacyCandidates(abs);
   if (!existsSync(legacy.main) && !existsSync(legacy.sync) && !existsSync(legacy.stats)) return;
-  const outcome = mergeLegacyDatabases({ db, legacy, log: (m) => console.log(m) });
+  let outcome;
+  try {
+    outcome = mergeLegacyDatabases({ db, controlPath: abs, legacy, log: (m) => console.log(m) });
+  } catch (e) {
+    mergeAttempted.delete(abs); // 失败不缓存:同进程重试还能再迁(schema 落库后重试是幂等的)
+    throw e;
+  }
   if (outcome) {
     console.log(`[db-merge] 已并入 ${outcome.mergedFiles.join(", ")};备份:${outcome.backups.join(", ")}`);
   }

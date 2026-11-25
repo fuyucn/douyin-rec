@@ -222,6 +222,12 @@ export function readStatsSessions(dbPath: string, sinceMs: number): StoredSessio
   if (!existsSync(dbPath)) return [];
   let db: DatabaseSync | undefined;
   try {
+    // 控制库里还没有 `room_sessions`(全新实例、尚未采集)是**健康空态**,不是读错。
+    // 直接把表查一遍:不存在就返回空,存在才走 readOnly 打开(issue #750 审查 F10)。
+    const probe = new DatabaseSync(dbPath, { readOnly: true });
+    const hasTable = probe.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='room_sessions'`).get() !== undefined;
+    probe.close();
+    if (!hasTable) return [];
     db = openDb(dbPath, true);
     const rows = db.prepare(`
       SELECT workerId, platform, roomSlug, startMs, endMs, durationSec, gapSec, danmuCount, bytes, title, lastSeenAt
