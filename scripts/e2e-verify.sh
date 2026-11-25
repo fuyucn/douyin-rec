@@ -6,7 +6,7 @@
 #   scripts/e2e-verify.sh keep     # 隔离断言 → 只 stop 容器,保留数据与网络(事后排查;再 up 可续)
 #   scripts/e2e-verify.sh up --egress   # egress 验收档(env DREC_EGRESS=1 等价):controller 放行外网 + 真 biliup + 只读真 cookies
 #   scripts/e2e-verify.sh run egress-record|egress-submit   # 仅 egress 档:真房间录一小段 / 真投稿(需显式确认,见 docs §10)
-#   scripts/e2e-verify.sh up --mirror   # mirror 档(env DREC_MIRROR=1 等价):从 docker-data 只读复制 prd 数据(真 cookies/任务/hub 规则,任务全关),三节点放行外网;测试时才 up,用完 keep/down
+#   scripts/e2e-verify.sh up --mirror   # mirror 档(env DREC_MIRROR=1 等价):从线上数据根只读复制 prd 数据(真 cookies/任务/hub 规则,任务全关),三节点放行外网;测试时才 up,用完 keep/down
 #   scripts/e2e-verify.sh doctor   # 只跑隔离断言(+反例自检),不起任何容器
 #   scripts/e2e-verify.sh smoke    # 只读冒烟:controller 内 ssh 到 worker 跑无副作用命令 + 证明断外网
 #   scripts/e2e-verify.sh x <ctrl|node-1|node-2> CMD…   # 隔离断言后在 dev 容器内 exec(场景/排查唯一的 docker exec 入口)
@@ -36,7 +36,9 @@ NET_EG="drec-devnet-egress${SUFFIX}"
 EGRESS_COOKIES=${DREC_EGRESS_COOKIES:-}
 # mirror 档:dev 当「真 dev server」用。数据根由 prd 只读复制(真抖音 cookies/任务/hub 规则),任务全关,上传一律 stage;biliup 仍是假的。
 MIRROR=${DREC_MIRROR:-0}
-MIRROR_SRC=${DREC_MIRROR_SRC:-}          # 默认 <主仓库>/docker-data
+MIRROR_SRC=${DREC_MIRROR_SRC:-}          # 默认线上数据根(~\/drec);显式给 DREC_MIRROR_SRC 可覆盖
+# 控制库文件名(issue #750):老部署是 db/douyin-rec.db,新部署是 db/drec-control.db —— 两套都认。
+DREC_DB_NAME=drec-control.db
 MIRROR_ROOMS=${DREC_MIRROR_ROOMS:-}      # 逗号分隔 roomSlug;空 = 复制全部 hub 规则(任务本身一律 enabled=0)
 MIRROR_PORT=${DREC_MIRROR_PORT:-7871}    # controller UI 只绑 127.0.0.1:$MIRROR_PORT  # issue-guard: allow(dev 测试夹具:本机回环地址/假房间号)
 COMPOSE_MIRROR="$REPO/dev/multi-node/compose.mirror.yml"
@@ -78,7 +80,7 @@ init_tier() {
   else
     EGRESS_COOKIES="/nonexistent/egress-cookies-unused"   # internal 档不叠加 egress 覆盖,仅占位(compose 变量不展开)
   fi
-  if [[ $MIRROR == 1 && -z $MIRROR_SRC ]]; then MIRROR_SRC="$(main_checkout)/docker-data"; fi
+  if [[ $MIRROR == 1 && -z $MIRROR_SRC ]]; then MIRROR_SRC="${HOME}/drec"; fi
   # 集群档位一致性:egress 与 internal 的网络/镜像不同,混用会让断言与实际不符 → 以数据根标记为准。
   if [[ -f $E2E_ROOT/.tier ]]; then
     local t; t=$(cat "$E2E_ROOT/.tier")
@@ -394,7 +396,7 @@ main_checkout() {
 chk_mirror_seed() {
   local root=$1 bad=0 d db f n
   for d in controller node-1 node-2; do
-    db="$root/$d/db/douyin-rec.db"
+    db="$root/$d/db/$DREC_DB_NAME"; [[ -f $db ]] || db="$root/$d/db/douyin-rec.db"
     [[ -f $db ]] || continue
     n=$(sqlite3 -readonly "$db" "SELECT count(*) FROM settings WHERE key IN ('discordWebhook','notifWebhookToggles')") || { refuse "读不到 $db"; bad=1; continue; }
     [[ $n == 0 ]] || { refuse "$d: 种子里仍有通知 webhook 设置"; bad=1; }
@@ -425,11 +427,22 @@ mirror_seed() {
   if [[ -f $marker ]]; then note "mirror 种子已就绪($(cat "$marker"));要重新从 prd 复制请先 down"; return 0; fi
   command -v sqlite3 >/dev/null 2>&1 || die "缺少依赖命令: sqlite3"
   local src=$MIRROR_SRC
-  [[ -f $src/db/douyin-rec.db && -f $src/config/hub.config.json && -d $src/config/hub ]] \
-    || die "mirror 源数据根不完整: $src(需要 db/douyin-rec.db、config/hub.config.json、config/hub/;可设 DREC_MIRROR_SRC)"
+  local srcdb=$src/db/$DREC_DB_NAME
+  [[ -f $srcdb ]] || srcdb=$src/db/douyin-rec.db     # 老部署回落
   if overlaps "$(canon "$E2E_ROOT")" "$(canon "$src")"; then die "mirror 源 $src 与 dev 数据根重叠"; fi
   local tmp; tmp=$(mktemp -d)
-  sqlite3 -readonly "$src/db/douyin-rec.db" ".backup '$tmp/seed.db'" || { rm -rf "$tmp"; die "读取 prd 数据库失败: $src/db/douyin-rec.db"; }
+  if [[ ! -f $srcdb ]]; then
+    # issue #750:库目录已搬到 named volume,宿主数据根下的 db/ 只剩遮住的旧文件 → 从卷里导一份快照。
+    if docker volume inspect drec-db >/dev/null 2>&1; then
+      docker run --rm -v drec-db:/db -v "$tmp":/out node:24-bookworm-slim \
+        sh -c "cp -a /db/$DREC_DB_NAME /out/seed.db 2>/dev/null || cp -a /db/douyin-rec.db /out/seed.db" \
+        || { rm -rf "$tmp"; die "从卷 drec-db 导出 prd 数据库失败"; }
+      srcdb="$tmp/seed.db"
+    fi
+  fi
+  [[ -f $srcdb && -f $src/config/hub.config.json && -d $src/config/hub ]] \
+    || die "mirror 源数据根不完整: $src(需要 db/drec-control.db(或旧 db/douyin-rec.db)、config/hub.config.json、config/hub/;可设 DREC_MIRROR_SRC)"
+  [[ -f $tmp/seed.db ]] || sqlite3 -readonly "$srcdb" ".backup '$tmp/seed.db'" || { rm -rf "$tmp"; die "读取 prd 数据库失败: $srcdb"; }
   sqlite3 "$tmp/seed.db" >/dev/null <<'SQL' || { rm -rf "$tmp"; die "改写种子数据库失败"; }
 PRAGMA journal_mode=DELETE;
 DELETE FROM settings WHERE key IN ('discordWebhook','notifWebhookToggles');
@@ -443,9 +456,9 @@ SQL
   local n
   for n in controller node-1 node-2; do
     mkdir -p "$E2E_ROOT/$n/db"
-    cp "$tmp/seed.db" "$E2E_ROOT/$n/db/douyin-rec.db"
+    cp "$tmp/seed.db" "$E2E_ROOT/$n/db/$DREC_DB_NAME"
   done
-  for n in node-1 node-2; do sqlite3 "$E2E_ROOT/$n/db/douyin-rec.db" "DELETE FROM tasks;"; done   # worker 的任务由 hub 同步下发
+  for n in node-1 node-2; do sqlite3 "$E2E_ROOT/$n/db/$DREC_DB_NAME" "DELETE FROM tasks;"; done   # worker 的任务由 hub 同步下发
   local map; map=$(jq -c '[.workers[]? | select(.id != "local") | .id] | to_entries | map({(.value): ("node-" + ((.key % 2 + 1) | tostring))}) | add // {}' "$src/config/hub.config.json")
   mkdir -p "$E2E_ROOT/controller/config/hub"
   local f slug want=",${MIRROR_ROOMS}," n_rules=0
@@ -462,8 +475,8 @@ SQL
   rm -rf "$tmp"
   chk_mirror_seed "$E2E_ROOT" || die "mirror 种子未通过安全断言,已中止(数据根 $E2E_ROOT 内的种子请 down 后重来)"
   local nt ck
-  nt=$(sqlite3 -readonly "$E2E_ROOT/controller/db/douyin-rec.db" "SELECT count(*) FROM tasks")
-  ck=$(sqlite3 -readonly "$E2E_ROOT/controller/db/douyin-rec.db" "SELECT coalesce(length(value),0) FROM settings WHERE key='platformCookies'")
+  nt=$(sqlite3 -readonly "$E2E_ROOT/controller/db/$DREC_DB_NAME" "SELECT count(*) FROM tasks")
+  ck=$(sqlite3 -readonly "$E2E_ROOT/controller/db/$DREC_DB_NAME" "SELECT coalesce(length(value),0) FROM settings WHERE key='platformCookies'")
   printf '%s tasks=%s rules=%s\n' "$(date +%FT%T%z)" "$nt" "$n_rules" >"$marker"
   pass "mirror 种子:任务 $nt 个(全 enabled=0)、hub 规则 $n_rules 条(workers→dev 节点、upload.mode→stage)、平台 cookies ${ck:-0} 字节(不打印内容)"
 }
