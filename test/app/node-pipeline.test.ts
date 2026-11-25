@@ -87,6 +87,20 @@ vi.mock("../../packages/app/src/upload/biliup.js", async () => {
 });
 
 const silence = (): void => {};
+/**
+ * 2026-11-24: 生产默认数据根改为「家目录下的 drec」。本文件用默认根装配闸门/队列，
+ * 若不隔离就会打开**真实**节点库（与大机器上运行中的 serve 抢租约）→ 整片用例失败。
+ * 这里每个用例给一个一次性根，结束后还原。
+ */
+const savedRoot = process.env.DOUYIN_REC_ROOT;
+beforeEach(() => {
+  process.env.DOUYIN_REC_ROOT = mkdtempSync(join(tmpdir(), "node-root-"));
+});
+afterEach(() => {
+  if (savedRoot === undefined) delete process.env.DOUYIN_REC_ROOT;
+  else process.env.DOUYIN_REC_ROOT = savedRoot;
+});
+
 const tmp = (): string => join(mkdtempSync(join(tmpdir(), "node-gate-")), "x.db");
 function clock(start = 1_000_000): { now: () => number; sleep: (ms: number) => Promise<void>; advance: (ms: number) => void } {
   let t = start;

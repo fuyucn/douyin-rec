@@ -54,7 +54,7 @@ export function registerRecoverOrderCommands(program: Command): void {
     .option("--bv <bv>", "append the remaining parts to this verified draft (needs --from-part)")
     .option("--from-part <n>", "1-based first part missing from the draft (>= 2)", (v) => Number(v))
     .option("--restart", "create the draft again; only if the archive lookup proves none exists")
-    .option("--data-root <path>", "node data root (default: DOUYIN_REC_ROOT or ./output-data)")
+    .option("--data-root <path>", "node data root (default: DOUYIN_REC_ROOT or <home>/drec)")
     .option("--apply", "enqueue the new generation (default: print the plan only)")
     .action(async (orderKey: string, o: { prep?: boolean; bv?: string; fromPart?: number; restart?: boolean; dataRoot?: string; apply?: boolean }) => {
       const modes = [o.prep && "prep", o.bv !== undefined && "bv", o.restart && "restart"].filter(Boolean) as RecoverMode[];

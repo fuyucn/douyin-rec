@@ -21,7 +21,7 @@ export function registerRecordCommand(program: Command): void {
     .option("--danmu <0|1>", "弹幕开关: 1=开(由平台 connectDanmu 提供) 0=关 (默认 1)")
     .option("--cookies <s>", "抖音 cookie 字符串")
     .option("--cookies-file <path>", "从文件读取 cookie (优先于 --cookies)")
-    .option("--out <dir>", "输出目录 (默认 <DOUYIN_REC_ROOT>/recordings,未设根则 output-data/recordings)")
+    .option("--out <dir>", "输出目录 (默认 <DOUYIN_REC_ROOT>/recordings,未设根则 <home>/drec/recordings)")
     .option("--segment <sec>", "分段时长(秒), 0=不分段 (默认 1800)")
     .option("--danmu-xml-mode <mode>", "弹幕 xml 粒度: session(整场一个,默认) | segment(逐段一个)")
     .option("--reconnect <sec>", "断流快速重连等待(秒) (默认 5)")

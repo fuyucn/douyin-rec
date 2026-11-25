@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { resolveDbPath, resolveServeDbPath } from "../../packages/app/src/db.js";
+import { DEFAULT_ROOT } from "../../packages/app/src/paths.js";
 import { NodeRecordSpawner } from "../../packages/app/src/process/spawner.js";
 import type { Task } from "../../packages/app/src/store.js";
 
@@ -35,6 +36,20 @@ afterEach(() => {
   rmSync(temp, { recursive: true, force: true });
 });
 
+describe("默认数据根（生产约定）", () => {
+  it("未设 DOUYIN_REC_ROOT → 家目录下的 drec/（跨平台同一规则）", () => {
+    // 只断言纯值，不碰真实目录：macOS/Linux = $HOME/drec，Windows = %USERPROFILE%\drec。
+    expect(DEFAULT_ROOT).toBe(join(homedir(), "drec"));
+  });
+
+  it("设了 DOUYIN_REC_ROOT 就按 env（默认值不抢戏）", () => {
+    const saved = process.env.DOUYIN_REC_ROOT;
+    process.env.DOUYIN_REC_ROOT = "/tmp/somewhere";
+    try { expect(resolveDbPath(undefined)).toBe("/tmp/somewhere/db/douyin-rec.db"); }
+    finally { if (saved === undefined) delete process.env.DOUYIN_REC_ROOT; else process.env.DOUYIN_REC_ROOT = saved; }
+  });
+});
+
 describe("serve database path resolution", () => {
   it.each([
     ["默认根", undefined, undefined, undefined],
@@ -52,9 +67,9 @@ describe("serve database path resolution", () => {
         ? resolve(temp, envDb)
         : rootName
           ? resolve(temp, rootName, "db/douyin-rec.db")
-          : resolve("./output-data/db/douyin-rec.db");
+          : resolve(DEFAULT_ROOT, "db/douyin-rec.db");
     expect(resolveServeDbPath(explicit)).toBe(expected);
-    expect(resolveDbPath(explicit)).toBe(explicit ?? (envDb ? join(temp, envDb) : rootName ? join(temp, rootName, "db/douyin-rec.db") : "output-data/db/douyin-rec.db"));
+    expect(resolveDbPath(explicit)).toBe(explicit ?? (envDb ? join(temp, envDb) : rootName ? join(temp, rootName, "db/douyin-rec.db") : join(DEFAULT_ROOT, "db/douyin-rec.db")));
   });
 
   it("fake recording child receives serve's resolved path without mutating the parent env", async () => {
@@ -109,7 +124,7 @@ describe("stream-upload ledger database path", () => {
       expect(recordStreamUpload).toHaveBeenCalledTimes(cases.length);
       const calls = vi.mocked(recordStreamUpload).mock.calls;
       expect(calls.map(([input]) => input.syncDbPath)).toEqual([
-        "output-data/db/douyin-rec-sync.db",
+        join(DEFAULT_ROOT, "db/douyin-rec-sync.db"),
         resolve(temp, "root/db/douyin-rec-sync.db"),
         resolve(temp, "env-sync.db"),
         resolve(temp, "serve-sync.db"),
