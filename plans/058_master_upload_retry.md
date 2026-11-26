@@ -4,7 +4,7 @@
 
 - 新一轮独立审查发现 4 项问题（REQUEST_CHANGES）：历史无证据任务可能重建稿、proof-only append 在回读不可用时误记受理、真实 DAG 执行前清除 safe-retry、节点侧配置开关误拦主控回退重试。前两项已在 a9007b8f 修复并有回归；后两项当前仅在本地未提交改动中修复，新增真实 Reconciler→pipeline 测试，尚未推送。
 - 最新本地验证：定向端到端 27/27；全量 5,797 passed / 42 skipped；pnpm typecheck、pnpm arch:check、pnpm bundle（0.0.412-f61e30）及 git diff --check 均通过。scripts/pr-risk-scan.sh origin/main 仍命中 RISK。
-- PR 说明已补状态所有者、提交与源计划不变量、事件×状态矩阵及对称路径覆盖。当前 PR 远端 head 为 fbd75cc；待本地修复推送、新 SHA 独立复审及风险批准。未合并、未部署；部署仍需人工批准及实测主控/目标节点均无录制与上传。
+- PR 说明已补状态所有者、提交与源计划不变量、事件×状态矩阵及对称路径覆盖。代码修复提交 2e688ca6 已推送，待新 SHA CI 与独立复审。风险扫描仍为 RISK；未合并、未部署，须先取得安全行为批准，并实测主控/目标节点均无录制与上传。
 
 ## Goal
 
