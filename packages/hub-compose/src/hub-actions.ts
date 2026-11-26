@@ -8,6 +8,7 @@
 
 import {
   buildWorkflow, deriveStageProducts, runWorkflowNodes, withOutputStem,
+  beginMasterUploadRun, runNowBaseKey, runNowConflict,
 } from "@drec/orchestrator";
 import type { PipelineCfg, PipelineDeps, Reconciler, ResourcePool, SyncLedger, Transport, WorkflowNodeKey } from "@drec/orchestrator";
 import type { NotifyEvent } from "@drec/core";
@@ -118,16 +119,37 @@ export function createHubActions(deps: HubActionsDeps): HubActions {
           if (cfg.steps?.mergeSegments === false) {
             return { ok: false, error: "分段上传模式不支持单节点重跑,请用「重新运行」整场重跑", code: 400 };
           }
+          if (unsafe(node) && cfg.uploadMode === "upload") {
+            const baseKey = runNowBaseKey(streamKey);
+            const candidates = deps.ledger.getCandidates(baseKey);
+            const conflict = await runNowConflict({
+              ledger: deps.ledger,
+              transports: deps.transports(),
+              isBusy: (candidate) => isJobLive(candidate) || deps.pool.hasStreamLock(candidate),
+            }, baseKey, {
+              force: false,
+              ignoreKeys: [streamKey],
+              targetKey: streamKey,
+              self: candidates.length > 0 ? {
+                startMs: Math.min(...candidates.map((candidate) => candidate.startMs)),
+                endMs: Math.max(...candidates.map((candidate) => candidate.endMs)),
+              } : undefined,
+            });
+            if (conflict) {
+              return { ok: false, error: "同场任务冲突，不能重跑上传节点: " + conflict, code: 409 };
+            }
+          }
           const derived = deriveStageProducts(stageSub, effectiveStageFormat(cfg.outputFormat, cfg.uploadMode));
           if (!derived) {
             return { ok: false, error: `stage 产物缺失,无法重跑: ${stageSub}`, code: 409 };
           }
           // 前置检查全部通过后才写台账,拒绝重跑时保留原 job / 节点状态 / 事件。
+          if (unsafe(node) && cfg.uploadMode === "upload") beginMasterUploadRun(deps.ledger, streamKey);
           deps.ledger.setState(streamKey, "retrying", {}, { force: true }); // 人工重跑:允许 done 场重跑单节点
           deps.ledger.backfillNodeStates(streamKey);
           const products = job?.outputStem ? withOutputStem(derived, job.outputStem) : derived;
           const workflow = buildWorkflow({
-            streamKey, stageSub, products, deps: deps.pipelineDeps, cfg, log: deps.log,
+            streamKey, stageSub, products, deps: { ...deps.pipelineDeps, cfg }, cfg, log: deps.log,
             willUpload: cfg.uploadMode === "upload",
             ...burnFlags(cfg.steps),
             segmentCount: 0,

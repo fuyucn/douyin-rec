@@ -18,7 +18,7 @@ const WAL_RETRIES = 200;
  */
 const EXPECTED_SCHEMA: ReadonlyArray<readonly [string, readonly string[]]> = [
   ["sync_jobs", ["streamKey", "state", "winnerWorker", "bv", "error", "fails", "startMs", "outputStem",
-    "followups", "uploadPlan", "uploadStatus", "ackedAt", "ackNote", "seasonState", "failureClass", "nextAttemptAt",
+    "followups", "uploadPlan", "uploadStatus", "ackedAt", "ackNote", "seasonState", "failureClass", "nextAttemptAt", "retryDeferredAt", "uploadJournal",
     "updatedAt"]],
   ["sync_candidates", ["streamKey", "workerId", "coverage", "durationSec", "startMs", "endMs",
     "totalGapSec", "isWinner", "danmuCount", "updatedAt"]],
@@ -105,6 +105,10 @@ export interface JobRow {
   failureClass?: "safe-retry" | "resume-append" | "verify-manual" | null;
   /** 下一次自动唤醒时刻(ms;仅 safe-retry / resume-append 有意义)。NULL = 不排队。 */
   nextAttemptAt?: number | null;
+  /** Start of the current non-active retry deferral window; NULL when no deferral is being timed. */
+  retryDeferredAt?: number | null;
+  /** Master submission evidence; NULL is legacy/unknown, never proof of no submission. */
+  uploadJournal?: string | null;
   updatedAt: number;
 }
 
@@ -185,6 +189,8 @@ export class SyncLedger {
     // 上传失败处置(issue #752):分类结果 + 下一次该被唤醒的时刻(ms)。旧行 NULL = 未分类(等价「未知 → 人工」)。
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN failureClass TEXT"); } catch { /* column exists */ }
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN nextAttemptAt INTEGER"); } catch { /* column exists */ }
+    try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN retryDeferredAt INTEGER"); } catch { /* column exists */ }
+    try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN uploadJournal TEXT"); } catch { /* column exists */ }
     // 选优候选明细:每场每节点一行,记 coverage/时长/起止/缺口 + 是否胜出,供事后复盘选优依据。
     this.db.exec(`CREATE TABLE IF NOT EXISTS sync_candidates(
       streamKey TEXT NOT NULL, workerId TEXT NOT NULL,
@@ -329,7 +335,8 @@ export class SyncLedger {
     // A state change (or a new needs_manual reason) is a new case: drop any earlier review mark.
     const clearAck = reopen(cur) ? "ackedAt=NULL, ackNote=NULL, " : "";
     // 收口(done / needs_manual)时清掉失败处置计划,避免过期唤醒把已定案的场重新拉起来。
-    const clearPlan = to === "done" || to === "needs_manual" ? "failureClass=NULL, nextAttemptAt=NULL, " : "";
+    const clearPlan = to === "done" || to === "needs_manual"
+      ? "failureClass=NULL, nextAttemptAt=NULL, retryDeferredAt=NULL, " : "";
     const r = this.db.prepare(`UPDATE sync_jobs SET state=?, ${set}, ${clearAck}${clearPlan}updatedAt=? WHERE streamKey=? AND state=?`)
       .run(to, ...args, at, streamKey, cur.state);
     if (Number(r.changes) === 0) {
@@ -376,20 +383,52 @@ export class SyncLedger {
    * 记录上传失败的处置计划(issue #752):分类 + 下次唤醒时刻。
    * 只写这两列,不改 state(状态由 `setState` 按分类决定:retrying / needs_manual)。
    */
-  setFailurePlan(streamKey: string, plan: { failureClass: JobRow["failureClass"]; nextAttemptAt?: number | null }): boolean {
+  setFailurePlan(streamKey: string, plan: {
+    failureClass: JobRow["failureClass"]; nextAttemptAt?: number | null;
+    retryDeferredAt?: number | null; touchUpdatedAt?: boolean;
+  }): boolean {
     // 人工分类不许带唤醒时间(带了也不会被取,但留着会在页面上误导);未分类同理。
     const retryable = plan.failureClass === "safe-retry" || plan.failureClass === "resume-append";
     const next = retryable ? (plan.nextAttemptAt ?? null) : null;
-    const r = this.db.prepare("UPDATE sync_jobs SET failureClass=?, nextAttemptAt=?, updatedAt=? WHERE streamKey=?")
-      .run(plan.failureClass ?? null, next, this.now(), streamKey);
+    const deferredAt = retryable ? (plan.retryDeferredAt ?? null) : null;
+    const r = plan.touchUpdatedAt === false
+      ? this.db.prepare("UPDATE sync_jobs SET failureClass=?, nextAttemptAt=?, retryDeferredAt=? WHERE streamKey=?")
+        .run(plan.failureClass ?? null, next, deferredAt, streamKey)
+      : this.db.prepare("UPDATE sync_jobs SET failureClass=?, nextAttemptAt=?, retryDeferredAt=?, updatedAt=? WHERE streamKey=?")
+        .run(plan.failureClass ?? null, next, deferredAt, this.now(), streamKey);
     return Number(r.changes) > 0;
   }
 
   /** 清掉处置计划(收口/转入新阶段时调用,避免过期唤醒)。 */
   clearFailurePlan(streamKey: string): boolean {
-    const r = this.db.prepare("UPDATE sync_jobs SET failureClass=NULL, nextAttemptAt=NULL, updatedAt=? WHERE streamKey=?")
+    const r = this.db.prepare("UPDATE sync_jobs SET failureClass=NULL, nextAttemptAt=NULL, retryDeferredAt=NULL, updatedAt=? WHERE streamKey=?")
       .run(this.now(), streamKey);
     return Number(r.changes) > 0;
+  }
+
+  /** Compare-and-set evidence, optionally committing submission checkpoints in the same transaction. */
+  saveUploadJournal(streamKey: string, previous: string | null, next: string, success?: {
+    bv: string; group: string; indices: number[]; seasonPending?: boolean;
+  }): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const changed = this.db.prepare(
+        "UPDATE sync_jobs SET uploadJournal=?, updatedAt=? WHERE streamKey=? AND uploadJournal IS ?",
+      ).run(next, this.now(), streamKey, previous);
+      if (Number(changed.changes) !== 1) throw new Error("upload evidence changed concurrently or job missing");
+      if (success) {
+        const current = this.get(streamKey)?.bv;
+        if (current && current !== success.bv) throw new Error("upload archive identity conflict");
+        if (success.seasonPending) {
+          this.setBvAndSeasonState(streamKey, success.bv, "pending");
+        } else this.setBv(streamKey, success.bv);
+        for (const index of success.indices) this.markPartDone(streamKey, success.group, index);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   /** 到期该被唤醒的 job(按 nextAttemptAt 升序;喂给调度 tick)。 */
@@ -610,8 +649,8 @@ export class SyncLedger {
     }
   }
   /** pipeline 抛错时:置 failed + 记 error + fails 自增(供重试上限判定)。 */
-  markFailed(streamKey: string, error: string): boolean {
-    return this.transition(streamKey, "failed", "error=?, fails=fails+1", [error]);
+  markFailed(streamKey: string, error: string, countsAsFailure = true): boolean {
+    return this.transition(streamKey, "failed", `error=?, fails=fails+${countsAsFailure ? 1 : 0}`, [error]);
   }
   /** 某场的状态转换时间线(升序)。 */
   getEvents(streamKey: string): JobEvent[] {

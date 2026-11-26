@@ -123,6 +123,7 @@ export function createBiliupFileTarget(deps: BiliupTargetDeps = {}): UploadTarge
         tag: (input.tags ?? []).join(","),
         public: input.policy.visibility === "public",
         desc: input.desc,
+        ...(input.proofOnly ? { proofOnly: true } : {}),
       };
       try {
         // uploadPlain = 逐线路重试 + parseBV；拿不到 BV 时它自己抛「解析不到」。
@@ -150,6 +151,7 @@ export function createBiliupFileTarget(deps: BiliupTargetDeps = {}): UploadTarge
           ...(input.countParts ? { countParts: input.countParts } : { countParts: () => countParts(input.ref.id, credPath(input.cred)) }),
           sleep,
           deferVerificationUntilCleanup: input.deferVerificationUntilCleanup,
+          proofOnly: input.proofOnly,
         });
         return { proof: input.deferVerificationUntilCleanup ? "accepted" : "observed" };
       } catch (err) {

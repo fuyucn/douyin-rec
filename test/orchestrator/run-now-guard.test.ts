@@ -35,7 +35,20 @@ describe("runNowConflict", () => {
   it("allows a broadcast with no BV and no queue plan", async () => {
     const l = fresh();
     order(l, BASE, false);
-    expect(await runNowConflict({ ledger: l, transports: new Map() }, BASE, { force: false })).toBeNull();
+    expect(await runNowConflict({ ledger: l, transports: new Map() }, BASE,
+      { force: false, ignoreBusyKeys: [BASE] })).toBeNull();
+  });
+
+  it("blocks a same-broadcast sibling job even without upload evidence", async () => {
+    const l = fresh();
+    const sibling = BASE + "-1";
+    order(l, BASE, false);
+    order(l, sibling, false);
+    const msg = await runNowConflict({ ledger: l, transports: new Map() }, BASE,
+      { force: false, targetKey: sibling, ignoreBusyKeys: [sibling] });
+    expect(msg).toContain(BASE + " has an existing same-broadcast job that may still submit");
+    expect(await runNowConflict({ ledger: l, transports: new Map() }, BASE,
+      { force: true, targetKey: sibling, ignoreBusyKeys: [sibling] })).toBeNull();
   });
 
   it("a BV on the base key blocks the -N submission too, and force passes with a log", async () => {
@@ -52,6 +65,17 @@ describe("runNowConflict", () => {
     const l = fresh();
     order(l, `${BASE}-1`, false); l.setBv(`${BASE}-1`, "BV1bbbbbbbbb"); // issue-guard: allow (fake BV fixture)
     expect(await runNowConflict({ ledger: l, transports: new Map() }, BASE, { force: false })).toMatch(/-1 already has BV/);
+  });
+
+  it("force cannot bypass legacy upload history without a durable journal", async () => {
+    const l = fresh();
+    order(l, BASE, false);
+    l.logStep(BASE, "upload_plain", "start");
+
+    const ordinary = await runNowConflict({ ledger: l, transports: new Map() }, BASE, { force: false, targetKey: BASE });
+    const forced = await runNowConflict({ ledger: l, transports: new Map() }, BASE, { force: true, targetKey: BASE });
+    expect(ordinary).toMatch(/rerun blocked:.*legacy/i);
+    expect(forced).toBe(ordinary);
   });
 
   it("another broadcast's BV does not interfere", async () => {
@@ -102,10 +126,11 @@ describe("runNowConflict", () => {
     expect(await runNowConflict({ ledger: l, transports: node(async () => []) }, BASE, { force: false })).toMatch(/cannot be read/);
   });
 
-  it("force passes an unknown queue state and logs why", async () => {
+  it("force refuses an unknown queue state and logs why", async () => {
     const l = fresh(); order(l, BASE);
     const log = vi.fn();
-    expect(await runNowConflict({ ledger: l, transports: node(async () => { throw new Error("x"); }), log }, BASE, { force: true })).toBeNull();
+    expect(await runNowConflict({ ledger: l, transports: node(async () => { throw new Error("x"); }), log }, BASE, { force: true }))
+      .toMatch(/rerun blocked:.*queue state unknown/i);
     expect(log).toHaveBeenCalledOnce();
   });
 });

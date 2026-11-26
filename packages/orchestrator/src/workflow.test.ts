@@ -16,6 +16,7 @@ import {
 import { SyncLedger } from "./ledger.js";
 import { JobDispatcher } from "./job-dispatcher.js";
 import type { PipelineDeps } from "./pipeline.js";
+import { prepareMasterUpload } from "./master-upload.js";
 import { fakeUploadTarget } from "@drec/core";
 import type { UploadTarget } from "@drec/core";
 
@@ -58,6 +59,8 @@ interface TestDeps {
 
 function makeDeps(overrides: Partial<PipelineDeps> = {}): TestDeps {
   const ledger = freshLedger();
+  ledger.upsertPending(STREAM_KEY);
+  prepareMasterUpload(ledger, STREAM_KEY);
   const stageDir = mkdtempSync(join(tmpdir(), "workflow-stage-"));
   const stageSub = join(stageDir, "douyin_test-room_2026-06-27");
   mkdirSync(stageSub, { recursive: true });
@@ -223,7 +226,7 @@ describe("runWorkflowNodes — 安全阀与分支隔离", () => {
     const t = makeDeps();
     t.ledger.upsertPending(STREAM_KEY, Date.now());
     t.deps.cfg = { ...t.deps.cfg, uploadMeta: { ...t.deps.cfg.uploadMeta, seasonSectionId: 456 } };
-    const bv = ["B", "V", "SEASONPENDINGFAIL"].join("");
+    const bv = "SEASONPENDINGFAIL";
     t.uploadPlain.mockResolvedValue(bv);
     vi.mocked(addArchiveToSeasonIfConfigured).mockClear();
     vi.spyOn(t.ledger, "setBvAndSeasonState").mockImplementation(() => {
@@ -234,10 +237,10 @@ describe("runWorkflowNodes — 安全阀与分支隔离", () => {
       streamKey: STREAM_KEY, nodes: workflow.nodes, edges: workflow.edges,
       ctx: workflow.ctx, pool: t.deps.pool!,
     });
-    expect(r.ok).toBe(true);
+    expect(r.ok).toBe(false);
     expect(t.uploadPlain).toHaveBeenCalledTimes(1);
     expect(t.ledger.get(STREAM_KEY)?.bv).toBe(bv);
-    expect(t.ledger.getNodeState(STREAM_KEY, "upload_plain")?.state).toBe("done");
+    expect(t.ledger.getNodeState(STREAM_KEY, "upload_plain")?.state).toBe("failed");
     expect(t.ledger.get(STREAM_KEY)?.seasonState).toBeNull();
     expect(vi.mocked(addArchiveToSeasonIfConfigured)).not.toHaveBeenCalled();
   });
@@ -272,9 +275,10 @@ describe("runWorkflowNodes — 安全阀与分支隔离", () => {
     t.ledger.close();
   });
 
-  it("forceRetry 单节点续跑:merge/burn 幂等跳过,只重传 P1,blocked append 自动恢复且 P2→P3 串行", async () => {
+  it("forceRetry 明确限流拒绝:merge/burn 幂等跳过,只重试 P1,blocked append 恢复且 P2→P3 串行", async () => {
     const t = makeDeps();
-    t.uploadPlain.mockRejectedValueOnce(new Error("network down"));
+    t.uploadPlain.mockRejectedValueOnce(new Error("code: 601 upload rate limit"));
+    t.deps.pool = new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, uploadCooldownMs: 0 });
     const workflow = build(t);
     const r1 = await runWorkflowNodes({
       streamKey: STREAM_KEY,

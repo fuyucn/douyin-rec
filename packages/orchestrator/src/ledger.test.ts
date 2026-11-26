@@ -356,7 +356,7 @@ describe("migration validates every expected column (issue #478)", () => {
    *  is the independent copy that fails when the production list and the migration drift apart. */
   const EXPECTED: Record<string, string[]> = {
     sync_jobs: ["streamKey", "state", "winnerWorker", "bv", "error", "fails", "startMs", "outputStem",
-      "followups", "uploadPlan", "uploadStatus", "ackedAt", "ackNote", "seasonState", "failureClass", "nextAttemptAt", "updatedAt"].sort(),
+      "followups", "uploadPlan", "uploadStatus", "ackedAt", "ackNote", "seasonState", "failureClass", "nextAttemptAt", "retryDeferredAt", "uploadJournal", "updatedAt"].sort(),
     sync_candidates: ["streamKey", "workerId", "coverage", "durationSec", "startMs", "endMs",
       "totalGapSec", "isWinner", "danmuCount", "updatedAt"].sort(),
     sync_job_events: ["streamKey", "state", "at"].sort(),

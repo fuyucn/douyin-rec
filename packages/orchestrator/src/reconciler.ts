@@ -1,4 +1,5 @@
-import { abortJob, effectiveReconnectWindowMs, isJobAbort, isJobLive, resolveDiskMinGB, SAME_BROADCAST_GAP_MS, USER_STOP } from "@drec/core";
+import { abortJob, effectiveReconnectWindowMs, isJobAbort, isJobLive, resolveDiskMinGB, retryBackoffMs, MAX_BACKOFF_MS, SAME_BROADCAST_GAP_MS, USER_STOP } from "@drec/core";
+import { masterUploadFailurePlan, hasMasterUploadFailure, markMasterFailure, MASTER_UPLOAD_STEPS } from "./master-upload.js";
 import type { Transport, NodeInventory, NodeRecording } from "./transport.js";
 import type { UnclaimedSegment } from "./unclaimed.js";
 import type { JobState, StepName, SyncLedger } from "./ledger.js";
@@ -6,13 +7,27 @@ import type { PipelineDeps, PipelineCfg } from "./pipeline.js";
 import { runPipeline, CLEANUP_BACKFILL_MAX } from "./pipeline.js";
 import { pollFollowups } from "./finalize-format.js";
 import { createUploadQueuePoller, type UploadPollerOpts } from "./node-upload-poll.js";
-import { isDerivedKey, runNowConflict } from "./run-now-guard.js";
+import { isDerivedKey, runNowConflict, sameBroadcastJobKeys } from "./run-now-guard.js";
 import { DEFAULT_NODE_UPLOAD, type NodeUploadConfig } from "./node-upload-config.js";
 import { completeFromDispatch } from "./node-upload-complete.js";
 import { clusterBroadcasts, type Broadcast } from "./identity.js";
 import type { HubBlockedBroadcastDTO, StatsSessionInput } from "@drec/core";
 import { gateWorkers, explainRejections, isWorkerAssigned, isWorkerTargeted } from "@drec/core";
 import { JobDispatcher } from "./job-dispatcher.js";
+
+const RETRY_SKIP_DELAY_MS = 60_000;
+const RETRY_SKIP_MAX_MS = MAX_BACKOFF_MS;
+
+function streamIdentity(streamKey: string): { platform: string; roomSlug: string } | null {
+  const first = streamKey.indexOf(":");
+  const second = streamKey.indexOf(":", first + 1);
+  if (first <= 0 || second <= first + 1) return null;
+  return { platform: streamKey.slice(0, first), roomSlug: streamKey.slice(first + 1, second) };
+}
+
+function retryBroadcastKey(streamKey: string): string | null {
+  return /^(.+?:\d{4}-\d{2}-\d{2}(?:_\d{4})?)-\d+$/.exec(streamKey)?.[1] ?? null;
+}
 
 export interface SettleConfig {
   maxWaitMs: number;
@@ -138,7 +153,7 @@ function toStatsInput(r: NodeRecording): StatsSessionInput {
 }
 
 const RETRYABLE = new Set<JobState>(["pending", "failed"]);
-const UNSAFE_RETRY_NODES = new Set(["upload_plain", "append_danmu", "append_livechat"]);
+
 
 /** 收尾补跑日志(统一前缀,便于 grep)。 */
 const jlogInfo = (msg: string): void => console.info(msg);
@@ -392,6 +407,10 @@ export class Reconciler {
 
   private clearSkipLog(key: string): void {
     this.skipLogState.delete(key);
+  }
+
+  private isStreamBusy(key: string): boolean {
+    return this.dispatcher.isScheduled(key) || isJobLive(key) || (this.pipelineDeps.pool?.hasStreamLock(key) ?? false);
   }
 
   /**
@@ -665,16 +684,135 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
     return this.uploadPoller.poll();
   }
 
-  async reconcileAll(): Promise<void> {
+  /** Due-only scan has its own hub timer, but shares this instance's dispatcher and stream locks. */
+  async pollUploadRetries(): Promise<void> {
+    const due = this.ledger.dueForRetry(Date.now(), -1);
+    const ready = new Set<string>();
+    for (const job of due) {
+      const key = job.streamKey;
+      if (this.ledger.getUploadPlan(key) != null) {
+        this.ledger.clearFailurePlan(key);
+        continue;
+      }
+      if (this.isStreamBusy(key)) {
+        this.deferUploadRetry(key, undefined, false);
+        continue;
+      }
+      if (job.state === "retrying") {
+        this.deferUploadRetry(key);
+        continue;
+      }
+      const identity = streamIdentity(key);
+      const cfg = identity && this.resolveCfg
+        ? this.resolveCfg(identity.platform, identity.roomSlug)
+        : this.resolveCfg ? null : this.pipelineDeps.cfg;
+      if (!cfg || cfg.uploadMode !== "upload") {
+        this.stopUploadRetry(key, !cfg ? "room rule is missing or disabled" : "room is no longer in master upload mode");
+        continue;
+      }
+      ready.add(key);
+    }
+    if (ready.size > 0) await this.reconcileAll(ready);
+  }
+
+  private deferUploadRetry(
+    key: string,
+    reason = "retry prerequisite remains unavailable",
+    countTowardLimit = true,
+  ): void {
+    const job = this.ledger.get(key);
+    if (!job || (job.failureClass !== "safe-retry" && job.failureClass !== "resume-append")) return;
+    const now = Date.now();
+    const deferredAt = countTowardLimit ? (job.retryDeferredAt ?? now) : null;
+    if (countTowardLimit && now - deferredAt! >= RETRY_SKIP_MAX_MS) {
+      this.stopUploadRetry(key, reason + " for " + Math.round(RETRY_SKIP_MAX_MS / 60_000) + " minutes");
+      return;
+    }
+    // Time only persistent non-active refusals. Queue waits and active work clear the timer, so a long upload
+    // cannot be mistaken for a stalled prerequisite after a restart.
+    this.ledger.setFailurePlan(key, {
+      failureClass: job.failureClass,
+      nextAttemptAt: now + RETRY_SKIP_DELAY_MS,
+      retryDeferredAt: deferredAt,
+      touchUpdatedAt: false,
+    });
+  }
+
+  private async isBroadcastStillRecording(b: Broadcast, transports: Map<string, Transport>): Promise<boolean> {
+    for (const member of b.members) {
+      const transport = transports.get(member.workerId);
+      if (typeof transport?.isDone !== "function") continue;
+      try {
+        if (!(await transport.isDone(member.rec.roomSlug))) return true;
+      } catch {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private stopUploadRetry(key: string, reason: string): void {
+    const job = this.ledger.get(key);
+    if (!job || (job.state !== "pending" && job.state !== "failed" && job.state !== "retrying")) return;
+    this.ledger.setState(key, "needs_manual", { error: (job.error || "upload retry") + "; " + reason });
+    this.notify?.({ kind: "error", stage: "同步", message: key + " 自动重试已停止并转人工: " + reason });
+  }
+
+  private planUploadRetry(key: string, error?: unknown, allowAutomaticRetry = true): boolean {
+    const job = this.ledger.get(key);
+    if (job?.state !== "failed" || this.ledger.getUploadPlan(key)) return false;
+    const identity = streamIdentity(key);
+    const cfg = identity && this.resolveCfg
+      ? this.resolveCfg(identity.platform, identity.roomSlug)
+      : this.resolveCfg ? null : this.pipelineDeps.cfg;
+    if (!cfg || cfg.uploadMode !== "upload") return false;
+    const uploadFailed = this.ledger.getFailedNodes(key).some((n) => MASTER_UPLOAD_STEPS.has(n.node));
+    if (!uploadFailed && !hasMasterUploadFailure(this.ledger, key)) return false;
+    const plan = masterUploadFailurePlan(this.ledger, key, error);
+    const exhaustedRateLimit = plan?.class === "safe-retry"
+      && plan.retryAttempt != null && plan.retryAttempt >= this.maxRetries;
+    if (!plan?.retryable || (plan.countsAsFailure && job.fails >= this.maxRetries) || exhaustedRateLimit) {
+      const reason = exhaustedRateLimit
+        ? "单文件限流失败已达到自动重试上限 " + this.maxRetries + " 次"
+        : plan?.reason ?? "缺少上传提交证据,禁止自动重传";
+      this.ledger.setState(key, "needs_manual", { error: `${job.error || "上传失败"}; ${reason}` });
+      this.notify?.({ kind: "error", stage: "同步", message: `${key} ${reason},已转人工` });
+      return true;
+    }
+    if (!allowAutomaticRetry) {
+      const reason = "单节点手动选源的任务不能安全地自动重新选源,请人工重跑";
+      this.ledger.setState(key, "needs_manual", { error: `${job.error || "上传失败"}; ${reason}` });
+      this.notify?.({ kind: "error", stage: "同步", message: `${key} ${reason}` });
+      return true;
+    }
+    const retryAttempt = plan.retryAttempt ?? Math.max(1, job.fails);
+    const delay = Math.min(MAX_BACKOFF_MS, Math.round(retryBackoffMs(retryAttempt) * (0.8 + Math.random() * 0.4)));
+    const cooldown = this.pipelineDeps.pool?.snapshot().upload.cooldownUntil ?? 0;
+    this.ledger.setFailurePlan(key, {
+      failureClass: plan.class, nextAttemptAt: Math.max(Date.now() + delay, cooldown),
+    });
+    if (retryAttempt === 1) {
+      this.notify?.({ kind: "error", stage: "同步", message: `${key} 上传失败已自动回队列:${plan.reason}` });
+    }
+    return true;
+  }
+
+  private consumeUploadRetryPlan(key: string): void {
+    const job = this.ledger.get(key);
+    if (!job || (job.failureClass !== "safe-retry" && job.failureClass !== "resume-append")) return;
+    this.ledger.clearFailurePlan(key);
+  }
+
+  async reconcileAll(onlyDue?: ReadonlySet<string>): Promise<void> {
     // 实时重载:重建 transports(反映 hub.config.json 最新 workers);同步给 pipeline 用的那份。
     if (this.loadTransports) this.transports = this.loadTransports();
     const transports = this.transports;
     // 磁盘看门狗:每轮对账顺带查各节点剩余空间 → 低了由 **master 自己**告警。
     // 不依赖 worker 侧 DISCORD_WEBHOOK(worker 常不配,告警发不出去 → 爆盘无人知)。
     // 与主流程并行、不阻塞:查不到(transport 不支持/ssh 失败)就跳过该节点。
-    void this.checkDiskSpace(transports);
+    if (!onlyDue) void this.checkDiskSpace(transports);
     // 收尾后留存转格式的回执轮询(T9b):与主流程并行,本方法返回前 await(永不抛;不可达的节点只跳过本轮)。
-    const followupPoll = pollFollowups({
+    const followupPoll = onlyDue ? Promise.resolve() : pollFollowups({
       ledger: this.ledger, transports, stageProc: this.pipelineDeps.finalizeFormat?.stageProc,
       notify: this.notify, log: (m) => console.info(m),
     }).catch(() => undefined);
@@ -687,19 +825,39 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
 
     // 第一份清单只用来确定「要等哪些场收播」;settle 期间节点可能还在写新分段,
     // 旧快照会漏尾巴 → settle 后必须再收一份权威清单,选优/合并只用新快照。
-    const first = await this.collect(transports);
+    const first = onlyDue ? { broadcasts: [] } : await this.collect(transports);
 
-    // 3. Settle: 只等(过滤后)仍有成员的场收播;返回仍在录的成员 key 集。
-    const stillRecording = await this.settleAll(first.broadcasts);
+    // Retry ticks check activity once instead of occupying the timer while waiting for recording to end.
+    const stillRecording = onlyDue ? new Set<string>() : await this.settleAll(first.broadcasts);
 
     // 已知 job key 传给聚类:同一天已有 base key 的 job(哪怕已 done)→ 本簇强制 _HHMM,
     // 否则第二场直播会复用 base key 被幂等跳过。
-    const { broadcasts, cfgByKey, unreachable } = await this.collect(transports, this.ledger.listKeys());
-    this.trackUnreachable(transports, unreachable);
+    const collected = await this.collect(transports, this.ledger.listKeys());
+    const { cfgByKey, unreachable } = collected;
+    const broadcasts = onlyDue ? [...onlyDue].flatMap((key) => {
+      const exact = collected.broadcasts.find((b) => b.streamKey === key);
+      const base = exact ? null : retryBroadcastKey(key);
+      const source = exact ?? collected.broadcasts.find((b) => b.streamKey === base);
+      if (!source) return [];
+      if (source.streamKey === key) return [source];
+      const cfg = cfgByKey.get(source.streamKey);
+      if (cfg) cfgByKey.set(key, cfg);
+      return [{ ...source, streamKey: key }];
+    }) : collected.broadcasts;
+    if (onlyDue) {
+      const present = new Set(broadcasts.map((b) => b.streamKey));
+      for (const key of onlyDue) {
+        const job = this.ledger.get(key);
+        if (!job || !RETRYABLE.has(job.state) || present.has(key)) continue;
+        if (unreachable.size > 0) this.deferUploadRetry(key);
+        else this.stopUploadRetry(key, "source recordings are no longer available for this retry");
+      }
+    }
+    if (!onlyDue) this.trackUnreachable(transports, unreachable);
 
     // 3.5 第一份快照之后才出现的成员没经过 settle 等待(典型:首快照为空 → settle 秒回 →
     // 第二份快照才发现刚开播的分段)。现查 isDone,未收播则本轮跳过,防边录边合并残片。
-    await this.settleLateMembers(first.broadcasts, broadcasts, stillRecording);
+    await this.settleLateMembers(onlyDue ? [] : first.broadcasts, broadcasts, stillRecording);
 
     // 4. For each broadcast: 建 job 行(快)→ 派发给有界并发调度器(慢 IO 在那边)。
     //
@@ -721,9 +879,13 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
     for (const b of broadcasts) {
       try {
         // 过滤后无成员 → 房间没开 hub / 选中 worker 没人录到 → 跳过(不建 job)。
-        if (b.members.length === 0) continue;
+        if (b.members.length === 0) {
+          if (onlyDue) this.stopUploadRetry(b.streamKey, "no eligible source recordings are available");
+          continue;
+        }
         // 仍有成员在录制 → 本轮跳过(不建 job、不合并残片),待其录完的后续轮再处理。
         if (b.members.some((m) => stillRecording.has(`${m.workerId}:${m.rec.roomSlug}`))) {
+          if (onlyDue) this.deferUploadRetry(b.streamKey, "broadcast is still recording", false);
           this.clearSkipLog(`window:${b.streamKey}`);
           this.clearSkipLog(`rolling:${b.streamKey}`);
           continue;
@@ -733,6 +895,7 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
         // unsent tail as "interrupted" and park the broadcast in needs_manual; wait for the owner instead.
         const ownerBusy = b.members.filter((m) => m.rec.rolling?.active === true);
         if (ownerBusy.length > 0) {
+          if (onlyDue) this.deferUploadRetry(b.streamKey, "rolling upload still owns the broadcast", false);
           const nodes = [...new Set(ownerBusy.map((m) => m.workerId))].sort().join(",");
           this.logSkipOnce(`rolling:${b.streamKey}`, nodes, () => console.info(
             `[reconciler] ${b.streamKey} 边录边传进程仍在处理会话(${nodes}),本轮跳过`,
@@ -746,6 +909,7 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
         const latestEndMs = Math.max(...b.members.map((m) => m.rec.endMs));
         const windowMs = cfg.reconnectWindowMs != null ? this.resolveWindowMs(cfg.reconnectWindowMs) : this.reconnectWindowMs;
         if (windowMs > 0 && Date.now() - latestEndMs < windowMs) {
+          if (onlyDue) this.deferUploadRetry(b.streamKey, "broadcast is within the reconnect window", false);
           const nodes = [...new Set(b.members.map((m) => m.workerId))].sort().join(",");
           this.logSkipOnce(`window:${b.streamKey}`, nodes, () => console.info(
             `[reconciler] ${b.streamKey} 结束 ${Math.round((Date.now() - latestEndMs) / 1000)}s 前,重连窗内等待(防第二场撞 key/防拆场)`,
@@ -755,6 +919,10 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
         this.clearSkipLog(`window:${b.streamKey}`);
 
         const job = this.ledger.get(b.streamKey);
+        if (onlyDue && job && RETRYABLE.has(job.state) && await this.isBroadcastStillRecording(b, transports)) {
+          this.deferUploadRetry(b.streamKey, "broadcast is still recording", false);
+          continue;
+        }
 
         // T12 补跑:done 但「清理失败 / 核验待重试」的 job —— **在终态短路之前**判定,
         // 否则永远看不到这些 job(它们已经是终态,不会走下面的失败重试逻辑)。
@@ -795,20 +963,11 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
         // start a second (blocking) upload next to a queued or half-finished one.
         if (job && this.ledger.getUploadPlan(b.streamKey) != null) continue;
 
-        // failed 且已达重试上限 → 升级 needs_manual(终态)+ 通知一次人工,不再重入。
-        const failedNodes = job?.state === "failed" ? this.ledger.getFailedNodes(b.streamKey) : [];
-        // 上传类节点失败不可自动重试(可能已建稿/已 append 部分分 P)→ 直接转人工,避免重复稿。
-        const unsafeRetry = failedNodes.some((n) => UNSAFE_RETRY_NODES.has(n.node));
-        if (unsafeRetry) {
-          this.ledger.setState(b.streamKey, "needs_manual", { error: job?.error || "上传类节点失败,禁止自动重试" });
-          this.notify?.({
-            kind: "error",
-            stage: "同步",
-            message: `${b.streamKey} 上传类节点失败(${failedNodes.map((n) => n.node).join(",")}),已转人工(needs_manual)。最后错误:${(job?.error ?? "").slice(0, 200)}`,
-          });
-          continue;
-        }
-        if (job?.state === "failed" && (job.fails ?? 0) >= this.maxRetries) {
+        // Periodic reconcile and the retry timer share the same persisted due-time gate.
+        const planned = job?.failureClass === "safe-retry" || job?.failureClass === "resume-append";
+        if (job?.state === "failed" && !planned && this.planUploadRetry(b.streamKey)) continue;
+        if (planned && (job.nextAttemptAt == null || job.nextAttemptAt > Date.now())) continue;
+        if (job?.state === "failed" && !planned && (job.fails ?? 0) >= this.maxRetries) {
           this.ledger.setState(b.streamKey, "needs_manual", { error: job.error || "达重试上限" });
           this.notify?.({
             kind: "error",
@@ -822,6 +981,10 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
         // 下一轮重试。放在 done/needs_manual 短路之后(已收口的场不受影响)、建 job 之前(不留半截状态)。
         const lost = this.blockingUnreachable(cfg, transports, unreachable);
         if (lost.length > 0) {
+          if (onlyDue) {
+            this.deferUploadRetry(b.streamKey);
+            continue;
+          }
           console.warn(
             `[reconciler] ${b.streamKey} 参与节点 ${lost.map((id) => `${id}(${unreachable.get(id)})`).join(", ")} 清单失联,` +
               `本轮跳过选优与收口,下轮重试`,
@@ -856,7 +1019,7 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
         const nodeOwned = b.members.length > 0 && b.members.every((m) => !!m.rec.rolling?.bv);
         if (!job && isDerivedKey(b.streamKey) && !nodeOwned) {
           const conflict = await runNowConflict(
-            { ledger: this.ledger, transports },
+            { ledger: this.ledger, transports, isBusy: (key) => this.isStreamBusy(key) },
             b.streamKey,
             { force: false, self: { startMs: b.startMs, endMs: Math.max(...b.members.map((m) => m.rec.endMs)) } },
           );
@@ -893,17 +1056,72 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
         // 一旦把 await 挪进 dispatcher 就落到 dispatcher 的兜底日志上 → job 卡在
         // pending/retrying 且不计入 fails,重试上限形同虚设。所以在这里自己处理。
         const settled = this.dispatcher.dispatch(b.streamKey, async () => {
+          const current = this.ledger.get(b.streamKey);
+          if (!current) return;
+          if (!RETRYABLE.has(current.state)) {
+            this.ledger.clearFailurePlan(b.streamKey);
+            return;
+          }
+          if (this.ledger.getUploadPlan(b.streamKey)) {
+            this.ledger.clearFailurePlan(b.streamKey);
+            return;
+          }
+          if (this.pipelineDeps.pool?.hasStreamLock(b.streamKey)) {
+            if (current.failureClass) this.deferUploadRetry(b.streamKey, "upload is still active", false);
+            return;
+          }
+          const freshCfg = this.resolveCfg ? this.resolveCfg(b.platform, b.roomSlug) : cfg;
+          if (!freshCfg) {
+            if (current.failureClass) this.stopUploadRetry(b.streamKey, "room rule is missing or disabled");
+            return;
+          }
+          if (JSON.stringify([cfg.workers, cfg.requires]) !== JSON.stringify([freshCfg.workers, freshCfg.requires])) {
+            if (current.failureClass) this.stopUploadRetry(b.streamKey, "selected workers changed during retry");
+            return;
+          }
+          // The persisted uploadPlan is the ownership signal above. A node-side feature flag is only a
+          // preference: unsupported nodes and failed disk gates fall back to the master upload path.
+          if (current.failureClass && freshCfg.uploadMode !== "upload") {
+            this.stopUploadRetry(b.streamKey, "room is no longer in master upload mode");
+            return;
+          }
+          if (current.nextAttemptAt != null && current.nextAttemptAt > Date.now()) return;
+          if (freshCfg.uploadMode === "upload" && !nodeOwned) {
+            const conflict = await runNowConflict(
+              { ledger: this.ledger, transports, isBusy: (key) => this.isStreamBusy(key) },
+              b.streamKey,
+              { force: false, ignoreKeys: [b.streamKey], self: { startMs: b.startMs, endMs: Math.max(...b.members.map((m) => m.rec.endMs)) } },
+            );
+            if (conflict) {
+              const reason = "same-broadcast guard: " + conflict;
+              if (current.failureClass) this.stopUploadRetry(b.streamKey, reason);
+              else {
+                this.ledger.setState(b.streamKey, "needs_manual", { error: reason });
+                this.notify?.({ kind: "error", stage: "同步", message: `${b.streamKey} ${reason},已转人工` });
+              }
+              return;
+            }
+          }
+          const beforeFails = current.fails;
           try {
-            await this._runPipeline(b, { ...this.pipelineDeps, transports, cfg });
+            const result = await this._runPipeline(b, { ...this.pipelineDeps, transports, cfg: freshCfg });
+            this.consumeUploadRetryPlan(b.streamKey);
+            const currentFailure = result.state === "failed" ? this.ledger.get(b.streamKey)?.error ?? "pipeline failed" : undefined;
+            this.planUploadRetry(b.streamKey, currentFailure);
           } catch (err) {
             // 用户停止 → 转人工,绝不能 markFailed(failed 会自动重试)。
             if (isJobAbort(err)) {
+              this.consumeUploadRetryPlan(b.streamKey);
               this.ledger.setState(b.streamKey, "needs_manual", { error: USER_STOP });
               return;
             }
             // Per-broadcast 出错:置 job=failed(可见 + 重试上限内自动重试),不中止其余 broadcast。
             console.error(`[reconciler] broadcast ${b.streamKey} failed:`, err);
-            this.ledger.markFailed(b.streamKey, String((err as Error)?.message ?? err).slice(0, 300));
+            this.consumeUploadRetryPlan(b.streamKey);
+            if ((this.ledger.get(b.streamKey)?.fails ?? 0) === beforeFails) {
+              markMasterFailure(this.pipelineDeps, b.streamKey, String((err as Error)?.message ?? err).slice(-2000));
+            }
+            this.planUploadRetry(b.streamKey, err);
           }
         });
         // 去重命中时 dispatch 返回 resolved promise(活动 key 已在跑,本轮不必等它)——
@@ -921,10 +1139,10 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
         this.ledger.markFailed(b.streamKey, String((err as Error)?.message ?? err).slice(0, 300));
       }
     }
-    this.blocked = blockedNow;
+    if (!onlyDue) this.blocked = blockedNow;
     // 等**本轮派发出去**的场全部跑完(保留 running 守卫语义,见上方说明)。
     // 只等自己派发的那些:并发进来的另一轮所派的活跟本轮无关,不该把本轮卡住。
-    await Promise.all([...dispatched, followupPoll]);
+    if (!onlyDue) await Promise.all([...dispatched, followupPoll]);
   }
 
   /**
@@ -1001,10 +1219,25 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
     if (members.length === 0) {
       return { ok: false, error: `节点 ${winnerWorker} 没有这场录像`, code: 404 };
     }
-    const b: Broadcast = { ...found, streamKey: isNewSubmission ? streamKey : found.streamKey, members };
+    const b: Broadcast = {
+      ...found,
+      streamKey: isNewSubmission ? streamKey : this.ledger.get(streamKey) ? streamKey : found.streamKey,
+      members,
+    };
     const key = b.streamKey;
     if (isJobLive(key) || (this.pipelineDeps.pool?.hasStreamLock(key) ?? false)) {
       return { ok: false, error: "任务正在执行", code: 409 };
+    }
+    const existing = [this.ledger.get(streamKey), this.ledger.get(key)].find((job) =>
+      (job?.failureClass === "safe-retry" || job?.failureClass === "resume-append")
+      && job.nextAttemptAt != null && job.nextAttemptAt > Date.now());
+    if (existing?.nextAttemptAt != null && opts.force !== true) {
+      return {
+        ok: false,
+        error: "重试已排期，请等到 " + new Date(existing.nextAttemptAt).toISOString(),
+        code: 429,
+        streamKey: key,
+      };
     }
     // Both guards are evaluated before any force bypass so a single 409 lists every reason; one force cannot skip a
     // reason the user never saw.
@@ -1015,9 +1248,13 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
     // 2) By the original (suffix-free) key: any earlier BV or an unfinished queue row for this broadcast means a
     //    rerun could post a second draft.
     const conflict = await runNowConflict(
-      { ledger: this.ledger, transports, log: (m) => console.info(m) }, baseKey,
-      { force: opts.force === true, self: { startMs: b.startMs, endMs: Math.max(...members.map((m) => m.rec.endMs)) } },
+      { ledger: this.ledger, transports, isBusy: (key) => this.isStreamBusy(key), log: (m) => console.info(m) }, baseKey,
+      { force: opts.force === true, ignoreBusyKeys: [streamKey, key], targetKey: key,
+        self: { startMs: b.startMs, endMs: Math.max(...members.map((m) => m.rec.endMs)) } },
     );
+    if (opts.force === true && conflict?.startsWith("rerun blocked:")) {
+      return { ok: false, error: conflict, code: 409 };
+    }
     if (opts.force !== true) {
       const reasons: string[] = [];
       if (missing.length > 0) {
@@ -1029,12 +1266,36 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
       if (busy.length > 0) reasons.push(`节点 ${busy.join(",")} 的边录边传仍在处理本场(等槽或上传末段),现在重跑可能重复建稿`);
       if (reasons.length > 0) {
         return {
-          ok: false, code: 409, forceable: true,
+          ok: false, code: 409, forceable: !conflict?.startsWith("rerun blocked:"),
           error: reasons.length === 1 && !missing.length ? reasons[0]! : `${reasons.join(";")};确认全部原因后用 force 继续`,
         };
       }
     } else if (missing.length > 0) {
       console.warn(`[runNow] force over unreachable node(s): ${missingDetail}`);
+    }
+    if (opts.force === true) {
+      const family = sameBroadcastJobKeys(
+        { ledger: this.ledger, transports, isBusy: (candidate) => this.isStreamBusy(candidate) },
+        baseKey, { startMs: b.startMs, endMs: Math.max(...members.map((m) => m.rec.endMs)) },
+      );
+      const siblings = new Set([baseKey, ...family]);
+      const activeSibling = [...siblings].find((sibling) => {
+        if (sibling === streamKey || sibling === key) return false;
+        const job = this.ledger.get(sibling);
+        return this.isStreamBusy(sibling) || job?.state === "retrying";
+      });
+      if (activeSibling) {
+        return { ok: false, error: `同场任务 ${activeSibling} 已开始执行,请刷新后重试`, code: 409, forceable: false };
+      }
+      for (const sibling of siblings) {
+        const job = this.ledger.get(sibling);
+        if (sibling === streamKey || sibling === key) continue;
+        if (this.ledger.getUploadPlan(sibling)) continue;
+        if (job?.state !== "pending" && job?.state !== "failed") continue;
+        this.ledger.setState(sibling, "needs_manual", {
+          error: (job.error || "same-broadcast job") + "; superseded by forced same-broadcast rerun " + key,
+        });
+      }
     }
 
     this.ledger.upsertPending(key, b.startMs);
@@ -1044,16 +1305,29 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
     // 配置按广播身份(found.streamKey)缓存;新建任务 key 带 -N 后缀,直接按任务 key 查会
     // miss 而回落成全局 stage 默认 → 上传节点全 skip。必须按 found 的原始广播身份查。
     const cfg = cfgByKey.get(found.streamKey) ?? cfgByKey.get(key) ?? this.pipelineDeps.cfg;
+    const consumeRetryPlans = (): void => {
+      this.consumeUploadRetryPlan(streamKey);
+      if (key !== streamKey) this.consumeUploadRetryPlan(key);
+    };
     const fire = async (): Promise<void> => {
+      const beforeFails = this.ledger.get(key)?.fails ?? 0;
       try {
-        await this._runPipeline(b, { ...this.pipelineDeps, transports, cfg });
+        const result = await this._runPipeline(b, { ...this.pipelineDeps, transports, cfg });
+        consumeRetryPlans();
+        const currentFailure = result.state === "failed" ? this.ledger.get(key)?.error ?? "pipeline failed" : undefined;
+        this.planUploadRetry(key, currentFailure, winnerWorker === undefined);
       } catch (err) {
         if (isJobAbort(err)) {
+          consumeRetryPlans();
           this.ledger.setState(key, "needs_manual", { error: USER_STOP });
           return;
         }
         console.error(`[reconciler] runNow ${key} failed:`, err);
-        this.ledger.markFailed(key, String((err as Error)?.message ?? err).slice(0, 300));
+        if ((this.ledger.get(key)?.fails ?? 0) === beforeFails) {
+          markMasterFailure(this.pipelineDeps, key, String((err as Error)?.message ?? err).slice(-2000));
+        }
+        consumeRetryPlans();
+        this.planUploadRetry(key, err, winnerWorker === undefined);
         if (wait) throw err;
       }
     };

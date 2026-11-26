@@ -2,7 +2,7 @@
 
 > 本文件是本仓库 **agent 工作的唯一待办台账**。管理规则见 `AGENTS.md`「任务与 TODO 管理」。
 > 编号 `T-N` 稳定不变（引用/提交信息里用它指代条目）。
-> 最后更新：2026-11-20
+> 最后更新：2026-11-26
 
 ## 状态约定
 
@@ -14,6 +14,10 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+
+补充状态（2026-11-26，覆盖 T-250 上述旧 SHA/计数）：复审发现 `retryNode` 可绕过同一场上传证据判定；已在 master submit 入口拒绝无 BV 的节点上传历史，并加“禁止调用 create”回归，代码提交 `84e90adb`（本地，尚未推送），版本 `0.0.415`。定向 `master-upload.test.ts` 56/56；类型、架构、bundle、diff 与隐私门禁通过。最近一次完整本地 `pnpm test` 退出 1（终端未保留失败用例），不能视作全量通过；旧远端 SHA `3569e0a` 的 CI 也在未改的 `test/app/task-secrets.test.ts` 报 JSON 截断错误，尚未对新 SHA 或 base 复核。风险扫描仍为 RISK，人工 force 语义待 owner 决定，故不合并。未部署，master 与目标节点空闲状态尚未实测。PR 跟进调度 `ed69afab-3760-408a-a5f1-fb4f684edde8` 仍 active，但旧 hook 需用户在 Automation 中仅替换 command 并保留 180 秒超时。
+
+- [~] **T-250 主控单文件限流安全回队（issue [#752](https://github.com/fuyucn/douyin-rec/issues/752)，PR2，2026-11-25）** — **做什么/为什么**: 仅对持久证据明确拒绝的单文件限流请求使用退避回队；未知回执、部分成功、非限流上传失败和历史无证据任务不自动重传。复用现有上传闸与冷却，停止/终态不复活。用户已在 #752 明确批准此限定行为。**验收（本地）**: 当前补丁定向 `master-upload.test.ts` 56/56；类型检查、架构检查、bundle `0.0.415`、diff-check 与隐私门禁通过。最近全量 `pnpm test` 退出 1，失败用例未保留；远端旧 SHA `3569e0a` 也有未改测试 `task-secrets` 的 JSON 截断失败，新 SHA 尚无 CI。**当前阻塞**: `84e90adb` 已本地提交但尚未推送；须取得新 SHA 的 CI 与独立复审。风险扫描仍为 RISK，且人工 force 对 legacy/无证明历史的边界需 owner 决定。未知结果继续 fail-closed，不自动重传。未合并或部署；部署须实测 master 与目标节点均无录制、无上传，且由人执行。PR 跟进调度 `ed69afab-3760-408a-a5f1-fb4f684edde8` 仍 active，但旧 hook 需用户在 Automation 中仅替换 command 并保留 180 秒超时。**计划**: [plans/058](plans/058_master_upload_retry.md)。PR3–5 与历史任务迁移不在本步范围。
 
 - [~] **T-249 四库收口为「控制库 + 处理队列库」并把库放进 named volume（issue [#750](https://github.com/fuyucn/douyin-rec/issues/750)，2026-11-25）** — **做什么**: `db/drec-control.db` 一个文件装 tasks/settings/merge_jobs/hub_rules + hub 台账 `sync_*`(7 表) + `room_sessions` + `upload_limits`；`proc-queue.db` 保持独立（多进程 claim/租约独占 WAL）。`compose` 把 `db/` 改挂 named volume `drec-db`，新增一次性 `db-seed`（拷完跑 `integrity_check` 才落 `.seed-complete`）。**为什么**: #747 的 522 是 SQLite `-wal`/`-shm` 经宿主 bind mount 转发时视图分叉，只能重启容器恢复；顺带把「4 份 WAL/4 个连接/4 个备份点」收成一份。**验收**: 主控已部署 `0.0.406`，控制库 12 表 `integrity ok`、tasks 23 / sync_jobs 570 / room_sessions 192 / upload_limits 1 与迁移前一致；宿主侧对 bind 目录改名→改回，`/api/tasks`、`/api/hub/jobs`、`/api/stats` 仍 200（注入验证）。**剩余**: 两台节点当前都在录制（`recording:1`），按部署 guard 等收播后再升级，升级时旧库自动并入并保留原文件。
 

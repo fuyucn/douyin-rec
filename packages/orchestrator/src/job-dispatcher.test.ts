@@ -18,6 +18,21 @@ const tick = () => new Promise<void>((r) => setImmediate(r));
 const flush = () => new Promise<void>((r) => setImmediate(r));
 
 describe("JobDispatcher", () => {
+  it("reports active and queued keys until their task settles", async () => {
+    const d = new JobDispatcher({ maxConcurrent: 1, log: () => {} });
+    const gate = deferred();
+    d.enqueue("running", async () => { await gate.promise; });
+    d.enqueue("queued", async () => {});
+
+    expect(d.isScheduled("running")).toBe(true);
+    expect(d.isScheduled("queued")).toBe(true);
+    expect(d.isScheduled("missing")).toBe(false);
+    gate.resolve();
+    await d.drain();
+    expect(d.isScheduled("running")).toBe(false);
+    expect(d.isScheduled("queued")).toBe(false);
+  });
+
   it("并发上限生效:maxConcurrent=2 → 第三个任务排队等待,不并发跑", async () => {
     const d = new JobDispatcher({ maxConcurrent: 2, log: () => {} });
     const running: string[] = [];

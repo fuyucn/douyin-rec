@@ -3,13 +3,12 @@ import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, rmdirSyn
 import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { NodeUploadConfig } from "./node-upload-config.js";
-import { appendArchive } from "@drec/core";
+import { appendMasterParts, prepareMasterUpload, beginMasterUploadRun, markMasterFailure, bindMasterPlan, validateMasterParts, hasVerifiedMasterHistory, hasMasterUploadFailure, MASTER_UPLOAD_STEPS } from "./master-upload.js";
 import type { JobState, SyncLedger } from "./ledger.js";
-import { resolveSubmissionTitle, isAtomicTempName, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, resolveJobLogPath, stageSessionDir, anchorNameOfSessionBase, type PathLayout, survivingArtifacts, throwIfAborted, closeStageReady, USER_STOP, VIDEO_EXT_ALT, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, isSidecarSkipEvent, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
+import { resolveSubmissionTitle, isAtomicTempName, formatPartTitle, isJobAbort, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, resolveJobLogPath, stageSessionDir, anchorNameOfSessionBase, type PathLayout, survivingArtifacts, throwIfAborted, closeStageReady, USER_STOP, VIDEO_EXT_ALT, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, isSidecarSkipEvent, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
 import type { OutputFormat, UploadOpts, UploadTarget } from "@drec/core";
 import { groupSessionsInDir } from "@drec/post-process";
 import { selectWinner } from "./select.js";
-import { retry } from "./retry.js";
 import { humanBytes, sumBytes } from "./format.js";
 import { associateSeasonForJob, buildWorkflow, deriveStageProducts, runWorkflowNodes, ResourcePool, type StageProducts, type WorkflowNodeKey } from "./workflow.js";
 import { deriveSegmentPlan, repairStageProductsByAlias, stageProductPaths, UPLOAD_ALIAS_DIR } from "./session-plan.js";
@@ -1014,6 +1013,26 @@ async function runPipelineInner(
   jlog: (msg: string) => void,
 ): Promise<{ state: JobState; bv?: string; stageReady?: true }> {
   const { transports, ledger, notify, cfg } = deps;
+  const existing = ledger.get(b.streamKey);
+  const bindMasterUploadPlan = (): void => {
+    if (cfg.uploadMode !== "upload" || ledger.get(b.streamKey)?.state === "done") return;
+    prepareMasterUpload(ledger, b.streamKey);
+    bindMasterPlan(ledger, b.streamKey, "sources", {
+      members: b.members.map((m) => [m.workerId, m.rec.sessionBase, m.rec.tsFiles, m.rec.xmlPath]).sort(),
+      steps: cfg.steps, minSegmentSec: cfg.minSegmentSec ?? 2, segmentGroupSec: cfg.segmentGroupSec ?? 0,
+      uploadBatchSize: cfg.uploadBatchSize ?? 1, outputFormat: cfg.outputFormat,
+      visibility: cfg.uploadPrivate === false ? "public" : "private",
+    });
+  };
+  // An existing master archive must keep its original visibility policy even if a later config
+  // change makes the node-side path eligible. Bind before every resume branch, not only before
+  // the pull-to-master path.
+  if (cfg.uploadMode === "upload" && existing?.state !== "done"
+    && (existing?.bv != null || hasMasterUploadFailure(ledger, b.streamKey)
+      || !shouldUseNodeSideUpload(cfg, burnFlags(cfg.steps)).ok)) {
+    beginMasterUploadRun(ledger, b.streamKey);
+    bindMasterUploadPlan();
+  }
   // 子命令统一经此执行:命令行 + 耗时 + 输出摘尾(最后 2KB,biliup 输出可能很长)都进 job.log。
   const sh = async (cmd: string): Promise<void> => {
     jlog(`$ ${cmd}`);
@@ -1038,7 +1057,6 @@ async function runPipelineInner(
   const stageFmt = effectiveStageFormat(cfg.outputFormat, cfg.uploadMode);
 
   // 续跑:job 已有 bv ⇒ P1 已建稿(不可逆),绝不重传。跳过 select/pull/merge/burn/uploadPlain,只补 append。
-  const existing = ledger.get(streamKey);
   // #70:台账已有 bv 时,同场另一成员可能在建稿中被杀(有意图/不确定段、无稿件号)—— 续跑只认台账 bv,
   // 会漏掉该成员的分 P 却收口 done。续跑任一分支(含节点侧 done 补跑)前先跑同一检查,命中转人工。
   if (existing?.bv && blockUnsettledWithoutBv({ streamKey, members: b.members, ledger, jlog, notify })) {
@@ -1054,7 +1072,21 @@ async function runPipelineInner(
   if (existing?.state === "done" && existing.bv
       && (ranNodeSide || shouldUseNodeSideUpload(cfg, { burnDanmu, burnLivechat }).ok)) {
     jlog(`节点侧上传的 done 场补跑收尾:只补核验 + 删源(bv=${existing.bv}),不重传`);
+    await associateSeasonForJob(ledger, cfg, streamKey, jlog);
     return await finalizeOnly(streamKey, existing.bv, deps, jlog, notify, b.members, stageSub, { keepNodeXml: true });
+  }
+
+  if (existing?.state === "done" && existing.bv) {
+    jlog("已完成稿件只执行收尾补跑，不重新进入上传管线");
+    await associateSeasonForJob(ledger, cfg, streamKey, jlog);
+    return await finalizeOnly(streamKey, existing.bv, deps, jlog, notify, b.members, stageSub);
+  }
+
+  if (cfg.uploadMode === "upload" && existing?.bv && !hasVerifiedMasterHistory(ledger, streamKey)) {
+    const error = "existing archive has no verified master submission evidence; refusing automatic append";
+    ledger.setState(streamKey, "needs_manual", { error: error });
+    notify({ kind: "error", stage: "上传", message: "已有稿件号但缺少可验证的主控提交记录，无法安全判断哪些分P已落地；已停止续传，请人工核对" });
+    return { state: "needs_manual", bv: existing.bv };
   }
 
   // 分段模式(bv 已存在)有自己的续跑(含 plain 段 checkpoint),不要走合并路径的 resumeAppends。
@@ -1204,7 +1236,10 @@ async function runPipelineInner(
   // ── 节点侧上传(experimental,plans/027)──────────────────────────────────────
   // 全部逻辑隔离在 node-side-upload.ts(含 kill switch);这里只做「是否该走」的判定 + 调用。
   // 不满足条件(未开启/全局停用/stage 模式/需烧录) → 记明原因后继续走下面的 pull 回 master。
-  const nodeSide = shouldUseNodeSideUpload(cfg, { burnDanmu, burnLivechat });
+  const masterUploadOwnsRetry = hasMasterUploadFailure(ledger, streamKey);
+  const nodeSide = masterUploadOwnsRetry
+    ? { ok: false as const, reason: "a previous master upload attempt owns this retry" }
+    : shouldUseNodeSideUpload(cfg, { burnDanmu, burnLivechat });
   // earliest = 本场最早会话:开播时刻 / 直播标题 / 会话 base 的唯一口径。
   // 节点侧上传与 pull 回 master 的常规路径共用同一取值(否则节点侧渲染会偏)。
   const earliestRec = winnerMembers.reduce((a, m) => (m.rec.startMs < a.rec.startMs ? m : a));
@@ -1223,6 +1258,7 @@ async function runPipelineInner(
   }
 
   // stageSub 已在入口声明(续跑分支复用)——stageDir/<sanitized-streamKey>,隔离各场文件。
+  bindMasterUploadPlan();
   const filesToPull = winnerMembers.flatMap((m) => [
     ...m.rec.tsFiles,
     ...(m.rec.xmlPath ? [m.rec.xmlPath] : []),
@@ -1361,7 +1397,8 @@ async function runPipelineInner(
     pool: deps.pool ?? new ResourcePool(),
     autoRetry: new Set<WorkflowNodeKey>(
       failedNodes
-        .filter((n) => n.node === "merge" || n.node === "burn_danmu" || n.node === "burn_livechat")
+        .filter((n) => n.node === "merge" || n.node === "burn_danmu" || n.node === "burn_livechat"
+          || (MASTER_UPLOAD_STEPS.has(n.node) && ledger.get(streamKey)?.failureClass === "safe-retry"))
         .map((n) => n.node as WorkflowNodeKey),
     ),
   });
@@ -1374,9 +1411,10 @@ async function runPipelineInner(
       ? ledger.getNodeState(streamKey, result.failed[0])?.error ?? `节点失败: ${result.failed.join(",")}`
       : `节点被阻断: ${result.blocked.join(",")}`;
     jlog(`pipeline 节点失败: failed=${result.failed.join(",")} blocked=${result.blocked.join(",")}`);
-    ledger.markFailed(streamKey, `${errText} [${[...result.failed, ...result.blocked].join(",")}]`);
+    markMasterFailure(deps, streamKey, `${errText} [${[...result.failed, ...result.blocked].join(",")}]`);
     notify({ kind: "error", stage: "同步", message: `${streamKey} 节点失败: ${errText}` });
-    return { state: "failed", bv: ledger.get(streamKey)?.bv };
+    const state = ledger.get(streamKey)?.state === "needs_manual" ? "needs_manual" : "failed";
+    return { state, bv: ledger.get(streamKey)?.bv };
   }
 
   const bv = ledger.get(streamKey)?.bv;
@@ -1468,7 +1506,6 @@ async function resumeAppends(
   jlog(`续跑:已建稿 bv=${bv},跳过 select/pull/merge/burn/uploadPlain,只补 append`);
   const splitForUpload = deps.splitForUpload ?? defaultSplitForUpload;
   const { burnDanmu, burnLivechat } = burnFlags(cfg.steps);
-  const isPublic = cfg.uploadPrivate === false;
   // A kill after upload_plain persisted the BV but before its post-slot association leaves "pending".
   // Run it as a tail so the append work below never waits on this bounded HTTP call.
   const seasonTail = associateSeasonForJob(ledger, cfg, streamKey, jlog).catch((e) => {
@@ -1515,6 +1552,7 @@ async function resumeAppends(
     notify({ kind: "error", stage: "上传", message: `续跑失败:${bv} 产物缺失,请人工处理(补 append 或删稿重来)` });
     return await drainSeason({ state: "needs_manual", bv });
   }
+  await validateMasterParts(ledger, streamKey, "plain", [prod.plain]);
   // 续跑前先修复失败的烧录节点:docker crash / 中断可能留下半成品(文件在但缺 moov),
   // 直接 append 会把坏文件传上去;烧录是本地产物,重烧不会重复投稿。
   const burnRepairs: Array<{ step: "burn_danmu" | "burn_livechat"; on: boolean }> = [
@@ -1563,11 +1601,13 @@ async function resumeAppends(
   ];
   for (const g of groups) {
     if (!g.on) continue;
-    if (ledger.isStepDone(streamKey, g.step)) { jlog(`append 跳过(已完成): ${g.step}`); continue; }
     const files = await splitForUpload(g.mp4);
+    const stepDone = ledger.isStepDone(streamKey, g.step);
+    await validateMasterParts(ledger, streamKey, g.step, files, stepDone);
+    if (ledger.isStepDone(streamKey, g.step)) { jlog(`append 跳过(已完成): ${g.step}`); continue; }
     if (files.length === 0) continue;
-    // 多段组(>16GB)无法安全续跑:上一轮可能已 append 部分段,重跑会重复分 P(无 per-part checkpoint)→ 转人工。
-    if (files.length > 1) {
+    // Legacy multi-file groups have no atomic submission evidence. New journals fence the whole batch.
+    if (files.length > 1 && !hasVerifiedMasterHistory(ledger, streamKey)) {
       jlog(`续跑无法安全处理多段组 ${g.step}(${files.length} 段,可能已 append 部分)→ 转人工`);
       ledger.setState(streamKey, "needs_manual", { error: `续跑遇多段组 ${g.step}(${files.length} 段),无法安全续传,请人工核对分 P` });
       notify({ kind: "error", stage: "上传", message: `${bv} 续跑遇多段组 ${g.step},无法安全续传,请人工核对分 P` });
@@ -1575,29 +1615,10 @@ async function resumeAppends(
     }
     jlog(`续跑 append 开始: ${g.step} (${files.length} 段)`);
     ledger.logStep(streamKey, g.step, "start");
-    // 与主 workflow 一致:B站追加分 P 后稿件短暂锁定,60s*2^n 退避等锁释放。
-    const tries = files.length === 1 ? 5 : 1;
-    // 经**全局上传队列**执行(与主 workflow / 分段路径同一口径):否则续跑补 append 会绕过
-    // 提交限速与 601 冷却,多场同时续跑时直接打爆 B 站频率限制。
-    const submit = (): Promise<void> =>
-      deps.pool
-        ? deps.pool.withUpload(() => appendArchive(deps.upload, { bv, files, cookies: cfg.cookies, public: isPublic, deferVerificationUntilCleanup: canDeferAppendVerification(deps, streamKey) }), streamKey)
-        : appendArchive(deps.upload, { bv, files, cookies: cfg.cookies, public: isPublic, deferVerificationUntilCleanup: canDeferAppendVerification(deps, streamKey) });
-    await drainSeasonOnThrow(() => retry(submit, {
-      tries,
-      backoffMs: 60_000,
-      sleep: deps.sleep,
-      // append 结果不确定（请求已发出但没拿到响应）→ 服务端可能已追加，**绝不重试**（会重复分P）。
-      // 601 限流是「本次提交未生效」，仍按冷却退避重试；与主 workflow / 分段路径同一口径。
-      shouldRetry: (err) => isUploadRateLimited(err) || !isAppendAmbiguous(err),
-      onRetry: (attempt, err) => jlog(`续跑 append ${g.step} 第 ${attempt} 次失败,重试: ${String((err as Error)?.message ?? err).slice(0, 200)}`),
-    }));
-    // 续跑补的 append 同样要记 checkpoint(T11.8):否则核验基线只含首轮提交的组,
-    // 续跑补上的分 P 不计入期望 → 假 mismatch。
-    for (let i = 0; i < files.length; i++) {
-      const grp = g.step === "append_danmu" ? PART_GROUP_CANONICAL.danmu : PART_GROUP_CANONICAL.livechat;
-      ledger.markPartDone(streamKey, grp, i);
-    }
+    const submit = (): Promise<void> => appendMasterParts(deps, streamKey, bv, g.step,
+      files.map((_, index) => index), files, canDeferAppendVerification(deps, streamKey));
+    await drainSeasonOnThrow(() => deps.pool ? deps.pool.withUpload(submit, streamKey) : submit());
+    // Submission evidence and verification progress were committed together by master-upload.
     ledger.logStep(streamKey, g.step, "done", `${files.length} 段`);
     jlog(`续跑 append 完成: ${g.step}`);
   }

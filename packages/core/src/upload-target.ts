@@ -118,6 +118,8 @@ export interface UploadChildHooks {
 }
 
 export interface CreateArchiveInput {
+  /** Unknown submissions must not be resent, even when visibility has not caught up. */
+  proofOnly?: boolean;
   cred: CredentialRef;
   hooks?: UploadChildHooks;
   title: string;
@@ -138,6 +140,7 @@ export interface CreateArchiveResult {
 }
 
 export interface AppendPartsInput {
+  proofOnly?: boolean;
   cred: CredentialRef;
   hooks?: UploadChildHooks;
   /** 幂等核对用的分 P 数回读;缺省由目标自己实现。编排层有更严的读法时要显式传。 */

@@ -7,7 +7,7 @@ import { SyncLedger } from "./ledger.js";
 import { ProcUnsupported, type Transport, type NodeRecording, type NodeInventory } from "./transport.js";
 import type { PipelineDeps } from "./pipeline.js";
 import { clusterBroadcasts, type Broadcast } from "./identity.js";
-import { zeroDiskStreamKey } from "@drec/core";
+import { MAX_BACKOFF_MS, zeroDiskStreamKey } from "@drec/core";
 import type { JobState } from "./ledger.js";
 import { processTimeZone, zonedStamp, JobAbortedError, USER_STOP, _resetJobAbort, beginJob, endJob, isJobLive } from "@drec/core";
 import type { NotifyEvent } from "@drec/core";
@@ -1208,7 +1208,7 @@ describe("Reconciler.stopJob / runNow", () => {
 
   it("stopJob: done → 409", async () => {
     const { ledger, reconciler } = setup();
-    ledger.upsertPending(key, Date.now());
+    ledger.upsertPending(key, makeRec().startMs);
     ledger.markDone(key, "BV1");
     const r = await reconciler.stopJob(key);
     expect(r).toMatchObject({ ok: false, code: 409 });
@@ -1292,6 +1292,47 @@ describe("Reconciler.stopJob / runNow", () => {
     ledger.close();
   });
 
+  it("runNow requires force to bypass persisted upload backoff", async () => {
+    const { ledger, reconciler, spyRunPipeline } = setup();
+    ledger.upsertPending(key, Date.now());
+    ledger.setState(key, "failed", { error: "rate limited" });
+    const dueAt = Date.now() + 60_000;
+    ledger.setFailurePlan(key, { failureClass: "safe-retry", nextAttemptAt: dueAt });
+    const before = ledger.get(key)!;
+
+    const early = await reconciler.runNow({ streamKey: key, wait: true });
+    expect(early).toMatchObject({ ok: false, code: 429, streamKey: key });
+    expect(spyRunPipeline).not.toHaveBeenCalled();
+    expect(ledger.get(key)).toMatchObject({ state: before.state, fails: before.fails, nextAttemptAt: dueAt });
+
+    const forced = await reconciler.runNow({ streamKey: key, wait: true, force: true });
+    expect(forced).toMatchObject({ ok: true, code: 200, streamKey: key });
+    expect(spyRunPipeline).toHaveBeenCalledTimes(1);
+    expect(ledger.get(key)?.state).toBe("done");
+    ledger.close();
+  });
+
+  it("consumes a due upload retry plan before a retry that later fails outside upload", async () => {
+    const { ledger, reconciler, spyRunPipeline } = setup();
+    const retryKey = key;
+    ledger.upsertPending(retryKey, makeRec().startMs);
+    ledger.setState(retryKey, "failed", { error: "rate limited" });
+    ledger.syncNodeState(retryKey, "upload_plain", "failed", { error: "rate limited" });
+    ledger.setFailurePlan(retryKey, { failureClass: "safe-retry", nextAttemptAt: 0 });
+    spyRunPipeline.mockImplementation(async (broadcast) => {
+      ledger.syncNodeState(broadcast.streamKey, "upload_plain", "done", { error: null });
+      ledger.setState(broadcast.streamKey, "failed", { error: "post-upload cleanup failed" }, { force: true });
+      throw new Error("post-upload cleanup failed");
+    });
+
+    await reconciler.pollUploadRetries();
+
+    await vi.waitFor(() => expect(spyRunPipeline).toHaveBeenCalledTimes(1));
+    expect(spyRunPipeline).toHaveBeenCalledTimes(1);
+    expect(ledger.get(retryKey)).toMatchObject({ state: "failed", fails: 1, failureClass: null, nextAttemptAt: null });
+    ledger.close();
+  });
+
   it("runNow: a node's rolling uploader still owns the session → forceable 409 (issue #309)", async () => {
     const { ledger, reconciler, spyRunPipeline } = setup([makeRec({ rolling: { confirmed: [], active: true } })]);
     const r = await reconciler.runNow({ streamKey: key, wait: true });
@@ -1341,6 +1382,18 @@ describe("Reconciler.stopJob / runNow", () => {
     endJob(key);
     expect(r).toMatchObject({ ok: false, code: 409 });
     expect(r.forceable).toBeUndefined();
+    expect(spyRunPipeline).not.toHaveBeenCalled();
+    ledger.close();
+  });
+
+  it("runNow marks a non-forceable same-broadcast conflict as not forceable", async () => {
+    const { ledger, reconciler, spyRunPipeline } = setup();
+    ledger.upsertPending(key);
+    ledger.setState(key, "retrying");
+
+    const result = await reconciler.runNow({ streamKey: `${key}-1`, wait: true });
+
+    expect(result).toMatchObject({ ok: false, code: 409, forceable: false });
     expect(spyRunPipeline).not.toHaveBeenCalled();
     ledger.close();
   });
@@ -2030,6 +2083,132 @@ describe("清单三态:失联节点所在的场不选优不收口(#27)", () => {
     await reconciler.reconcileAll();
     expect(alerts()).toHaveLength(2);                          // 新一轮失联期可再报
     ledger.close();
+  });
+
+  it("due retry becomes manual after a persistent selected-node outage", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const startedAt = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(startedAt);
+    const live = flaky("live", [makeRec()], "ok");
+    const lost = flaky("lost", [makeRec()], "reject");
+    const { ledger, runPipeline, reconciler } = setup({
+      transports: [live.t, lost.t],
+      cfgFor: () => ({ workers: ["live", "lost"] }),
+    });
+    const key = clusterBroadcasts([{ workerId: "live", recordings: [makeRec()] }], 0, "douyin")[0]!.streamKey;
+    ledger.upsertPending(key, makeRec().startMs);
+    ledger.setState(key, "failed", { error: "safe upload rejection" });
+    ledger.setFailurePlan(key, { failureClass: "safe-retry", nextAttemptAt: 0 });
+
+    await reconciler.pollUploadRetries();
+    clock.mockReturnValue(startedAt + MAX_BACKOFF_MS + 10_000);
+    await reconciler.pollUploadRetries();
+
+    expect(ledger.get(key)?.state).toBe("needs_manual");
+    expect(ledger.get(key)?.error).toContain("minutes");
+    expect(runPipeline).not.toHaveBeenCalled();
+
+    ledger.setState(key, "retrying");
+    ledger.setFailurePlan(key, { failureClass: "safe-retry", nextAttemptAt: 0 });
+    const retryStartedAt = Date.now();
+    await reconciler.pollUploadRetries();
+    clock.mockReturnValue(retryStartedAt + MAX_BACKOFF_MS + 10_000);
+    await reconciler.pollUploadRetries();
+    expect(ledger.get(key)?.state).toBe("needs_manual");
+
+    clock.mockRestore();
+    ledger.close();
+  });
+
+  it("an active retry is not expired while its pipeline owns the stream", async () => {
+    const startedAt = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(startedAt);
+    const rec = makeRec();
+    const { ledger, reconciler, runPipeline } = setup({ transports: [makeTransport("live", [rec])] });
+    const key = clusterBroadcasts([{ workerId: "live", recordings: [rec] }], 0, "douyin")[0]!.streamKey;
+    ledger.upsertPending(key, rec.startMs);
+    ledger.setState(key, "retrying");
+    ledger.setFailurePlan(key, { failureClass: "safe-retry", nextAttemptAt: 0 });
+
+    beginJob(key);
+    try {
+      clock.mockReturnValue(startedAt + MAX_BACKOFF_MS + 10_000);
+      await reconciler.pollUploadRetries();
+      expect(ledger.get(key)).toMatchObject({ state: "retrying", failureClass: "safe-retry" });
+      expect(ledger.get(key)!.nextAttemptAt).toBe(Date.now() + 60_000);
+      expect(runPipeline).not.toHaveBeenCalled();
+    } finally {
+      endJob(key);
+      clock.mockRestore();
+      ledger.close();
+    }
+  });
+
+  it("a queued retry is not expired while it waits for a dispatcher slot", async () => {
+    const failureAt = Date.now();
+    const blocker = makeRec({
+      roomSlug: "blocker-room",
+      startMs: Date.parse("2026-06-22T07:00:00Z"),
+    });
+    const target = makeRec({ roomSlug: "retry-room" });
+    const transports = [makeTransport("live", [blocker, target])];
+    const { ledger, reconciler, runPipeline } = setup({
+      transports,
+      extra: { maxConcurrentPipelines: 1 },
+    });
+    const targetKey = clusterBroadcasts([{ workerId: "live", recordings: [target] }], 0, "douyin")[0]!.streamKey;
+    ledger.upsertPending(targetKey, target.startMs);
+    ledger.setState(targetKey, "failed", { error: "rate limited" });
+    ledger.setFailurePlan(targetKey, { failureClass: "safe-retry", nextAttemptAt: 0 });
+
+    const clock = vi.spyOn(Date, "now").mockReturnValue(failureAt + MAX_BACKOFF_MS + 10_000);
+    let releaseBlocker!: () => void;
+    const blockerGate = new Promise<void>((resolve) => { releaseBlocker = resolve; });
+    runPipeline.mockImplementation(async (broadcast) => {
+      if (broadcast.streamKey !== targetKey) await blockerGate;
+      ledger.markDone(broadcast.streamKey, "BV_TEST");
+      return { state: "done", bv: "BV_TEST" };
+    });
+
+    const reconciling = reconciler.reconcileAll();
+    try {
+      await vi.waitFor(() => expect(runPipeline).toHaveBeenCalledTimes(1));
+      await reconciler.pollUploadRetries();
+
+      expect(ledger.get(targetKey)?.state).not.toBe("needs_manual");
+      expect(ledger.get(targetKey)?.failureClass).toBe("safe-retry");
+      expect(ledger.get(targetKey)?.nextAttemptAt).toBe(Date.now() + 60_000);
+      expect(runPipeline).toHaveBeenCalledTimes(1);
+    } finally {
+      releaseBlocker();
+      clock.mockRestore();
+      await reconciling;
+      ledger.close();
+    }
+  });
+
+  it("a broadcast that resumes recording is deferred without the retry-age cap", async () => {
+    const startedAt = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(startedAt);
+    const rec = makeRec();
+    const transport = makeTransport("live", [rec]);
+    transport.isDone = vi.fn().mockResolvedValue(false);
+    const { ledger, reconciler, runPipeline } = setup({ transports: [transport] });
+    const key = clusterBroadcasts([{ workerId: "live", recordings: [rec] }], 0, "douyin")[0]!.streamKey;
+    ledger.upsertPending(key, rec.startMs);
+    ledger.setState(key, "failed", { error: "safe upload rejection" });
+    ledger.setFailurePlan(key, { failureClass: "safe-retry", nextAttemptAt: 0 });
+
+    try {
+      clock.mockReturnValue(startedAt + MAX_BACKOFF_MS + 10_000);
+      await reconciler.pollUploadRetries();
+      expect(ledger.get(key)).toMatchObject({ state: "failed", failureClass: "safe-retry" });
+      expect(ledger.get(key)!.nextAttemptAt).toBe(Date.now() + 60_000);
+      expect(runPipeline).not.toHaveBeenCalled();
+    } finally {
+      clock.mockRestore();
+      ledger.close();
+    }
   });
 
   it("单轮抖动不累计:失联—恢复—失联 交替不触发通知", async () => {

@@ -4,6 +4,7 @@ export type { FfprobeAdapter } from "./scan.js";
 export type { UnclaimedSegment, SidecarShape } from "./unclaimed.js";
 export { classifyUnclaimedFiles, segmentSecByAnchorOf, UNCLAIMED_CAP } from "./unclaimed.js";
 export { Reconciler } from "./reconciler.js";
+export { isSameBroadcast, isDerivedKey, sameBroadcastJobKeys, runNowBaseKey, runNowConflict } from "./run-now-guard.js";
 // 能力门控纯函数已下沉 @drec/core(app L4 的「本机抑制」也要用;见 core/src/capabilities.ts)。
 // 这里 re-export 保持 orchestrator 现有消费方(cli/reconciler)导入路径不变。
 export { satisfiesCapabilities, gateWorkers, explainRejections } from "@drec/core";
@@ -44,6 +45,7 @@ export type {
   StageProducts,
 } from "./workflow.js";
 export { openUploadLimitStore, sanitizeUploadLimitState } from "./upload-limits.js";
+export { beginMasterUploadRun } from "./master-upload.js";
 export type { UploadLimitState, UploadLimitStore } from "./upload-limits.js";
 // verify.ts 的纯判定/推导函数(T32 重核工具也要用;单一真理源,不在工具里另写一份)。
 export {

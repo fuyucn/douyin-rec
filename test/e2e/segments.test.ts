@@ -7,6 +7,7 @@ import { expectHealthyDone } from "./harness/invariants.js";
 import { segWorkPath } from "../../packages/orchestrator/src/session-plan.js";
 import { addArchiveToSeasonIfConfigured } from "@drec/bilibili-api";
 import { fakeUploadTarget } from "@drec/core";
+import { ResourcePool } from "../../packages/orchestrator/src/workflow.js";
 
 vi.mock("@drec/bilibili-api", async (orig) => {
   const b = await orig<typeof import("@drec/bilibili-api")>();
@@ -125,7 +126,7 @@ describe("e2e: 半成品产物(issue #140)", () => {
     await s.reconcile();
 
     expect(s.fake.calls.filter((c) => c.op === "upload")).toHaveLength(0);
-    expect(s.jobState(KEY)).toBe("failed");
+    expect(s.jobState(KEY)).toBe("needs_manual");
     // 拒投 + 不删源:源段必须还在(坏产物待人工,不能连源一起丢)。
     expect(existsSync(join(s.recordingsDir, "主播甲"))).toBe(true);
   });
@@ -239,7 +240,7 @@ describe("e2e: 半成品产物(issue #140)", () => {
     await s.reconcile();
 
     expect(s.fake.calls.filter((c) => c.op === "upload")).toHaveLength(0);
-    expect(s.jobState(KEY)).toBe("failed");
+    expect(s.jobState(KEY)).toBe("needs_manual");
   });
 
   it("残留 _danmu 读不出时长 → 重烧而不是复用", async () => {
@@ -282,17 +283,19 @@ describe("e2e: 分段续跑补齐烧录轨(issue #142)", () => {
   const KEY = `douyin:${ROOM}:2026-06-27`;
   const onlyDanmu = (files: string[]): boolean => files.some((f) => f.includes("_danmu"));
 
-  /** 首轮:P1 建稿成功,append danmu 被「进程被杀」打断(未提交)→ job failed、稿件号已落库。 */
+  /** Explicit rejection is retryable; an unknown killed request must not be used as recovery proof. */
   async function interruptedBeforeDanmu(): Promise<string> {
     s = await Scenario.create({
       cfg: { steps: { mergeSegments: false, burnDanmu: true, burnLivechat: false }, cleanup: FULL_CLEANUP },
+      deps: { pool: new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, uploadCooldownMs: 0 }) },
     });
     s.record({ sessions: [{ startMs: pastStartMs(0, 10, 0), segments: 1, segSec: 600 }] });
-    s.fake.inject({ op: "append", mode: "killed", applied: false, times: 100, match: onlyDanmu });
+    s.fake.inject({ op: "append", mode: "rate-limit", match: onlyDanmu });
     await s.reconcile();
     expect(s.jobState(KEY)).toBe("failed");
+    expect(s.ledger.get(KEY)).toMatchObject({ failureClass: "resume-append", fails: 0 });
     expect(s.ledger.get(KEY)?.bv).toBeTruthy();
-    s.fake.clearFaults();
+    s.ledger.setFailurePlan(KEY, { failureClass: "resume-append", nextAttemptAt: 0 });
     return KEY;
   }
 

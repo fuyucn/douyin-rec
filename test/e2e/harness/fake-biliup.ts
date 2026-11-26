@@ -21,10 +21,13 @@ export interface RealBiliup {
     run?: (argv: string[]) => Promise<string>;
     countParts?: () => Promise<number | null>;
     deferVerificationUntilCleanup?: boolean;
+    proofOnly?: boolean;
   }): Promise<void>;
 }
 
 export type FaultMode =
+  /** Explicit submission rejection: the caller can persist proof that this request was not applied. */
+  | "rate-limit"
   /** 网关超时:**未提交**;文案命中真实包装的「可换线重试」判定。 */
   | "gateway-timeout"
   /** 请求超时:同上(文案不同,B站侧未提交)。 */
@@ -151,6 +154,10 @@ export class FakeBiliup {
         record("hung");
         return new Promise<string>(() => {});
       }
+      if (fault.mode === "rate-limit") {
+        record("rejected");
+        throw new Error("code: 601 upload rate limit");
+      }
       if (fault.mode === "gateway-timeout" || fault.mode === "timeout") {
         record("rejected");
         const why = fault.mode === "gateway-timeout" ? "Gateway Time-out" : "operation timed out";
@@ -199,6 +206,7 @@ export class FakeBiliup {
     bv: string; files: string[]; cookies: string; public?: boolean;
     countParts?: () => Promise<number | null>;
     deferVerificationUntilCleanup?: boolean;
+    proofOnly?: boolean;
   }): Promise<void> => this.real.appendGroup({ ...o, run: this.run, sleep: async () => {} });
 
   // ── 断言用视图 ──

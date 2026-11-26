@@ -122,7 +122,7 @@ describe("planPartXmlDerivation：派生 per-分P 弹幕 xml 的命名/窗口/�
 });
 
 describe("runSegmentPipeline season checkpoint", () => {
-  it("continues appending remaining plain parts when the pending checkpoint cannot be persisted", async () => {
+  it("retains the unresolved submission and stops when the pending checkpoint cannot be persisted", async () => {
     const root = mkdtempSync(join(tmpdir(), "segment-season-pending-"));
     const stageDir = join(root, "stage");
     const stageSub = join(stageDir, "room");
@@ -139,7 +139,8 @@ describe("runSegmentPipeline season checkpoint", () => {
     vi.spyOn(ledger, "setBvAndSeasonState").mockImplementation(() => {
       throw new Error("EIO season pending");
     });
-    const uploadPlain = vi.fn(async () => ["B", "V", "SEGMENTPENDING"].join(""));
+    const pendingBv = "SEGMENTPENDING";
+    const uploadPlain = vi.fn(async () => pendingBv);
     const appendGroup = vi.fn(async () => {});
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ code: 0, data: null }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
@@ -170,7 +171,7 @@ describe("runSegmentPipeline season checkpoint", () => {
     const members = [{ workerId: "local", rec: { tsFiles: src } }] as never;
 
     try {
-      const r = await runSegmentPipeline({
+      await expect(runSegmentPipeline({
         streamKey,
         deps,
         jlog: () => {},
@@ -178,12 +179,13 @@ describe("runSegmentPipeline season checkpoint", () => {
         winnerMembers: members,
         allMembers: members,
         dateName: "show_2026-10-26",
-      });
+      })).rejects.toThrow("EIO season pending");
 
-      expect(r).toMatchObject({ state: "done", bv: ["B", "V", "SEGMENTPENDING"].join("") });
       expect(uploadPlain).toHaveBeenCalledTimes(1);
-      expect(appendGroup).toHaveBeenCalledTimes(1);
-      expect(ledger.doneParts(streamKey, "plain")).toEqual(new Set([0, 1]));
+      expect(appendGroup).not.toHaveBeenCalled();
+      expect(ledger.doneParts(streamKey, "plain")).toEqual(new Set());
+      expect(ledger.get(streamKey)?.bv).toBe(pendingBv);
+      expect(JSON.parse(ledger.get(streamKey)!.uploadJournal!).entries[0].state).toBe("intent");
       expect(ledger.get(streamKey)?.seasonState).toBeNull();
       expect(fetchMock).not.toHaveBeenCalled();
     } finally {
