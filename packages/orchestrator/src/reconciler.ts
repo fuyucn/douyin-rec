@@ -1,4 +1,4 @@
-import { abortJob, effectiveReconnectWindowMs, isJobAbort, isJobLive, resolveDiskMinGB, retryBackoffMs, burnFlags, shouldUseNodeSideUpload, SAME_BROADCAST_GAP_MS, USER_STOP } from "@drec/core";
+import { abortJob, effectiveReconnectWindowMs, isJobAbort, isJobLive, resolveDiskMinGB, retryBackoffMs, MAX_BACKOFF_MS, burnFlags, shouldUseNodeSideUpload, SAME_BROADCAST_GAP_MS, USER_STOP } from "@drec/core";
 import { masterUploadFailurePlan, hasMasterUploadFailure, markMasterFailure, MASTER_UPLOAD_STEPS } from "./master-upload.js";
 import type { Transport, NodeInventory, NodeRecording } from "./transport.js";
 import type { UnclaimedSegment } from "./unclaimed.js";
@@ -684,7 +684,8 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
       this.notify?.({ kind: "error", stage: "同步", message: `${key} ${reason},已转人工` });
       return true;
     }
-    const delay = Math.round(retryBackoffMs(Math.max(1, job.fails)) * (0.8 + Math.random() * 0.4));
+    const retryAttempt = plan.retryAttempt ?? Math.max(1, job.fails);
+    const delay = Math.min(MAX_BACKOFF_MS, Math.round(retryBackoffMs(retryAttempt) * (0.8 + Math.random() * 0.4)));
     const cooldown = this.pipelineDeps.pool?.snapshot().upload.cooldownUntil ?? 0;
     this.ledger.setFailurePlan(key, {
       failureClass: plan.class, nextAttemptAt: Math.max(Date.now() + delay, cooldown),

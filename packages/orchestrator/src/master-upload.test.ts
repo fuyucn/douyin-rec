@@ -58,6 +58,16 @@ describe("master submission evidence", () => {
     expect(f.ledger.doneParts(KEY, "plain")).toEqual(new Set([0]));
   });
 
+  it("a durable rate-limit rejection remains retryable when restart recovery replaces the job error", async () => {
+    const f = fixture();
+    f.create.mockRejectedValueOnce(new Error("code: 601 upload rate limit"));
+    await expect(createMasterArchive(f.deps, KEY, f.opts)).rejects.toThrow("601");
+    f.ledger.setState(KEY, "failed", { error: "进程重启中断" });
+    expect(masterUploadFailurePlan(f.ledger, KEY)).toMatchObject({
+      class: "safe-retry", retryable: true, countsAsFailure: false, retryAttempt: 1,
+    });
+  });
+
   it.each(["Connection timed out", "[plain-no-bv] result unknown", "[append-ambiguous] unknown"])(
     "%s cannot generate a second archive even on direct reentry", async (message) => {
       const f = fixture();
@@ -79,6 +89,20 @@ describe("master submission evidence", () => {
     await appendMasterParts(f.deps, KEY, ARCHIVE, "append_danmu", [0], [f.files[1]], true);
     expect(f.create).toHaveBeenCalledTimes(1);
     expect(f.append).toHaveBeenCalledTimes(2); // a confirmed operation is skipped on direct reentry
+  });
+
+  it("a prior rate-limit rejection cannot queue a later non-rate-limit pre-submit failure", async () => {
+    const f = fixture();
+    await createMasterArchive(f.deps, KEY, f.opts);
+    expect(masterUploadFailurePlan(f.ledger, KEY, new Error("upload input missing or empty")))
+      .toMatchObject({ class: "verify-manual", retryable: false });
+
+    f.append.mockRejectedValueOnce(new Error("code: 21540 upload rate limit"));
+    await expect(appendMasterParts(f.deps, KEY, ARCHIVE, "append_danmu", [0], [f.files[1]], true)).rejects.toThrow();
+    expect(masterUploadFailurePlan(f.ledger, KEY)).toMatchObject({ class: "resume-append", countsAsFailure: false });
+
+    expect(masterUploadFailurePlan(f.ledger, KEY, new Error("upload input missing or empty")))
+      .toMatchObject({ class: "verify-manual", retryable: false });
   });
 
   it("a multi-file limit rejection may be partial and never resends the batch", async () => {
@@ -328,6 +352,47 @@ describe("master retry scheduling", () => {
     await vi.waitFor(() => expect(f.ledger.get(KEY)?.state).toBe("done"));
     expect(f.create).toHaveBeenCalledTimes(2);
     expect(f.ledger.get(KEY)?.nextAttemptAt).toBeNull();
+  });
+
+  it("consecutive explicit rate limits increase the durable exponential backoff", async () => {
+    const f = fixture();
+    const start = 1_800_000_000_000;
+    vi.spyOn(Date, "now").mockReturnValue(start);
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    f.create.mockRejectedValueOnce(new Error("code: 601 upload rate limit"))
+      .mockRejectedValueOnce(new Error("code: 601 upload rate limit"));
+    const s = scheduler(f, (deps) => createMasterArchive(deps, KEY, f.opts).then(() => {}));
+
+    await s.reconciler.reconcileAll();
+    const first = f.ledger.get(KEY)!;
+    expect(first).toMatchObject({ state: "failed", fails: 0, nextAttemptAt: start + 5 * 60_000 });
+    expect(masterUploadFailurePlan(f.ledger, KEY)?.retryAttempt).toBe(1);
+
+    vi.spyOn(Date, "now").mockReturnValue(first.nextAttemptAt! + 1);
+    await s.reconciler.pollUploadRetries();
+    await vi.waitFor(() => expect(f.ledger.get(KEY)!.nextAttemptAt).toBeGreaterThan(first.nextAttemptAt!));
+    const second = f.ledger.get(KEY)!;
+    expect(second).toMatchObject({ state: "failed", fails: 0, nextAttemptAt: first.nextAttemptAt! + 1 + 10 * 60_000 });
+    expect(masterUploadFailurePlan(f.ledger, KEY)?.retryAttempt).toBe(2);
+  });
+
+  it("jitter never exceeds the one-hour backoff cap", async () => {
+    const f = fixture();
+    const start = 1_800_000_000_000;
+    vi.spyOn(Date, "now").mockReturnValue(start);
+    vi.spyOn(Math, "random").mockReturnValue(0.999);
+    prepareMasterUpload(f.ledger, KEY);
+    const raw = f.ledger.get(KEY)!.uploadJournal!;
+    const journal = JSON.parse(raw) as { failure?: Record<string, unknown> };
+    journal.failure = { message: "previous explicit rate limit", code: "rate-limit", ambiguous: false, rateLimitAttempt: 5 };
+    f.ledger.saveUploadJournal(KEY, raw, JSON.stringify(journal));
+    f.create.mockRejectedValueOnce(new Error("code: 601 upload rate limit"));
+    const s = scheduler(f, (deps) => createMasterArchive(deps, KEY, f.opts).then(() => {}));
+
+    await s.reconciler.reconcileAll();
+
+    expect(masterUploadFailurePlan(f.ledger, KEY)?.retryAttempt).toBe(6);
+    expect(f.ledger.get(KEY)?.nextAttemptAt).toBe(start + 60 * 60_000);
   });
 
   it("idle ticks perform no inventory queries and a stopped queued job never revives", async () => {

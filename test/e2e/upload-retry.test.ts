@@ -64,7 +64,7 @@ describe("e2e: 上传超时/故障后的重试与降级", () => {
     expect(tsLeft(s)).toBe(3);
   });
 
-  it("历史限流不豁免后来产物缺失的失败预算,耗尽后保留源转人工", async () => {
+  it("历史限流不能把后来产物缺失误分类为限流重试", async () => {
     s = await Scenario.create({ cfg: { cleanup: FULL_CLEANUP }, deps: {
       pool: new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, uploadCooldownMs: 0 }) } });
     rec(s); s.fake.inject({ op: "upload", mode: "rate-limit" });
@@ -72,13 +72,12 @@ describe("e2e: 上传超时/故障后的重试与降级", () => {
     const key = s.onlyKey();
     expect(s.ledger.get(key)?.fails).toBe(0);
     rmSync(join(s.stageSubOf(key), THREE[0]));
-    for (let count = 1; count <= 3; count++) {
-      s.ledger.setFailurePlan(key, { failureClass: "safe-retry", nextAttemptAt: 0 });
-      await s.reconcile();
-      expect(s.ledger.get(key)?.fails).toBe(count);
-    }
+    const uploadCalls = s.fake.calls.filter((call) => call.op === "upload").length;
+    s.ledger.setFailurePlan(key, { failureClass: "safe-retry", nextAttemptAt: 0 });
+    await s.reconcile();
     expect(s.jobState(key)).toBe("needs_manual");
-    expect(s.fake.calls.filter((call) => call.op === "upload")).toHaveLength(1);
+    expect(s.ledger.get(key)?.fails).toBe(0);
+    expect(s.fake.calls.filter((call) => call.op === "upload")).toHaveLength(uploadCalls);
     expect(tsLeft(s)).toBe(3);
   });
 

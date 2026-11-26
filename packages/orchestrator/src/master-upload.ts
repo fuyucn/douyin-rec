@@ -14,7 +14,8 @@ type Submission = {
   state: "intent" | "submitted" | "not-submitted";
   proof?: "created" | "accepted" | "observed"; bv?: string;
 };
-type Failure = { message: string; code: string; ambiguous: boolean };
+type Failure = { message: string; code: string; ambiguous: boolean; rateLimitAttempt?: number };
+type MasterUploadFailurePlan = UploadFailurePlan & { retryAttempt?: number };
 type UploadIdentity = { targetId: string; accountKey: string; credentialFingerprint: string; generation: string };
 type FileFingerprint = { size: number; sha256: string };
 type Journal = {
@@ -45,7 +46,9 @@ function parseJournal(raw: string | null | undefined): Journal | null {
       || typeof j.identity.credentialFingerprint !== "string" || !j.identity.credentialFingerprint
       || typeof j.identity.generation !== "string" || !j.identity.generation)) return null;
     if (j.failure && (typeof j.failure.message !== "string" || typeof j.failure.code !== "string"
-      || typeof j.failure.ambiguous !== "boolean")) return null;
+      || typeof j.failure.ambiguous !== "boolean"
+      || (j.failure.rateLimitAttempt != null && (!Number.isSafeInteger(j.failure.rateLimitAttempt)
+        || j.failure.rateLimitAttempt < 1)))) return null;
     return j;
   } catch { return null; }
 }
@@ -204,20 +207,29 @@ function consistent(ledger: SyncLedger, key: string, journal: Journal): boolean 
   return !bv || journal.entries.some((e) => e.kind === "create" && e.state === "submitted" && e.bv === bv);
 }
 
-export function masterUploadFailurePlan(ledger: SyncLedger, key: string, error?: unknown): UploadFailurePlan | null {
+export function masterUploadFailurePlan(ledger: SyncLedger, key: string, error?: unknown): MasterUploadFailurePlan | null {
   const job = ledger.get(key);
   const journal = parseJournal(job?.uploadJournal);
   if (!journal) return job?.uploadJournal == null ? null : classifyUploadOutcome({ ambiguous: true });
-  const last = error ?? job?.error ?? journal.failure;
+  const durableRateLimit = journal.failure?.code === "rate-limit" && !journal.failure.ambiguous;
+  const last = error ?? (durableRateLimit ? journal.failure!.message : job?.error ?? journal.failure);
   if (journal.legacy || journal.entries.length === 0 || !consistent(ledger, key, journal)) {
     return classifyUploadOutcome({ ambiguous: true, error: last });
   }
+  const hasSingleRateLimitedRejection = journal.failure?.code === "rate-limit"
+    && !journal.failure.ambiguous
+    && isUploadRateLimited(last)
+    && journal.entries.some((entry) => entry.state === "not-submitted" && entry.indices.length === 1);
+  if (!hasSingleRateLimitedRejection) return classifyUploadOutcome({ ambiguous: true, error: last });
   const unknown = journal.entries.some((e) => e.state === "intent");
-  return classifyUploadOutcome({
+  return {
+    ...classifyUploadOutcome({
     bv: job?.bv, intentCommitted: unknown,
     partsConfirmed: !unknown, ambiguous: unknown || journal.failure?.ambiguous,
     error: last,
-  });
+    }),
+    ...(hasSingleRateLimitedRejection ? { retryAttempt: journal.failure?.rateLimitAttempt ?? 1 } : {}),
+  };
 }
 
 type SubmitInput = {
@@ -260,6 +272,8 @@ async function submit(input: SubmitInput): Promise<string> {
     return previous.bv!;
   }
   const entry: Submission = { kind: input.create ? "create" : "append", group, indices, fingerprint: fp, state: "intent" };
+  const priorRateLimitAttempt = boundJournal.failure?.code === "rate-limit" && !boundJournal.failure.ambiguous
+    ? boundJournal.failure.rateLimitAttempt ?? 1 : 0;
   if (previous) boundJournal.entries.splice(boundJournal.entries.indexOf(previous), 1, entry);
   else boundJournal.entries.push(entry);
   delete boundJournal.failure;
@@ -292,6 +306,7 @@ async function submit(input: SubmitInput): Promise<string> {
     boundJournal.failure = {
       message: String((error as Error)?.message ?? error).slice(0, 300),
       code: classifyRetryableFailure(error).code, ambiguous: !rejected,
+      ...(rejected ? { rateLimitAttempt: priorRateLimitAttempt + 1 } : {}),
     };
     deps.ledger.saveUploadJournal(key, intent, JSON.stringify(boundJournal));
     if (isJobAbort(error) || rejected) throw error;
