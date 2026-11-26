@@ -1815,6 +1815,36 @@ describe("runPipeline", () => {
       deps.ledger.close();
     });
 
+    it("resumes an unsplit submitted P1 after a single-file append rate limit", async () => {
+      const stageDir = mkdtempSync(join(tmpdir(), "resume-large-p1-"));
+      const deps = makeDeps({
+        cfg: { ...makeDeps().cfg, stageDir, steps: { burnDanmu: true, burnLivechat: false } },
+        pool: new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, uploadCooldownMs: 0 }),
+        splitForUpload: async (file: string) => {
+          if (file.endsWith("_danmu.mp4")) return [file];
+          const parts = [file + ".part1", file + ".part2"];
+          for (const part of parts) writeFileSync(part, "split part");
+          return parts;
+        },
+      });
+      const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(broadcast.streamKey);
+      const upload = deps.upload as unknown as { uploadPlain: Mock; appendGroup: Mock };
+      upload.appendGroup.mockRejectedValueOnce(new Error("code: 601 upload rate limit"));
+
+      const first = await runPipeline(broadcast, deps);
+      expect(first.state).toBe("failed");
+      expect(deps.ledger.get(broadcast.streamKey)?.bv).toBe("BV123");
+
+      const resumed = await runPipeline(broadcast, deps);
+
+      expect(resumed).toEqual({ state: "done", bv: "BV123" });
+      expect(upload.uploadPlain).toHaveBeenCalledTimes(1);
+      expect(upload.appendGroup).toHaveBeenCalledTimes(2);
+      expect(deps.ledger.get(broadcast.streamKey)?.state).toBe("done");
+      deps.ledger.close();
+    });
+
     it("续跑遇多段组(>1 段)→ needs_manual,不 append(防重复分 P)", async () => {
       const { mkdirSync, writeFileSync } = await import("node:fs");
       const stageDir = mkdtempSync(join(tmpdir(), "resume-multipart-"));

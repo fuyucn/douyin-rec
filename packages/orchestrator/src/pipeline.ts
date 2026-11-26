@@ -1543,8 +1543,7 @@ async function resumeAppends(
     notify({ kind: "error", stage: "上传", message: `续跑失败:${bv} 产物缺失,请人工处理(补 append 或删稿重来)` });
     return await drainSeason({ state: "needs_manual", bv });
   }
-  const plainFiles = await splitForUpload(prod.plain);
-  await validateMasterParts(ledger, streamKey, "plain", plainFiles);
+  await validateMasterParts(ledger, streamKey, "plain", [prod.plain]);
   // 续跑前先修复失败的烧录节点:docker crash / 中断可能留下半成品(文件在但缺 moov),
   // 直接 append 会把坏文件传上去;烧录是本地产物,重烧不会重复投稿。
   const burnRepairs: Array<{ step: "burn_danmu" | "burn_livechat"; on: boolean }> = [
