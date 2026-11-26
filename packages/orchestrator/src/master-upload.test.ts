@@ -105,6 +105,22 @@ describe("master submission evidence", () => {
       .toMatchObject({ class: "verify-manual", retryable: false });
   });
 
+  it("a due retry's early pipeline failure is classified from the current result, not stale rate-limit proof", async () => {
+    const f = fixture();
+    await createMasterArchive(f.deps, KEY, f.opts);
+    f.append.mockRejectedValueOnce(new Error("code: 21540 upload rate limit"));
+    await expect(appendMasterParts(f.deps, KEY, ARCHIVE, "append_danmu", [0], [f.files[1]], true)).rejects.toThrow();
+    f.ledger.markFailed(KEY, "code: 21540 upload rate limit", false);
+    f.ledger.setFailurePlan(KEY, { failureClass: "resume-append", nextAttemptAt: 0 });
+
+    const s = scheduler(f, async (deps) => { deps.ledger.markFailed(KEY, "no eligible segments"); }, "failed");
+    await s.reconciler.pollUploadRetries();
+
+    expect(f.ledger.get(KEY)).toMatchObject({ state: "needs_manual", failureClass: null });
+    expect(f.ledger.get(KEY)?.error).toContain("no eligible segments");
+    expect(f.append).toHaveBeenCalledTimes(1);
+  });
+
   it("a multi-file limit rejection may be partial and never resends the batch", async () => {
     const f = fixture();
     await createMasterArchive(f.deps, KEY, f.opts);
@@ -318,7 +334,7 @@ describe("master submission evidence", () => {
   });
 });
 
-function scheduler(f: ReturnType<typeof fixture>, run: (deps: PipelineDeps) => Promise<void>) {
+function scheduler(f: ReturnType<typeof fixture>, run: (deps: PipelineDeps) => Promise<void>, resultState: "done" | "failed" = "done") {
   const rec = { roomSlug: "retry-fixture", platform: "douyin", sessionBase: "fixture_2026-06-22_08-00-00",
     tsFiles: f.files, durationSec: 600, startMs: Date.parse("2026-06-22T00:00:00Z"),
     endMs: Date.parse("2026-06-22T00:10:00Z"), totalGapSec: 0 };
@@ -327,6 +343,7 @@ function scheduler(f: ReturnType<typeof fixture>, run: (deps: PipelineDeps) => P
   const transports = new Map([["local", transport]]);
   const execute = vi.fn(async (_b: unknown, deps: PipelineDeps) => {
     await run(deps);
+    if (resultState === "failed") return { state: "failed" as const };
     deps.ledger.markDone(KEY, ARCHIVE);
     return { state: "done" as const, bv: ARCHIVE };
   });

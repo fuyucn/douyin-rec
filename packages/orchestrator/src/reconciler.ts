@@ -934,9 +934,10 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
           if (current.nextAttemptAt != null && current.nextAttemptAt > Date.now()) return;
           const beforeFails = current.fails;
           try {
-            await this._runPipeline(b, { ...this.pipelineDeps, transports, cfg: freshCfg });
+            const result = await this._runPipeline(b, { ...this.pipelineDeps, transports, cfg: freshCfg });
             this.consumeUploadRetryPlan(b.streamKey);
-            this.planUploadRetry(b.streamKey);
+            const currentFailure = result.state === "failed" ? this.ledger.get(b.streamKey)?.error ?? "pipeline failed" : undefined;
+            this.planUploadRetry(b.streamKey, currentFailure);
           } catch (err) {
             // 用户停止 → 转人工,绝不能 markFailed(failed 会自动重试)。
             if (isJobAbort(err)) {
@@ -1111,8 +1112,9 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
     const fire = async (): Promise<void> => {
       const beforeFails = this.ledger.get(key)?.fails ?? 0;
       try {
-        await this._runPipeline(b, { ...this.pipelineDeps, transports, cfg });
-        this.planUploadRetry(key);
+        const result = await this._runPipeline(b, { ...this.pipelineDeps, transports, cfg });
+        const currentFailure = result.state === "failed" ? this.ledger.get(key)?.error ?? "pipeline failed" : undefined;
+        this.planUploadRetry(key, currentFailure);
       } catch (err) {
         if (isJobAbort(err)) {
           this.ledger.setState(key, "needs_manual", { error: USER_STOP });
