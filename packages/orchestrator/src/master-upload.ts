@@ -336,6 +336,9 @@ async function submit(input: SubmitInput): Promise<string> {
   const boundJournal = parseJournal(boundRaw);
   if (!boundJournal) throw ambiguous("missing or malformed master upload identity");
   if (boundJournal.legacy) rejectJournal(deps.ledger, key, boundRaw!, boundJournal, "legacy upload history has no submission proof");
+  if (!deps.ledger.get(key)?.bv && hasNodeUploadActivity(deps.ledger, key)) {
+    rejectJournal(deps.ledger, key, boundRaw!, boundJournal, "node upload history has no submission proof");
+  }
   if (!boundJournal.legacy && !consistent(deps.ledger, key, boundJournal)) throw ambiguous("submission checkpoints disagree");
   if (!files.length || indices.length !== files.length || new Set(indices).size !== indices.length) {
     throw ambiguous("invalid submission part indices");

@@ -138,6 +138,15 @@ describe("master submission evidence", () => {
     expect(conflict).toMatch(/rerun blocked.*unresolved or legacy/i);
   });
 
+  it("master submission rejects unproven node upload history at the submit gate", async () => {
+    const f = fixture();
+    prepareMasterUpload(f.ledger, KEY);
+    f.ledger.logStep(KEY, "node_upload", "start");
+
+    await expect(createMasterArchive(f.deps, KEY, f.opts)).rejects.toThrow("node upload history has no submission proof");
+    expect(f.create).not.toHaveBeenCalled();
+  });
+
 
   it("force cannot race a same-broadcast retrying job", async () => {
     const f = fixture();
