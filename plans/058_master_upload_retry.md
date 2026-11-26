@@ -19,7 +19,7 @@
 - [x] 接入主控合并、分段与各续跑调用；替换持锁内的重复上传重试为失败后回队。
 - [x] 以持久证据替换上传节点一刀切门禁，接独立到期 tick 与失败计数。
 - [x] 覆盖限流、未知结果、批次失败、成功后崩溃、文件变化、重启、并发去重、用户停止和节点路径不变。
-- [x] 完整回归、类型、架构、bundle 与隔离开发 API 实跑；完成最终独立只读审查。
+- [~] 完整回归、类型、架构、bundle 与隔离开发 API 实跑；等待隐私计划绑定修复的最终独立只读复审。
 
 ## Global Constraints
 
@@ -31,8 +31,10 @@
 
 ## Evidence
 
+- Final local verification: full suite 5781 passed / 42 skipped; typecheck, architecture check, bundle (0.0.410-93a809), and git diff --check passed. Isolated service startup with a fresh temporary data root returned GET /api/tasks 200 with []; the process stopped cleanly. The independent review found and prompted a privacy-plan binding fix; removing that binding made the regression resolve successfully under public visibility, while restoring it made both resume regressions pass. Final independent review is pending. Production node status is unverified because the SSH capability is disabled; no deployment performed.
+
 - 初始基线：完整测试 5723 passed / 48 skipped；依赖用 frozen lockfile 恢复，未改锁文件。基线未 bundle 导致 CLI 的 6 条额外跳过；最终先 bundle 再全量回归。
-- 最终本地门禁：完整测试 **5779 passed / 42 skipped**（387 个测试文件，1 个文件跳过），类型检查、架构检查、bundle 与 git diff --check 通过。既有跳过未增加，不放宽超时。Bundle 版本 `0.0.409-f61f84`；受影响测试另行通过 **429 passed**。
+- 首轮本地门禁（补充修复前）：完整测试 **5779 passed / 42 skipped**（387 个测试文件，1 个文件跳过），类型检查、架构检查、bundle 与 git diff --check 通过。既有跳过未增加，不放宽超时。Bundle 版本 `0.0.409-f61f84`；受影响测试另行通过 **429 passed**。补充修复后的权威结果见下条。
 - 变异：撤掉未知 intent 守卫 → 3 failed；恢复 → 新增证据/调度测试 17 passed。
 - 隔离开发实跑：全新临时数据根、显式回环地址、随机回环端口，`GET /api/tasks` 返回 200，bundle `--version` 返回 `0.0.409-f61f84`；进程已停止并清理临时根，不接触生产目录。
 - 首轮全量 10 条旧预期失败保留记录：4 条回读/失败阶段断言改为同轮转人工；2 条旧重传测试改为超时/被杀结果未知不得重发；4 条半成品恢复用例改用可证明未提交的限流拒绝，不再用“被杀”当未提交证明。所有源保留与防重复断言继续保留。
