@@ -1020,6 +1020,7 @@ async function runPipelineInner(
       members: b.members.map((m) => [m.workerId, m.rec.sessionBase, m.rec.tsFiles, m.rec.xmlPath]).sort(),
       steps: cfg.steps, minSegmentSec: cfg.minSegmentSec ?? 2, segmentGroupSec: cfg.segmentGroupSec ?? 0,
       uploadBatchSize: cfg.uploadBatchSize ?? 1, outputFormat: cfg.outputFormat,
+      visibility: cfg.uploadPrivate === false ? "public" : "private",
     });
   };
   if (cfg.uploadMode === "upload" && ledger.get(b.streamKey)?.state !== "done"

@@ -211,6 +211,7 @@ async function seedVerifiedMasterArchive(
     segmentGroupSec: deps.cfg.segmentGroupSec ?? 0,
     uploadBatchSize: deps.cfg.uploadBatchSize ?? 1,
     outputFormat: deps.cfg.outputFormat,
+    visibility: deps.cfg.uploadPrivate === false ? "public" : "private",
   });
   const upload = deps.upload as unknown as { uploadPlain: Mock; appendGroup: Mock };
   upload.uploadPlain.mockResolvedValueOnce(bv);
@@ -1842,6 +1843,32 @@ describe("runPipeline", () => {
       expect(upload.uploadPlain).toHaveBeenCalledTimes(1);
       expect(upload.appendGroup).toHaveBeenCalledTimes(2);
       expect(deps.ledger.get(broadcast.streamKey)?.state).toBe("done");
+      deps.ledger.close();
+    });
+
+    it("refuses resume when a private archive plan changes to public", async () => {
+      const stageDir = mkdtempSync(join(tmpdir(), "resume-private-archive-"));
+      const deps = makeDeps({
+        cfg: { ...makeDeps().cfg, stageDir, steps: { burnDanmu: true, burnLivechat: false }, uploadPrivate: true },
+        pool: new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, uploadCooldownMs: 0 }),
+      });
+      const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(broadcast.streamKey);
+      const upload = deps.upload as unknown as { uploadPlain: Mock; appendGroup: Mock };
+      upload.appendGroup.mockRejectedValueOnce(new Error("code: 601 upload rate limit"));
+
+      const first = await runPipeline(broadcast, deps);
+
+      expect(first.state).toBe("failed");
+      expect(upload.uploadPlain.mock.calls[0]?.[0]?.public).toBe(false);
+      expect(upload.appendGroup).toHaveBeenCalledTimes(1);
+
+      const publicConfig = { ...deps, cfg: { ...deps.cfg, uploadPrivate: false } };
+      await expect(runPipeline(broadcast, publicConfig)).rejects.toThrow("plan changed after submission");
+
+      expect(upload.uploadPlain).toHaveBeenCalledTimes(1);
+      expect(upload.appendGroup).toHaveBeenCalledTimes(1);
+      expect(deps.ledger.get(broadcast.streamKey)?.bv).toBe("BV123");
       deps.ledger.close();
     });
 
