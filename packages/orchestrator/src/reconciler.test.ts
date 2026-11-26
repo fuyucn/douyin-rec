@@ -1208,7 +1208,7 @@ describe("Reconciler.stopJob / runNow", () => {
 
   it("stopJob: done → 409", async () => {
     const { ledger, reconciler } = setup();
-    ledger.upsertPending(key, Date.now());
+    ledger.upsertPending(key, makeRec().startMs);
     ledger.markDone(key, "BV1");
     const r = await reconciler.stopJob(key);
     expect(r).toMatchObject({ ok: false, code: 409 });
@@ -1289,6 +1289,48 @@ describe("Reconciler.stopJob / runNow", () => {
     expect(r).toMatchObject({ ok: false, code: 404 });
     expect(spyRunPipeline).not.toHaveBeenCalled();
     expect(ledger.get(key)).toBeNull();
+    ledger.close();
+  });
+
+  it("runNow respects persisted upload backoff until its due time", async () => {
+    const { ledger, reconciler, spyRunPipeline } = setup();
+    ledger.upsertPending(key, Date.now());
+    ledger.setState(key, "failed", { error: "rate limited" });
+    const dueAt = Date.now() + 60_000;
+    ledger.setFailurePlan(key, { failureClass: "safe-retry", nextAttemptAt: dueAt });
+    const before = ledger.get(key)!;
+
+    const early = await reconciler.runNow({ streamKey: key, wait: true, force: true });
+    expect(early).toMatchObject({ ok: false, code: 429, streamKey: key });
+    expect(spyRunPipeline).not.toHaveBeenCalled();
+    expect(ledger.get(key)).toMatchObject({ state: before.state, fails: before.fails, nextAttemptAt: dueAt });
+
+    vi.spyOn(Date, "now").mockReturnValue(dueAt + 1);
+    const due = await reconciler.runNow({ streamKey: key, wait: true, force: true });
+    expect(due).toMatchObject({ ok: true, code: 200, streamKey: key });
+    expect(spyRunPipeline).toHaveBeenCalledTimes(1);
+    expect(ledger.get(key)?.state).toBe("done");
+    ledger.close();
+  });
+
+  it("consumes a due upload retry plan before a retry that later fails outside upload", async () => {
+    const { ledger, reconciler, spyRunPipeline } = setup();
+    const retryKey = key;
+    ledger.upsertPending(retryKey, makeRec().startMs);
+    ledger.setState(retryKey, "failed", { error: "rate limited" });
+    ledger.syncNodeState(retryKey, "upload_plain", "failed", { error: "rate limited" });
+    ledger.setFailurePlan(retryKey, { failureClass: "safe-retry", nextAttemptAt: 0 });
+    spyRunPipeline.mockImplementation(async (broadcast) => {
+      ledger.syncNodeState(broadcast.streamKey, "upload_plain", "done", { error: null });
+      ledger.setState(broadcast.streamKey, "failed", { error: "post-upload cleanup failed" }, { force: true });
+      throw new Error("post-upload cleanup failed");
+    });
+
+    await reconciler.pollUploadRetries();
+
+    await vi.waitFor(() => expect(spyRunPipeline).toHaveBeenCalledTimes(1));
+    expect(spyRunPipeline).toHaveBeenCalledTimes(1);
+    expect(ledger.get(retryKey)).toMatchObject({ state: "failed", fails: 1, failureClass: null, nextAttemptAt: null });
     ledger.close();
   });
 

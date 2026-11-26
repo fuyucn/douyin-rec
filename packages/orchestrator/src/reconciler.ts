@@ -693,6 +693,13 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
     return true;
   }
 
+  private consumeUploadRetryPlan(key: string): void {
+    const job = this.ledger.get(key);
+    if (!job || (job.failureClass !== "safe-retry" && job.failureClass !== "resume-append")
+      || (job.nextAttemptAt != null && job.nextAttemptAt > Date.now())) return;
+    this.ledger.clearFailurePlan(key);
+  }
+
   async reconcileAll(onlyDue?: ReadonlySet<string>): Promise<void> {
     // 实时重载:重建 transports(反映 hub.config.json 最新 workers);同步给 pipeline 用的那份。
     if (this.loadTransports) this.transports = this.loadTransports();
@@ -927,15 +934,18 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
           const beforeFails = current.fails;
           try {
             await this._runPipeline(b, { ...this.pipelineDeps, transports, cfg: freshCfg });
+            this.consumeUploadRetryPlan(b.streamKey);
             this.planUploadRetry(b.streamKey);
           } catch (err) {
             // 用户停止 → 转人工,绝不能 markFailed(failed 会自动重试)。
             if (isJobAbort(err)) {
+              this.consumeUploadRetryPlan(b.streamKey);
               this.ledger.setState(b.streamKey, "needs_manual", { error: USER_STOP });
               return;
             }
             // Per-broadcast 出错:置 job=failed(可见 + 重试上限内自动重试),不中止其余 broadcast。
             console.error(`[reconciler] broadcast ${b.streamKey} failed:`, err);
+            this.consumeUploadRetryPlan(b.streamKey);
             if ((this.ledger.get(b.streamKey)?.fails ?? 0) === beforeFails) {
               markMasterFailure(this.pipelineDeps, b.streamKey, String((err as Error)?.message ?? err).slice(0, 300));
             }
@@ -1037,10 +1047,25 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
     if (members.length === 0) {
       return { ok: false, error: `节点 ${winnerWorker} 没有这场录像`, code: 404 };
     }
-    const b: Broadcast = { ...found, streamKey: isNewSubmission ? streamKey : found.streamKey, members };
+    const b: Broadcast = {
+      ...found,
+      streamKey: isNewSubmission ? streamKey : this.ledger.get(streamKey) ? streamKey : found.streamKey,
+      members,
+    };
     const key = b.streamKey;
     if (isJobLive(key) || (this.pipelineDeps.pool?.hasStreamLock(key) ?? false)) {
       return { ok: false, error: "任务正在执行", code: 409 };
+    }
+    const existing = [this.ledger.get(streamKey), this.ledger.get(key)].find((job) =>
+      (job?.failureClass === "safe-retry" || job?.failureClass === "resume-append")
+      && job.nextAttemptAt != null && job.nextAttemptAt > Date.now());
+    if (existing?.nextAttemptAt != null) {
+      return {
+        ok: false,
+        error: "重试已排期，请等到 " + new Date(existing.nextAttemptAt).toISOString(),
+        code: 429,
+        streamKey: key,
+      };
     }
     // Both guards are evaluated before any force bypass so a single 409 lists every reason; one force cannot skip a
     // reason the user never saw.
@@ -1073,6 +1098,8 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
       console.warn(`[runNow] force over unreachable node(s): ${missingDetail}`);
     }
 
+    this.consumeUploadRetryPlan(streamKey);
+    if (key !== streamKey) this.consumeUploadRetryPlan(key);
     this.ledger.upsertPending(key, b.startMs);
     this.ledger.resetActiveNodes(key);
     this.ledger.setState(key, "retrying", {}, { force: true }); // 人工重跑:允许把 done(无 bv)拨回进行中

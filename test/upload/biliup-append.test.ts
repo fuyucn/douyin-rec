@@ -254,6 +254,32 @@ describe("appendGroup 成功返回后的落地确认（rc=0 但分 P 未落地�
     return "appended";
   };
 
+  it("proof-only submission without a baseline is ambiguous unless cleanup will verify it", async () => {
+    const calls: string[][] = [];
+    await expect(appendGroup({
+      cookies: "c.json", bv: "BV1", files: ["d.mp4"], run: succeed(calls),
+      countParts: async () => null, proofOnly: true,
+    })).rejects.toThrow(/append-ambiguous/);
+    expect(calls).toHaveLength(1);
+
+    const deferredCalls: string[][] = [];
+    await expect(appendGroup({
+      cookies: "c.json", bv: "BV1", files: ["d.mp4"], run: succeed(deferredCalls),
+      countParts: async () => null, proofOnly: true, deferVerificationUntilCleanup: true,
+    })).resolves.toBeUndefined();
+    expect(deferredCalls).toHaveLength(1);
+  });
+
+  it("proof-only submission with an unreadable post-submit count stays ambiguous", async () => {
+    const calls: string[][] = [];
+    const counts: Array<number | null> = [1];
+    await expect(appendGroup({
+      cookies: "c.json", bv: "BV1", files: ["d.mp4"], run: succeed(calls),
+      countParts: async () => counts.shift() ?? null, proofOnly: true, sleep: async () => {},
+    })).rejects.toThrow(/append-ambiguous/);
+    expect(calls).toHaveLength(1);
+  });
+
   it.each([{ files: ["d.mp4"] }, { files: ["d.mp4", "l.mp4"] }])("can defer visibility checks for a successful submission: $files", async ({ files }) => {
     const calls: string[][] = [];
     let reads = 0;

@@ -409,11 +409,7 @@ export class SyncLedger {
         const current = this.get(streamKey)?.bv;
         if (current && current !== success.bv) throw new Error("upload archive identity conflict");
         if (success.seasonPending) {
-          try { this.setBvAndSeasonState(streamKey, success.bv, "pending"); }
-          catch (error) {
-            console.warn("[ledger] season intent unavailable; preserving the archive without association:", error);
-            this.setBv(streamKey, success.bv);
-          }
+          this.setBvAndSeasonState(streamKey, success.bv, "pending");
         } else this.setBv(streamKey, success.bv);
         for (const index of success.indices) this.markPartDone(streamKey, success.group, index);
       }

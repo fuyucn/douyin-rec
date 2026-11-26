@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cleanupSourcesShared, consecutiveSidecarSkips, removeEmptyStageDir, xmlKeepRule, runPipeline, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
 import { ResourcePool } from "./workflow.js";
-import { masterUploadFailurePlan } from "./master-upload.js";
+import { appendMasterParts, bindMasterPlan, createMasterArchive, masterUploadFailurePlan } from "./master-upload.js";
 import { SyncLedger } from "./ledger.js";
 import { APPEND_AMBIGUOUS_MARKER, closeStageReady, STAGE_READY } from "@drec/core";
 import { addArchiveToSeasonIfConfigured } from "@drec/bilibili-api";
@@ -188,6 +188,50 @@ function writePlainArtifacts(deps: TestDeps): void {
   writeFileSync(join(sub, `${dateName}.xml`), "x");
 }
 
+async function seedVerifiedMasterArchive(
+  deps: TestDeps,
+  broadcast: Broadcast,
+  bv: string,
+  completedGroups: Array<"append_danmu" | "append_livechat"> = [],
+): Promise<void> {
+  const dateName = "主播名_2026-06-27";
+  const stageSub = stageSubOf(deps);
+  mkdirSync(stageSub, { recursive: true });
+  const plainFile = join(stageSub, dateName + ".mp4");
+  if (!existsSync(plainFile)) writeFileSync(plainFile, "x");
+  for (const group of completedGroups) {
+    const suffix = group === "append_danmu" ? "_danmu.mp4" : "_livechat.mp4";
+    const file = join(stageSub, dateName + suffix);
+    if (!existsSync(file)) writeFileSync(file, "x");
+  }
+  bindMasterPlan(deps.ledger, broadcast.streamKey, "sources", {
+    members: broadcast.members.map((member) => [member.workerId, member.rec.sessionBase, member.rec.tsFiles, member.rec.xmlPath]).sort(),
+    steps: deps.cfg.steps,
+    minSegmentSec: deps.cfg.minSegmentSec ?? 2,
+    segmentGroupSec: deps.cfg.segmentGroupSec ?? 0,
+    uploadBatchSize: deps.cfg.uploadBatchSize ?? 1,
+    outputFormat: deps.cfg.outputFormat,
+  });
+  const upload = deps.upload as unknown as { uploadPlain: Mock; appendGroup: Mock };
+  upload.uploadPlain.mockResolvedValueOnce(bv);
+  await createMasterArchive(deps, broadcast.streamKey, {
+    video: plainFile,
+    cookies: deps.cfg.cookies,
+    title: "test",
+    tag: deps.cfg.uploadMeta.tag,
+    tid: deps.cfg.uploadMeta.tid,
+    public: false,
+    desc: deps.cfg.uploadMeta.desc,
+  });
+  for (const group of completedGroups) {
+    const suffix = group === "append_danmu" ? "_danmu.mp4" : "_livechat.mp4";
+    await appendMasterParts(deps, broadcast.streamKey, bv, group, [0], [join(stageSub, dateName + suffix)], false);
+    deps.ledger.logStep(broadcast.streamKey, group, "done");
+  }
+  upload.uploadPlain.mockClear();
+  upload.appendGroup.mockClear();
+}
+
 // plans/051 P0 / issue #49: characterization, not a new executor or an idealized DAG.
 // Keep these beside the existing helpers instead of cloning a second PipelineDeps fixture.
 describe("runPipeline P0 execution trace (#49)", () => {
@@ -329,7 +373,7 @@ describe("runPipeline", () => {
     const deps = makeDeps();
     deps.cfg = { ...deps.cfg, uploadMeta: { ...deps.cfg.uploadMeta, seasonSectionId: 456 } };
     deps.ledger.upsertPending(broadcast.streamKey);
-    deps.ledger.setBv(broadcast.streamKey, "BVresume1");
+    deps.ledger.markDone(broadcast.streamKey, "BVresume1");
     deps.ledger.setSeasonState(broadcast.streamKey, "pending");
 
     await runPipeline(broadcast, deps);
@@ -749,8 +793,7 @@ describe("runPipeline", () => {
         cleanup: { stageSourceAfterMerge: true, sourceAfterDone: true, stageAfterDone: true },
       };
       deps.ledger.upsertPending(broadcast.streamKey);
-      deps.ledger.setState(broadcast.streamKey, "retrying"); // 真实续跑入口:runNow/reconciler 先置 retrying,pipeline 自己再推进
-      deps.ledger.setBv(broadcast.streamKey, "BVseg");  // 已建稿 → 走分段续跑
+      deps.ledger.markDone(broadcast.streamKey, "BVseg");
 
       const result = await runPipeline(broadcast, deps);
 
@@ -1357,11 +1400,11 @@ describe("runPipeline", () => {
     const deps = makeDeps({ cfg: { ...makeDeps().cfg, stageDir } });
     const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
     deps.ledger.upsertPending(b.streamKey);
-    for (const st of ["syncing", "merging", "uploading"] as const) deps.ledger.setState(b.streamKey, st);
-    deps.ledger.setBv(b.streamKey, "BVing");
     const sub = join(stageDir, "douyin_test-room_2026-06-27");
     mkdirSync(sub, { recursive: true });
     for (const f of [".mp4", "_danmu.mp4", "_livechat.mp4"]) writeFileSync(join(sub, "主播名_2026-06-27" + f), "x");
+    await seedVerifiedMasterArchive(deps, b, "BVing");
+    for (const st of ["syncing", "merging", "uploading"] as const) deps.ledger.setState(b.streamKey, st);
     deps.ledger.syncNodeState(b.streamKey, "burn_danmu", "failed", { error: "" });
     (deps.sh as Mock).mockImplementation(async () => { throw new Error(""); });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -1538,8 +1581,11 @@ describe("runPipeline", () => {
       const deps = makeDeps();
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
       deps.ledger.upsertPending(b.streamKey);
-      deps.ledger.syncNodeState(b.streamKey, "append_danmu", "done"); // 预置 danmu 已完成
-      await runPipeline(b, deps);
+      writePlainArtifacts(deps);
+      writeFileSync(join(stageSubOf(deps), "主播名_2026-06-27_danmu.mp4"), "x");
+      writeFileSync(join(stageSubOf(deps), "主播名_2026-06-27_livechat.mp4"), "x");
+      await seedVerifiedMasterArchive(deps, b, "BV123", ["append_danmu"]);
+      expect((await runPipeline(b, deps)).state).toBe("done");
       const appended = (deps.upload as unknown as { appendGroup: Mock }).appendGroup.mock.calls.map((c) => c[0].files.join(",")).join("|");
       expect(appended).not.toContain("_danmu.mp4"); // 已 done → 跳过
       expect(appended).toContain("_livechat.mp4");  // 只补 livechat
@@ -1555,17 +1601,13 @@ describe("runPipeline", () => {
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
       // 预置:已建稿 + danmu 已 append 完
       deps.ledger.upsertPending(b.streamKey);
-      deps.ledger.setState(b.streamKey, "syncing");
-      deps.ledger.setState(b.streamKey, "merging");
-      deps.ledger.setState(b.streamKey, "uploading");
-      deps.ledger.setBv(b.streamKey, BV_EXISTING);
-      deps.ledger.logStep(b.streamKey, "append_danmu", "start");
-      deps.ledger.logStep(b.streamKey, "append_danmu", "done");
       // 预置 stage 产物(dateName 由 deriveProducts 从目录反推)
       const dateName = "主播名_2026-06-27";
       const sub = join(stageDir, "douyin_test-room_2026-06-27");
       mkdirSync(sub, { recursive: true });
       for (const suf of [".mp4", "_danmu.mp4", "_livechat.mp4", ".xml"]) writeFileSync(join(sub, dateName + suf), "x");
+      await seedVerifiedMasterArchive(deps, b, BV_EXISTING, ["append_danmu"]);
+      for (const st of ["syncing", "merging", "uploading"] as const) deps.ledger.setState(b.streamKey, st);
 
       const r = await runPipeline(b, deps);
 
@@ -1586,12 +1628,11 @@ describe("runPipeline", () => {
       const deps = makeDeps({ cfg: { ...makeDeps().cfg, stageDir } });
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
       deps.ledger.upsertPending(b.streamKey);
-      for (const st of ["syncing", "merging", "uploading"] as const) deps.ledger.setState(b.streamKey, st);
-      deps.ledger.setBv(b.streamKey, "BV" + "existing");
-      deps.ledger.logStep(b.streamKey, "append_danmu", "done"); // 只剩 livechat 一组
       const sub = join(stageDir, "douyin_test-room_2026-06-27");
       mkdirSync(sub, { recursive: true });
       for (const suf of [".mp4", "_danmu.mp4", "_livechat.mp4", ".xml"]) writeFileSync(join(sub, "主播名_2026-06-27" + suf), "x");
+      await seedVerifiedMasterArchive(deps, b, "BV" + "existing", ["append_danmu"]);
+      for (const st of ["syncing", "merging", "uploading"] as const) deps.ledger.setState(b.streamKey, st);
       (deps.upload as unknown as { appendGroup: Mock }).appendGroup.mockRejectedValue(new Error(APPEND_AMBIGUOUS_MARKER + " append 结果无法确认"));
 
       await expect(runPipeline(b, deps)).rejects.toThrow(APPEND_AMBIGUOUS_MARKER);
@@ -1611,12 +1652,11 @@ describe("runPipeline", () => {
       });
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
       deps.ledger.upsertPending(b.streamKey);
-      for (const st of ["syncing", "merging", "uploading"] as const) deps.ledger.setState(b.streamKey, st);
-      deps.ledger.setBv(b.streamKey, "BV" + "existing");
-      deps.ledger.logStep(b.streamKey, "append_danmu", "done");
       const sub = join(stageDir, "douyin_test-room_2026-06-27");
       mkdirSync(sub, { recursive: true });
       for (const suf of [".mp4", "_danmu.mp4", "_livechat.mp4", ".xml"]) writeFileSync(join(sub, "主播名_2026-06-27" + suf), "x");
+      await seedVerifiedMasterArchive(deps, b, "BV" + "existing", ["append_danmu"]);
+      for (const st of ["syncing", "merging", "uploading"] as const) deps.ledger.setState(b.streamKey, st);
       (deps.upload as unknown as { appendGroup: Mock }).appendGroup.mockRejectedValueOnce(new Error("code: 601 您上传视频过快")).mockResolvedValue(undefined);
 
       await expect(runPipeline(b, deps)).rejects.toThrow("601");
@@ -1639,10 +1679,10 @@ describe("runPipeline", () => {
         const b = makeBroadcast(members);
         deps.ledger.upsertPending(b.streamKey);
         for (const st of ["syncing", "merging", "uploading"] as const) deps.ledger.setState(b.streamKey, st);
-        deps.ledger.setBv(b.streamKey, EXISTING_BV);
         const sub = join(stageDir, "douyin_test-room_2026-06-27");
         mkdirSync(sub, { recursive: true });
         for (const suf of [".mp4", "_danmu.mp4", "_livechat.mp4", ".xml"]) writeFileSync(join(sub, "主播名_2026-06-27" + suf), "x");
+        await seedVerifiedMasterArchive(deps, b, EXISTING_BV);
         const r = await runPipeline(b, deps);
         return { r, deps, b };
       }
@@ -1686,11 +1726,11 @@ describe("runPipeline", () => {
       deps.ledger.setState(b.streamKey, "syncing");
       deps.ledger.setState(b.streamKey, "merging");
       deps.ledger.setState(b.streamKey, "uploading");
-      deps.ledger.setBv(b.streamKey, BV_EXISTING);
       const dateName = "主播名_2026-06-27";
       const sub = join(stageDir, "douyin_test-room_2026-06-27");
       mkdirSync(sub, { recursive: true });
       for (const suf of [".mp4", "_danmu.mp4", "_livechat.mp4", ".xml"]) writeFileSync(join(sub, dateName + suf), "x");
+      await seedVerifiedMasterArchive(deps, b, BV_EXISTING);
 
       const r = await runPipeline(b, deps);
 
@@ -1729,8 +1769,6 @@ describe("runPipeline", () => {
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
       deps.ledger.upsertPending(b.streamKey);
       for (const st of ["syncing", "merging", "uploading"] as const) deps.ledger.setState(b.streamKey, st);
-      deps.ledger.setBv(b.streamKey, BV_EXISTING);
-      deps.ledger.logStep(b.streamKey, "append_danmu", "start"); // 两个 append 都还没做完
       const dateName = "主播名_2026-06-27";
       const sub = join(stageDir, "douyin_test-room_2026-06-27");
       mkdirSync(sub, { recursive: true });
@@ -1742,6 +1780,8 @@ describe("runPipeline", () => {
         prepareUploadAlias(sub, "danmu", canonical, alias);
         rmSync(canonical);
       }
+      await seedVerifiedMasterArchive(deps, b, BV_EXISTING);
+      deps.ledger.logStep(b.streamKey, "append_danmu", "start"); // Both append groups are still pending.
 
       const r = await runPipeline(b, deps);
 

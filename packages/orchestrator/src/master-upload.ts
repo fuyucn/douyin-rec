@@ -1,4 +1,5 @@
-import { statSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
 import {
   appendArchive, createArchive, classifyRetryableFailure, classifyUploadOutcome,
   isAppendAmbiguous, isPlainNoBv, isJobAbort, isUncertainOutcome, isUploadRateLimited, throwIfAborted,
@@ -14,7 +15,12 @@ type Submission = {
   proof?: "created" | "accepted" | "observed"; bv?: string;
 };
 type Failure = { message: string; code: string; ambiguous: boolean };
-type Journal = { version: 1; legacy: boolean; entries: Submission[]; failure?: Failure; plans?: Record<string, string> };
+type UploadIdentity = { targetId: string; accountKey: string; credentialFingerprint: string; generation: string };
+type FileFingerprint = { size: number; sha256: string };
+type Journal = {
+  version: 1; legacy: boolean; entries: Submission[]; failure?: Failure; plans?: Record<string, string>;
+  generation?: string; identity?: UploadIdentity;
+};
 
 function parseJournal(raw: string | null | undefined): Journal | null {
   if (!raw) return null;
@@ -33,6 +39,11 @@ function parseJournal(raw: string | null | undefined): Journal | null {
       .some((other) => e.group === other.group && e.indices.some((i) => other.indices.includes(i))))) return null;
     if (j.plans && (typeof j.plans !== "object" || Array.isArray(j.plans)
       || !Object.values(j.plans).every((value) => typeof value === "string"))) return null;
+    if (j.generation != null && (typeof j.generation !== "string" || !j.generation)) return null;
+    if (j.identity != null && (typeof j.identity.targetId !== "string" || !j.identity.targetId
+      || typeof j.identity.accountKey !== "string" || !j.identity.accountKey
+      || typeof j.identity.credentialFingerprint !== "string" || !j.identity.credentialFingerprint
+      || typeof j.identity.generation !== "string" || !j.identity.generation)) return null;
     if (j.failure && (typeof j.failure.message !== "string" || typeof j.failure.code !== "string"
       || typeof j.failure.ambiguous !== "boolean")) return null;
     return j;
@@ -48,7 +59,7 @@ export function prepareMasterUpload(ledger: SyncLedger, key: string): void {
   const nodes = ledger.getNodeStates(key).some((n) => MASTER_UPLOAD_STEPS.has(n.node)
     && !["pending", "skipped", "blocked"].includes(n.state));
   ledger.saveUploadJournal(key, null, JSON.stringify({
-    version: 1, legacy: !!job.bv || history || parts || nodes, entries: [],
+    version: 1, legacy: !!job.bv || history || parts || nodes, entries: [], generation: randomUUID(),
   } satisfies Journal));
 }
 
@@ -70,12 +81,109 @@ export function bindMasterPlan(ledger: SyncLedger, key: string, scope: string, i
   ledger.saveUploadJournal(key, raw, JSON.stringify(journal));
 }
 
-function fingerprint(files: string[]): string {
-  return JSON.stringify(files.map((file) => {
+async function fingerprint(files: string[]): Promise<string> {
+  const entries: Array<{ size: number; sha256: string }> = [];
+  for (const file of files) {
     const st = statSync(file);
     if (!st.isFile() || st.size <= 0) throw new Error("upload input missing or empty");
-    return { device: st.dev, inode: st.ino, size: st.size, mtimeMs: st.mtimeMs };
-  }));
+    const hash = createHash("sha256");
+    for await (const chunk of createReadStream(file)) hash.update(chunk);
+    const after = statSync(file);
+    if (after.size !== st.size || after.mtimeMs !== st.mtimeMs || after.ino !== st.ino || after.dev !== st.dev) {
+      throw new Error("upload input changed while fingerprinting");
+    }
+    entries.push({ size: st.size, sha256: hash.digest("hex") });
+  }
+  return JSON.stringify(entries);
+}
+
+function bindUploadIdentity(deps: PipelineDeps, key: string, journal: Journal, raw: string | null, cookies: string): string | null {
+  const targetId = deps.upload.id;
+  const accountKey = deps.upload.accountKey({ targetId, locator: cookies });
+  const generation = journal.generation ?? randomUUID();
+  const credentialFingerprint = createHash("sha256")
+    .update(generation)
+    .update("\0")
+    .update(cookies)
+    .update("\0")
+    .update(existsSync(cookies) ? readFileSync(cookies) : "missing")
+    .digest("hex");
+  if (journal.entries.length > 0 && !journal.identity) {
+    journal.failure = { message: "[append-ambiguous] upload identity missing for existing submission evidence", code: "unknown", ambiguous: true };
+    deps.ledger.saveUploadJournal(key, raw, JSON.stringify(journal));
+    throw ambiguous("upload identity missing for existing submission evidence");
+  }
+  if (journal.identity && (journal.identity.targetId !== targetId || journal.identity.accountKey !== accountKey
+    || journal.identity.credentialFingerprint !== credentialFingerprint || journal.identity.generation !== generation)) {
+    journal.failure = { message: "[append-ambiguous] upload target or account changed during retry", code: "unknown", ambiguous: true };
+    deps.ledger.saveUploadJournal(key, raw, JSON.stringify(journal));
+    throw ambiguous("upload target or account changed during retry");
+  }
+  if (journal.generation !== generation || !journal.identity) {
+    journal.generation = generation;
+    journal.identity = { targetId, accountKey, credentialFingerprint, generation };
+    const next = JSON.stringify(journal);
+    try { deps.ledger.saveUploadJournal(key, raw, next); }
+    catch {
+      const latest = deps.ledger.get(key)?.uploadJournal ?? null;
+      const current = parseJournal(latest);
+      if (!current?.identity || current.identity.targetId !== targetId || current.identity.accountKey !== accountKey
+        || current.identity.credentialFingerprint !== credentialFingerprint || current.identity.generation !== generation) throw ambiguous("upload identity changed concurrently");
+      return latest;
+    }
+    return next;
+  }
+  return raw;
+}
+
+/** Validate persisted successful parts before a resume path skips their upload calls. */
+export async function validateMasterParts(
+  ledger: SyncLedger, key: string, group: string, files: string[], requireComplete = false,
+): Promise<void> {
+  const raw = ledger.get(key)?.uploadJournal;
+  const journal = parseJournal(raw);
+  if (!journal) {
+    if (raw != null) throw ambiguous("missing or malformed master upload evidence");
+    if (requireComplete && files.length > 0) throw ambiguous("completed upload group has no submission evidence");
+    return;
+  }
+  const submittedEntries = journal.entries.filter((entry) => entry.group === group && entry.state === "submitted");
+  for (const entry of submittedEntries) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(entry.fingerprint) as unknown; }
+    catch { rejectJournal(ledger, key, raw!, journal, "submitted part fingerprint is malformed"); }
+    const validFingerprint = (value: unknown): value is FileFingerprint => typeof value === "object" && value !== null
+      && "size" in value && typeof value.size === "number" && Number.isSafeInteger(value.size) && value.size > 0
+      && "sha256" in value && typeof value.sha256 === "string" && /^[0-9a-f]{64}$/.test(value.sha256);
+    if (!Array.isArray(parsed) || parsed.length !== entry.indices.length || !parsed.every(validFingerprint)) {
+      rejectJournal(ledger, key, raw!, journal, "submitted part fingerprint is malformed");
+    }
+    const recorded = parsed;
+    for (let offset = 0; offset < entry.indices.length; offset++) {
+      const index = entry.indices[offset]!;
+      if (index >= files.length) rejectJournal(ledger, key, raw!, journal, `submitted part ${group}[${index}] is missing from the current upload plan (${files.length} parts)`);
+      let current: string;
+      try { current = await fingerprint([files[index]!]); }
+      catch { rejectJournal(ledger, key, raw!, journal, "submitted part is missing or unreadable"); }
+      if (current !== JSON.stringify([recorded[offset]])) rejectJournal(ledger, key, raw!, journal, "submitted part changed after confirmation");
+    }
+  }
+  if (requireComplete) {
+    const expected = new Set(files.map((_, index) => index));
+    const submitted = new Set(submittedEntries.flatMap((entry) => entry.indices));
+    const checkpointed = ledger.doneParts(key, group);
+    const sameIndices = (left: Set<number>, right: Set<number>): boolean =>
+      left.size === right.size && [...left].every((index) => right.has(index));
+    if (!sameIndices(submitted, expected) || !sameIndices(checkpointed, expected)) {
+      rejectJournal(ledger, key, raw!, journal, "completed upload group does not cover the current part plan");
+    }
+  }
+}
+
+function rejectJournal(ledger: SyncLedger, key: string, raw: string, journal: Journal, message: string): never {
+  journal.failure = { message: "[append-ambiguous] " + message, code: "unknown", ambiguous: true };
+  ledger.saveUploadJournal(key, raw, JSON.stringify(journal));
+  throw ambiguous(message);
 }
 
 function ambiguous(message: string): Error {
@@ -125,7 +233,12 @@ async function submit(input: SubmitInput): Promise<string> {
   const raw = deps.ledger.get(key)?.uploadJournal ?? null;
   const journal = parseJournal(raw);
   if (!journal) throw ambiguous("missing or malformed master upload evidence");
-  if (!journal.legacy && !consistent(deps.ledger, key, journal)) throw ambiguous("submission checkpoints disagree");
+  bindUploadIdentity(deps, key, journal, raw, input.create?.cookies ?? deps.cfg.cookies);
+  const boundRaw = deps.ledger.get(key)?.uploadJournal ?? null;
+  const boundJournal = parseJournal(boundRaw);
+  if (!boundJournal) throw ambiguous("missing or malformed master upload identity");
+  if (boundJournal.legacy) rejectJournal(deps.ledger, key, boundRaw!, boundJournal, "legacy upload history has no submission proof");
+  if (!boundJournal.legacy && !consistent(deps.ledger, key, boundJournal)) throw ambiguous("submission checkpoints disagree");
   if (!files.length || indices.length !== files.length || new Set(indices).size !== indices.length) {
     throw ambiguous("invalid submission part indices");
   }
@@ -133,25 +246,34 @@ async function submit(input: SubmitInput): Promise<string> {
   if ((input.create && currentBv) || (!input.create && (!input.bv || currentBv !== input.bv))) {
     throw ambiguous("upload archive identity changed");
   }
-  const fp = fingerprint(files);
-  const overlapping = journal.entries.filter((e) => e.group === group && e.indices.some((i) => indices.includes(i)));
+  const fp = await fingerprint(files);
+  const overlapping = boundJournal.entries.filter((e) => e.group === group && e.indices.some((i) => indices.includes(i)));
   const previous = overlapping[0];
   if (overlapping.length > 1 || (previous && (JSON.stringify(previous.indices) !== JSON.stringify(indices)
     || previous.kind !== (input.create ? "create" : "append")
     || (previous.fingerprint !== fp && previous.state !== "not-submitted")))) {
     throw ambiguous("upload inputs changed since submission");
   }
-  if (journal.entries.some((e) => e.state === "intent")) throw ambiguous("unresolved submission intent; refusing to resend");
+  if (boundJournal.entries.some((e) => e.state === "intent")) throw ambiguous("unresolved submission intent; refusing to resend");
   if (previous?.state === "submitted") {
-    if (!consistent(deps.ledger, key, journal)) throw ambiguous("submission checkpoints disagree");
+    if (!consistent(deps.ledger, key, boundJournal)) throw ambiguous("submission checkpoints disagree");
     return previous.bv!;
   }
   const entry: Submission = { kind: input.create ? "create" : "append", group, indices, fingerprint: fp, state: "intent" };
-  if (previous) journal.entries.splice(journal.entries.indexOf(previous), 1, entry);
-  else journal.entries.push(entry);
-  delete journal.failure;
-  const intent = JSON.stringify(journal);
-  deps.ledger.saveUploadJournal(key, raw, intent);
+  if (previous) boundJournal.entries.splice(boundJournal.entries.indexOf(previous), 1, entry);
+  else boundJournal.entries.push(entry);
+  delete boundJournal.failure;
+  const intent = JSON.stringify(boundJournal);
+  try { deps.ledger.saveUploadJournal(key, boundRaw, intent); }
+  catch {
+    const latestRaw = deps.ledger.get(key)?.uploadJournal ?? null;
+    const latest = parseJournal(latestRaw);
+    if (latest?.entries.some((entry) => entry.state === "intent")) throw ambiguous("unresolved submission intent; refusing to resend");
+    const completed = latest?.entries.find((entry) => entry.group === group && entry.kind === (input.create ? "create" : "append")
+      && entry.state === "submitted" && JSON.stringify(entry.indices) === JSON.stringify(indices) && entry.fingerprint === fp);
+    if (completed && consistent(deps.ledger, key, latest!)) return completed.bv!;
+    throw ambiguous("upload evidence changed concurrently");
+  }
   let bv: string;
   try {
     if (input.create) bv = await createArchive(deps.upload, { ...input.create, proofOnly: true });
@@ -167,19 +289,19 @@ async function submit(input: SubmitInput): Promise<string> {
     // Multi-file rejection may follow partial success; the batch is indivisible without server proof.
     const rejected = files.length === 1 && !unknown && !isJobAbort(error) && isUploadRateLimited(error);
     entry.state = rejected ? "not-submitted" : "intent";
-    journal.failure = {
+    boundJournal.failure = {
       message: String((error as Error)?.message ?? error).slice(0, 300),
       code: classifyRetryableFailure(error).code, ambiguous: !rejected,
     };
-    deps.ledger.saveUploadJournal(key, intent, JSON.stringify(journal));
+    deps.ledger.saveUploadJournal(key, intent, JSON.stringify(boundJournal));
     if (isJobAbort(error) || rejected) throw error;
-    throw ambiguous(journal.failure.message);
+    throw ambiguous(boundJournal.failure.message);
   }
   entry.state = "submitted";
   entry.bv = bv;
   // Deferred returns guarantee acceptance, not observation. Never promote it to observed here.
   entry.proof = input.create ? "created" : input.deferred ? "accepted" : "observed";
-  deps.ledger.saveUploadJournal(key, intent, JSON.stringify(journal), {
+  deps.ledger.saveUploadJournal(key, intent, JSON.stringify(boundJournal), {
     bv, group, indices, seasonPending: !!input.create && !!deps.cfg.uploadMeta.seasonSectionId,
   });
   return bv;

@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, rmdirSyn
 import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { NodeUploadConfig } from "./node-upload-config.js";
-import { appendMasterParts, prepareMasterUpload, markMasterFailure, bindMasterPlan, hasVerifiedMasterHistory, MASTER_UPLOAD_STEPS } from "./master-upload.js";
+import { appendMasterParts, prepareMasterUpload, markMasterFailure, bindMasterPlan, validateMasterParts, hasVerifiedMasterHistory, MASTER_UPLOAD_STEPS } from "./master-upload.js";
 import type { JobState, SyncLedger } from "./ledger.js";
 import { resolveSubmissionTitle, isAtomicTempName, formatPartTitle, isJobAbort, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, resolveJobLogPath, stageSessionDir, anchorNameOfSessionBase, type PathLayout, survivingArtifacts, throwIfAborted, closeStageReady, USER_STOP, VIDEO_EXT_ALT, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, isSidecarSkipEvent, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
 import type { OutputFormat, UploadOpts, UploadTarget } from "@drec/core";
@@ -1013,14 +1013,18 @@ async function runPipelineInner(
   jlog: (msg: string) => void,
 ): Promise<{ state: JobState; bv?: string; stageReady?: true }> {
   const { transports, ledger, notify, cfg } = deps;
-  if (cfg.uploadMode === "upload" && ledger.get(b.streamKey)?.state !== "done"
-    && !shouldUseNodeSideUpload(cfg, burnFlags(cfg.steps)).ok) {
+  const bindMasterUploadPlan = (): void => {
+    if (cfg.uploadMode !== "upload" || ledger.get(b.streamKey)?.state === "done") return;
     prepareMasterUpload(ledger, b.streamKey);
     bindMasterPlan(ledger, b.streamKey, "sources", {
       members: b.members.map((m) => [m.workerId, m.rec.sessionBase, m.rec.tsFiles, m.rec.xmlPath]).sort(),
       steps: cfg.steps, minSegmentSec: cfg.minSegmentSec ?? 2, segmentGroupSec: cfg.segmentGroupSec ?? 0,
       uploadBatchSize: cfg.uploadBatchSize ?? 1, outputFormat: cfg.outputFormat,
     });
+  };
+  if (cfg.uploadMode === "upload" && ledger.get(b.streamKey)?.state !== "done"
+    && !shouldUseNodeSideUpload(cfg, burnFlags(cfg.steps)).ok) {
+    bindMasterUploadPlan();
   }
   // 子命令统一经此执行:命令行 + 耗时 + 输出摘尾(最后 2KB,biliup 输出可能很长)都进 job.log。
   const sh = async (cmd: string): Promise<void> => {
@@ -1062,7 +1066,21 @@ async function runPipelineInner(
   if (existing?.state === "done" && existing.bv
       && (ranNodeSide || shouldUseNodeSideUpload(cfg, { burnDanmu, burnLivechat }).ok)) {
     jlog(`节点侧上传的 done 场补跑收尾:只补核验 + 删源(bv=${existing.bv}),不重传`);
+    await associateSeasonForJob(ledger, cfg, streamKey, jlog);
     return await finalizeOnly(streamKey, existing.bv, deps, jlog, notify, b.members, stageSub, { keepNodeXml: true });
+  }
+
+  if (existing?.state === "done" && existing.bv) {
+    jlog("已完成稿件只执行收尾补跑，不重新进入上传管线");
+    await associateSeasonForJob(ledger, cfg, streamKey, jlog);
+    return await finalizeOnly(streamKey, existing.bv, deps, jlog, notify, b.members, stageSub);
+  }
+
+  if (cfg.uploadMode === "upload" && existing?.bv && !hasVerifiedMasterHistory(ledger, streamKey)) {
+    const error = "existing archive has no verified master submission evidence; refusing automatic append";
+    ledger.setState(streamKey, "needs_manual", { error: error });
+    notify({ kind: "error", stage: "上传", message: "已有稿件号但缺少可验证的主控提交记录，无法安全判断哪些分P已落地；已停止续传，请人工核对" });
+    return { state: "needs_manual", bv: existing.bv };
   }
 
   // 分段模式(bv 已存在)有自己的续跑(含 plain 段 checkpoint),不要走合并路径的 resumeAppends。
@@ -1231,6 +1249,7 @@ async function runPipelineInner(
   }
 
   // stageSub 已在入口声明(续跑分支复用)——stageDir/<sanitized-streamKey>,隔离各场文件。
+  bindMasterUploadPlan();
   const filesToPull = winnerMembers.flatMap((m) => [
     ...m.rec.tsFiles,
     ...(m.rec.xmlPath ? [m.rec.xmlPath] : []),
@@ -1524,6 +1543,8 @@ async function resumeAppends(
     notify({ kind: "error", stage: "上传", message: `续跑失败:${bv} 产物缺失,请人工处理(补 append 或删稿重来)` });
     return await drainSeason({ state: "needs_manual", bv });
   }
+  const plainFiles = await splitForUpload(prod.plain);
+  await validateMasterParts(ledger, streamKey, "plain", plainFiles);
   // 续跑前先修复失败的烧录节点:docker crash / 中断可能留下半成品(文件在但缺 moov),
   // 直接 append 会把坏文件传上去;烧录是本地产物,重烧不会重复投稿。
   const burnRepairs: Array<{ step: "burn_danmu" | "burn_livechat"; on: boolean }> = [
@@ -1572,8 +1593,10 @@ async function resumeAppends(
   ];
   for (const g of groups) {
     if (!g.on) continue;
-    if (ledger.isStepDone(streamKey, g.step)) { jlog(`append 跳过(已完成): ${g.step}`); continue; }
     const files = await splitForUpload(g.mp4);
+    const stepDone = ledger.isStepDone(streamKey, g.step);
+    await validateMasterParts(ledger, streamKey, g.step, files, stepDone);
+    if (ledger.isStepDone(streamKey, g.step)) { jlog(`append 跳过(已完成): ${g.step}`); continue; }
     if (files.length === 0) continue;
     // Legacy multi-file groups have no atomic submission evidence. New journals fence the whole batch.
     if (files.length > 1 && !hasVerifiedMasterHistory(ledger, streamKey)) {

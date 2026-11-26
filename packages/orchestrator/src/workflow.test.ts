@@ -16,6 +16,7 @@ import {
 import { SyncLedger } from "./ledger.js";
 import { JobDispatcher } from "./job-dispatcher.js";
 import type { PipelineDeps } from "./pipeline.js";
+import { prepareMasterUpload } from "./master-upload.js";
 import { fakeUploadTarget } from "@drec/core";
 import type { UploadTarget } from "@drec/core";
 
@@ -59,6 +60,7 @@ interface TestDeps {
 function makeDeps(overrides: Partial<PipelineDeps> = {}): TestDeps {
   const ledger = freshLedger();
   ledger.upsertPending(STREAM_KEY);
+  prepareMasterUpload(ledger, STREAM_KEY);
   const stageDir = mkdtempSync(join(tmpdir(), "workflow-stage-"));
   const stageSub = join(stageDir, "douyin_test-room_2026-06-27");
   mkdirSync(stageSub, { recursive: true });
@@ -235,10 +237,10 @@ describe("runWorkflowNodes — 安全阀与分支隔离", () => {
       streamKey: STREAM_KEY, nodes: workflow.nodes, edges: workflow.edges,
       ctx: workflow.ctx, pool: t.deps.pool!,
     });
-    expect(r.ok).toBe(true);
+    expect(r.ok).toBe(false);
     expect(t.uploadPlain).toHaveBeenCalledTimes(1);
-    expect(t.ledger.get(STREAM_KEY)?.bv).toBe(bv);
-    expect(t.ledger.getNodeState(STREAM_KEY, "upload_plain")?.state).toBe("done");
+    expect(t.ledger.get(STREAM_KEY)?.bv).toBeNull();
+    expect(t.ledger.getNodeState(STREAM_KEY, "upload_plain")?.state).toBe("failed");
     expect(t.ledger.get(STREAM_KEY)?.seasonState).toBeNull();
     expect(vi.mocked(addArchiveToSeasonIfConfigured)).not.toHaveBeenCalled();
   });

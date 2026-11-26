@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { linkSync, mkdtempSync, writeFileSync } from "node:fs";
+import { linkSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -8,7 +8,7 @@ import type { PipelineDeps } from "./pipeline.js";
 import { SyncLedger } from "./ledger.js";
 import { Reconciler } from "./reconciler.js";
 import { ResourcePool } from "./workflow.js";
-import { appendMasterParts, bindMasterPlan, createMasterArchive, masterUploadFailurePlan, prepareMasterUpload } from "./master-upload.js";
+import { appendMasterParts, bindMasterPlan, createMasterArchive, markMasterFailure, masterUploadFailurePlan, prepareMasterUpload, validateMasterParts } from "./master-upload.js";
 import type { NodeInventory, Transport } from "./transport.js";
 
 const KEY = "douyin:retry-fixture:2026-06-22";
@@ -106,6 +106,92 @@ describe("master submission evidence", () => {
     expect(f.create).toHaveBeenCalledTimes(1);
   });
 
+  it("season checkpoint failure rolls back BV, parts, and submitted evidence together", async () => {
+    const f = fixture();
+    f.deps.cfg.uploadMeta.seasonSectionId = 42;
+    vi.spyOn(f.ledger, "setBvAndSeasonState").mockImplementation(() => { throw new Error("season write failed"); });
+    await expect(createMasterArchive(f.deps, KEY, f.opts)).rejects.toThrow("season write failed");
+    expect(f.create).toHaveBeenCalledTimes(1);
+    expect(f.ledger.get(KEY)).toMatchObject({ bv: null, seasonState: null });
+    expect(f.ledger.doneParts(KEY, "plain")).toEqual(new Set());
+    expect(JSON.parse(f.ledger.get(KEY)!.uploadJournal!).entries[0].state).toBe("intent");
+    expect(masterUploadFailurePlan(f.ledger, KEY)?.class).toBe("verify-manual");
+  });
+
+  it("does not skip a submitted P1 after later parts are rate-limited and P1 changes", async () => {
+    const f = fixture();
+    await createMasterArchive(f.deps, KEY, f.opts);
+    f.append.mockRejectedValueOnce(new Error("code: 601 upload rate limit"));
+    await expect(appendMasterParts(f.deps, KEY, ARCHIVE, "plain", [1], [f.files[1]], true)).rejects.toThrow();
+    writeFileSync(f.files[0], "changed submitted P1");
+    await expect(validateMasterParts(f.ledger, KEY, "plain", f.files)).rejects.toThrow("submitted part changed");
+    markMasterFailure(f.deps, KEY, "submitted part changed after confirmation");
+    expect(f.ledger.get(KEY)?.state).toBe("needs_manual");
+    expect(f.append).toHaveBeenCalledTimes(1);
+    expect(f.ledger.get(KEY)?.bv).toBe(ARCHIVE);
+    expect(f.files.every((file) => readFileSync(file).length > 0)).toBe(true);
+  });
+
+  it("validates submitted P1 when a different append group is rate-limited", async () => {
+    const f = fixture();
+    await createMasterArchive(f.deps, KEY, f.opts);
+    f.append.mockRejectedValueOnce(new Error("code: 601 upload rate limit"));
+    await expect(appendMasterParts(f.deps, KEY, ARCHIVE, "append_danmu", [0], [f.files[1]], true))
+      .rejects.toThrow("601");
+
+    writeFileSync(f.files[0], "changed submitted P1");
+    await expect(validateMasterParts(f.ledger, KEY, "plain", f.files)).rejects.toThrow("submitted part changed");
+    markMasterFailure(f.deps, KEY, "submitted part changed after confirmation");
+    expect(f.ledger.get(KEY)?.state).toBe("needs_manual");
+    expect(f.append).toHaveBeenCalledTimes(1);
+    expect(f.files.every((file) => readFileSync(file).length > 0)).toBe(true);
+  });
+
+  it("accepts an identical submitted part regenerated with a different inode", async () => {
+    const f = fixture();
+    await createMasterArchive(f.deps, KEY, f.opts);
+    const identical = join(f.deps.cfg.stageDir, "part-0-regenerated.mp4");
+    writeFileSync(identical, readFileSync(f.files[0]!));
+    await expect(validateMasterParts(f.ledger, KEY, "plain", [identical])).resolves.toBeUndefined();
+  });
+
+  it("a completed group must cover every current part index before it can be skipped", async () => {
+    const f = fixture();
+    await createMasterArchive(f.deps, KEY, f.opts);
+    await expect(validateMasterParts(f.ledger, KEY, "plain", f.files, true))
+      .rejects.toThrow("does not cover the current part plan");
+
+    const complete = fixture();
+    await createMasterArchive(complete.deps, KEY, complete.opts);
+    await appendMasterParts(complete.deps, KEY, ARCHIVE, "plain", [1, 2], complete.files.slice(1), true);
+    await expect(validateMasterParts(complete.ledger, KEY, "plain", complete.files, true)).resolves.toBeUndefined();
+  });
+
+  it("pins target account and execution generation across retries", async () => {
+    const f = fixture();
+    const credential = join(f.deps.cfg.stageDir, "cookies.json");
+    writeFileSync(credential, "account-a");
+    const baseTarget = f.deps.upload;
+    f.deps.upload = {
+      ...baseTarget,
+      accountKey: () => "fake:stable-account",
+    };
+    f.deps.cfg.cookies = credential;
+    const opts = { ...f.opts, cookies: credential };
+    await createMasterArchive(f.deps, KEY, opts);
+    f.append.mockRejectedValueOnce(new Error("code: 601 upload rate limit"));
+    await expect(appendMasterParts(f.deps, KEY, ARCHIVE, "append_danmu", [0], [f.files[1]], true)).rejects.toThrow();
+    const before = JSON.parse(f.ledger.get(KEY)!.uploadJournal!);
+    expect(before.identity.generation).toBe(before.generation);
+    writeFileSync(credential, "account-b");
+    await expect(appendMasterParts(f.deps, KEY, ARCHIVE, "append_danmu", [0], [f.files[1]], true))
+      .rejects.toThrow("account changed");
+    markMasterFailure(f.deps, KEY, "upload target or account changed during retry");
+    expect(f.ledger.get(KEY)?.state).toBe("needs_manual");
+    expect(f.append).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(f.ledger.get(KEY)!.uploadJournal!).generation).toBe(before.generation);
+  });
+
   it("only definitely rejected inputs may be regenerated; submitted inputs and indices remain pinned", async () => {
     const f = fixture();
     f.create.mockRejectedValueOnce(new Error("code: 601 upload rate limit"));
@@ -135,18 +221,39 @@ describe("master submission evidence", () => {
     db.close();
   });
 
-  it("a legacy archive pins its newly recorded source plan once new append evidence exists", async () => {
+  it("legacy create history without intent proof never starts a second archive", async () => {
+    const f = fixture();
+    f.ledger.logStep(KEY, "upload_plain", "start");
+    prepareMasterUpload(f.ledger, KEY);
+    expect(JSON.parse(f.ledger.get(KEY)!.uploadJournal!).legacy).toBe(true);
+    await expect(createMasterArchive(f.deps, KEY, f.opts)).rejects.toThrow("legacy upload history");
+    expect(f.create).not.toHaveBeenCalled();
+    expect(masterUploadFailurePlan(f.ledger, KEY)?.retryable).toBe(false);
+  });
+
+  it("legacy archive without append proof never resends a previously attempted part", async () => {
     const f = fixture();
     f.ledger.setBv(KEY, ARCHIVE);
     prepareMasterUpload(f.ledger, KEY);
     bindMasterPlan(f.ledger, KEY, "parts", { sources: [f.files[0]] });
-    await appendMasterParts(f.deps, KEY, ARCHIVE, "append_danmu", [0], [f.files[1]], true);
-    expect(() => bindMasterPlan(f.ledger, KEY, "parts", { sources: [f.files[2]] }))
-      .toThrow("source or part plan changed after submission");
+    await expect(appendMasterParts(f.deps, KEY, ARCHIVE, "append_danmu", [0], [f.files[1]], true))
+      .rejects.toThrow("legacy upload history");
+    expect(f.append).not.toHaveBeenCalled();
     const journal = JSON.parse(f.ledger.get(KEY)!.uploadJournal!);
-    expect(journal.plans.parts).toBe(JSON.stringify({ sources: [f.files[0]] }));
+    expect(journal.entries).toEqual([]);
     expect(journal.failure.ambiguous).toBe(true);
     expect(masterUploadFailurePlan(f.ledger, KEY)?.retryable).toBe(false);
+  });
+
+  it("malformed submitted fingerprint JSON is marked ambiguous rather than thrown as an ordinary retry", async () => {
+    const f = fixture();
+    await createMasterArchive(f.deps, KEY, f.opts);
+    const raw = f.ledger.get(KEY)!.uploadJournal!;
+    const journal = JSON.parse(raw);
+    journal.entries[0].fingerprint = "null";
+    f.ledger.saveUploadJournal(KEY, raw, JSON.stringify(journal));
+    await expect(validateMasterParts(f.ledger, KEY, "plain", [f.files[0]])).rejects.toThrow("fingerprint is malformed");
+    expect(masterUploadFailurePlan(f.ledger, KEY)).toMatchObject({ class: "verify-manual", retryable: false });
   });
 
   it("cross-connection compare-and-set rejects a stale writer without overwriting evidence", () => {
@@ -180,6 +287,7 @@ describe("master submission evidence", () => {
       return { proof: "created", ref: { targetId: "fake", id: ARCHIVE } };
     });
     const first = createMasterArchive(f.deps, KEY, f.opts);
+    await vi.waitFor(() => expect(f.create).toHaveBeenCalledTimes(1));
     await expect(createMasterArchive(f.deps, KEY, f.opts)).rejects.toThrow("unresolved");
     release(); await first;
     expect(f.create).toHaveBeenCalledTimes(1);

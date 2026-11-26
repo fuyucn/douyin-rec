@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { Scenario } from "./harness/scenario.js";
@@ -54,6 +54,7 @@ describe("e2e: 完成后清 stage 一并清视频类内容(#60)", () => {
     expect(s.jobState(s.onlyKey())).toBe("needs_manual");
     expect(stageVideos(s).filter((f) => f.endsWith(".ts"))).toHaveLength(6);
     expect(stageVideos(s).some((f) => f.endsWith(".mp4"))).toBe(true);
+    expect(s.ledger.get(s.onlyKey())?.uploadJournal ?? null).toBeNull();
   });
 
   // ── issue #327:上传是否成功仍只看 biliup 返回码,但删最后一份源之前先延后回读分 P 数;
@@ -173,7 +174,7 @@ describe("e2e: 完成后清 stage 一并清视频类内容(#60)", () => {
     });
 
     it("分段续跑(上传已完成、markDone 前中断,稿件号已落库)→ 续跑不重复上传,完成后 stage 源段副本清空", async () => {
-      s = await Scenario.create({ cfg: { steps: { mergeSegments: false }, cleanup: { ...COMMON, sourceAfterDone: false } }, deps }); // 节点源保留,下一轮才能重新发现该场续跑
+      s = await Scenario.create({ cfg: { steps: { mergeSegments: false }, cleanup: { ...COMMON, sourceAfterDone: false, stageAfterDone: false } }, deps }); // Keep submitted artifacts to model a crash before final cleanup.
       mk(s);
       record(s);
       await s.reconcile();
@@ -184,11 +185,33 @@ describe("e2e: 完成后清 stage 一并清视频类内容(#60)", () => {
       s.ledger.setState(key, "failed", { error: "进程重启中断" }, { force: true });
       s.ledger.syncNodeState(key, "merge", "failed", { error: "进程重启中断" });
       const calls = s.fake.calls.length;
+      s.patchConfig({ cleanup: { ...COMMON, sourceAfterDone: false, stageAfterDone: true } });
       await s.reconcile();
       expect(s.jobState(key)).toBe("done");
       expect(s.fake.calls, "续跑不得重复上传").toHaveLength(calls);
       expect(tsCount(s)).toBe(0);
     });
+  });
+
+  it("合并模式续跑发现已提交 P1 内容变化 → 转人工并保留源", async () => {
+    s = await Scenario.create({ cfg: { steps: { burnDanmu: false, burnLivechat: false },
+      cleanup: { ...COMMON, sourceAfterDone: false, stageAfterDone: false } } });
+    record(s);
+    await s.reconcile();
+    const key = s.onlyKey();
+    const plain = readdirSync(s.stageSubOf(key)).find((file) => file.endsWith(".mp4"));
+    expect(plain).toBeTruthy();
+    writeFileSync(join(s.stageSubOf(key), plain!), "changed submitted P1");
+    s.ledger.setState(key, "failed", { error: "simulated interruption before final cleanup" }, { force: true });
+    const calls = s.fake.calls.length;
+
+    await s.reconcile();
+
+    expect(s.jobState(key)).toBe("needs_manual");
+    expect(s.ledger.get(key)?.error).toContain("submitted part changed");
+    expect(s.fake.calls).toHaveLength(calls);
+    expect(stageVideos(s).length).toBeGreaterThan(0);
+    expect(s.recordingFiles().filter((file) => file.endsWith(".ts"))).toHaveLength(6);
   });
 });
 

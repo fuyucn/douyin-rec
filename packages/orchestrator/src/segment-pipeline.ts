@@ -15,7 +15,7 @@ import { isCompleteMedia, planSegmentGroups, renderXmlWindowToXml, unreadablePar
 import type { Broadcast } from "./identity.js";
 import type { JobState, SyncLedger } from "./ledger.js";
 import { canDeferAppendVerification } from "./verify.js";
-import { createMasterArchive, appendMasterParts, prepareMasterUpload, bindMasterPlan } from "./master-upload.js";
+import { createMasterArchive, appendMasterParts, prepareMasterUpload, bindMasterPlan, validateMasterParts } from "./master-upload.js";
 import { prepareUploadAlias, restoreProductFromAlias, SEG_WORK_DIR, segmentStem, segWorkPath, UPLOAD_ALIAS_DIR, type SegmentPlan } from "./session-plan.js";
 import { cleanupSourcesShared, clearCleanFailure, defaultRmStage, defaultSplitForUpload, finalizeAfterUpload, finalizeOnly, readdirSyncSafe, recordCleanFailure, removeEmptyStageDir, stageVideoLeftovers, videoOnly, xmlKeepRule, type CleanupOutcome, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
 
@@ -337,7 +337,7 @@ export async function runSegmentPipeline(o: {
   };
 
   // 续跑:已建稿(bv 已落库)→ 只补没做完的 append,绝不重传 plain 组(会重复建稿)。
-  prepareMasterUpload(ledger, streamKey);
+  if (cfg.uploadMode === "upload") prepareMasterUpload(ledger, streamKey);
   const existing = ledger.get(streamKey);
 
   // 该场各段的 remux 输入(按会话序 → 段序,已由 winnerMembers.tsFiles 保证)。
@@ -590,6 +590,7 @@ export async function runSegmentPipeline(o: {
     public: isPublic, desc: cfg.uploadMeta.desc,
   };
   // 分 P checkpoint:每个已成功提交的段都落库(组名 "plain"),续跑据此精确跳过 → 不漏段、不重复。
+  await validateMasterParts(ledger, streamKey, "plain", plainFiles);
   const donePlain = ledger.doneParts(streamKey, "plain");
   // 分P总数(用于 {parts}):plain 各段 + 各开启的烧录类各段。
   const totalParts = plainFiles.length
@@ -728,8 +729,10 @@ async function appendSegmentGroup(
 ): Promise<void> {
   const { ledger } = deps;
   if (!on) { ledger.syncNodeState(streamKey, step, "skipped"); return; }
-  if (ledger.isStepDone(streamKey, step)) { jlog(`append 跳过(已完成): ${step}`); return; }
+  const stepDone = ledger.isStepDone(streamKey, step);
   if (files.length === 0) {
+    await validateMasterParts(ledger, streamKey, step, [], stepDone);
+    if (ledger.isStepDone(streamKey, step)) { jlog(`append 跳过(已完成): ${step}`); return; }
     jlog(`${step}: 无产物段,跳过`);
     ledger.syncNodeState(streamKey, step, "skipped");
     return;
@@ -737,6 +740,8 @@ async function appendSegmentGroup(
   // 每个产物段再按 16GB 上限切(罕见),展平成最终 append 文件列表(顺序保持)。
   const finalFiles: string[] = [];
   for (const f of files) finalFiles.push(...await splitForUpload(f));
+  await validateMasterParts(deps.ledger, streamKey, step, finalFiles, stepDone);
+  if (ledger.isStepDone(streamKey, step)) { jlog(`append 跳过(已完成): ${step}`); return; }
   ledger.logStep(streamKey, step, "start");
   ledger.syncNodeState(streamKey, step, "running");
   // 分批 append(每批 ≤uploadBatchSize):每次提交走全局上传队列(限速 + 601 冷却)。
@@ -781,11 +786,18 @@ async function recoverBurnProducts(
     { style: "livechat", on: burnLivechat, step: "append_livechat" },
   ] as const;
   for (const t of tracks) {
-    if (!t.on || deps.ledger.isStepDone(streamKey, t.step)) continue;
+    if (!t.on) continue;
+    const alreadyDone = deps.ledger.isStepDone(streamKey, t.step);
     for (const p of uploadParts) {
       throwIfAborted();
       if (!p.window) continue;
       const out = burnOutOf(p.plain, t.style);
+      if (alreadyDone) {
+        if (existsSync(out)) {
+          if (t.style === "danmu") p.danmu = out; else p.livechat = out;
+        }
+        continue;
+      }
       if (!(await isCompleteMedia(out, probe))) {
         jlog(`续跑:${t.style} 组 ${p.index} 产物${existsSync(out) ? "读不出时长" : "缺失"} → 补烧 ${path.basename(out)}`);
         await burnOne({ plain: p.plain, xmlPath: p.window.xmlPath, window: p.window, style: t.style, out });
@@ -881,6 +893,7 @@ async function resumeSegmentAppends(
     notify({ kind: "error", stage: "上传", message: `${streamKey} 续跑产物自检失败:${brokenResume.length} 个分 P 读不出时长,请人工核对` });
     return await drainSeason({ state: "needs_manual", bv });
   }
+  await validateMasterParts(ledger, streamKey, "plain", plainFiles);
   const donePlain = ledger.doneParts(streamKey, "plain");
   const batchSize = Math.max(1, cfg.uploadBatchSize ?? 1);
   for (let i = 0; i < plainFiles.length; i += batchSize) {

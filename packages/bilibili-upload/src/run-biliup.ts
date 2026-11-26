@@ -375,10 +375,20 @@ export async function appendGroup(o: {
       if (o.proofOnly) throw new Error(`${APPEND_AMBIGUOUS_MARKER} append 未取得提交结果,列表未变不证明未提交`);
       continue; // Legacy policy: unchanged through the read window permits a different line.
     }
-    // run 返回成功:rc=0 不等于分 P 已落地。有基线时确认服务端真的多了 files.length 个。
+    // run returned successfully. Under proof-only mode, require a baseline unless a later cleanup read will verify it.
+    if (o.proofOnly && !o.deferVerificationUntilCleanup && (before == null || !o.countParts)) {
+      throw new Error(`${APPEND_AMBIGUOUS_MARKER} append returned success without a verifiable baseline`);
+    }
+    // rc=0 does not prove that parts landed. With a baseline, verify the server count unless cleanup will do so later.
     if (o.deferVerificationUntilCleanup || !o.countParts || before == null) return;
     const v = await confirmAppendLanded({ before, added: o.files.length, countParts: o.countParts, sleep });
-    if (v.kind === "ok" || v.kind === "unknown") return;
+    if (v.kind === "ok") return;
+    if (v.kind === "unknown") {
+      if (o.proofOnly) {
+        throw new Error(`${APPEND_AMBIGUOUS_MARKER} append returned success but verification remained unreadable`);
+      }
+      return;
+    }
     throw new Error(
       `${APPEND_AMBIGUOUS_MARKER} append 返回成功但服务端分 P 数不符(期望 ${before + o.files.length}、实际 ${v.actual ?? "读不到"}),可能未真正落地;不重发,请人工核对稿件`,
     );

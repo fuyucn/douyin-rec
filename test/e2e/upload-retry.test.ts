@@ -36,7 +36,7 @@ describe("e2e: 上传超时/故障后的重试与降级", () => {
     await s.restart();
     s.ledger.setFailurePlan(key, { failureClass: queued.failureClass, nextAttemptAt: 0 });
     await s.reconciler.pollUploadRetries();
-    await vi.waitFor(() => expect(s.jobState(key)).toBe("done"));
+    await vi.waitFor(() => expect(s.jobState(key)).toBe("done"), { timeout: 4_000 });
     expectHealthyDone(s, key, { parts: mergeSegments ? 3 : 9 });
     expect(s.fake.draftCount).toBe(1);
     const accepted = s.fake.calls.filter((call) => call.outcome === "ok").flatMap((call) => call.files);
