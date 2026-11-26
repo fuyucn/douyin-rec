@@ -37,11 +37,11 @@ export type VerifyGroup = "plain" | "danmu" | "livechat";
  * 主名 = 步骤名(与 segment-pipeline 现状一致);后面是兼容短名。
  * 读写两侧共用这张表 —— 别在别处硬写组名字面量。
  */
-export const PART_GROUP_ALIASES: Record<VerifyGroup, readonly string[]> = {
+export const PART_GROUP_ALIASES = {
   plain: ["plain"],
   danmu: ["append_danmu", "danmu"],
   livechat: ["append_livechat", "livechat"],
-};
+} as const satisfies Record<VerifyGroup, readonly string[]>;
 
 /**
  * 写侧要用到的规范组名(= 步骤名,与分段路径 `appendSegmentGroup` 一致)。
@@ -50,11 +50,13 @@ export const PART_GROUP_ALIASES: Record<VerifyGroup, readonly string[]> = {
  * 核验就会恒 mismatch(且历史行读不到)。派生保证「写的名字永远是读的第一优先名」,
  * 两边不可能漂移。
  */
-export const PART_GROUP_CANONICAL: Record<VerifyGroup, string> = {
+export const PART_GROUP_CANONICAL = {
   plain: PART_GROUP_ALIASES.plain[0],
   danmu: PART_GROUP_ALIASES.danmu[0],
   livechat: PART_GROUP_ALIASES.livechat[0],
-};
+} as const satisfies Record<VerifyGroup, string>;
+
+export type CanonicalPartGroup = (typeof PART_GROUP_CANONICAL)[VerifyGroup];
 
 /** 台账读侧(只要求 `doneParts`,便于单测注入假台账)。 */
 export interface PartsReader {

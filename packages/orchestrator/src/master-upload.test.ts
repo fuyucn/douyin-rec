@@ -70,6 +70,84 @@ describe("master submission evidence", () => {
     expect(f.ledger.doneParts(KEY, "plain")).toEqual(new Set([0]));
   });
 
+  it("does not retry when durable evidence for a known rejection cannot be saved", async () => {
+    const f = fixture();
+    f.create.mockRejectedValueOnce(new Error("code: 601 upload rate limit"));
+    const save = f.ledger.saveUploadJournal.bind(f.ledger);
+    vi.spyOn(f.ledger, "saveUploadJournal").mockImplementation((streamKey, previous, next, success) => {
+      const journal = JSON.parse(next) as { entries?: Array<{ state: string }> };
+      if (journal.entries?.some((entry) => entry.state === "not-submitted")) throw new Error("journal write failed");
+      save(streamKey, previous, next, success);
+    });
+
+    await expect(createMasterArchive(f.deps, KEY, f.opts)).rejects.toThrow("journal write failed");
+    expect(masterUploadFailurePlan(f.ledger, KEY)).toMatchObject({ class: "verify-manual", retryable: false });
+    markMasterFailure(f.deps, KEY, "journal write failed after explicit rejection");
+    expect(f.ledger.get(KEY)).toMatchObject({ state: "needs_manual", fails: 0 });
+    await expect(createMasterArchive(f.deps, KEY, f.opts)).rejects.toThrow("unresolved submission intent");
+    expect(f.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows safe plan changes before submission and freezes the plan afterward", async () => {
+    const f = fixture();
+    const original = { sources: [f.files[0]] };
+    bindMasterPlan(f.ledger, KEY, "parts", original);
+    const rescanned = { sources: [f.files[1]] };
+    bindMasterPlan(f.ledger, KEY, "parts", rescanned);
+
+    expect(JSON.parse(f.ledger.get(KEY)!.uploadJournal!).plans.parts).toBe(JSON.stringify(rescanned));
+    await createMasterArchive(f.deps, KEY, f.opts);
+
+    expect(() => bindMasterPlan(f.ledger, KEY, "parts", { sources: [f.files[2]] }))
+      .toThrow("source or part plan changed after submission");
+    const journal = JSON.parse(f.ledger.get(KEY)!.uploadJournal!);
+    expect(journal.plans.parts).toBe(JSON.stringify(rescanned));
+    expect(journal.failure).toMatchObject({ ambiguous: true });
+  });
+
+  it("freezes a legacy plan after binding even without new journal entries", () => {
+    const f = fixture();
+    prepareMasterUpload(f.ledger, KEY);
+    const raw = f.ledger.get(KEY)!.uploadJournal!;
+    const journal = JSON.parse(raw) as { legacy: boolean };
+    journal.legacy = true;
+    f.ledger.saveUploadJournal(KEY, raw, JSON.stringify(journal));
+    const original = { sources: [f.files[0]] };
+    bindMasterPlan(f.ledger, KEY, "parts", original);
+
+    expect(() => bindMasterPlan(f.ledger, KEY, "parts", { sources: [f.files[1]] }))
+      .toThrow("source or part plan changed after submission");
+    expect(JSON.parse(f.ledger.get(KEY)!.uploadJournal!).plans.parts).toBe(JSON.stringify(original));
+  });
+
+  it("refuses to submit when an input changes after fingerprinting", async () => {
+    const f = fixture();
+    const save = f.ledger.saveUploadJournal.bind(f.ledger);
+    vi.spyOn(f.ledger, "saveUploadJournal").mockImplementation((streamKey, previous, next, success) => {
+      save(streamKey, previous, next, success);
+      const journal = JSON.parse(next) as { entries?: Array<{ state: string }> };
+      if (journal.entries?.some((entry) => entry.state === "intent")) writeFileSync(f.files[0]!, "changed after fingerprint");
+    });
+
+    await expect(createMasterArchive(f.deps, KEY, f.opts)).rejects.toThrow("upload input changed before submission");
+    expect(f.create).not.toHaveBeenCalled();
+    expect(masterUploadFailurePlan(f.ledger, KEY)).toMatchObject({ class: "verify-manual", retryable: false });
+  });
+
+  it("does not confirm a successful submit if its input changes during upload", async () => {
+    const f = fixture();
+    f.create.mockImplementationOnce(async () => {
+      writeFileSync(f.files[0]!, "changed during upload");
+      return { proof: "created" as const, ref: { targetId: "fake", id: ARCHIVE } };
+    });
+
+    await expect(createMasterArchive(f.deps, KEY, f.opts)).rejects.toThrow("upload input changed while submitting");
+    expect(f.create).toHaveBeenCalledTimes(1);
+    expect(f.ledger.doneParts(KEY, "plain")).toEqual(new Set());
+    expect(JSON.parse(f.ledger.get(KEY)!.uploadJournal!).entries[0].state).toBe("intent");
+    expect(masterUploadFailurePlan(f.ledger, KEY)).toMatchObject({ class: "verify-manual", retryable: false });
+  });
+
   it("a durable rate-limit rejection remains retryable when restart recovery replaces the job error", async () => {
     const f = fixture();
     f.create.mockRejectedValueOnce(new Error("code: 601 upload rate limit"));

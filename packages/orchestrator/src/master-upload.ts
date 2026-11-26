@@ -1,4 +1,4 @@
-import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync, statSync, type Stats } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendArchive, createArchive, classifyRetryableFailure, classifyUploadOutcome,
@@ -7,10 +7,12 @@ import {
 } from "@drec/core";
 import type { SyncLedger } from "./ledger.js";
 import type { PipelineDeps } from "./pipeline.js";
+import { PART_GROUP_CANONICAL, type CanonicalPartGroup } from "./verify.js";
 
 export const MASTER_UPLOAD_STEPS = new Set(["upload_plain", "append_danmu", "append_livechat"]);
+const UPLOAD_GROUPS: readonly CanonicalPartGroup[] = Object.values(PART_GROUP_CANONICAL);
 type Submission = {
-  kind: "create" | "append"; group: string; indices: number[]; fingerprint: string;
+  kind: "create" | "append"; group: CanonicalPartGroup; indices: number[]; fingerprint: string;
   state: "intent" | "submitted" | "not-submitted";
   proof?: "created" | "accepted" | "observed"; bv?: string;
 };
@@ -29,7 +31,7 @@ function parseJournal(raw: string | null | undefined): Journal | null {
     const j = JSON.parse(raw) as Journal;
     if (j.version !== 1 || typeof j.legacy !== "boolean" || !Array.isArray(j.entries)) return null;
     if (!j.entries.every((e) => e && ["create", "append"].includes(e.kind)
-      && ["plain", "append_danmu", "append_livechat"].includes(e.group) && typeof e.fingerprint === "string"
+      && UPLOAD_GROUPS.includes(e.group) && typeof e.fingerprint === "string"
       && Array.isArray(e.indices) && e.indices.length > 0
       && e.indices.every((i) => Number.isSafeInteger(i) && i >= 0)
       && new Set(e.indices).size === e.indices.length
@@ -58,7 +60,7 @@ export function prepareMasterUpload(ledger: SyncLedger, key: string): void {
   const job = ledger.get(key);
   if (!job || job.uploadJournal != null) return;
   const history = ledger.getSteps(key).some((s) => MASTER_UPLOAD_STEPS.has(s.step) && s.phase !== "skipped");
-  const parts = ["plain", "append_danmu", "append_livechat"].some((g) => ledger.doneParts(key, g).size > 0);
+  const parts = UPLOAD_GROUPS.some((group) => ledger.doneParts(key, group).size > 0);
   const nodes = ledger.getNodeStates(key).some((n) => MASTER_UPLOAD_STEPS.has(n.node)
     && !["pending", "skipped", "blocked"].includes(n.state));
   ledger.saveUploadJournal(key, null, JSON.stringify({
@@ -73,31 +75,48 @@ export function bindMasterPlan(ledger: SyncLedger, key: string, scope: string, i
   const journal = parseJournal(raw);
   if (!journal) throw ambiguous("missing master source plan evidence");
   const next = JSON.stringify(identity);
-  if (journal.plans?.[scope] === next) return;
-  if (journal.entries.length > 0) {
+  const existing = journal.plans?.[scope];
+  if (existing === next) return;
+  if (journal.entries.length > 0 || (journal.legacy && existing !== undefined)) {
     const message = "source or part plan changed after submission";
     journal.failure = { message: "[append-ambiguous] " + message, code: "unknown", ambiguous: true };
     ledger.saveUploadJournal(key, raw, JSON.stringify(journal));
     throw ambiguous(message);
   }
+  // A rescan may legitimately change the plan before any submit was attempted.
   journal.plans = { ...journal.plans, [scope]: next };
   ledger.saveUploadJournal(key, raw, JSON.stringify(journal));
 }
 
-async function fingerprint(files: string[]): Promise<string> {
+type Fingerprint = { value: string; stamps: string[] };
+
+function fileStamp(st: Stats): string {
+  return JSON.stringify([st.dev, st.ino, st.size, st.mtimeMs, st.ctimeMs]);
+}
+
+function sameFileStamps(files: string[], expected: string[]): boolean {
+  try {
+    return files.length === expected.length && files.every((file, index) => fileStamp(statSync(file)) === expected[index]);
+  } catch { return false; }
+}
+
+async function fingerprint(files: string[]): Promise<Fingerprint> {
   const entries: Array<{ size: number; sha256: string }> = [];
+  const stamps: string[] = [];
   for (const file of files) {
     const st = statSync(file);
     if (!st.isFile() || st.size <= 0) throw new Error("upload input missing or empty");
+    const stamp = fileStamp(st);
     const hash = createHash("sha256");
     for await (const chunk of createReadStream(file)) hash.update(chunk);
     const after = statSync(file);
-    if (after.size !== st.size || after.mtimeMs !== st.mtimeMs || after.ino !== st.ino || after.dev !== st.dev) {
+    if (fileStamp(after) !== stamp) {
       throw new Error("upload input changed while fingerprinting");
     }
     entries.push({ size: st.size, sha256: hash.digest("hex") });
+    stamps.push(stamp);
   }
-  return JSON.stringify(entries);
+  return { value: JSON.stringify(entries), stamps };
 }
 
 function bindUploadIdentity(deps: PipelineDeps, key: string, journal: Journal, raw: string | null, cookies: string): string | null {
@@ -166,7 +185,7 @@ export async function validateMasterParts(
       const index = entry.indices[offset]!;
       if (index >= files.length) rejectJournal(ledger, key, raw!, journal, `submitted part ${group}[${index}] is missing from the current upload plan (${files.length} parts)`);
       let current: string;
-      try { current = await fingerprint([files[index]!]); }
+      try { current = (await fingerprint([files[index]!])).value; }
       catch { rejectJournal(ledger, key, raw!, journal, "submitted part is missing or unreadable"); }
       if (current !== JSON.stringify([recorded[offset]])) rejectJournal(ledger, key, raw!, journal, "submitted part changed after confirmation");
     }
@@ -196,7 +215,7 @@ function ambiguous(message: string): Error {
 /** Validate both representations of successful submissions, never infer a missing part from visibility. */
 function consistent(ledger: SyncLedger, key: string, journal: Journal): boolean {
   const bv = ledger.get(key)?.bv;
-  const groups = ["plain", "append_danmu", "append_livechat"];
+  const groups = UPLOAD_GROUPS;
   for (const group of groups) {
     const submitted = journal.entries.filter((e) => e.group === group && e.state === "submitted");
     const expected = new Set(submitted.flatMap((e) => e.indices));
@@ -233,7 +252,7 @@ export function masterUploadFailurePlan(ledger: SyncLedger, key: string, error?:
 }
 
 type SubmitInput = {
-  deps: PipelineDeps; key: string; group: string; indices: number[]; files: string[];
+  deps: PipelineDeps; key: string; group: CanonicalPartGroup; indices: number[]; files: string[];
   bv?: string; create?: UploadOpts; deferred?: boolean;
 };
 
@@ -263,7 +282,7 @@ async function submit(input: SubmitInput): Promise<string> {
   const previous = overlapping[0];
   if (overlapping.length > 1 || (previous && (JSON.stringify(previous.indices) !== JSON.stringify(indices)
     || previous.kind !== (input.create ? "create" : "append")
-    || (previous.fingerprint !== fp && previous.state !== "not-submitted")))) {
+    || (previous.fingerprint !== fp.value && previous.state !== "not-submitted")))) {
     throw ambiguous("upload inputs changed since submission");
   }
   if (boundJournal.entries.some((e) => e.state === "intent")) throw ambiguous("unresolved submission intent; refusing to resend");
@@ -271,7 +290,7 @@ async function submit(input: SubmitInput): Promise<string> {
     if (!consistent(deps.ledger, key, boundJournal)) throw ambiguous("submission checkpoints disagree");
     return previous.bv!;
   }
-  const entry: Submission = { kind: input.create ? "create" : "append", group, indices, fingerprint: fp, state: "intent" };
+  const entry: Submission = { kind: input.create ? "create" : "append", group, indices, fingerprint: fp.value, state: "intent" };
   const priorRateLimitAttempt = boundJournal.failure?.code === "rate-limit" && !boundJournal.failure.ambiguous
     ? boundJournal.failure.rateLimitAttempt ?? 1 : 0;
   if (previous) boundJournal.entries.splice(boundJournal.entries.indexOf(previous), 1, entry);
@@ -284,9 +303,16 @@ async function submit(input: SubmitInput): Promise<string> {
     const latest = parseJournal(latestRaw);
     if (latest?.entries.some((entry) => entry.state === "intent")) throw ambiguous("unresolved submission intent; refusing to resend");
     const completed = latest?.entries.find((entry) => entry.group === group && entry.kind === (input.create ? "create" : "append")
-      && entry.state === "submitted" && JSON.stringify(entry.indices) === JSON.stringify(indices) && entry.fingerprint === fp);
+      && entry.state === "submitted" && JSON.stringify(entry.indices) === JSON.stringify(indices) && entry.fingerprint === fp.value);
     if (completed && consistent(deps.ledger, key, latest!)) return completed.bv!;
     throw ambiguous("upload evidence changed concurrently");
+  }
+  if (!sameFileStamps(files, fp.stamps)) {
+    entry.state = "not-submitted";
+    boundJournal.failure = { message: "[append-ambiguous] upload input changed before submission", code: "unknown", ambiguous: true };
+    try { deps.ledger.saveUploadJournal(key, intent, JSON.stringify(boundJournal)); }
+    catch { throw ambiguous("upload input changed before submission; durable status remains blocked"); }
+    throw ambiguous("upload input changed before submission");
   }
   let bv: string;
   try {
@@ -312,6 +338,12 @@ async function submit(input: SubmitInput): Promise<string> {
     if (isJobAbort(error) || rejected) throw error;
     throw ambiguous(boundJournal.failure.message);
   }
+  if (!sameFileStamps(files, fp.stamps)) {
+    boundJournal.failure = { message: "[append-ambiguous] upload input changed while submitting", code: "unknown", ambiguous: true };
+    try { deps.ledger.saveUploadJournal(key, intent, JSON.stringify(boundJournal)); }
+    catch { throw ambiguous("upload input changed while submitting; durable status remains blocked"); }
+    throw ambiguous("upload input changed while submitting");
+  }
   entry.state = "submitted";
   entry.bv = bv;
   // Deferred returns guarantee acceptance, not observation. Never promote it to observed here.
@@ -324,11 +356,11 @@ async function submit(input: SubmitInput): Promise<string> {
 
 export function createMasterArchive(deps: PipelineDeps, key: string, opts: UploadOpts): Promise<string> {
   const files = opts.videos?.length ? opts.videos : opts.video ? [opts.video] : [];
-  return submit({ deps, key, group: "plain", indices: files.map((_, index) => index), files, create: opts });
+  return submit({ deps, key, group: PART_GROUP_CANONICAL.plain, indices: files.map((_, index) => index), files, create: opts });
 }
 
 export async function appendMasterParts(
-  deps: PipelineDeps, key: string, bv: string, group: string, indices: number[], files: string[], deferred: boolean,
+  deps: PipelineDeps, key: string, bv: string, group: CanonicalPartGroup, indices: number[], files: string[], deferred: boolean,
 ): Promise<void> {
   if (!files.length) return;
   await submit({ deps, key, bv, group, indices, files, deferred });
