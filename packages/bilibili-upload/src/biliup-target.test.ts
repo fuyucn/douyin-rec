@@ -133,6 +133,22 @@ describe("biliup target: proof 与旧链的重试语义", () => {
     expect(r.proof).toBe("created");
   });
 
+  it("does not retry an ambiguous create across lines when proof-only is required", async () => {
+    let calls = 0;
+    const target = createBiliupFileTarget({
+      exists: () => true,
+      run: async () => {
+        calls += 1;
+        throw new Error("connection reset, start=0 end=1 uploader.rs:12");
+      },
+    });
+
+    await expect(target.create({
+      cred: CRED, title: "t", files: [{ path: X1 }], policy: POLICY, proofOnly: true,
+    })).rejects.toThrow("connection reset");
+    expect(calls).toBe(1);
+  });
+
   it("上传完成但解析不到稿件号 → proof=unknown，不猜第二个稿件", async () => {
     const target = createBiliupFileTarget({ run: async () => "no archive id here", exists: () => true });
     const r = await target.create({ cred: CRED, title: "t", files: [{ path: X1 }], policy: POLICY });
@@ -155,6 +171,25 @@ describe("biliup target: proof 与旧链的重试语义", () => {
       policy: POLICY,
     });
     expect(r).toEqual({ proof: "unknown" });
+  });
+
+  it("does not retry an ambiguous append across lines when proof-only is required", async () => {
+    let calls = 0;
+    const target = createBiliupFileTarget({
+      exists: () => true,
+      run: async () => {
+        calls += 1;
+        throw new Error("connection reset, start=0 end=1 uploader.rs:12");
+      },
+      countParts: async () => 1,
+      sleep: async () => {},
+    });
+
+    await expect(target.append({
+      cred: CRED, ref: { targetId: BILIUP_TARGET_ID, id: FAKE_BV },
+      files: [{ path: X3 }], policy: POLICY, proofOnly: true,
+    })).resolves.toEqual({ proof: "unknown" });
+    expect(calls).toBe(1);
   });
 
   it("限流错误照旧抛出（交由 Gate 冷却），且分类为 rate-limited", async () => {
