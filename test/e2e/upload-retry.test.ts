@@ -3,6 +3,7 @@ import { FULL_CLEANUP, Scenario } from "./harness/scenario.js";
 import { pastStartMs } from "./harness/fake-recordings.js";
 import { expectHealthyDone, expectLegalTrail, expectSourceSidecarsKept } from "./harness/invariants.js";
 import { ResourcePool } from "../../packages/orchestrator/src/workflow.js";
+import type { Transport } from "../../packages/orchestrator/src/transport.js";
 import { join } from "node:path";
 import { rmSync } from "node:fs";
 
@@ -42,6 +43,84 @@ describe("e2e: 上传超时/故障后的重试与降级", () => {
     const accepted = s.fake.calls.filter((call) => call.outcome === "ok").flatMap((call) => call.files);
     expect(new Set(accepted).size).toBe(accepted.length);
     expectLegalTrail(s, key);
+  });
+
+  it("retries master upload after configured node-side upload falls back on unsupported transport", async () => {
+    s = await Scenario.create({
+      cfg: { steps: { nodeSideUpload: true, burnDanmu: false, burnLivechat: false }, cleanup: FULL_CLEANUP },
+      deps: { pool: new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, uploadCooldownMs: 0 }) },
+    });
+    rec(s);
+    s.fake.inject({ op: "upload", mode: "rate-limit" });
+
+    await s.reconcile();
+    const key = s.onlyKey();
+    expect(s.ledger.get(key)).toMatchObject({ state: "failed", fails: 0, failureClass: "safe-retry" });
+    expect(s.fake.calls.filter((call) => call.op === "upload")).toHaveLength(1);
+
+    s.ledger.setFailurePlan(key, { failureClass: "safe-retry", nextAttemptAt: 0 });
+    await s.reconciler.pollUploadRetries();
+    await vi.waitFor(() => expect(s.jobState(key)).toBe("done"), { timeout: 4_000 });
+
+    expect(s.fake.calls.filter((call) => call.op === "upload")).toHaveLength(2);
+    expect(s.fake.draftCount).toBe(1);
+    expect(tsLeft(s)).toBe(0);
+  });
+
+  it("retries master upload after the node-side disk gate falls back", async () => {
+    const nodePipeline = vi.fn(async (_spec: Parameters<NonNullable<Transport["nodePipeline"]>>[0]) => {
+      throw new Error("node-side pipeline should not run below the disk threshold");
+    });
+    s = await Scenario.create({
+      cfg: {
+        diskMinGB: 10,
+        steps: { nodeSideUpload: true, burnDanmu: false, burnLivechat: false },
+        cleanup: FULL_CLEANUP,
+      },
+      wrapTransport: (base) => {
+        const transport = base as unknown as Transport;
+        transport.nodeCapabilities = async () => ({ biliup: true, cookies: true, diskFreeGB: 1, cjkFonts: false });
+        transport.nodePipeline = nodePipeline;
+        return transport;
+      },
+      deps: { pool: new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, uploadCooldownMs: 0 }) },
+    });
+    rec(s);
+    s.fake.inject({ op: "upload", mode: "rate-limit" });
+
+    await s.reconcile();
+    const key = s.onlyKey();
+    expect(s.ledger.get(key)).toMatchObject({ state: "failed", fails: 0, failureClass: "safe-retry" });
+    expect(s.fake.calls.filter((call) => call.op === "upload")).toHaveLength(1);
+    expect(nodePipeline).not.toHaveBeenCalled();
+
+    s.ledger.setFailurePlan(key, { failureClass: "safe-retry", nextAttemptAt: 0 });
+    await s.reconciler.pollUploadRetries();
+    await vi.waitFor(() => expect(s.jobState(key)).toBe("done"), { timeout: 4_000 });
+
+    expect(s.fake.calls.filter((call) => call.op === "upload")).toHaveLength(2);
+    expect(s.fake.draftCount).toBe(1);
+    expect(nodePipeline).not.toHaveBeenCalled();
+  });
+
+  it("runNow preserves an expired upload retry classification through the real pipeline", async () => {
+    s = await Scenario.create({ cfg: { cleanup: FULL_CLEANUP }, deps: {
+      pool: new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, uploadCooldownMs: 0 }),
+    } });
+    rec(s);
+    s.fake.inject({ op: "upload", mode: "rate-limit" });
+    await s.reconcile();
+
+    const key = s.onlyKey();
+    expect(s.ledger.get(key)).toMatchObject({ state: "failed", fails: 0, failureClass: "safe-retry" });
+    s.ledger.setFailurePlan(key, { failureClass: "safe-retry", nextAttemptAt: 0 });
+
+    const result = await s.reconciler.runNow({ streamKey: key, wait: true, force: true });
+
+    expect(result.ok).toBe(true);
+    expect(s.jobState(key)).toBe("done");
+    expect(s.fake.calls.filter((call) => call.op === "upload")).toHaveLength(2);
+    expect(s.fake.draftCount).toBe(1);
   });
 
   it("退避期间过滤规则变化不能让旧下标跳过另一源段并误删源", async () => {

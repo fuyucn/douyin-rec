@@ -1,4 +1,4 @@
-import { abortJob, effectiveReconnectWindowMs, isJobAbort, isJobLive, resolveDiskMinGB, retryBackoffMs, MAX_BACKOFF_MS, burnFlags, shouldUseNodeSideUpload, SAME_BROADCAST_GAP_MS, USER_STOP } from "@drec/core";
+import { abortJob, effectiveReconnectWindowMs, isJobAbort, isJobLive, resolveDiskMinGB, retryBackoffMs, MAX_BACKOFF_MS, SAME_BROADCAST_GAP_MS, USER_STOP } from "@drec/core";
 import { masterUploadFailurePlan, hasMasterUploadFailure, markMasterFailure, MASTER_UPLOAD_STEPS } from "./master-upload.js";
 import type { Transport, NodeInventory, NodeRecording } from "./transport.js";
 import type { UnclaimedSegment } from "./unclaimed.js";
@@ -696,8 +696,7 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
 
   private consumeUploadRetryPlan(key: string): void {
     const job = this.ledger.get(key);
-    if (!job || (job.failureClass !== "safe-retry" && job.failureClass !== "resume-append")
-      || (job.nextAttemptAt != null && job.nextAttemptAt > Date.now())) return;
+    if (!job || (job.failureClass !== "safe-retry" && job.failureClass !== "resume-append")) return;
     this.ledger.clearFailurePlan(key);
   }
 
@@ -929,8 +928,9 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
           const freshCfg = this.resolveCfg ? this.resolveCfg(b.platform, b.roomSlug) : cfg;
           if (!freshCfg) return;
           if (JSON.stringify([cfg.workers, cfg.requires]) !== JSON.stringify([freshCfg.workers, freshCfg.requires])) return;
-          if (current.failureClass && (freshCfg.uploadMode !== "upload"
-            || shouldUseNodeSideUpload(freshCfg, burnFlags(freshCfg.steps)).ok)) return;
+          // The persisted uploadPlan is the ownership signal above. A node-side feature flag is only a
+          // preference: unsupported nodes and failed disk gates fall back to the master upload path.
+          if (current.failureClass && freshCfg.uploadMode !== "upload") return;
           if (current.nextAttemptAt != null && current.nextAttemptAt > Date.now()) return;
           const beforeFails = current.fails;
           try {
@@ -1100,8 +1100,6 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
       console.warn(`[runNow] force over unreachable node(s): ${missingDetail}`);
     }
 
-    this.consumeUploadRetryPlan(streamKey);
-    if (key !== streamKey) this.consumeUploadRetryPlan(key);
     this.ledger.upsertPending(key, b.startMs);
     this.ledger.resetActiveNodes(key);
     this.ledger.setState(key, "retrying", {}, { force: true }); // 人工重跑:允许把 done(无 bv)拨回进行中
@@ -1109,14 +1107,20 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
     // 配置按广播身份(found.streamKey)缓存;新建任务 key 带 -N 后缀,直接按任务 key 查会
     // miss 而回落成全局 stage 默认 → 上传节点全 skip。必须按 found 的原始广播身份查。
     const cfg = cfgByKey.get(found.streamKey) ?? cfgByKey.get(key) ?? this.pipelineDeps.cfg;
+    const consumeRetryPlans = (): void => {
+      this.consumeUploadRetryPlan(streamKey);
+      if (key !== streamKey) this.consumeUploadRetryPlan(key);
+    };
     const fire = async (): Promise<void> => {
       const beforeFails = this.ledger.get(key)?.fails ?? 0;
       try {
         const result = await this._runPipeline(b, { ...this.pipelineDeps, transports, cfg });
+        consumeRetryPlans();
         const currentFailure = result.state === "failed" ? this.ledger.get(key)?.error ?? "pipeline failed" : undefined;
         this.planUploadRetry(key, currentFailure);
       } catch (err) {
         if (isJobAbort(err)) {
+          consumeRetryPlans();
           this.ledger.setState(key, "needs_manual", { error: USER_STOP });
           return;
         }
@@ -1124,6 +1128,7 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
         if ((this.ledger.get(key)?.fails ?? 0) === beforeFails) {
           markMasterFailure(this.pipelineDeps, key, String((err as Error)?.message ?? err).slice(0, 300));
         }
+        consumeRetryPlans();
         this.planUploadRetry(key, err);
         if (wait) throw err;
       }
