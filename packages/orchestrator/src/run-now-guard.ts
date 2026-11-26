@@ -11,7 +11,7 @@ import type { UploadPlan } from "./node-upload-queue.js";
 import { canFallbackToBlocking } from "./node-upload-config.js";
 import type { SyncLedger } from "./ledger.js";
 import type { Transport } from "./transport.js";
-import { masterUploadMayOwnArchive } from "./master-upload.js";
+import { masterUploadHasUnresolvedSubmission, masterUploadMayOwnArchive } from "./master-upload.js";
 
 export interface RunNowGuardDeps {
   ledger: Pick<SyncLedger, "listKeys" | "get" | "getUploadPlan" | "getCandidates" | "getSteps" | "doneParts" | "getNodeStates">;
@@ -34,12 +34,17 @@ export function isDerivedKey(key: string): boolean {
   return DAY_FAMILY_RE.exec(key)?.[2] != null;
 }
 
+export function runNowBaseKey(key: string): string {
+  const family = DAY_FAMILY_RE.exec(key);
+  return family ? family[1] + (family[2] ?? "") : key;
+}
+
 /**
  * Same-day sibling keys of `key` (`base`, `base_HHMM`, with any `-N`) that are NOT provably a separate broadcast.
  * Provably separate = both time spans are known and the gap between them is > SAME_BROADCAST_GAP_MS. Anything
  * unknown (no candidate rows, no span for this broadcast) counts as the same broadcast: uncertain means manual.
  */
-function sameBroadcastSiblings(
+export function sameBroadcastJobKeys(
   d: RunNowGuardDeps, key: string, self: { startMs?: number; endMs?: number } | undefined,
 ): string[] {
   const family = DAY_FAMILY_RE.exec(key);
@@ -85,35 +90,61 @@ export async function runNowConflict(
     force: boolean;
     ignoreKeys?: readonly string[];
     ignoreBusyKeys?: readonly string[];
+    targetKey?: string;
     self?: { startMs?: number; endMs?: number };
   },
 ): Promise<string | null> {
   const keys = [...new Set([
     ...d.ledger.listKeys().map((k) => k.streamKey).filter((k) => isSameBroadcast(k, baseKey)),
-    ...sameBroadcastSiblings(d, baseKey, opts.self),
+    ...sameBroadcastJobKeys(d, baseKey, opts.self),
   ])].filter((key) => !opts.ignoreKeys?.includes(key));
   const reasons: string[] = [];
+  const nonForceable: string[] = [];
   for (const key of keys) {
     const job = d.ledger.get(key);
     const bv = job?.bv;
     if (bv) reasons.push(`${key} already has BV ${bv}`);
     if (masterUploadMayOwnArchive(d.ledger, key)) reasons.push(key + " has master upload history that may own a manuscript");
+    if (masterUploadHasUnresolvedSubmission(d.ledger, key)) {
+      nonForceable.push(key + " has unresolved or legacy submission evidence");
+    }
     const busyConflict = !opts.ignoreBusyKeys?.includes(key)
-      && (d.isBusy?.(key) || job?.failureClass === "safe-retry" || job?.failureClass === "resume-append");
+      && (!!d.isBusy?.(key) || job?.state === "retrying");
     if (busyConflict) {
-      reasons.push(key + " has an active or scheduled same-broadcast job");
+      const reason = key + " has an active or scheduled same-broadcast job";
+      reasons.push(reason);
+      nonForceable.push(reason);
+    }
+    const siblingCanStillSubmit = key !== (opts.targetKey ?? baseKey)
+      && !opts.ignoreBusyKeys?.includes(key)
+      && (job?.state === "pending" || job?.state === "failed");
+    if (siblingCanStillSubmit) {
+      reasons.push(key + " has an existing same-broadcast job that may still submit");
+    }
+    if (job?.failureClass === "safe-retry" || job?.failureClass === "resume-append") {
+      reasons.push(key + " has a scheduled same-broadcast retry");
     }
     const raw = d.ledger.getUploadPlan(key);
     if (raw == null) continue;
     const plan = planIds(raw);
     const t = plan ? d.transports.get(plan.nodeId) : undefined;
-    if (!plan || !t) { reasons.push(`${key} has a queued upload whose node state cannot be read`); continue; }
+    if (!plan || !t) {
+      const reason = `${key} has a queued upload whose node state cannot be read`;
+      reasons.push(reason);
+      nonForceable.push(reason);
+      continue;
+    }
     const r = await canFallbackToBlocking(t, plan.ids);
-    if (!r.ok) reasons.push(`${key}: ${r.reason}`);
+    if (!r.ok) {
+      const reason = `${key}: ${r.reason}`;
+      reasons.push(reason);
+      nonForceable.push(reason);
+    }
   }
   if (reasons.length === 0) return null;
   if (opts.force) {
     d.log?.(`[runNow] force over: ${reasons.join("; ")}`);
+    if (nonForceable.length > 0) return `rerun refused: ${nonForceable.join("; ")}`;
     return null;
   }
   return `rerun refused: ${reasons.join("; ")}. Rerun with force only after deleting the old draft, or when resuming it on purpose.`;

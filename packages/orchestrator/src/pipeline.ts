@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, rmdirSyn
 import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { NodeUploadConfig } from "./node-upload-config.js";
-import { appendMasterParts, prepareMasterUpload, markMasterFailure, bindMasterPlan, validateMasterParts, hasVerifiedMasterHistory, MASTER_UPLOAD_STEPS } from "./master-upload.js";
+import { appendMasterParts, prepareMasterUpload, beginMasterUploadRun, markMasterFailure, bindMasterPlan, validateMasterParts, hasVerifiedMasterHistory, hasMasterUploadFailure, MASTER_UPLOAD_STEPS } from "./master-upload.js";
 import type { JobState, SyncLedger } from "./ledger.js";
 import { resolveSubmissionTitle, isAtomicTempName, formatPartTitle, isJobAbort, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, resolveJobLogPath, stageSessionDir, anchorNameOfSessionBase, type PathLayout, survivingArtifacts, throwIfAborted, closeStageReady, USER_STOP, VIDEO_EXT_ALT, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, isSidecarSkipEvent, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
 import type { OutputFormat, UploadOpts, UploadTarget } from "@drec/core";
@@ -1028,7 +1028,9 @@ async function runPipelineInner(
   // change makes the node-side path eligible. Bind before every resume branch, not only before
   // the pull-to-master path.
   if (cfg.uploadMode === "upload" && existing?.state !== "done"
-    && (existing?.bv != null || !shouldUseNodeSideUpload(cfg, burnFlags(cfg.steps)).ok)) {
+    && (existing?.bv != null || hasMasterUploadFailure(ledger, b.streamKey)
+      || !shouldUseNodeSideUpload(cfg, burnFlags(cfg.steps)).ok)) {
+    beginMasterUploadRun(ledger, b.streamKey);
     bindMasterUploadPlan();
   }
   // 子命令统一经此执行:命令行 + 耗时 + 输出摘尾(最后 2KB,biliup 输出可能很长)都进 job.log。
@@ -1234,7 +1236,10 @@ async function runPipelineInner(
   // ── 节点侧上传(experimental,plans/027)──────────────────────────────────────
   // 全部逻辑隔离在 node-side-upload.ts(含 kill switch);这里只做「是否该走」的判定 + 调用。
   // 不满足条件(未开启/全局停用/stage 模式/需烧录) → 记明原因后继续走下面的 pull 回 master。
-  const nodeSide = shouldUseNodeSideUpload(cfg, { burnDanmu, burnLivechat });
+  const masterUploadOwnsRetry = hasMasterUploadFailure(ledger, streamKey);
+  const nodeSide = masterUploadOwnsRetry
+    ? { ok: false as const, reason: "a previous master upload attempt owns this retry" }
+    : shouldUseNodeSideUpload(cfg, { burnDanmu, burnLivechat });
   // earliest = 本场最早会话:开播时刻 / 直播标题 / 会话 base 的唯一口径。
   // 节点侧上传与 pull 回 master 的常规路径共用同一取值(否则节点侧渲染会偏)。
   const earliestRec = winnerMembers.reduce((a, m) => (m.rec.startMs < a.rec.startMs ? m : a));

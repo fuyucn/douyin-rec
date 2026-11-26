@@ -35,7 +35,20 @@ describe("runNowConflict", () => {
   it("allows a broadcast with no BV and no queue plan", async () => {
     const l = fresh();
     order(l, BASE, false);
-    expect(await runNowConflict({ ledger: l, transports: new Map() }, BASE, { force: false })).toBeNull();
+    expect(await runNowConflict({ ledger: l, transports: new Map() }, BASE,
+      { force: false, ignoreBusyKeys: [BASE] })).toBeNull();
+  });
+
+  it("blocks a same-broadcast sibling job even without upload evidence", async () => {
+    const l = fresh();
+    const sibling = BASE + "-1";
+    order(l, BASE, false);
+    order(l, sibling, false);
+    const msg = await runNowConflict({ ledger: l, transports: new Map() }, BASE,
+      { force: false, targetKey: sibling, ignoreBusyKeys: [sibling] });
+    expect(msg).toContain(BASE + " has an existing same-broadcast job that may still submit");
+    expect(await runNowConflict({ ledger: l, transports: new Map() }, BASE,
+      { force: true, targetKey: sibling, ignoreBusyKeys: [sibling] })).toBeNull();
   });
 
   it("a BV on the base key blocks the -N submission too, and force passes with a log", async () => {
@@ -102,10 +115,11 @@ describe("runNowConflict", () => {
     expect(await runNowConflict({ ledger: l, transports: node(async () => []) }, BASE, { force: false })).toMatch(/cannot be read/);
   });
 
-  it("force passes an unknown queue state and logs why", async () => {
+  it("force refuses an unknown queue state and logs why", async () => {
     const l = fresh(); order(l, BASE);
     const log = vi.fn();
-    expect(await runNowConflict({ ledger: l, transports: node(async () => { throw new Error("x"); }), log }, BASE, { force: true })).toBeNull();
+    expect(await runNowConflict({ ledger: l, transports: node(async () => { throw new Error("x"); }), log }, BASE, { force: true }))
+      .toMatch(/rerun refused:.*queue state unknown/i);
     expect(log).toHaveBeenCalledOnce();
   });
 });

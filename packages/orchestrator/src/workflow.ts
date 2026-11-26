@@ -938,7 +938,7 @@ export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<Workfl
         ctx.log(`[node] ${node.key} aborted: ${USER_STOP}`);
         throw e;
       }
-      const msg = String((e as Error)?.message ?? e).slice(0, 300);
+      const msg = String((e as Error)?.message ?? e).slice(-2000);
       ctx.ledger.syncNodeState(streamKey, node.key, "failed", { error: msg });
       state.set(node.key, "failed");
       ctx.log(`[node] ${node.key} failed: ${msg}`);

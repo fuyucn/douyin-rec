@@ -183,7 +183,7 @@ describe("runSegmentPipeline season checkpoint", () => {
       expect(uploadPlain).toHaveBeenCalledTimes(1);
       expect(appendGroup).not.toHaveBeenCalled();
       expect(ledger.doneParts(streamKey, "plain")).toEqual(new Set());
-      expect(ledger.get(streamKey)?.bv).toBeNull();
+      expect(ledger.get(streamKey)?.bv).toBe("BVSEGMENTPENDING");
       expect(JSON.parse(ledger.get(streamKey)!.uploadJournal!).entries[0].state).toBe("intent");
       expect(ledger.get(streamKey)?.seasonState).toBeNull();
       expect(fetchMock).not.toHaveBeenCalled();

@@ -379,12 +379,17 @@ export class SyncLedger {
    * 记录上传失败的处置计划(issue #752):分类 + 下次唤醒时刻。
    * 只写这两列,不改 state(状态由 `setState` 按分类决定:retrying / needs_manual)。
    */
-  setFailurePlan(streamKey: string, plan: { failureClass: JobRow["failureClass"]; nextAttemptAt?: number | null }): boolean {
+  setFailurePlan(streamKey: string, plan: {
+    failureClass: JobRow["failureClass"]; nextAttemptAt?: number | null; touchUpdatedAt?: boolean;
+  }): boolean {
     // 人工分类不许带唤醒时间(带了也不会被取,但留着会在页面上误导);未分类同理。
     const retryable = plan.failureClass === "safe-retry" || plan.failureClass === "resume-append";
     const next = retryable ? (plan.nextAttemptAt ?? null) : null;
-    const r = this.db.prepare("UPDATE sync_jobs SET failureClass=?, nextAttemptAt=?, updatedAt=? WHERE streamKey=?")
-      .run(plan.failureClass ?? null, next, this.now(), streamKey);
+    const r = plan.touchUpdatedAt === false
+      ? this.db.prepare("UPDATE sync_jobs SET failureClass=?, nextAttemptAt=? WHERE streamKey=?")
+        .run(plan.failureClass ?? null, next, streamKey)
+      : this.db.prepare("UPDATE sync_jobs SET failureClass=?, nextAttemptAt=?, updatedAt=? WHERE streamKey=?")
+        .run(plan.failureClass ?? null, next, this.now(), streamKey);
     return Number(r.changes) > 0;
   }
 

@@ -16,13 +16,13 @@ type Submission = {
   state: "intent" | "submitted" | "not-submitted";
   proof?: "created" | "accepted" | "observed"; bv?: string;
 };
-type Failure = { message: string; code: string; ambiguous: boolean; rateLimitAttempt?: number };
+type Failure = { message: string; code: string; ambiguous: boolean; runId?: string; rateLimitAttempt?: number };
 type MasterUploadFailurePlan = UploadFailurePlan & { retryAttempt?: number };
 type UploadIdentity = { targetId: string; accountKey: string; credentialFingerprint: string; generation: string };
 type FileFingerprint = { size: number; sha256: string };
 type Journal = {
   version: 1; legacy: boolean; entries: Submission[]; failure?: Failure; plans?: Record<string, string>;
-  generation?: string; identity?: UploadIdentity;
+  generation?: string; identity?: UploadIdentity; runId?: string;
 };
 
 function parseJournal(raw: string | null | undefined): Journal | null {
@@ -43,12 +43,14 @@ function parseJournal(raw: string | null | undefined): Journal | null {
     if (j.plans && (typeof j.plans !== "object" || Array.isArray(j.plans)
       || !Object.values(j.plans).every((value) => typeof value === "string"))) return null;
     if (j.generation != null && (typeof j.generation !== "string" || !j.generation)) return null;
+    if (j.runId != null && (typeof j.runId !== "string" || !j.runId)) return null;
     if (j.identity != null && (typeof j.identity.targetId !== "string" || !j.identity.targetId
       || typeof j.identity.accountKey !== "string" || !j.identity.accountKey
       || typeof j.identity.credentialFingerprint !== "string" || !j.identity.credentialFingerprint
       || typeof j.identity.generation !== "string" || !j.identity.generation)) return null;
     if (j.failure && (typeof j.failure.message !== "string" || typeof j.failure.code !== "string"
       || typeof j.failure.ambiguous !== "boolean"
+      || (j.failure.runId != null && (typeof j.failure.runId !== "string" || !j.failure.runId))
       || (j.failure.rateLimitAttempt != null && (!Number.isSafeInteger(j.failure.rateLimitAttempt)
         || j.failure.rateLimitAttempt < 1)))) return null;
     return j;
@@ -58,9 +60,10 @@ function parseJournal(raw: string | null | undefined): Journal | null {
 type MasterHistoryLedger = Pick<SyncLedger, "get" | "getSteps" | "doneParts" | "getNodeStates">;
 
 function hasPreviousMasterUploadActivity(ledger: MasterHistoryLedger, key: string): boolean {
-  const history = ledger.getSteps(key).some((step) => MASTER_UPLOAD_STEPS.has(step.step) && step.phase !== "skipped");
+  const history = ledger.getSteps(key).some((step) =>
+    (MASTER_UPLOAD_STEPS.has(step.step) || step.step === "node_upload") && step.phase !== "skipped");
   const parts = UPLOAD_GROUPS.some((group) => ledger.doneParts(key, group).size > 0);
-  const nodes = ledger.getNodeStates(key).some((node) => MASTER_UPLOAD_STEPS.has(node.node)
+  const nodes = ledger.getNodeStates(key).some((node) => (MASTER_UPLOAD_STEPS.has(node.node) || node.node === "node_upload")
     && !["pending", "skipped", "blocked"].includes(node.state));
   return history || parts || nodes;
 }
@@ -74,14 +77,33 @@ export function masterUploadMayOwnArchive(ledger: MasterHistoryLedger, key: stri
   return !journal || journal.legacy || journal.entries.length > 0 || hasPreviousMasterUploadActivity(ledger, key);
 }
 
+export function masterUploadHasUnresolvedSubmission(ledger: MasterHistoryLedger, key: string): boolean {
+  const job = ledger.get(key);
+  if (!job) return false;
+  const raw = job.uploadJournal ?? null;
+  if (raw == null) return hasPreviousMasterUploadActivity(ledger, key);
+  const journal = parseJournal(raw);
+  return !journal || journal.legacy || journal.entries.some((entry) => entry.state === "intent");
+}
+
 /** Called before workflow start events: absence of old upload evidence is not retroactive proof. */
 export function prepareMasterUpload(ledger: SyncLedger, key: string): void {
   const job = ledger.get(key);
   if (!job || job.uploadJournal != null) return;
   const legacy = !!job.bv || hasPreviousMasterUploadActivity(ledger, key);
   ledger.saveUploadJournal(key, null, JSON.stringify({
-    version: 1, legacy, entries: [], generation: randomUUID(),
+    version: 1, legacy, entries: [], generation: randomUUID(), runId: randomUUID(),
   } satisfies Journal));
+}
+
+/** Bind failure evidence to one pipeline execution so old upload errors cannot classify later failures. */
+export function beginMasterUploadRun(ledger: SyncLedger, key: string): void {
+  prepareMasterUpload(ledger, key);
+  const raw = ledger.get(key)?.uploadJournal ?? null;
+  const journal = parseJournal(raw);
+  if (!journal) throw ambiguous("missing or malformed master upload evidence");
+  journal.runId = randomUUID();
+  ledger.saveUploadJournal(key, raw, JSON.stringify(journal));
 }
 
 /** Freeze source membership and the logical per-part map before any request can have an effect. */
@@ -95,7 +117,7 @@ export function bindMasterPlan(ledger: SyncLedger, key: string, scope: string, i
   if (existing === next) return;
   if (journal.entries.length > 0 || (journal.legacy && existing !== undefined)) {
     const message = "source or part plan changed after submission";
-    journal.failure = { message: "[append-ambiguous] " + message, code: "unknown", ambiguous: true };
+    journal.failure = { message: "[append-ambiguous] " + message, code: "unknown", ambiguous: true, runId: journal.runId };
     ledger.saveUploadJournal(key, raw, JSON.stringify(journal));
     throw ambiguous(message);
   }
@@ -147,13 +169,13 @@ function bindUploadIdentity(deps: PipelineDeps, key: string, journal: Journal, r
     .update(existsSync(cookies) ? readFileSync(cookies) : "missing")
     .digest("hex");
   if (journal.entries.length > 0 && !journal.identity) {
-    journal.failure = { message: "[append-ambiguous] upload identity missing for existing submission evidence", code: "unknown", ambiguous: true };
+    journal.failure = { message: "[append-ambiguous] upload identity missing for existing submission evidence", code: "unknown", ambiguous: true, runId: journal.runId };
     deps.ledger.saveUploadJournal(key, raw, JSON.stringify(journal));
     throw ambiguous("upload identity missing for existing submission evidence");
   }
   if (journal.identity && (journal.identity.targetId !== targetId || journal.identity.accountKey !== accountKey
     || journal.identity.credentialFingerprint !== credentialFingerprint || journal.identity.generation !== generation)) {
-    journal.failure = { message: "[append-ambiguous] upload target or account changed during retry", code: "unknown", ambiguous: true };
+    journal.failure = { message: "[append-ambiguous] upload target or account changed during retry", code: "unknown", ambiguous: true, runId: journal.runId };
     deps.ledger.saveUploadJournal(key, raw, JSON.stringify(journal));
     throw ambiguous("upload target or account changed during retry");
   }
@@ -219,13 +241,29 @@ export async function validateMasterParts(
 }
 
 function rejectJournal(ledger: SyncLedger, key: string, raw: string, journal: Journal, message: string): never {
-  journal.failure = { message: "[append-ambiguous] " + message, code: "unknown", ambiguous: true };
+  journal.failure = { message: "[append-ambiguous] " + message, code: "unknown", ambiguous: true, runId: journal.runId };
   ledger.saveUploadJournal(key, raw, JSON.stringify(journal));
   throw ambiguous(message);
 }
 
 function ambiguous(message: string): Error {
   return new Error(`[append-ambiguous] ${message}`);
+}
+
+function preserveCreatedArchiveResult(
+  deps: PipelineDeps, key: string, intent: string, journal: Journal, entry: Submission, bv: string, reason: string,
+): never {
+  entry.state = "intent";
+  delete entry.proof;
+  entry.bv = bv;
+  const message = `[append-ambiguous] archive creation returned BV=${bv}, but ${reason}; submission evidence remains unresolved`;
+  journal.failure = { message, code: "unknown", ambiguous: true, runId: journal.runId };
+  try {
+    const currentBv = deps.ledger.get(key)?.bv;
+    if (!currentBv || currentBv === bv) deps.ledger.setBv(key, bv);
+  } catch {}
+  try { deps.ledger.saveUploadJournal(key, intent, JSON.stringify(journal)); } catch {}
+  throw ambiguous(message.slice("[append-ambiguous] ".length));
 }
 
 /** Validate both representations of successful submissions, never infer a missing part from visibility. */
@@ -246,14 +284,15 @@ export function masterUploadFailurePlan(ledger: SyncLedger, key: string, error?:
   const job = ledger.get(key);
   const journal = parseJournal(job?.uploadJournal);
   if (!journal) return job?.uploadJournal == null ? null : classifyUploadOutcome({ ambiguous: true });
-  const durableRateLimit = journal.failure?.code === "rate-limit" && !journal.failure.ambiguous;
-  const last = error ?? (durableRateLimit ? journal.failure!.message : job?.error ?? journal.failure);
+  const failureIsCurrent = !!journal.failure?.runId && journal.failure.runId === journal.runId;
+  const durableRateLimit = failureIsCurrent && journal.failure?.code === "rate-limit" && !journal.failure.ambiguous;
+  const last = durableRateLimit ? journal.failure!.message : error ?? job?.error ?? journal.failure;
   if (journal.legacy || journal.entries.length === 0 || !consistent(ledger, key, journal)) {
     return classifyUploadOutcome({ ambiguous: true, error: last });
   }
   const hasSingleRateLimitedRejection = journal.failure?.code === "rate-limit"
+    && failureIsCurrent
     && !journal.failure.ambiguous
-    && isUploadRateLimited(last)
     && journal.entries.some((entry) => entry.state === "not-submitted" && entry.indices.length === 1);
   if (!hasSingleRateLimitedRejection) return classifyUploadOutcome({ ambiguous: true, error: last });
   const unknown = journal.entries.some((e) => e.state === "intent");
@@ -325,7 +364,7 @@ async function submit(input: SubmitInput): Promise<string> {
   }
   if (!sameFileStamps(files, fp.stamps)) {
     entry.state = "not-submitted";
-    boundJournal.failure = { message: "[append-ambiguous] upload input changed before submission", code: "unknown", ambiguous: true };
+    boundJournal.failure = { message: "[append-ambiguous] upload input changed before submission", code: "unknown", ambiguous: true, runId: boundJournal.runId };
     try { deps.ledger.saveUploadJournal(key, intent, JSON.stringify(boundJournal)); }
     catch { throw ambiguous("upload input changed before submission; durable status remains blocked"); }
     throw ambiguous("upload input changed before submission");
@@ -346,8 +385,8 @@ async function submit(input: SubmitInput): Promise<string> {
     const rejected = files.length === 1 && !unknown && !isJobAbort(error) && isUploadRateLimited(error);
     entry.state = rejected ? "not-submitted" : "intent";
     boundJournal.failure = {
-      message: String((error as Error)?.message ?? error).slice(0, 300),
-      code: classifyRetryableFailure(error).code, ambiguous: !rejected,
+      message: String((error as Error)?.message ?? error).slice(-2000),
+      code: classifyRetryableFailure(error).code, ambiguous: !rejected, runId: boundJournal.runId,
       ...(rejected ? { rateLimitAttempt: priorRateLimitAttempt + 1 } : {}),
     };
     deps.ledger.saveUploadJournal(key, intent, JSON.stringify(boundJournal));
@@ -355,7 +394,10 @@ async function submit(input: SubmitInput): Promise<string> {
     throw ambiguous(boundJournal.failure.message);
   }
   if (!sameFileStamps(files, fp.stamps)) {
-    boundJournal.failure = { message: "[append-ambiguous] upload input changed while submitting", code: "unknown", ambiguous: true };
+    if (input.create) {
+      return preserveCreatedArchiveResult(deps, key, intent, boundJournal, entry, bv, "the source file changed after submission");
+    }
+    boundJournal.failure = { message: "[append-ambiguous] upload input changed while submitting", code: "unknown", ambiguous: true, runId: boundJournal.runId };
     try { deps.ledger.saveUploadJournal(key, intent, JSON.stringify(boundJournal)); }
     catch { throw ambiguous("upload input changed while submitting; durable status remains blocked"); }
     throw ambiguous("upload input changed while submitting");
@@ -364,9 +406,15 @@ async function submit(input: SubmitInput): Promise<string> {
   entry.bv = bv;
   // Deferred returns guarantee acceptance, not observation. Never promote it to observed here.
   entry.proof = input.create ? "created" : input.deferred ? "accepted" : "observed";
-  deps.ledger.saveUploadJournal(key, intent, JSON.stringify(boundJournal), {
-    bv, group, indices, seasonPending: !!input.create && !!deps.cfg.uploadMeta.seasonSectionId,
-  });
+  try {
+    deps.ledger.saveUploadJournal(key, intent, JSON.stringify(boundJournal), {
+      bv, group, indices, seasonPending: !!input.create && !!deps.cfg.uploadMeta.seasonSectionId,
+    });
+  } catch (error) {
+    const reason = `the local success checkpoint failed: ${String((error as Error)?.message ?? error).slice(-200)}`;
+    if (input.create) return preserveCreatedArchiveResult(deps, key, intent, boundJournal, entry, bv, reason);
+    throw ambiguous(`upload was accepted but ${reason}; existing submission evidence remains unresolved`);
+  }
   return bv;
 }
 

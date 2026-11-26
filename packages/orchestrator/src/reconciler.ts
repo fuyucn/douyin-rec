@@ -7,7 +7,7 @@ import type { PipelineDeps, PipelineCfg } from "./pipeline.js";
 import { runPipeline, CLEANUP_BACKFILL_MAX } from "./pipeline.js";
 import { pollFollowups } from "./finalize-format.js";
 import { createUploadQueuePoller, type UploadPollerOpts } from "./node-upload-poll.js";
-import { isDerivedKey, runNowConflict } from "./run-now-guard.js";
+import { isDerivedKey, runNowConflict, sameBroadcastJobKeys } from "./run-now-guard.js";
 import { DEFAULT_NODE_UPLOAD, type NodeUploadConfig } from "./node-upload-config.js";
 import { completeFromDispatch } from "./node-upload-complete.js";
 import { clusterBroadcasts, type Broadcast } from "./identity.js";
@@ -16,12 +16,17 @@ import { gateWorkers, explainRejections, isWorkerAssigned, isWorkerTargeted } fr
 import { JobDispatcher } from "./job-dispatcher.js";
 
 const RETRY_SKIP_DELAY_MS = 60_000;
+const RETRY_SKIP_MAX_MS = MAX_BACKOFF_MS;
 
 function streamIdentity(streamKey: string): { platform: string; roomSlug: string } | null {
   const first = streamKey.indexOf(":");
   const second = streamKey.indexOf(":", first + 1);
   if (first <= 0 || second <= first + 1) return null;
   return { platform: streamKey.slice(0, first), roomSlug: streamKey.slice(first + 1, second) };
+}
+
+function retryBroadcastKey(streamKey: string): string | null {
+  return /^(.+?:\d{4}-\d{2}-\d{2}(?:_\d{4})?)-\d+$/.exec(streamKey)?.[1] ?? null;
 }
 
 export interface SettleConfig {
@@ -693,6 +698,10 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
         this.deferUploadRetry(key);
         continue;
       }
+      if (job.state === "retrying") {
+        this.deferUploadRetry(key);
+        continue;
+      }
       const identity = streamIdentity(key);
       const cfg = identity && this.resolveCfg
         ? this.resolveCfg(identity.platform, identity.roomSlug)
@@ -706,18 +715,38 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
     if (ready.size > 0) await this.reconcileAll(ready);
   }
 
-  private deferUploadRetry(key: string): void {
+  private deferUploadRetry(key: string, reason = "retry prerequisite remains unavailable"): void {
     const job = this.ledger.get(key);
     if (!job || (job.failureClass !== "safe-retry" && job.failureClass !== "resume-append")) return;
+    const now = Date.now();
+    if (now - job.updatedAt >= RETRY_SKIP_MAX_MS) {
+      this.stopUploadRetry(key, reason + " for " + Math.round(RETRY_SKIP_MAX_MS / 60_000) + " minutes");
+      return;
+    }
+    // Keep the original failure timestamp so a persistent refusal cannot defer forever across restarts.
     this.ledger.setFailurePlan(key, {
       failureClass: job.failureClass,
-      nextAttemptAt: Date.now() + RETRY_SKIP_DELAY_MS,
+      nextAttemptAt: now + RETRY_SKIP_DELAY_MS,
+      touchUpdatedAt: false,
     });
+  }
+
+  private async isBroadcastStillRecording(b: Broadcast, transports: Map<string, Transport>): Promise<boolean> {
+    for (const member of b.members) {
+      const transport = transports.get(member.workerId);
+      if (typeof transport?.isDone !== "function") continue;
+      try {
+        if (!(await transport.isDone(member.rec.roomSlug))) return true;
+      } catch {
+        return true;
+      }
+    }
+    return false;
   }
 
   private stopUploadRetry(key: string, reason: string): void {
     const job = this.ledger.get(key);
-    if (!job || !RETRYABLE.has(job.state)) return;
+    if (!job || (job.state !== "pending" && job.state !== "failed" && job.state !== "retrying")) return;
     this.ledger.setState(key, "needs_manual", { error: (job.error || "upload retry") + "; " + reason });
     this.notify?.({ kind: "error", stage: "同步", message: key + " 自动重试已停止并转人工: " + reason });
   }
@@ -725,11 +754,20 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
   private planUploadRetry(key: string, error?: unknown): boolean {
     const job = this.ledger.get(key);
     if (job?.state !== "failed" || this.ledger.getUploadPlan(key)) return false;
+    const identity = streamIdentity(key);
+    const cfg = identity && this.resolveCfg
+      ? this.resolveCfg(identity.platform, identity.roomSlug)
+      : this.resolveCfg ? null : this.pipelineDeps.cfg;
+    if (!cfg || cfg.uploadMode !== "upload") return false;
     const uploadFailed = this.ledger.getFailedNodes(key).some((n) => MASTER_UPLOAD_STEPS.has(n.node));
     if (!uploadFailed && !hasMasterUploadFailure(this.ledger, key)) return false;
     const plan = masterUploadFailurePlan(this.ledger, key, error);
-    if (!plan?.retryable || (plan.countsAsFailure && job.fails >= this.maxRetries)) {
-      const reason = plan?.reason ?? "缺少上传提交证据,禁止自动重传";
+    const exhaustedRateLimit = plan?.class === "safe-retry"
+      && plan.retryAttempt != null && plan.retryAttempt >= this.maxRetries;
+    if (!plan?.retryable || (plan.countsAsFailure && job.fails >= this.maxRetries) || exhaustedRateLimit) {
+      const reason = exhaustedRateLimit
+        ? "单文件限流失败已达到自动重试上限 " + this.maxRetries + " 次"
+        : plan?.reason ?? "缺少上传提交证据,禁止自动重传";
       this.ledger.setState(key, "needs_manual", { error: `${job.error || "上传失败"}; ${reason}` });
       this.notify?.({ kind: "error", stage: "同步", message: `${key} ${reason},已转人工` });
       return true;
@@ -740,7 +778,9 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
     this.ledger.setFailurePlan(key, {
       failureClass: plan.class, nextAttemptAt: Math.max(Date.now() + delay, cooldown),
     });
-    this.notify?.({ kind: "error", stage: "同步", message: `${key} 上传失败已自动回队列:${plan.reason}` });
+    if (retryAttempt === 1) {
+      this.notify?.({ kind: "error", stage: "同步", message: `${key} 上传失败已自动回队列:${plan.reason}` });
+    }
     return true;
   }
 
@@ -781,9 +821,18 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
     // 否则第二场直播会复用 base key 被幂等跳过。
     const collected = await this.collect(transports, this.ledger.listKeys());
     const { cfgByKey, unreachable } = collected;
-    const broadcasts = onlyDue ? collected.broadcasts.filter((b) => onlyDue.has(b.streamKey)) : collected.broadcasts;
+    const broadcasts = onlyDue ? [...onlyDue].flatMap((key) => {
+      const exact = collected.broadcasts.find((b) => b.streamKey === key);
+      const base = exact ? null : retryBroadcastKey(key);
+      const source = exact ?? collected.broadcasts.find((b) => b.streamKey === base);
+      if (!source) return [];
+      if (source.streamKey === key) return [source];
+      const cfg = cfgByKey.get(source.streamKey);
+      if (cfg) cfgByKey.set(key, cfg);
+      return [{ ...source, streamKey: key }];
+    }) : collected.broadcasts;
     if (onlyDue) {
-      const present = new Set(collected.broadcasts.map((b) => b.streamKey));
+      const present = new Set(broadcasts.map((b) => b.streamKey));
       for (const key of onlyDue) {
         const job = this.ledger.get(key);
         if (!job || !RETRYABLE.has(job.state) || present.has(key)) continue;
@@ -857,6 +906,10 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
         this.clearSkipLog(`window:${b.streamKey}`);
 
         const job = this.ledger.get(b.streamKey);
+        if (onlyDue && job && RETRYABLE.has(job.state) && await this.isBroadcastStillRecording(b, transports)) {
+          this.deferUploadRetry(b.streamKey);
+          continue;
+        }
 
         // T12 补跑:done 但「清理失败 / 核验待重试」的 job —— **在终态短路之前**判定,
         // 否则永远看不到这些 job(它们已经是终态,不会走下面的失败重试逻辑)。
@@ -1020,14 +1073,16 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
             return;
           }
           if (current.nextAttemptAt != null && current.nextAttemptAt > Date.now()) return;
-          if (current.failureClass) {
+          if (freshCfg.uploadMode === "upload" && !nodeOwned) {
             const conflict = await runNowConflict(
               { ledger: this.ledger, transports, isBusy: (key) => this.isStreamBusy(key) },
               b.streamKey,
               { force: false, ignoreKeys: [b.streamKey], self: { startMs: b.startMs, endMs: Math.max(...b.members.map((m) => m.rec.endMs)) } },
             );
             if (conflict) {
-              this.stopUploadRetry(b.streamKey, "same-broadcast guard: " + conflict);
+              const reason = "same-broadcast guard: " + conflict;
+              if (current.failureClass) this.stopUploadRetry(b.streamKey, reason);
+              else this.ledger.setState(b.streamKey, "needs_manual", { error: reason });
               return;
             }
           }
@@ -1048,7 +1103,7 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
             console.error(`[reconciler] broadcast ${b.streamKey} failed:`, err);
             this.consumeUploadRetryPlan(b.streamKey);
             if ((this.ledger.get(b.streamKey)?.fails ?? 0) === beforeFails) {
-              markMasterFailure(this.pipelineDeps, b.streamKey, String((err as Error)?.message ?? err).slice(0, 300));
+              markMasterFailure(this.pipelineDeps, b.streamKey, String((err as Error)?.message ?? err).slice(-2000));
             }
             this.planUploadRetry(b.streamKey, err);
           }
@@ -1160,7 +1215,7 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
     const existing = [this.ledger.get(streamKey), this.ledger.get(key)].find((job) =>
       (job?.failureClass === "safe-retry" || job?.failureClass === "resume-append")
       && job.nextAttemptAt != null && job.nextAttemptAt > Date.now());
-    if (existing?.nextAttemptAt != null) {
+    if (existing?.nextAttemptAt != null && opts.force !== true) {
       return {
         ok: false,
         error: "重试已排期，请等到 " + new Date(existing.nextAttemptAt).toISOString(),
@@ -1178,8 +1233,12 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
     //    rerun could post a second draft.
     const conflict = await runNowConflict(
       { ledger: this.ledger, transports, isBusy: (key) => this.isStreamBusy(key), log: (m) => console.info(m) }, baseKey,
-      { force: opts.force === true, ignoreBusyKeys: [streamKey, key], self: { startMs: b.startMs, endMs: Math.max(...members.map((m) => m.rec.endMs)) } },
+      { force: opts.force === true, ignoreBusyKeys: [streamKey, key], targetKey: key,
+        self: { startMs: b.startMs, endMs: Math.max(...members.map((m) => m.rec.endMs)) } },
     );
+    if (opts.force === true && conflict?.startsWith("rerun refused:")) {
+      return { ok: false, error: conflict, code: 409 };
+    }
     if (opts.force !== true) {
       const reasons: string[] = [];
       if (missing.length > 0) {
@@ -1197,6 +1256,20 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
       }
     } else if (missing.length > 0) {
       console.warn(`[runNow] force over unreachable node(s): ${missingDetail}`);
+    }
+    if (opts.force === true) {
+      const family = sameBroadcastJobKeys(
+        { ledger: this.ledger, transports, isBusy: (candidate) => this.isStreamBusy(candidate) },
+        baseKey, { startMs: b.startMs, endMs: Math.max(...members.map((m) => m.rec.endMs)) },
+      );
+      for (const sibling of new Set([baseKey, ...family])) {
+        if (sibling === streamKey || sibling === key || this.ledger.getUploadPlan(sibling) || this.isStreamBusy(sibling)) continue;
+        const job = this.ledger.get(sibling);
+        if (job?.state !== "pending" && job?.state !== "failed") continue;
+        this.ledger.setState(sibling, "needs_manual", {
+          error: (job.error || "same-broadcast job") + "; superseded by forced same-broadcast rerun " + key,
+        });
+      }
     }
 
     this.ledger.upsertPending(key, b.startMs);
@@ -1225,7 +1298,7 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
         }
         console.error(`[reconciler] runNow ${key} failed:`, err);
         if ((this.ledger.get(key)?.fails ?? 0) === beforeFails) {
-          markMasterFailure(this.pipelineDeps, key, String((err as Error)?.message ?? err).slice(0, 300));
+          markMasterFailure(this.pipelineDeps, key, String((err as Error)?.message ?? err).slice(-2000));
         }
         consumeRetryPlans();
         this.planUploadRetry(key, err);

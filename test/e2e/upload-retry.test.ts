@@ -3,6 +3,7 @@ import { FULL_CLEANUP, Scenario } from "./harness/scenario.js";
 import { pastStartMs } from "./harness/fake-recordings.js";
 import { expectHealthyDone, expectLegalTrail, expectSourceSidecarsKept } from "./harness/invariants.js";
 import { ResourcePool } from "../../packages/orchestrator/src/workflow.js";
+import { clusterBroadcasts } from "../../packages/orchestrator/src/identity.js";
 import type { Transport } from "../../packages/orchestrator/src/transport.js";
 import { join } from "node:path";
 import { rmSync } from "node:fs";
@@ -103,6 +104,158 @@ describe("e2e: 上传超时/故障后的重试与降级", () => {
     expect(nodePipeline).not.toHaveBeenCalled();
   });
 
+  it("due retry maps a -N job to its broadcast, waits through live state, then posts once", async () => {
+    let recording = false;
+    s = await Scenario.create({
+      cfg: { cleanup: FULL_CLEANUP },
+      wrapTransport: (base) => {
+        const transport = base as unknown as Transport;
+        transport.isDone = async () => !recording;
+        return transport;
+      },
+      deps: { pool: new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, uploadCooldownMs: 0 }) },
+    });
+    rec(s);
+    const inventory = await s.transport.listInventory();
+    const baseKey = clusterBroadcasts([{ workerId: "local", recordings: inventory.recordings }], 0, "douyin")[0]!.streamKey;
+    const retryKey = baseKey + "-1";
+    s.fake.inject({ op: "upload", mode: "rate-limit" });
+
+    const first = await s.reconciler.runNow({ streamKey: retryKey, wait: true, force: true });
+    expect(first).toMatchObject({ ok: true, code: 200, streamKey: retryKey });
+    expect(s.ledger.get(retryKey)).toMatchObject({ state: "failed", fails: 0, failureClass: "safe-retry" });
+    expect(s.fake.calls.filter((call) => call.op === "upload")).toHaveLength(1);
+
+    s.ledger.setFailurePlan(retryKey, { failureClass: "safe-retry", nextAttemptAt: 0 });
+    recording = true;
+    await s.reconciler.pollUploadRetries();
+    expect(s.fake.calls.filter((call) => call.op === "upload")).toHaveLength(1);
+    expect(s.ledger.get(retryKey)?.nextAttemptAt).toBeGreaterThan(Date.now());
+
+    recording = false;
+    s.ledger.setFailurePlan(retryKey, { failureClass: "safe-retry", nextAttemptAt: 0 });
+    await s.reconciler.pollUploadRetries();
+    await vi.waitFor(() => expect(s.jobState(retryKey)).toBe("done"), { timeout: 4_000 });
+    expect(s.fake.calls.filter((call) => call.op === "upload")).toHaveLength(2);
+    expect(s.fake.draftCount).toBe(1);
+    expect(tsLeft(s)).toBe(0);
+  });
+
+  it("forced new submission cancels a sibling safe retry before creating its archive", async () => {
+    s = await Scenario.create({ cfg: { cleanup: FULL_CLEANUP },
+      deps: { pool: new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, uploadCooldownMs: 0 }) } });
+    rec(s);
+    s.fake.inject({ op: "upload", mode: "rate-limit" });
+    await s.reconcile();
+    const baseKey = s.onlyKey();
+    expect(s.ledger.get(baseKey)).toMatchObject({ state: "failed", failureClass: "safe-retry" });
+
+    const forced = await s.reconciler.runNow({ streamKey: baseKey + "-1", wait: true, force: true });
+    expect(forced).toMatchObject({ ok: true, code: 200, streamKey: baseKey + "-1" });
+    expect(s.jobState(baseKey)).toBe("needs_manual");
+    expect(s.fake.draftCount).toBe(1);
+
+    await s.reconciler.pollUploadRetries();
+    expect(s.fake.draftCount).toBe(1);
+    expect(s.fake.calls.filter((call) => call.op === "upload")).toHaveLength(2);
+  });
+
+  it("does not recreate a master retry after switching the room to stage mode", async () => {
+    s = await Scenario.create({
+      cfg: { cleanup: FULL_CLEANUP },
+      shellFault: (command) => /\\bmerge\\b/.test(command),
+      deps: { pool: new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, uploadCooldownMs: 0 }) },
+    });
+    rec(s);
+    s.fake.inject({ op: "upload", mode: "rate-limit" });
+    await s.reconcile();
+    const key = s.onlyKey();
+    expect(s.ledger.get(key)).toMatchObject({ state: "failed", failureClass: "safe-retry" });
+
+    s.patchConfig({ uploadMode: "stage" });
+    s.ledger.setFailurePlan(key, { failureClass: "safe-retry", nextAttemptAt: 0 });
+    await s.reconciler.pollUploadRetries();
+
+    expect(s.ledger.get(key)).toMatchObject({ state: "needs_manual", failureClass: null, nextAttemptAt: null });
+    expect(s.fake.calls.filter((call) => call.op === "upload")).toHaveLength(1);
+  });
+
+  it("ordinary pipeline retry parks when a sibling -N job may still submit", async () => {
+    s = await Scenario.create({
+      cfg: { cleanup: FULL_CLEANUP },
+      shellFault: () => true,
+      deps: { pool: new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, uploadCooldownMs: 0 }) },
+    });
+    rec(s);
+    await s.reconcile();
+    const baseKey = s.onlyKey();
+    const sibling = baseKey + "-1";
+    expect(s.jobState(baseKey)).toBe("failed");
+    s.ledger.upsertPending(sibling);
+
+    await s.reconcile();
+
+    expect(s.jobState(baseKey)).toBe("needs_manual");
+    expect(s.ledger.get(baseKey)?.error).toContain(sibling);
+    expect(s.fake.draftCount).toBe(0);
+  });
+
+  it("an automatic retry stops if a same-broadcast sibling already owns a BV", async () => {
+    s = await Scenario.create({ cfg: { cleanup: FULL_CLEANUP },
+      deps: { pool: new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, uploadCooldownMs: 0 }) } });
+    rec(s);
+    s.fake.inject({ op: "upload", mode: "rate-limit" });
+    await s.reconcile();
+    const key = s.onlyKey();
+    const sibling = key + "-1";
+    s.ledger.upsertPending(sibling);
+    s.ledger.markDone(sibling, "existing-broadcast-archive");
+    s.ledger.setFailurePlan(key, { failureClass: "safe-retry", nextAttemptAt: 0 });
+
+    await s.reconciler.pollUploadRetries();
+    await vi.waitFor(() => expect(s.jobState(key)).toBe("needs_manual"));
+
+    expect(s.ledger.get(key)?.error).toContain("existing-broadcast-archive");
+    expect(s.fake.calls.filter((call) => call.op === "upload")).toHaveLength(1);
+    expect(tsLeft(s)).toBe(3);
+  });
+
+  it("keeps a proven master retry on the master path when node-side capability later appears", async () => {
+    let diskFreeGB = 1;
+    const nodePipeline = vi.fn(async (_spec: Parameters<NonNullable<Transport["nodePipeline"]>>[0]) => {
+      throw new Error("node-side pipeline must not take over a master retry");
+    });
+    s = await Scenario.create({
+      cfg: {
+        diskMinGB: 10,
+        steps: { nodeSideUpload: true, burnDanmu: false, burnLivechat: false },
+        cleanup: FULL_CLEANUP,
+      },
+      wrapTransport: (base) => {
+        const transport = base as unknown as Transport;
+        transport.nodeCapabilities = async () => ({ biliup: true, cookies: true, diskFreeGB, cjkFonts: false });
+        transport.nodePipeline = nodePipeline;
+        return transport;
+      },
+      deps: { pool: new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, uploadCooldownMs: 0 }) },
+    });
+    rec(s);
+    s.fake.inject({ op: "upload", mode: "rate-limit" });
+    await s.reconcile();
+    const key = s.onlyKey();
+    expect(s.ledger.get(key)).toMatchObject({ state: "failed", failureClass: "safe-retry" });
+    expect(s.fake.calls.filter((call) => call.op === "upload")).toHaveLength(1);
+
+    diskFreeGB = 100;
+    s.ledger.setFailurePlan(key, { failureClass: "safe-retry", nextAttemptAt: 0 });
+    await s.reconciler.pollUploadRetries();
+    await vi.waitFor(() => expect(s.jobState(key)).toBe("done"), { timeout: 4_000 });
+
+    expect(s.fake.calls.filter((call) => call.op === "upload")).toHaveLength(2);
+    expect(s.fake.draftCount).toBe(1);
+    expect(nodePipeline).not.toHaveBeenCalled();
+  });
+
   it("runNow preserves an expired upload retry classification through the real pipeline", async () => {
     s = await Scenario.create({ cfg: { cleanup: FULL_CLEANUP }, deps: {
       pool: new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, uploadCooldownMs: 0 }),
@@ -121,6 +274,72 @@ describe("e2e: 上传超时/故障后的重试与降级", () => {
     expect(s.jobState(key)).toBe("done");
     expect(s.fake.calls.filter((call) => call.op === "upload")).toHaveLength(2);
     expect(s.fake.draftCount).toBe(1);
+  });
+
+  it("a forced -N run supersedes a proven sibling retry before creating one archive", async () => {
+    s = await Scenario.create({ cfg: { cleanup: FULL_CLEANUP }, deps: {
+      pool: new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, uploadCooldownMs: 0 }),
+    } });
+    rec(s);
+    s.fake.inject({ op: "upload", mode: "rate-limit" });
+    await s.reconcile();
+    const key = s.onlyKey();
+    expect(s.ledger.get(key)).toMatchObject({ state: "failed", failureClass: "safe-retry" });
+    s.ledger.setFailurePlan(key, { failureClass: "safe-retry", nextAttemptAt: 0 });
+
+    const denied = await s.reconciler.runNow({ streamKey: key + "-1", wait: true });
+    expect(denied).toMatchObject({ ok: false, code: 409 });
+    expect(s.fake.calls.filter((call) => call.op === "upload")).toHaveLength(1);
+
+    const forced = await s.reconciler.runNow({ streamKey: key + "-1", wait: true, force: true });
+    expect(forced.ok).toBe(true);
+    expect(s.jobState(key)).toBe("needs_manual");
+    expect(s.jobState(key + "-1")).toBe("done");
+    await s.reconciler.pollUploadRetries();
+    expect(s.fake.calls.filter((call) => call.op === "upload")).toHaveLength(2);
+    expect(s.fake.draftCount).toBe(1);
+  });
+
+  it("a due retry defers while the source broadcast is still recording", async () => {
+    s = await Scenario.create({ cfg: { cleanup: FULL_CLEANUP }, deps: {
+      pool: new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, uploadCooldownMs: 0 }),
+    } });
+    rec(s);
+    s.fake.inject({ op: "upload", mode: "rate-limit" });
+    await s.reconcile();
+    const key = s.onlyKey();
+    s.ledger.setFailurePlan(key, { failureClass: "safe-retry", nextAttemptAt: 0 });
+    const transport = s.transports.get("local")!;
+    s.transports.set("local", { ...transport, isDone: async () => false });
+
+    await s.reconciler.pollUploadRetries();
+
+    expect(s.ledger.get(key)).toMatchObject({ state: "failed", failureClass: "safe-retry" });
+    expect(s.ledger.get(key)!.nextAttemptAt).toBeGreaterThan(Date.now());
+    expect(s.fake.calls.filter((call) => call.op === "upload")).toHaveLength(1);
+    expect(s.fake.draftCount).toBe(0);
+  });
+
+  it("repeated single-file rate limits stop after the configured failure budget", async () => {
+    s = await Scenario.create({ cfg: { cleanup: FULL_CLEANUP }, deps: {
+      pool: new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, uploadCooldownMs: 0 }),
+    } });
+    rec(s);
+    s.fake.inject({ op: "upload", mode: "rate-limit" });
+    await s.reconcile();
+    const key = s.onlyKey();
+    for (let attempt = 2; attempt <= 3; attempt++) {
+      s.fake.inject({ op: "upload", mode: "rate-limit" });
+      s.ledger.setFailurePlan(key, { failureClass: "safe-retry", nextAttemptAt: 0 });
+      await s.reconcile();
+      if (attempt < 3) expect(s.ledger.get(key)).toMatchObject({ state: "failed", failureClass: "safe-retry" });
+    }
+
+    expect(s.jobState(key)).toBe("needs_manual");
+    expect(s.ledger.get(key)?.error).toContain("自动重试上限");
+    expect(s.fake.calls.filter((call) => call.op === "upload")).toHaveLength(3);
+    expect(s.fake.draftCount).toBe(0);
+    expect(s.notifications.filter((event) => event.message?.includes("已自动回队列"))).toHaveLength(1);
   });
 
   it("退避期间过滤规则变化不能让旧下标跳过另一源段并误删源", async () => {

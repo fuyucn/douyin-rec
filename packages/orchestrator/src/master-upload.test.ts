@@ -8,7 +8,7 @@ import type { PipelineDeps } from "./pipeline.js";
 import { SyncLedger } from "./ledger.js";
 import { Reconciler } from "./reconciler.js";
 import { ResourcePool } from "./workflow.js";
-import { appendMasterParts, bindMasterPlan, createMasterArchive, markMasterFailure, masterUploadFailurePlan, prepareMasterUpload, validateMasterParts } from "./master-upload.js";
+import { appendMasterParts, beginMasterUploadRun, bindMasterPlan, createMasterArchive, markMasterFailure, masterUploadFailurePlan, masterUploadHasUnresolvedSubmission, prepareMasterUpload, validateMasterParts } from "./master-upload.js";
 import { runNowConflict } from "./run-now-guard.js";
 import type { NodeInventory, Transport } from "./transport.js";
 
@@ -60,6 +60,21 @@ describe("master submission evidence", () => {
     expect(journal.entries[0]).toMatchObject({ kind: "create", indices: [0, 1], state: "submitted" });
   });
 
+  it("preserves a created BV when the source changes after the request returns", async () => {
+    const f = fixture();
+    f.create.mockImplementationOnce(async () => {
+      writeFileSync(f.files[0]!, "changed after remote create");
+      return { proof: "created", ref: { targetId: "fake", id: ARCHIVE } };
+    });
+
+    await expect(createMasterArchive(f.deps, KEY, f.opts)).rejects.toThrow(ARCHIVE);
+    expect(f.ledger.get(KEY)?.bv).toBe(ARCHIVE);
+    expect(JSON.parse(f.ledger.get(KEY)!.uploadJournal!).entries[0]).toMatchObject({ state: "intent", bv: ARCHIVE });
+    await expect(createMasterArchive(f.deps, KEY, f.opts)).rejects.toThrow("submission checkpoints disagree");
+    expect(f.create).toHaveBeenCalledTimes(1);
+    expect(f.ledger.doneParts(KEY, "plain")).toEqual(new Set());
+  });
+
   it("a single rejected create can safely retry; the rejected attempt is not a submitted part", async () => {
     const f = fixture();
     f.create.mockRejectedValueOnce(new Error("code: 601 upload rate limit"));
@@ -83,6 +98,31 @@ describe("master submission evidence", () => {
     expect(conflict).toMatch(/submission|draft|manuscript/i);
   });
 
+  it("force cannot bypass an unresolved create intent", async () => {
+    const f = fixture();
+    prepareMasterUpload(f.ledger, KEY);
+    const journal = JSON.parse(f.ledger.get(KEY)!.uploadJournal!);
+    journal.entries.push({ kind: "create", group: "plain", indices: [0], fingerprint: "[]", state: "intent" });
+    f.ledger.saveUploadJournal(KEY, f.ledger.get(KEY)!.uploadJournal!, JSON.stringify(journal));
+
+    expect(masterUploadHasUnresolvedSubmission(f.ledger, KEY)).toBe(true);
+    const conflict = await runNowConflict({ ledger: f.ledger, transports: new Map() }, `${KEY}_0830`, {
+      force: true, self: { startMs: Date.parse("2026-06-22T00:30:00Z"), endMs: Date.parse("2026-06-22T00:40:00Z") },
+    });
+    expect(conflict).toMatch(/rerun refused.*unresolved/i);
+  });
+
+  it("force cannot race a same-broadcast retrying job", async () => {
+    const f = fixture();
+    f.ledger.setState(KEY, "retrying");
+
+    const conflict = await runNowConflict({ ledger: f.ledger, transports: new Map() }, `${KEY}_0830`, {
+      force: true, self: { startMs: Date.parse("2026-06-22T00:30:00Z"), endMs: Date.parse("2026-06-22T00:40:00Z") },
+    });
+
+    expect(conflict).toMatch(/rerun refused.*active or scheduled/i);
+  });
+
   it("same-broadcast sibling is blocked while another job is active", async () => {
     const f = fixture();
     const sibling = KEY + "-1";
@@ -95,6 +135,31 @@ describe("master submission evidence", () => {
     });
 
     expect(conflict).toContain("active or scheduled same-broadcast job");
+  });
+
+  it("a previous master 601 cannot classify a later node-side failure as a safe retry", async () => {
+    const f = fixture();
+    f.create.mockRejectedValueOnce(new Error("code: 601 upload rate limit"));
+    await expect(createMasterArchive(f.deps, KEY, f.opts)).rejects.toThrow("601");
+    const previous = JSON.parse(f.ledger.get(KEY)!.uploadJournal!) as { runId: string };
+
+    beginMasterUploadRun(f.ledger, KEY);
+
+    const current = JSON.parse(f.ledger.get(KEY)!.uploadJournal!) as { runId: string; failure: { runId: string } };
+    expect(current.runId).not.toBe(previous.runId);
+    expect(current.failure.runId).toBe(previous.runId);
+    expect(masterUploadFailurePlan(f.ledger, KEY, new Error("node upload failed: 601"))?.class).not.toBe("safe-retry");
+  });
+
+  it("node upload history without proof is treated as legacy and cannot create another archive", async () => {
+    const f = fixture();
+    f.ledger.logStep(KEY, "node_upload", "start");
+
+    prepareMasterUpload(f.ledger, KEY);
+
+    expect(JSON.parse(f.ledger.get(KEY)!.uploadJournal!).legacy).toBe(true);
+    await expect(createMasterArchive(f.deps, KEY, f.opts)).rejects.toThrow("legacy upload history");
+    expect(f.create).not.toHaveBeenCalled();
   });
 
   it("does not retry when durable evidence for a known rejection cannot be saved", async () => {
@@ -168,7 +233,7 @@ describe("master submission evidence", () => {
       return { proof: "created" as const, ref: { targetId: "fake", id: ARCHIVE } };
     });
 
-    await expect(createMasterArchive(f.deps, KEY, f.opts)).rejects.toThrow("upload input changed while submitting");
+    await expect(createMasterArchive(f.deps, KEY, f.opts)).rejects.toThrow("source file changed after submission");
     expect(f.create).toHaveBeenCalledTimes(1);
     expect(f.ledger.doneParts(KEY, "plain")).toEqual(new Set());
     expect(JSON.parse(f.ledger.get(KEY)!.uploadJournal!).entries[0].state).toBe("intent");
@@ -217,8 +282,19 @@ describe("master submission evidence", () => {
     f.append.mockRejectedValueOnce(new Error("code: 21540 upload rate limit"));
     await expect(appendMasterParts(f.deps, KEY, ARCHIVE, "append_danmu", [0], [f.files[1]], true)).rejects.toThrow();
     expect(masterUploadFailurePlan(f.ledger, KEY)).toMatchObject({ class: "resume-append", countsAsFailure: false });
+    beginMasterUploadRun(f.ledger, KEY);
 
     expect(masterUploadFailurePlan(f.ledger, KEY, new Error("upload input missing or empty")))
+      .toMatchObject({ class: "verify-manual", retryable: false });
+  });
+
+  it("does not reuse a rate-limit rejection from a prior pipeline execution", async () => {
+    const f = fixture();
+    f.create.mockRejectedValueOnce(new Error("code: 601 upload rate limit"));
+    await expect(createMasterArchive(f.deps, KEY, f.opts)).rejects.toThrow("601");
+    beginMasterUploadRun(f.ledger, KEY);
+
+    expect(masterUploadFailurePlan(f.ledger, KEY, new Error("code: 21566 upload rate limit")))
       .toMatchObject({ class: "verify-manual", retryable: false });
   });
 
@@ -230,7 +306,10 @@ describe("master submission evidence", () => {
     f.ledger.markFailed(KEY, "code: 21540 upload rate limit", false);
     f.ledger.setFailurePlan(KEY, { failureClass: "resume-append", nextAttemptAt: 0 });
 
-    const s = scheduler(f, async (deps) => { deps.ledger.markFailed(KEY, "no eligible segments"); }, "failed");
+    const s = scheduler(f, async (deps) => {
+      beginMasterUploadRun(deps.ledger, KEY);
+      deps.ledger.markFailed(KEY, "no eligible segments");
+    }, "failed");
     await s.reconciler.pollUploadRetries();
     await vi.waitFor(() => expect(f.ledger.get(KEY)?.state).toBe("needs_manual"));
 
@@ -254,13 +333,13 @@ describe("master submission evidence", () => {
     const f = fixture();
     const db = new DatabaseSync(f.dbPath);
     db.exec("CREATE TRIGGER fail_part BEFORE INSERT ON sync_parts BEGIN SELECT RAISE(ABORT, 'checkpoint failed'); END");
-    await expect(createMasterArchive(f.deps, KEY, f.opts)).rejects.toThrow("checkpoint failed");
-    expect(f.ledger.get(KEY)?.bv).toBeNull();
+    await expect(createMasterArchive(f.deps, KEY, f.opts)).rejects.toThrow(ARCHIVE);
+    expect(f.ledger.get(KEY)?.bv).toBe(ARCHIVE);
     expect(f.ledger.doneParts(KEY, "plain").size).toBe(0);
-    expect(JSON.parse(f.ledger.get(KEY)!.uploadJournal!).entries[0].state).toBe("intent");
+    expect(JSON.parse(f.ledger.get(KEY)!.uploadJournal!).entries[0]).toMatchObject({ state: "intent", bv: ARCHIVE });
     db.exec("DROP TRIGGER fail_part"); db.close();
     const reopened = new SyncLedger(f.dbPath); resources.push(reopened);
-    await expect(createMasterArchive({ ...f.deps, ledger: reopened }, KEY, f.opts)).rejects.toThrow("unresolved");
+    await expect(createMasterArchive({ ...f.deps, ledger: reopened }, KEY, f.opts)).rejects.toThrow("submission checkpoints disagree");
     expect(f.create).toHaveBeenCalledTimes(1);
   });
 
@@ -270,10 +349,27 @@ describe("master submission evidence", () => {
     vi.spyOn(f.ledger, "setBvAndSeasonState").mockImplementation(() => { throw new Error("season write failed"); });
     await expect(createMasterArchive(f.deps, KEY, f.opts)).rejects.toThrow("season write failed");
     expect(f.create).toHaveBeenCalledTimes(1);
-    expect(f.ledger.get(KEY)).toMatchObject({ bv: null, seasonState: null });
+    expect(f.ledger.get(KEY)).toMatchObject({ bv: ARCHIVE, seasonState: null });
     expect(f.ledger.doneParts(KEY, "plain")).toEqual(new Set());
-    expect(JSON.parse(f.ledger.get(KEY)!.uploadJournal!).entries[0].state).toBe("intent");
+    expect(JSON.parse(f.ledger.get(KEY)!.uploadJournal!).entries[0]).toMatchObject({ state: "intent", bv: ARCHIVE });
     expect(masterUploadFailurePlan(f.ledger, KEY)?.class).toBe("verify-manual");
+  });
+
+  it("classifies a rate-limit marker at the tail of a long upload error", async () => {
+    const f = fixture();
+    await createMasterArchive(f.deps, KEY, f.opts);
+    const longError = "progress detail ".repeat(300) + "code: 601 upload rate limit";
+    f.append.mockRejectedValueOnce(new Error(longError));
+    let observed = "";
+    try {
+      await appendMasterParts(f.deps, KEY, ARCHIVE, "append_danmu", [0], [f.files[1]], true);
+    } catch (error) {
+      observed = String((error as Error).message).slice(-2000);
+    }
+    expect(observed).toContain("code: 601");
+    markMasterFailure(f.deps, KEY, observed);
+    expect(masterUploadFailurePlan(f.ledger, KEY, observed)).toMatchObject({ class: "resume-append", retryable: true, countsAsFailure: false });
+    expect(f.ledger.get(KEY)).toMatchObject({ state: "failed", fails: 0 });
   });
 
   it("does not skip a submitted P1 after later parts are rate-limited and P1 changes", async () => {
@@ -452,7 +548,7 @@ describe("master submission evidence", () => {
   });
 });
 
-function scheduler(f: ReturnType<typeof fixture>, run: (deps: PipelineDeps) => Promise<void>, resultState: "done" | "failed" = "done") {
+function scheduler(f: ReturnType<typeof fixture>, run: (deps: PipelineDeps) => Promise<void>, resultState: "done" | "failed" = "done", maxRetries = 3) {
   const rec = { roomSlug: "retry-fixture", platform: "douyin", sessionBase: "fixture_2026-06-22_08-00-00",
     tsFiles: f.files, durationSec: 600, startMs: Date.parse("2026-06-22T00:00:00Z"),
     endMs: Date.parse("2026-06-22T00:10:00Z"), totalGapSec: 0 };
@@ -466,8 +562,8 @@ function scheduler(f: ReturnType<typeof fixture>, run: (deps: PipelineDeps) => P
     return { state: "done" as const, bv: ARCHIVE };
   });
   const reconciler = new Reconciler({ platform: "douyin", ledger: f.ledger, transports,
-    pipelineDeps: f.deps, runPipeline: execute, reconnectWindowMs: 0, diskMinGB: 0 });
-  return { reconciler, transport, execute };
+    pipelineDeps: f.deps, runPipeline: execute, reconnectWindowMs: 0, diskMinGB: 0, maxRetries, notify: f.deps.notify });
+  return { reconciler, transport, execute, notify: vi.mocked(f.deps.notify) };
 }
 
 describe("master retry scheduling", () => {
@@ -509,6 +605,11 @@ describe("master retry scheduling", () => {
     const second = f.ledger.get(KEY)!;
     expect(second).toMatchObject({ state: "failed", fails: 0, nextAttemptAt: first.nextAttemptAt! + 1 + 10 * 60_000 });
     expect(masterUploadFailurePlan(f.ledger, KEY)?.retryAttempt).toBe(2);
+    const retryAlerts = s.notify.mock.calls.filter(([event]) => {
+      const value = event as { kind?: string; message?: string };
+      return value.kind === "error" && value.message?.includes("自动回队列");
+    });
+    expect(retryAlerts).toHaveLength(1);
   });
 
   it("jitter never exceeds the one-hour backoff cap", async () => {
@@ -518,11 +619,11 @@ describe("master retry scheduling", () => {
     vi.spyOn(Math, "random").mockReturnValue(0.999);
     prepareMasterUpload(f.ledger, KEY);
     const raw = f.ledger.get(KEY)!.uploadJournal!;
-    const journal = JSON.parse(raw) as { failure?: Record<string, unknown> };
-    journal.failure = { message: "previous explicit rate limit", code: "rate-limit", ambiguous: false, rateLimitAttempt: 5 };
+    const journal = JSON.parse(raw) as { runId: string; failure?: Record<string, unknown> };
+    journal.failure = { message: "previous explicit rate limit", code: "rate-limit", ambiguous: false, runId: journal.runId, rateLimitAttempt: 5 };
     f.ledger.saveUploadJournal(KEY, raw, JSON.stringify(journal));
     f.create.mockRejectedValueOnce(new Error("code: 601 upload rate limit"));
-    const s = scheduler(f, (deps) => createMasterArchive(deps, KEY, f.opts).then(() => {}));
+    const s = scheduler(f, (deps) => createMasterArchive(deps, KEY, f.opts).then(() => {}), "done", 7);
 
     await s.reconciler.reconcileAll();
 
@@ -544,6 +645,19 @@ describe("master retry scheduling", () => {
     await s.reconciler.reconcileAll();
     expect(f.create).toHaveBeenCalledTimes(1);
     expect(f.ledger.get(KEY)?.state).toBe("needs_manual");
+  });
+
+  it("a due retry in retrying state defers without repeating full inventory scans", async () => {
+    const f = fixture();
+    f.ledger.setState(KEY, "retrying");
+    f.ledger.setFailurePlan(KEY, { failureClass: "safe-retry", nextAttemptAt: 0 });
+    const s = scheduler(f, async () => {});
+
+    await s.reconciler.pollUploadRetries();
+
+    expect(s.transport.listInventory).not.toHaveBeenCalled();
+    expect(f.ledger.get(KEY)).toMatchObject({ state: "retrying", failureClass: "safe-retry" });
+    expect(f.ledger.get(KEY)?.nextAttemptAt).toBeGreaterThan(Date.now());
   });
 
   it("a due retry skips a broadcast whose recording has not ended", async () => {

@@ -191,6 +191,73 @@ describe("retryNode verdicts", () => {
     expect(r.code).toBe(409);
     expect(r.error).toContain("BV1abc");
   });
+
+  it("refuses a forced upload-node retry while a same-broadcast retry is pending", async () => {
+    const ledger = new orchestrator.SyncLedger(":memory:");
+    const base = "douyin:room1:2026-11-12";
+    const sibling = base + "-1";
+    ledger.upsertPending(base);
+    ledger.setState(base, "failed", { error: "601" });
+    ledger.setFailurePlan(base, { failureClass: "safe-retry", nextAttemptAt: Date.now() + 60_000 });
+    ledger.upsertPending(sibling);
+    ledger.setState(sibling, "done", {}, { force: true });
+    const runNodes = vi.spyOn(orchestrator, "runWorkflowNodes");
+    const derive = vi.spyOn(orchestrator, "deriveStageProducts");
+    const cfg = {
+      cleanMaxGapSec: 60, stageDir: "/tmp/stage", cookies: "room-cookie", uploadMode: "upload",
+      uploadMeta: { tag: "room", tid: 21 }, steps: { mergeSegments: true, burnDanmu: true, burnLivechat: true },
+    } as unknown as import("../../packages/orchestrator/src/index.js").PipelineCfg;
+    try {
+      const { actions } = makeActions({ ledger, resolveCfg: () => cfg, pipelineDeps: { ledger } as PipelineDeps });
+      const result = await actions.retryNode(sibling, node("upload_plain"), true);
+      expect(result).toMatchObject({ ok: false, code: 409 });
+      expect(result.error).toContain("同场任务冲突");
+      expect(ledger.get(base)?.failureClass).toBe("safe-retry");
+      expect(ledger.get(base)?.state).toBe("failed");
+      expect(runNodes).not.toHaveBeenCalled();
+      expect(derive).not.toHaveBeenCalled();
+    } finally {
+      runNodes.mockRestore();
+      derive.mockRestore();
+      ledger.close();
+    }
+  });
+
+  it("uses the room upload visibility and season config for a manual node retry", async () => {
+    const ledger = new orchestrator.SyncLedger(":memory:");
+    ledger.upsertPending(STREAM);
+    const roomCfg = {
+      cleanMaxGapSec: 60, stageDir: "/tmp/stage", cookies: "room-cookie", uploadMode: "upload",
+      uploadPrivate: false, uploadMeta: { tag: "room", tid: 21, seasonSectionId: 456 },
+      steps: { mergeSegments: true, burnDanmu: true, burnLivechat: true },
+    } as unknown as import("../../packages/orchestrator/src/index.js").PipelineCfg;
+    const globalCfg = { ...roomCfg, uploadPrivate: true, uploadMeta: { ...roomCfg.uploadMeta, seasonSectionId: undefined } };
+    const derive = vi.spyOn(orchestrator, "deriveStageProducts").mockReturnValue({
+      dateName: "recording", sessionBase: "recording", sessionBases: ["recording"],
+      plain: "/tmp/stage/plain.mp4", plainXml: "/tmp/stage/plain.xml", xmlArg: "/tmp/stage/source.xml",
+      danmuMp4: "/tmp/stage/danmu.mp4", livechatMp4: "/tmp/stage/livechat.mp4",
+    } as never);
+    const runNodes = vi.spyOn(orchestrator, "runWorkflowNodes").mockResolvedValue({
+      ok: false, failed: ["append_danmu"], blocked: [],
+    } as never);
+    try {
+      const { actions } = makeActions({
+        ledger, resolveCfg: () => roomCfg,
+        pipelineDeps: { ledger, cfg: globalCfg } as unknown as PipelineDeps,
+      });
+      orchestrator.beginMasterUploadRun(ledger, STREAM);
+      const previousRunId = JSON.parse(ledger.get(STREAM)!.uploadJournal!).runId;
+      await actions.retryNode(STREAM, node("append_danmu"), true);
+      const workflowDeps = runNodes.mock.calls[0]?.[0].ctx.deps;
+      expect(workflowDeps.cfg.uploadPrivate).toBe(false);
+      expect(workflowDeps.cfg.uploadMeta.seasonSectionId).toBe(456);
+      expect(JSON.parse(ledger.get(STREAM)!.uploadJournal!).runId).not.toBe(previousRunId);
+    } finally {
+      runNodes.mockRestore();
+      derive.mockRestore();
+      ledger.close();
+    }
+  });
 });
 
 describe("probeDrainSupport", () => {
