@@ -107,6 +107,10 @@ export class JobDispatcher {
     return this.queue.length;
   }
 
+  isScheduled(key: string): boolean {
+    return this.active.has(key);
+  }
+
   get stats(): JobDispatcherStats {
     return { deduped: this.dedupedCount };
   }

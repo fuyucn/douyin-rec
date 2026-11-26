@@ -9,6 +9,7 @@ import { SyncLedger } from "./ledger.js";
 import { Reconciler } from "./reconciler.js";
 import { ResourcePool } from "./workflow.js";
 import { appendMasterParts, bindMasterPlan, createMasterArchive, markMasterFailure, masterUploadFailurePlan, prepareMasterUpload, validateMasterParts } from "./master-upload.js";
+import { runNowConflict } from "./run-now-guard.js";
 import type { NodeInventory, Transport } from "./transport.js";
 
 const KEY = "douyin:retry-fixture:2026-06-22";
@@ -68,6 +69,32 @@ describe("master submission evidence", () => {
     await createMasterArchive(f.deps, KEY, f.opts);
     expect(f.create).toHaveBeenCalledTimes(2);
     expect(f.ledger.doneParts(KEY, "plain")).toEqual(new Set([0]));
+  });
+
+  it("same-broadcast sibling is blocked after a create attempt, even when the rejection is known", async () => {
+    const f = fixture();
+    f.create.mockRejectedValueOnce(new Error("code: 601 upload rate limit"));
+    await expect(createMasterArchive(f.deps, KEY, f.opts)).rejects.toThrow("601");
+
+    const conflict = await runNowConflict({ ledger: f.ledger, transports: new Map() }, `${KEY}_0830`, {
+      force: false, self: { startMs: Date.parse("2026-06-22T00:30:00Z"), endMs: Date.parse("2026-06-22T00:40:00Z") },
+    });
+
+    expect(conflict).toMatch(/submission|draft|manuscript/i);
+  });
+
+  it("same-broadcast sibling is blocked while another job is active", async () => {
+    const f = fixture();
+    const sibling = KEY + "-1";
+    f.ledger.setState(KEY, "needs_manual");
+    f.ledger.upsertPending(sibling);
+    f.ledger.setState(sibling, "retrying");
+
+    const conflict = await runNowConflict({ ledger: f.ledger, transports: new Map(), isBusy: (key) => key === sibling }, KEY, {
+      force: false,
+    });
+
+    expect(conflict).toContain("active or scheduled same-broadcast job");
   });
 
   it("does not retry when durable evidence for a known rejection cannot be saved", async () => {
@@ -205,6 +232,7 @@ describe("master submission evidence", () => {
 
     const s = scheduler(f, async (deps) => { deps.ledger.markFailed(KEY, "no eligible segments"); }, "failed");
     await s.reconciler.pollUploadRetries();
+    await vi.waitFor(() => expect(f.ledger.get(KEY)?.state).toBe("needs_manual"));
 
     expect(f.ledger.get(KEY)).toMatchObject({ state: "needs_manual", failureClass: null });
     expect(f.ledger.get(KEY)?.error).toContain("no eligible segments");
@@ -524,6 +552,7 @@ describe("master retry scheduling", () => {
     const s = scheduler(f, (deps) => createMasterArchive(deps, KEY, f.opts).then(() => {}));
     await s.reconciler.reconcileAll();
     expect(f.ledger.get(KEY)?.state).toBe("failed");
+    expect(f.ledger.get(KEY)?.nextAttemptAt).toBeGreaterThan(Date.now());
     expect(s.execute).toHaveBeenCalledTimes(1);
 
     f.ledger.setFailurePlan(KEY, { failureClass: "safe-retry", nextAttemptAt: 0 });
@@ -573,10 +602,31 @@ describe("master retry scheduling", () => {
     const stopped = new Reconciler({ platform: "douyin", ledger: f.ledger,
       transports: new Map([["local", s.transport]]), pipelineDeps: f.deps, resolveCfg: () => null,
       reconnectWindowMs: 0 });
+    const inventoryCalls = s.transport.listInventory.mock.calls.length;
     await stopped.pollUploadRetries();
     expect(f.create).toHaveBeenCalledTimes(1);
-    expect(f.ledger.get(KEY)?.state).toBe("failed");
+    expect(f.ledger.get(KEY)).toMatchObject({ state: "needs_manual", failureClass: null, nextAttemptAt: null });
+    expect(s.transport.listInventory).toHaveBeenCalledTimes(inventoryCalls);
   });
+
+  it("a retry poll skips a key already active in the dispatcher without scanning nodes", async () => {
+    const f = fixture();
+    let release!: () => void;
+    const s = scheduler(f, () => new Promise<void>((resolve) => { release = resolve; }));
+    const running = s.reconciler.reconcileAll();
+    await vi.waitFor(() => expect(s.execute).toHaveBeenCalledTimes(1));
+    f.ledger.setState(KEY, "failed");
+    f.ledger.setFailurePlan(KEY, { failureClass: "safe-retry", nextAttemptAt: 0 });
+    const inventoryCalls = s.transport.listInventory.mock.calls.length;
+
+    await s.reconciler.pollUploadRetries();
+
+    expect(s.transport.listInventory).toHaveBeenCalledTimes(inventoryCalls);
+    expect(f.ledger.get(KEY)?.nextAttemptAt).toBeGreaterThan(Date.now());
+    release();
+    await running;
+  });
+
 
   it("a long retry does not prevent a later due room from using another dispatcher slot", async () => {
     const f = fixture();

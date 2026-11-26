@@ -55,16 +55,32 @@ function parseJournal(raw: string | null | undefined): Journal | null {
   } catch { return null; }
 }
 
+type MasterHistoryLedger = Pick<SyncLedger, "get" | "getSteps" | "doneParts" | "getNodeStates">;
+
+function hasPreviousMasterUploadActivity(ledger: MasterHistoryLedger, key: string): boolean {
+  const history = ledger.getSteps(key).some((step) => MASTER_UPLOAD_STEPS.has(step.step) && step.phase !== "skipped");
+  const parts = UPLOAD_GROUPS.some((group) => ledger.doneParts(key, group).size > 0);
+  const nodes = ledger.getNodeStates(key).some((node) => MASTER_UPLOAD_STEPS.has(node.node)
+    && !["pending", "skipped", "blocked"].includes(node.state));
+  return history || parts || nodes;
+}
+
+export function masterUploadMayOwnArchive(ledger: MasterHistoryLedger, key: string): boolean {
+  const job = ledger.get(key);
+  if (!job) return false;
+  const raw = job.uploadJournal ?? null;
+  if (raw == null) return hasPreviousMasterUploadActivity(ledger, key);
+  const journal = parseJournal(raw);
+  return !journal || journal.legacy || journal.entries.length > 0 || hasPreviousMasterUploadActivity(ledger, key);
+}
+
 /** Called before workflow start events: absence of old upload evidence is not retroactive proof. */
 export function prepareMasterUpload(ledger: SyncLedger, key: string): void {
   const job = ledger.get(key);
   if (!job || job.uploadJournal != null) return;
-  const history = ledger.getSteps(key).some((s) => MASTER_UPLOAD_STEPS.has(s.step) && s.phase !== "skipped");
-  const parts = UPLOAD_GROUPS.some((group) => ledger.doneParts(key, group).size > 0);
-  const nodes = ledger.getNodeStates(key).some((n) => MASTER_UPLOAD_STEPS.has(n.node)
-    && !["pending", "skipped", "blocked"].includes(n.state));
+  const legacy = !!job.bv || hasPreviousMasterUploadActivity(ledger, key);
   ledger.saveUploadJournal(key, null, JSON.stringify({
-    version: 1, legacy: !!job.bv || history || parts || nodes, entries: [], generation: randomUUID(),
+    version: 1, legacy, entries: [], generation: randomUUID(),
   } satisfies Journal));
 }
 

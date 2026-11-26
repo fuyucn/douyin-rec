@@ -15,6 +15,15 @@ import type { HubBlockedBroadcastDTO, StatsSessionInput } from "@drec/core";
 import { gateWorkers, explainRejections, isWorkerAssigned, isWorkerTargeted } from "@drec/core";
 import { JobDispatcher } from "./job-dispatcher.js";
 
+const RETRY_SKIP_DELAY_MS = 60_000;
+
+function streamIdentity(streamKey: string): { platform: string; roomSlug: string } | null {
+  const first = streamKey.indexOf(":");
+  const second = streamKey.indexOf(":", first + 1);
+  if (first <= 0 || second <= first + 1) return null;
+  return { platform: streamKey.slice(0, first), roomSlug: streamKey.slice(first + 1, second) };
+}
+
 export interface SettleConfig {
   maxWaitMs: number;
   pollMs: number;
@@ -395,6 +404,10 @@ export class Reconciler {
     this.skipLogState.delete(key);
   }
 
+  private isStreamBusy(key: string): boolean {
+    return this.dispatcher.isScheduled(key) || isJobLive(key) || (this.pipelineDeps.pool?.hasStreamLock(key) ?? false);
+  }
+
   /**
    * 轮询各成员 isDone(roomSlug) 直到全部收播或 maxWaitMs 超时。无 isDone 的 transport 视为已收播。
    * isDone 抛错按"未收播"算(但不中止循环)。
@@ -669,7 +682,44 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
   /** Due-only scan has its own hub timer, but shares this instance's dispatcher and stream locks. */
   async pollUploadRetries(): Promise<void> {
     const due = this.ledger.dueForRetry(Date.now(), -1);
-    if (due.length) await this.reconcileAll(new Set(due.map((job) => job.streamKey)));
+    const ready = new Set<string>();
+    for (const job of due) {
+      const key = job.streamKey;
+      if (this.ledger.getUploadPlan(key) != null) {
+        this.ledger.clearFailurePlan(key);
+        continue;
+      }
+      if (this.dispatcher.isScheduled(key) || (this.pipelineDeps.pool?.hasStreamLock(key) ?? false)) {
+        this.deferUploadRetry(key);
+        continue;
+      }
+      const identity = streamIdentity(key);
+      const cfg = identity && this.resolveCfg
+        ? this.resolveCfg(identity.platform, identity.roomSlug)
+        : this.resolveCfg ? null : this.pipelineDeps.cfg;
+      if (!cfg || cfg.uploadMode !== "upload") {
+        this.stopUploadRetry(key, !cfg ? "room rule is missing or disabled" : "room is no longer in master upload mode");
+        continue;
+      }
+      ready.add(key);
+    }
+    if (ready.size > 0) await this.reconcileAll(ready);
+  }
+
+  private deferUploadRetry(key: string): void {
+    const job = this.ledger.get(key);
+    if (!job || (job.failureClass !== "safe-retry" && job.failureClass !== "resume-append")) return;
+    this.ledger.setFailurePlan(key, {
+      failureClass: job.failureClass,
+      nextAttemptAt: Date.now() + RETRY_SKIP_DELAY_MS,
+    });
+  }
+
+  private stopUploadRetry(key: string, reason: string): void {
+    const job = this.ledger.get(key);
+    if (!job || !RETRYABLE.has(job.state)) return;
+    this.ledger.setState(key, "needs_manual", { error: (job.error || "upload retry") + "; " + reason });
+    this.notify?.({ kind: "error", stage: "同步", message: key + " 自动重试已停止并转人工: " + reason });
   }
 
   private planUploadRetry(key: string, error?: unknown): boolean {
@@ -732,11 +782,20 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
     const collected = await this.collect(transports, this.ledger.listKeys());
     const { cfgByKey, unreachable } = collected;
     const broadcasts = onlyDue ? collected.broadcasts.filter((b) => onlyDue.has(b.streamKey)) : collected.broadcasts;
+    if (onlyDue) {
+      const present = new Set(collected.broadcasts.map((b) => b.streamKey));
+      for (const key of onlyDue) {
+        const job = this.ledger.get(key);
+        if (!job || !RETRYABLE.has(job.state) || present.has(key)) continue;
+        if (unreachable.size > 0) this.deferUploadRetry(key);
+        else this.stopUploadRetry(key, "source recordings are no longer available for this retry");
+      }
+    }
     if (!onlyDue) this.trackUnreachable(transports, unreachable);
 
     // 3.5 第一份快照之后才出现的成员没经过 settle 等待(典型:首快照为空 → settle 秒回 →
     // 第二份快照才发现刚开播的分段)。现查 isDone,未收播则本轮跳过,防边录边合并残片。
-    await this.settleLateMembers(first.broadcasts, broadcasts, stillRecording);
+    await this.settleLateMembers(onlyDue ? [] : first.broadcasts, broadcasts, stillRecording);
 
     // 4. For each broadcast: 建 job 行(快)→ 派发给有界并发调度器(慢 IO 在那边)。
     //
@@ -758,9 +817,13 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
     for (const b of broadcasts) {
       try {
         // 过滤后无成员 → 房间没开 hub / 选中 worker 没人录到 → 跳过(不建 job)。
-        if (b.members.length === 0) continue;
+        if (b.members.length === 0) {
+          if (onlyDue) this.stopUploadRetry(b.streamKey, "no eligible source recordings are available");
+          continue;
+        }
         // 仍有成员在录制 → 本轮跳过(不建 job、不合并残片),待其录完的后续轮再处理。
         if (b.members.some((m) => stillRecording.has(`${m.workerId}:${m.rec.roomSlug}`))) {
+          if (onlyDue) this.deferUploadRetry(b.streamKey);
           this.clearSkipLog(`window:${b.streamKey}`);
           this.clearSkipLog(`rolling:${b.streamKey}`);
           continue;
@@ -770,6 +833,7 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
         // unsent tail as "interrupted" and park the broadcast in needs_manual; wait for the owner instead.
         const ownerBusy = b.members.filter((m) => m.rec.rolling?.active === true);
         if (ownerBusy.length > 0) {
+          if (onlyDue) this.deferUploadRetry(b.streamKey);
           const nodes = [...new Set(ownerBusy.map((m) => m.workerId))].sort().join(",");
           this.logSkipOnce(`rolling:${b.streamKey}`, nodes, () => console.info(
             `[reconciler] ${b.streamKey} 边录边传进程仍在处理会话(${nodes}),本轮跳过`,
@@ -783,6 +847,7 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
         const latestEndMs = Math.max(...b.members.map((m) => m.rec.endMs));
         const windowMs = cfg.reconnectWindowMs != null ? this.resolveWindowMs(cfg.reconnectWindowMs) : this.reconnectWindowMs;
         if (windowMs > 0 && Date.now() - latestEndMs < windowMs) {
+          if (onlyDue) this.deferUploadRetry(b.streamKey);
           const nodes = [...new Set(b.members.map((m) => m.workerId))].sort().join(",");
           this.logSkipOnce(`window:${b.streamKey}`, nodes, () => console.info(
             `[reconciler] ${b.streamKey} 结束 ${Math.round((Date.now() - latestEndMs) / 1000)}s 前,重连窗内等待(防第二场撞 key/防拆场)`,
@@ -850,7 +915,10 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
         // 下一轮重试。放在 done/needs_manual 短路之后(已收口的场不受影响)、建 job 之前(不留半截状态)。
         const lost = this.blockingUnreachable(cfg, transports, unreachable);
         if (lost.length > 0) {
-          if (onlyDue) continue; // Fast retry ticks never advance the ordinary outage escalation counter.
+          if (onlyDue) {
+            this.deferUploadRetry(b.streamKey);
+            continue;
+          }
           console.warn(
             `[reconciler] ${b.streamKey} 参与节点 ${lost.map((id) => `${id}(${unreachable.get(id)})`).join(", ")} 清单失联,` +
               `本轮跳过选优与收口,下轮重试`,
@@ -885,7 +953,7 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
         const nodeOwned = b.members.length > 0 && b.members.every((m) => !!m.rec.rolling?.bv);
         if (!job && isDerivedKey(b.streamKey) && !nodeOwned) {
           const conflict = await runNowConflict(
-            { ledger: this.ledger, transports },
+            { ledger: this.ledger, transports, isBusy: (key) => this.isStreamBusy(key) },
             b.streamKey,
             { force: false, self: { startMs: b.startMs, endMs: Math.max(...b.members.map((m) => m.rec.endMs)) } },
           );
@@ -923,15 +991,46 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
         // pending/retrying 且不计入 fails,重试上限形同虚设。所以在这里自己处理。
         const settled = this.dispatcher.dispatch(b.streamKey, async () => {
           const current = this.ledger.get(b.streamKey);
-          if (!current || !RETRYABLE.has(current.state) || this.ledger.getUploadPlan(b.streamKey)
-            || this.pipelineDeps.pool?.hasStreamLock(b.streamKey)) return;
+          if (!current) return;
+          if (!RETRYABLE.has(current.state)) {
+            this.ledger.clearFailurePlan(b.streamKey);
+            return;
+          }
+          if (this.ledger.getUploadPlan(b.streamKey)) {
+            this.ledger.clearFailurePlan(b.streamKey);
+            return;
+          }
+          if (this.pipelineDeps.pool?.hasStreamLock(b.streamKey)) {
+            if (current.failureClass) this.deferUploadRetry(b.streamKey);
+            return;
+          }
           const freshCfg = this.resolveCfg ? this.resolveCfg(b.platform, b.roomSlug) : cfg;
-          if (!freshCfg) return;
-          if (JSON.stringify([cfg.workers, cfg.requires]) !== JSON.stringify([freshCfg.workers, freshCfg.requires])) return;
+          if (!freshCfg) {
+            if (current.failureClass) this.stopUploadRetry(b.streamKey, "room rule is missing or disabled");
+            return;
+          }
+          if (JSON.stringify([cfg.workers, cfg.requires]) !== JSON.stringify([freshCfg.workers, freshCfg.requires])) {
+            if (current.failureClass) this.stopUploadRetry(b.streamKey, "selected workers changed during retry");
+            return;
+          }
           // The persisted uploadPlan is the ownership signal above. A node-side feature flag is only a
           // preference: unsupported nodes and failed disk gates fall back to the master upload path.
-          if (current.failureClass && freshCfg.uploadMode !== "upload") return;
+          if (current.failureClass && freshCfg.uploadMode !== "upload") {
+            this.stopUploadRetry(b.streamKey, "room is no longer in master upload mode");
+            return;
+          }
           if (current.nextAttemptAt != null && current.nextAttemptAt > Date.now()) return;
+          if (current.failureClass) {
+            const conflict = await runNowConflict(
+              { ledger: this.ledger, transports, isBusy: (key) => this.isStreamBusy(key) },
+              b.streamKey,
+              { force: false, ignoreKeys: [b.streamKey], self: { startMs: b.startMs, endMs: Math.max(...b.members.map((m) => m.rec.endMs)) } },
+            );
+            if (conflict) {
+              this.stopUploadRetry(b.streamKey, "same-broadcast guard: " + conflict);
+              return;
+            }
+          }
           const beforeFails = current.fails;
           try {
             const result = await this._runPipeline(b, { ...this.pipelineDeps, transports, cfg: freshCfg });
@@ -1078,8 +1177,8 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
     // 2) By the original (suffix-free) key: any earlier BV or an unfinished queue row for this broadcast means a
     //    rerun could post a second draft.
     const conflict = await runNowConflict(
-      { ledger: this.ledger, transports, log: (m) => console.info(m) }, baseKey,
-      { force: opts.force === true, self: { startMs: b.startMs, endMs: Math.max(...members.map((m) => m.rec.endMs)) } },
+      { ledger: this.ledger, transports, isBusy: (key) => this.isStreamBusy(key), log: (m) => console.info(m) }, baseKey,
+      { force: opts.force === true, ignoreBusyKeys: [streamKey, key], self: { startMs: b.startMs, endMs: Math.max(...members.map((m) => m.rec.endMs)) } },
     );
     if (opts.force !== true) {
       const reasons: string[] = [];

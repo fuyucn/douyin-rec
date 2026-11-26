@@ -11,10 +11,12 @@ import type { UploadPlan } from "./node-upload-queue.js";
 import { canFallbackToBlocking } from "./node-upload-config.js";
 import type { SyncLedger } from "./ledger.js";
 import type { Transport } from "./transport.js";
+import { masterUploadMayOwnArchive } from "./master-upload.js";
 
 export interface RunNowGuardDeps {
-  ledger: Pick<SyncLedger, "listKeys" | "get" | "getUploadPlan" | "getCandidates">;
+  ledger: Pick<SyncLedger, "listKeys" | "get" | "getUploadPlan" | "getCandidates" | "getSteps" | "doneParts" | "getNodeStates">;
   transports: Map<string, Transport>;
+  isBusy?: (key: string) => boolean;
   log?: (m: string) => void;
 }
 
@@ -78,16 +80,29 @@ function planIds(json: string): { nodeId: string; ids: string[] } | null {
 
 /** Returns the 409 message, or null when the rerun may proceed. */
 export async function runNowConflict(
-  d: RunNowGuardDeps, baseKey: string, opts: { force: boolean; self?: { startMs?: number; endMs?: number } },
+  d: RunNowGuardDeps, baseKey: string,
+  opts: {
+    force: boolean;
+    ignoreKeys?: readonly string[];
+    ignoreBusyKeys?: readonly string[];
+    self?: { startMs?: number; endMs?: number };
+  },
 ): Promise<string | null> {
   const keys = [...new Set([
     ...d.ledger.listKeys().map((k) => k.streamKey).filter((k) => isSameBroadcast(k, baseKey)),
     ...sameBroadcastSiblings(d, baseKey, opts.self),
-  ])];
+  ])].filter((key) => !opts.ignoreKeys?.includes(key));
   const reasons: string[] = [];
   for (const key of keys) {
-    const bv = d.ledger.get(key)?.bv;
+    const job = d.ledger.get(key);
+    const bv = job?.bv;
     if (bv) reasons.push(`${key} already has BV ${bv}`);
+    if (masterUploadMayOwnArchive(d.ledger, key)) reasons.push(key + " has master upload history that may own a manuscript");
+    const busyConflict = !opts.ignoreBusyKeys?.includes(key)
+      && (d.isBusy?.(key) || job?.failureClass === "safe-retry" || job?.failureClass === "resume-append");
+    if (busyConflict) {
+      reasons.push(key + " has an active or scheduled same-broadcast job");
+    }
     const raw = d.ledger.getUploadPlan(key);
     if (raw == null) continue;
     const plan = planIds(raw);
