@@ -21,6 +21,12 @@
 - **Evidence on local commit 306ec7ba:** focused master-upload.test.ts 55/55 passed; full pnpm test 5,832 passed / 42 skipped; pnpm typecheck, pnpm bundle (0.0.414-691dc8), git diff --check, and python3 scripts/issue-guard.py --diff origin/main passed. scripts/pr-risk-scan.sh origin/main still reports RISK for this upload/ledger scope.
 - **State before push:** PR remote head remains 87ae4769 with both checks passing; commit 306ec7ba is local-only. Fresh CI and independent review are required after the single push. No merge or deployment; deployment still requires measured idle state on the master and selected node.
 
+## 2026-11-26 Review convergence round 13
+
+- **Failure family status:** the legacy/no-proof force-boundary fix is pushed in `306ec7ba`; `ca69f42f` records the updated ledger state. The latest independent report available to this worktree was for the previous head, so it is not treated as evidence for the current SHA.
+- **Current evidence:** focused `master-upload.test.ts` 55/55, full `pnpm test` 5,832 passed / 42 skipped, `pnpm typecheck`, `pnpm bundle`, `git diff --check`, and both CI checks for `ca69f42f` passed. `scripts/pr-risk-scan.sh origin/main` still reports `RISK` for the upload/ledger scope.
+- **Current state:** PR remains open and undeployed. A fresh independent review of `ca69f42f` is still required; merge also requires the owner decision to keep the PR2-only, fail-closed scope. Deployment still requires measured idle state on the master and selected node.
+
 ## Goal
 
 本次 PR2 只为主控增加一种自动回队路径：明确限流拒绝且持久证据证明未提交的单文件，按既有退避重试。其他非限流上传错误、未知回执、部分成功和缺少历史证据都不自动重传；PR3–5 另行实施。任务索引：[TODO.md 的 T-250](../TODO.md)，上游 issue #752；PR1 已合并。
