@@ -2,9 +2,10 @@
 
 ## 2026-11-26 更新
 
-- 新一轮独立审查发现 4 项问题（REQUEST_CHANGES）：历史无证据任务可能重建稿、proof-only append 在回读不可用时误记受理、真实 DAG 执行前清除 safe-retry、节点侧配置开关误拦主控回退重试。前两项已在 a9007b8f 修复并有回归；后两项当前仅在本地未提交改动中修复，新增真实 Reconciler→pipeline 测试，尚未推送。
-- 最新本地验证：定向端到端 27/27；全量 5,797 passed / 42 skipped；pnpm typecheck、pnpm arch:check、pnpm bundle（0.0.412-f61e30）及 git diff --check 均通过。scripts/pr-risk-scan.sh origin/main 仍命中 RISK。
-- PR 说明已补状态所有者、提交与源计划不变量、事件×状态矩阵及对称路径覆盖。代码修复提交 2e688ca6 已推送，待新 SHA CI 与独立复审。风险扫描仍为 RISK；未合并、未部署，须先取得安全行为批准，并实测主控/目标节点均无录制与上传。
+- 本轮独立复审（PR head `7e72f421`）归为两组根因：①同场稿件归属在新建、强制重跑和自动重试之间缺少统一判定；②到期调度、失败归因与运行配置存在不对称，可能造成第二稿、重试空转或把旧限流套到新失败。当前未提交修复统一自动/手动同场守卫；`-N` 到期任务映射回基础录像；对临时不可派发项有限期退避，对配置/来源不可恢复项转人工；本次执行 runId 隔离失败证据；手动节点重跑使用房间配置；成功建稿后优先保存 BV。
+- 审查对称路径：首次 reconcile、到期 tick、`runNow` 默认/force、手动节点重跑、节点能力/磁盘闸门回落主控、重启、停止、同场 sibling、`-N` job 与节点队列所有权。真实管线回归覆盖失败归因、同场重复投稿阻断、强制 supersede、`-N` 调度、房间可见性/season 与主控/节点路径隔离。
+- 最新本地完整验证：`pnpm test` **5,822 passed / 42 skipped**（387 个文件通过、1 个既有跳过）；`pnpm typecheck`、`pnpm arch:check`、`pnpm bundle`（`0.0.413-3c5bc8`）、`git diff --check` 均通过。代码已提交为 `af30ae8c`，等待推送后 CI 与独立复审。
+- 用户已在 #752 明确批准 PR2 限定行为（仅持久证据证明未提交的单文件限流失败自动重试；未知回执、部分提交、历史任务不自动重传），因此本轮不再重复询问产品决定。风险扫描仍为 `RISK`，属仓库强制风险门禁，须按 review 流程处理；PR 远端待推送 `af30ae8c`，未合并、未部署，生产空闲检查也未执行。
 
 ## Goal
 
@@ -25,7 +26,7 @@
 - [x] 接入主控合并、分段与各续跑调用；替换持锁内的重复上传重试为失败后回队。
 - [x] 仅对主控单文件明确限流拒绝接持久证据与独立到期 tick；其他上传失败维持人工兜底。
 - [x] 覆盖限流、未知结果、批次失败、成功后崩溃、文件变化、重启、并发去重、用户停止和节点路径不变。
-- [!] 本地验证已完成；本轮修复尚待推送后的远端 CI/自动 review。风险扫描为 RISK，等待用户明确批准该上传重试行为后才可合并；部署按仓库流程由人执行，且须通过生产空闲预检。
+- [!] 本地验证已完成；代码提交 `af30ae8c` 待推送后的远端 CI/自动 review。风险扫描为 RISK，合并仍须通过 review 门禁；部署按仓库流程由人执行，且须通过生产空闲预检。
 
 ## Global Constraints
 
@@ -37,7 +38,28 @@
 
 ## Evidence
 
-- Final local verification after the retry-cap correction: \`pnpm test --reporter=dot\` passed (5,785 passed, 42 skipped; 387 files passed, 1 skipped); \`pnpm typecheck\`, \`pnpm arch:check\`, \`pnpm bundle\` (\`0.0.408-4b1aab\`), \`git diff --check\`, and the focused master-upload suite (35 passed) passed. Retry jitter is clamped to the core one-hour maximum while the existing upload-pool cooldown remains a lower bound. The latest changes are local and need updated-head remote CI/review. Production nodes were not changed: the SSH executor is disabled in this session and requires a settings change plus a new session; no deployment or production status check was attempted.
+## 2026-11-26 Review convergence
+
+- **Invariant — at most one archive per broadcast:** before any master submission, all live/terminal sibling jobs, BVs, unresolved create intents, active stream locks and node-queue ownership are considered. Force can supersede only a provably safe pending retry; unknown/legacy submission evidence remains non-forceable.
+- **Invariant — retries require current proof:** only a single-file, durable, explicit rate-limit rejection from the current run is retryable. Old journal errors, node-side outcomes, partial batches and ambiguous intents cannot confer retry eligibility on a later run.
+- **Invariant — node queue ownership is preserved:** a persisted `uploadPlan` remains the node queue's responsibility; master retries apply only when the pipeline actually owns the upload, including legitimate fallback from unavailable node-side capability.
+- **State owners:** `master-upload` owns `uploadJournal`, run identity and submission proof using compare-and-set writes; `SyncLedger` owns the atomic commit of BV/season/part checkpoints; `Reconciler` owns failure classification and retry wake-up fields; the shared `JobDispatcher` owns active-job deduplication; `ResourcePool` owns upload serialization, cooldown and stream locks. The due timer only selects/awakens jobs and never creates a second execution lane.
+
+| Event | No submission proof | Current explicit single-file rejection | Intent / unknown or partial outcome | Submitted / observed or accepted proof | Manual / terminal |
+| --- | --- | --- | --- | --- | --- |
+| Initial submit | Persist plan and intent, then submit once | Not applicable | Refuse a second submit | Reuse verified checkpoint; do not duplicate | No automatic execution |
+| Explicit rate-limit response | Store `not-submitted` proof and bounded-backoff schedule | Retry same logical group/index through existing upload gate | Any other unresolved entry forces manual | Keep already submitted parts and retry only proven missing item | Stay terminal |
+| Timeout, process kill, lost response | Intent remains unresolved | Not inferred from an unchanged remote count | Turn manual; never resend | Continue only from durable observed proof | Stay terminal |
+| Due tick / ordinary reconcile / `runNow` | Apply the same room, family, source and ownership guards | Preserve retry eligibility through real DAG; consume after execution | Do not schedule or submit | Skip submitted parts; perform existing final verification | Do not resurrect |
+| Restart / stale `retrying` | Recover using the same durable evidence | Defer until stale recovery, then dispatch once | Manual; intent is not retried | Resume append/checkpoint path without recreating archive | Stay terminal |
+| Source-plan or room-config change | May bind a new plan only before any submission evidence | Stop retry if room mode/worker selection no longer matches | Manual; never remap an old index | Preserve prior mapping; changed submitted input is rejected | Stay terminal |
+| Same-broadcast sibling / forced rerun | Block while another viable sibling may submit | Force may supersede a proven retry sibling, clearing its plan | Force cannot bypass unresolved or legacy evidence | Existing BV/history blocks automatic second archive | Remain manual unless an explicitly safe path is selected |
+| Persisted node `uploadPlan` | Do not start master upload | Do not steal the node-owned order | Node status unknown remains non-forceable | Node queue completes through its own poller | Do not create a master duplicate |
+| User stop / duplicate dispatch | Single dispatcher/stream lock prevents concurrent run | Cancel to manual and do not requeue | Preserve unknown intent | Preserve accepted evidence and do not repeat | Stay terminal |
+
+- **Symmetric path audit:** initial reconcile, due-only scan, default/forced `runNow`, manual node retry, node-side eligibility changes, disk/capability fallback, restart/stale recovery, stop/abort, same-broadcast siblings, `-N` identities and queue ownership use the same predicates and submission evidence. The end-to-end tests exercise real `Reconciler` → `runPipeline` DAG paths rather than only mock callbacks.
+- **Scope convergence:** retaining the one per-job submission journal and using the existing dispatcher is necessary for this PR's approved goal—retry a proven no-side-effect rejection without posting twice. No second queue/executor or new persistence store is introduced. Unknown/legacy operator attestation and node-side retry behavior stay out of PR2.
+- **Intentional limits:** no operator attestation path for legacy/unknown submissions and no automatic line failover after an ambiguous request; both remain manual to preserve at-most-once behavior. Node-side upload remains owned by each node's existing queue; this PR changes only master-side retry scheduling.
 
 - 初始基线：完整测试 5723 passed / 48 skipped；依赖用 frozen lockfile 恢复，未改锁文件。基线未 bundle 导致 CLI 的 6 条额外跳过；最终先 bundle 再全量回归。
 - 首轮本地门禁（补充修复前）：完整测试 **5779 passed / 42 skipped**（387 个测试文件，1 个文件跳过），类型检查、架构检查、bundle 与 git diff --check 通过。既有跳过未增加，不放宽超时。Bundle 版本 `0.0.409-f61f84`；受影响测试另行通过 **429 passed**。补充修复后的权威结果见下条。
