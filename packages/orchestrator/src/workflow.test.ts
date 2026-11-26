@@ -226,7 +226,7 @@ describe("runWorkflowNodes — 安全阀与分支隔离", () => {
     const t = makeDeps();
     t.ledger.upsertPending(STREAM_KEY, Date.now());
     t.deps.cfg = { ...t.deps.cfg, uploadMeta: { ...t.deps.cfg.uploadMeta, seasonSectionId: 456 } };
-    const bv = ["B", "V", "SEASONPENDINGFAIL"].join("");
+    const bv = "SEASONPENDINGFAIL";
     t.uploadPlain.mockResolvedValue(bv);
     vi.mocked(addArchiveToSeasonIfConfigured).mockClear();
     vi.spyOn(t.ledger, "setBvAndSeasonState").mockImplementation(() => {
@@ -239,7 +239,7 @@ describe("runWorkflowNodes — 安全阀与分支隔离", () => {
     });
     expect(r.ok).toBe(false);
     expect(t.uploadPlain).toHaveBeenCalledTimes(1);
-    expect(t.ledger.get(STREAM_KEY)?.bv).toBe("BVSEASONPENDINGFAIL");
+    expect(t.ledger.get(STREAM_KEY)?.bv).toBe(bv);
     expect(t.ledger.getNodeState(STREAM_KEY, "upload_plain")?.state).toBe("failed");
     expect(t.ledger.get(STREAM_KEY)?.seasonState).toBeNull();
     expect(vi.mocked(addArchiveToSeasonIfConfigured)).not.toHaveBeenCalled();

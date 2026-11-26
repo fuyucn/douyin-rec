@@ -139,7 +139,8 @@ describe("runSegmentPipeline season checkpoint", () => {
     vi.spyOn(ledger, "setBvAndSeasonState").mockImplementation(() => {
       throw new Error("EIO season pending");
     });
-    const uploadPlain = vi.fn(async () => ["B", "V", "SEGMENTPENDING"].join(""));
+    const pendingBv = "SEGMENTPENDING";
+    const uploadPlain = vi.fn(async () => pendingBv);
     const appendGroup = vi.fn(async () => {});
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ code: 0, data: null }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
@@ -183,7 +184,7 @@ describe("runSegmentPipeline season checkpoint", () => {
       expect(uploadPlain).toHaveBeenCalledTimes(1);
       expect(appendGroup).not.toHaveBeenCalled();
       expect(ledger.doneParts(streamKey, "plain")).toEqual(new Set());
-      expect(ledger.get(streamKey)?.bv).toBe("BVSEGMENTPENDING");
+      expect(ledger.get(streamKey)?.bv).toBe(pendingBv);
       expect(JSON.parse(ledger.get(streamKey)!.uploadJournal!).entries[0].state).toBe("intent");
       expect(ledger.get(streamKey)?.seasonState).toBeNull();
       expect(fetchMock).not.toHaveBeenCalled();
