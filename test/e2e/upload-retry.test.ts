@@ -282,6 +282,7 @@ describe("e2e: 上传超时/故障后的重试与降级", () => {
     } });
     rec(s);
     s.fake.inject({ op: "upload", mode: "rate-limit" });
+    s.fake.inject({ op: "upload", mode: "rate-limit" });
     await s.reconcile();
     const key = s.onlyKey();
     expect(s.ledger.get(key)).toMatchObject({ state: "failed", failureClass: "safe-retry" });
@@ -294,10 +295,31 @@ describe("e2e: 上传超时/故障后的重试与降级", () => {
     const forced = await s.reconciler.runNow({ streamKey: key + "-1", wait: true, force: true });
     expect(forced.ok).toBe(true);
     expect(s.jobState(key)).toBe("needs_manual");
-    expect(s.jobState(key + "-1")).toBe("done");
+    expect(s.ledger.get(key + "-1")).toMatchObject({ state: "failed", fails: 0, failureClass: "safe-retry" });
+    expect(s.fake.draftCount).toBe(0);
+    s.ledger.setFailurePlan(key + "-1", { failureClass: "safe-retry", nextAttemptAt: 0 });
     await s.reconciler.pollUploadRetries();
-    expect(s.fake.calls.filter((call) => call.op === "upload")).toHaveLength(2);
+    await vi.waitFor(() => expect(s.jobState(key + "-1")).toBe("done"), { timeout: 4_000 });
+    expect(s.fake.calls.filter((call) => call.op === "upload")).toHaveLength(3);
     expect(s.fake.draftCount).toBe(1);
+  });
+
+  it("a worker-restricted manual run does not schedule a retry with a different source plan", async () => {
+    s = await Scenario.create({ cfg: { cleanup: FULL_CLEANUP }, deps: {
+      pool: new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, uploadCooldownMs: 0 }),
+    } });
+    rec(s);
+    s.fake.inject({ op: "upload", mode: "rate-limit" });
+    await s.reconcile();
+    const key = s.onlyKey();
+    s.fake.inject({ op: "upload", mode: "rate-limit" });
+
+    const result = await s.reconciler.runNow({ streamKey: key, winnerWorker: "local", wait: true, force: true });
+
+    expect(result.ok).toBe(true);
+    expect(s.ledger.get(key)).toMatchObject({ state: "needs_manual", failureClass: null, nextAttemptAt: null });
+    expect(s.fake.calls.filter((call) => call.op === "upload")).toHaveLength(2);
+    expect(s.fake.draftCount).toBe(0);
   });
 
   it("a due retry defers while the source broadcast is still recording", async () => {

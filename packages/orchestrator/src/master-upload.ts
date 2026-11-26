@@ -68,13 +68,23 @@ function hasPreviousMasterUploadActivity(ledger: MasterHistoryLedger, key: strin
   return history || parts || nodes;
 }
 
+function hasNodeUploadActivity(ledger: MasterHistoryLedger, key: string): boolean {
+  const history = ledger.getSteps(key).some((step) => step.step === "node_upload" && step.phase !== "skipped");
+  const nodes = ledger.getNodeStates(key).some((node) => node.node === "node_upload"
+    && !["pending", "skipped", "blocked"].includes(node.state));
+  return history || nodes;
+}
+
 export function masterUploadMayOwnArchive(ledger: MasterHistoryLedger, key: string): boolean {
   const job = ledger.get(key);
   if (!job) return false;
   const raw = job.uploadJournal ?? null;
   if (raw == null) return hasPreviousMasterUploadActivity(ledger, key);
   const journal = parseJournal(raw);
-  return !journal || journal.legacy || journal.entries.length > 0 || hasPreviousMasterUploadActivity(ledger, key);
+  if (!journal || journal.legacy) return true;
+  return !!job.bv || hasNodeUploadActivity(ledger, key)
+    || UPLOAD_GROUPS.some((group) => ledger.doneParts(key, group).size > 0)
+    || journal.entries.some((entry) => entry.state !== "not-submitted");
 }
 
 export function masterUploadHasUnresolvedSubmission(ledger: MasterHistoryLedger, key: string): boolean {
@@ -83,7 +93,7 @@ export function masterUploadHasUnresolvedSubmission(ledger: MasterHistoryLedger,
   const raw = job.uploadJournal ?? null;
   if (raw == null) return hasPreviousMasterUploadActivity(ledger, key);
   const journal = parseJournal(raw);
-  return !journal || journal.legacy || journal.entries.some((entry) => entry.state === "intent");
+  return !journal || journal.entries.some((entry) => entry.state === "intent");
 }
 
 /** Called before workflow start events: absence of old upload evidence is not retroactive proof. */

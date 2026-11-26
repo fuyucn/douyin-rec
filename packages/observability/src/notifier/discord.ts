@@ -3,20 +3,30 @@ import { createLogger } from "@drec/core";
 import { type Notifier, type NotifyEvent, formatMessage } from "./index.js";
 
 const log = createLogger("notifier");
+const MAX_CONTENT_LENGTH = 2000;
 
-/** POST 消息到 Discord incoming webhook。失败只 log，绝不抛（不得影响主流程）。 */
+function boundedContent(content: string): string {
+  const characters = Array.from(content);
+  if (characters.length <= MAX_CONTENT_LENGTH) return content;
+  return `${characters.slice(0, MAX_CONTENT_LENGTH - 1).join("")}…`;
+}
+
+/** Post to Discord without allowing webhook failures to affect the main workflow. */
 export class DiscordNotifier implements Notifier {
   constructor(private readonly webhook: string) {}
   async notify(e: NotifyEvent): Promise<void> {
     try {
-      await fetch(this.webhook, {
+      const response = await fetch(this.webhook, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ content: formatMessage(e) }),
+        body: JSON.stringify({ content: boundedContent(formatMessage(e)) }),
         signal: AbortSignal.timeout(5000),
       });
+      if (!response.ok) {
+        log.warn(`Discord push failed (ignored): HTTP ${response.status} ${response.statusText}`);
+      }
     } catch (err) {
-      log.warn(`Discord 推送失败（忽略）: ${(err as Error).message}`);
+      log.warn(`Discord push failed (ignored): ${(err as Error).message}`);
     }
   }
 }

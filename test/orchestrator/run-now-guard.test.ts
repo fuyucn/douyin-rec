@@ -67,6 +67,17 @@ describe("runNowConflict", () => {
     expect(await runNowConflict({ ledger: l, transports: new Map() }, BASE, { force: false })).toMatch(/-1 already has BV/);
   });
 
+  it("force cannot bypass legacy upload history without a durable journal", async () => {
+    const l = fresh();
+    order(l, BASE, false);
+    l.logStep(BASE, "upload_plain", "start");
+
+    const ordinary = await runNowConflict({ ledger: l, transports: new Map() }, BASE, { force: false, targetKey: BASE });
+    const forced = await runNowConflict({ ledger: l, transports: new Map() }, BASE, { force: true, targetKey: BASE });
+    expect(ordinary).toMatch(/rerun blocked:.*legacy/i);
+    expect(forced).toBe(ordinary);
+  });
+
   it("another broadcast's BV does not interfere", async () => {
     const l = fresh();
     order(l, "douyin:1:2026-10-16", false); l.setBv("douyin:1:2026-10-16", "BV1ccccccccc"); // issue-guard: allow (fake BV fixture)
@@ -119,7 +130,7 @@ describe("runNowConflict", () => {
     const l = fresh(); order(l, BASE);
     const log = vi.fn();
     expect(await runNowConflict({ ledger: l, transports: node(async () => { throw new Error("x"); }), log }, BASE, { force: true }))
-      .toMatch(/rerun refused:.*queue state unknown/i);
+      .toMatch(/rerun blocked:.*queue state unknown/i);
     expect(log).toHaveBeenCalledOnce();
   });
 });

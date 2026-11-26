@@ -4,7 +4,8 @@
  * The rule is keyed by the original broadcast key with any `-N` suffix removed, because `-N` jobs are separate
  * ledger rows for the same recording: a BV on `key` must stop `key-2` from posting a second draft.
  * The family also covers same-day `_HHMM` siblings that are not provably a separate broadcast (gap > 60 min), so
- * a derived job of the same broadcast (issue #292) is bound by the base key's BV. Everything unknown fails closed (409). Only `force` passes, and a forced rerun logs the old BV.
+ * a derived job of the same broadcast (issue #292) is bound by the base key's BV. A forced rerun may bypass old
+ * archive history only when no unresolved submission or active/unknown node queue can still submit.
  */
 import { SAME_BROADCAST_GAP_MS } from "@drec/core";
 import type { UploadPlan } from "./node-upload-queue.js";
@@ -106,7 +107,9 @@ export async function runNowConflict(
     if (bv) reasons.push(`${key} already has BV ${bv}`);
     if (masterUploadMayOwnArchive(d.ledger, key)) reasons.push(key + " has master upload history that may own a manuscript");
     if (masterUploadHasUnresolvedSubmission(d.ledger, key)) {
-      nonForceable.push(key + " has unresolved or legacy submission evidence");
+      const reason = key + " has unresolved or legacy submission evidence";
+      reasons.push(reason);
+      nonForceable.push(reason);
     }
     const busyConflict = !opts.ignoreBusyKeys?.includes(key)
       && (!!d.isBusy?.(key) || job?.state === "retrying");
@@ -142,9 +145,9 @@ export async function runNowConflict(
     }
   }
   if (reasons.length === 0) return null;
+  if (opts.force) d.log?.(`[runNow] force over: ${reasons.join("; ")}`);
+  if (nonForceable.length > 0) return `rerun blocked: ${reasons.join("; ")}`;
   if (opts.force) {
-    d.log?.(`[runNow] force over: ${reasons.join("; ")}`);
-    if (nonForceable.length > 0) return `rerun refused: ${nonForceable.join("; ")}`;
     return null;
   }
   return `rerun refused: ${reasons.join("; ")}. Rerun with force only after deleting the old draft, or when resuming it on purpose.`;

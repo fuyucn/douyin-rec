@@ -109,8 +109,9 @@ describe("master submission evidence", () => {
     const conflict = await runNowConflict({ ledger: f.ledger, transports: new Map() }, `${KEY}_0830`, {
       force: true, self: { startMs: Date.parse("2026-06-22T00:30:00Z"), endMs: Date.parse("2026-06-22T00:40:00Z") },
     });
-    expect(conflict).toMatch(/rerun refused.*unresolved/i);
+    expect(conflict).toMatch(/rerun blocked.*unresolved/i);
   });
+
 
   it("force cannot race a same-broadcast retrying job", async () => {
     const f = fixture();
@@ -120,7 +121,7 @@ describe("master submission evidence", () => {
       force: true, self: { startMs: Date.parse("2026-06-22T00:30:00Z"), endMs: Date.parse("2026-06-22T00:40:00Z") },
     });
 
-    expect(conflict).toMatch(/rerun refused.*active or scheduled/i);
+    expect(conflict).toMatch(/rerun blocked.*active or scheduled/i);
   });
 
   it("same-broadcast sibling is blocked while another job is active", async () => {
