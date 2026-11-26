@@ -1013,6 +1013,7 @@ async function runPipelineInner(
   jlog: (msg: string) => void,
 ): Promise<{ state: JobState; bv?: string; stageReady?: true }> {
   const { transports, ledger, notify, cfg } = deps;
+  const existing = ledger.get(b.streamKey);
   const bindMasterUploadPlan = (): void => {
     if (cfg.uploadMode !== "upload" || ledger.get(b.streamKey)?.state === "done") return;
     prepareMasterUpload(ledger, b.streamKey);
@@ -1023,8 +1024,11 @@ async function runPipelineInner(
       visibility: cfg.uploadPrivate === false ? "public" : "private",
     });
   };
-  if (cfg.uploadMode === "upload" && ledger.get(b.streamKey)?.state !== "done"
-    && !shouldUseNodeSideUpload(cfg, burnFlags(cfg.steps)).ok) {
+  // An existing master archive must keep its original visibility policy even if a later config
+  // change makes the node-side path eligible. Bind before every resume branch, not only before
+  // the pull-to-master path.
+  if (cfg.uploadMode === "upload" && existing?.state !== "done"
+    && (existing?.bv != null || !shouldUseNodeSideUpload(cfg, burnFlags(cfg.steps)).ok)) {
     bindMasterUploadPlan();
   }
   // 子命令统一经此执行:命令行 + 耗时 + 输出摘尾(最后 2KB,biliup 输出可能很长)都进 job.log。
@@ -1051,7 +1055,6 @@ async function runPipelineInner(
   const stageFmt = effectiveStageFormat(cfg.outputFormat, cfg.uploadMode);
 
   // 续跑:job 已有 bv ⇒ P1 已建稿(不可逆),绝不重传。跳过 select/pull/merge/burn/uploadPlain,只补 append。
-  const existing = ledger.get(streamKey);
   // #70:台账已有 bv 时,同场另一成员可能在建稿中被杀(有意图/不确定段、无稿件号)—— 续跑只认台账 bv,
   // 会漏掉该成员的分 P 却收口 done。续跑任一分支(含节点侧 done 补跑)前先跑同一检查,命中转人工。
   if (existing?.bv && blockUnsettledWithoutBv({ streamKey, members: b.members, ledger, jlog, notify })) {

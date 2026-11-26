@@ -1863,11 +1863,17 @@ describe("runPipeline", () => {
       expect(upload.uploadPlain.mock.calls[0]?.[0]?.public).toBe(false);
       expect(upload.appendGroup).toHaveBeenCalledTimes(1);
 
-      const publicConfig = { ...deps, cfg: { ...deps.cfg, uploadPrivate: false } };
+      const publicConfig = { ...deps, cfg: { ...deps.cfg, uploadPrivate: false,
+        steps: { nodeSideUpload: true, burnDanmu: false, burnLivechat: false } } };
+      const node = publicConfig.transports.get("node-1")!;
+      const nodePipeline = vi.fn().mockResolvedValue({ ok: true, bv: "BVnode" });
+      node.nodeCapabilities = vi.fn().mockResolvedValue({ biliup: true, cookies: true, diskFreeGB: 50 });
+      node.nodePipeline = nodePipeline;
       await expect(runPipeline(broadcast, publicConfig)).rejects.toThrow("plan changed after submission");
 
       expect(upload.uploadPlain).toHaveBeenCalledTimes(1);
       expect(upload.appendGroup).toHaveBeenCalledTimes(1);
+      expect(nodePipeline).not.toHaveBeenCalled();
       expect(deps.ledger.get(broadcast.streamKey)?.bv).toBe("BV123");
       deps.ledger.close();
     });
