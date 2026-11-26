@@ -723,14 +723,17 @@ private cleanupBackfillDue(streamKey: string, segmentMode = false): string | nul
     const job = this.ledger.get(key);
     if (!job || (job.failureClass !== "safe-retry" && job.failureClass !== "resume-append")) return;
     const now = Date.now();
-    if (countTowardLimit && now - job.updatedAt >= RETRY_SKIP_MAX_MS) {
+    const deferredAt = countTowardLimit ? (job.retryDeferredAt ?? now) : null;
+    if (countTowardLimit && now - deferredAt! >= RETRY_SKIP_MAX_MS) {
       this.stopUploadRetry(key, reason + " for " + Math.round(RETRY_SKIP_MAX_MS / 60_000) + " minutes");
       return;
     }
-    // Keep the original failure timestamp so a persistent refusal cannot defer forever across restarts.
+    // Time only persistent non-active refusals. Queue waits and active work clear the timer, so a long upload
+    // cannot be mistaken for a stalled prerequisite after a restart.
     this.ledger.setFailurePlan(key, {
       failureClass: job.failureClass,
       nextAttemptAt: now + RETRY_SKIP_DELAY_MS,
+      retryDeferredAt: deferredAt,
       touchUpdatedAt: false,
     });
   }

@@ -2100,6 +2100,7 @@ describe("清单三态:失联节点所在的场不选优不收口(#27)", () => {
     ledger.setState(key, "failed", { error: "safe upload rejection" });
     ledger.setFailurePlan(key, { failureClass: "safe-retry", nextAttemptAt: 0 });
 
+    await reconciler.pollUploadRetries();
     clock.mockReturnValue(startedAt + MAX_BACKOFF_MS + 10_000);
     await reconciler.pollUploadRetries();
 
@@ -2110,6 +2111,7 @@ describe("清单三态:失联节点所在的场不选优不收口(#27)", () => {
     ledger.setState(key, "retrying");
     ledger.setFailurePlan(key, { failureClass: "safe-retry", nextAttemptAt: 0 });
     const retryStartedAt = Date.now();
+    await reconciler.pollUploadRetries();
     clock.mockReturnValue(retryStartedAt + MAX_BACKOFF_MS + 10_000);
     await reconciler.pollUploadRetries();
     expect(ledger.get(key)?.state).toBe("needs_manual");
