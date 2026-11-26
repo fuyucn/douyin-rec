@@ -2,7 +2,7 @@
 
 > 本文件是本仓库 **agent 工作的唯一待办台账**。管理规则见 `AGENTS.md`「任务与 TODO 管理」。
 > 编号 `T-N` 稳定不变（引用/提交信息里用它指代条目）。
-> 最后更新：2026-11-20
+> 最后更新：2026-11-26
 
 ## 状态约定
 
@@ -15,7 +15,7 @@
 
 ## 进行中
 
-- [~] **T-250 主控单文件限流安全回队（issue [#752](https://github.com/fuyucn/douyin-rec/issues/752)，PR2，2026-11-25）** — **做什么/为什么**: 仅对持久证据明确拒绝的单文件限流请求使用退避回队；未知回执、部分成功、非限流上传失败和历史无证据任务不自动重传。复用现有上传闸与冷却，停止/终态不复活。用户已在 #752 明确批准此限定行为。**验收**: 本轮本地全量测试 5,822 passed / 42 skipped，类型、架构、bundle、diff-check 通过；代码已提交 `af30ae8c`，待推送后的 CI 和新 SHA 独立复审。**阻塞**: 风险扫描仍为 RISK，遵循仓库风险门禁；合并前须满足 review 流程。未合并或部署；部署须实测 master 及目标节点均无录制、无上传，且由人执行。**计划**: [plans/058](plans/058_master_upload_retry.md)。PR3–5 与历史任务迁移不在本步范围。
+- [~] **T-250 主控单文件限流安全回队（issue [#752](https://github.com/fuyucn/douyin-rec/issues/752)，PR2，2026-11-25）** — **做什么/为什么**: 仅对持久证据明确拒绝的单文件限流请求使用退避回队；未知回执、部分成功、非限流上传失败和历史无证据任务不自动重传。复用现有上传闸与冷却，停止/终态不复活。用户已在 #752 明确批准此限定行为。**验收（本地）**: 全量测试 5,830 passed / 42 skipped；定向重试/force/通知测试 210 passed；类型、架构、bundle `0.0.414-44bde7`、隐私扫描与 diff-check 通过。queued、running、直播恢复均有退避边界回归；Discord 通知截断到平台限制并记录非 2xx。**当前阻塞**: PR 远端仍为 `fe8487b`（CI 当前一次 check 通过）；本轮修复尚未提交、推送、CI 验证或新 SHA 独立复审。风险扫描为 RISK，合并前须由人决定；legacy/无证明历史和未知节点队列的 force 仍 fail-closed，是否恢复人工覆盖待用户决定。尚未合并或部署；部署须实测 master 及目标节点均无录制、无上传，且由人执行。PR 跟进调度 `ed69afab-3760-408a-a5f1-fb4f684edde8` 的旧 hook 需用户在 Automation 中仅替换 command，保留 timeout。**计划**: [plans/058](plans/058_master_upload_retry.md)。PR3–5 与历史任务迁移不在本步范围。
 
 - [~] **T-249 四库收口为「控制库 + 处理队列库」并把库放进 named volume（issue [#750](https://github.com/fuyucn/douyin-rec/issues/750)，2026-11-25）** — **做什么**: `db/drec-control.db` 一个文件装 tasks/settings/merge_jobs/hub_rules + hub 台账 `sync_*`(7 表) + `room_sessions` + `upload_limits`；`proc-queue.db` 保持独立（多进程 claim/租约独占 WAL）。`compose` 把 `db/` 改挂 named volume `drec-db`，新增一次性 `db-seed`（拷完跑 `integrity_check` 才落 `.seed-complete`）。**为什么**: #747 的 522 是 SQLite `-wal`/`-shm` 经宿主 bind mount 转发时视图分叉，只能重启容器恢复；顺带把「4 份 WAL/4 个连接/4 个备份点」收成一份。**验收**: 主控已部署 `0.0.406`，控制库 12 表 `integrity ok`、tasks 23 / sync_jobs 570 / room_sessions 192 / upload_limits 1 与迁移前一致；宿主侧对 bind 目录改名→改回，`/api/tasks`、`/api/hub/jobs`、`/api/stats` 仍 200（注入验证）。**剩余**: 两台节点当前都在录制（`recording:1`），按部署 guard 等收播后再升级，升级时旧库自动并入并保留原文件。
 
