@@ -14,6 +14,13 @@
 - **Scope decision:** the durable submission journal, existing dispatcher, upload gate, and per-node upload-plan ownership remain necessary for the original at-most-once goal. No second queue or executor was added. Legacy/unknown manual force remains fail-closed pending an explicit product decision.
 - **Current state:** PR remains open and undeployed. Independent review must use 4ebe3c1b; production deployment still requires the master and selected node to be idle for recording and upload.
 
+## 2026-11-26 Review convergence round 12
+
+- **Failure family fixed:** runNow could reject legacy history without a journal but allow the same history after it was materialized as a legacy journal; it also missed unproven node-side upload history when a non-legacy master journal already existed. masterUploadHasUnresolvedSubmission now classifies both paths as non-forceable unless a BV proves archive identity.
+- **Convergence choice:** preserve the existing at-most-once invariant and fail closed for legacy/unknown outcomes. Do not add a new queue, executor, or persistence field; the fix reuses the existing submission journal and node-upload evidence.
+- **Evidence on local commit 306ec7ba:** focused master-upload.test.ts 55/55 passed; full pnpm test 5,832 passed / 42 skipped; pnpm typecheck, pnpm bundle (0.0.414-691dc8), git diff --check, and python3 scripts/issue-guard.py --diff origin/main passed. scripts/pr-risk-scan.sh origin/main still reports RISK for this upload/ledger scope.
+- **State before push:** PR remote head remains 87ae4769 with both checks passing; commit 306ec7ba is local-only. Fresh CI and independent review are required after the single push. No merge or deployment; deployment still requires measured idle state on the master and selected node.
+
 ## Goal
 
 本次 PR2 只为主控增加一种自动回队路径：明确限流拒绝且持久证据证明未提交的单文件，按既有退避重试。其他非限流上传错误、未知回执、部分成功和缺少历史证据都不自动重传；PR3–5 另行实施。任务索引：[TODO.md 的 T-250](../TODO.md)，上游 issue #752；PR1 已合并。
