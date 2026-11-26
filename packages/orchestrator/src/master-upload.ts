@@ -324,7 +324,7 @@ async function submit(input: SubmitInput): Promise<string> {
 
 export function createMasterArchive(deps: PipelineDeps, key: string, opts: UploadOpts): Promise<string> {
   const files = opts.videos?.length ? opts.videos : opts.video ? [opts.video] : [];
-  return submit({ deps, key, group: "plain", indices: [0], files, create: opts });
+  return submit({ deps, key, group: "plain", indices: files.map((_, index) => index), files, create: opts });
 }
 
 export async function appendMasterParts(

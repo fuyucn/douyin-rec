@@ -47,6 +47,18 @@ describe("master submission evidence", () => {
     expect(f.ledger.get(KEY)?.bv).toBe(ARCHIVE);
   });
 
+  it("records every part index for a multi-file archive create", async () => {
+    const f = fixture();
+    await createMasterArchive(f.deps, KEY, {
+      videos: [f.files[0]!, f.files[1]!], cookies: "fixture", title: "fixture", tag: "fixture", tid: 21, public: false,
+    });
+
+    expect(f.create).toHaveBeenCalledTimes(1);
+    expect(f.ledger.doneParts(KEY, "plain")).toEqual(new Set([0, 1]));
+    const journal = JSON.parse(f.ledger.get(KEY)!.uploadJournal!);
+    expect(journal.entries[0]).toMatchObject({ kind: "create", indices: [0, 1], state: "submitted" });
+  });
+
   it("a single rejected create can safely retry; the rejected attempt is not a submitted part", async () => {
     const f = fixture();
     f.create.mockRejectedValueOnce(new Error("code: 601 upload rate limit"));
