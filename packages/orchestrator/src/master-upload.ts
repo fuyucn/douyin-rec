@@ -93,7 +93,9 @@ export function masterUploadHasUnresolvedSubmission(ledger: MasterHistoryLedger,
   const raw = job.uploadJournal ?? null;
   if (raw == null) return hasPreviousMasterUploadActivity(ledger, key);
   const journal = parseJournal(raw);
-  return !journal || journal.entries.some((entry) => entry.state === "intent");
+  return !journal || journal.legacy
+    || (!job.bv && hasNodeUploadActivity(ledger, key))
+    || journal.entries.some((entry) => entry.state === "intent");
 }
 
 /** Called before workflow start events: absence of old upload evidence is not retroactive proof. */

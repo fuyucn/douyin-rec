@@ -112,6 +112,32 @@ describe("master submission evidence", () => {
     expect(conflict).toMatch(/rerun blocked.*unresolved/i);
   });
 
+  it("runNow force cannot bypass legacy upload history after journal initialization", async () => {
+    const f = fixture();
+    f.ledger.logStep(KEY, "upload_plain", "start");
+    prepareMasterUpload(f.ledger, KEY);
+
+    expect(JSON.parse(f.ledger.get(KEY)!.uploadJournal!).legacy).toBe(true);
+    expect(masterUploadHasUnresolvedSubmission(f.ledger, KEY)).toBe(true);
+    const conflict = await runNowConflict({ ledger: f.ledger, transports: new Map() }, KEY, {
+      force: true, targetKey: KEY,
+    });
+    expect(conflict).toMatch(/rerun blocked.*unresolved or legacy/i);
+  });
+
+  it("runNow force cannot bypass unproven node upload history beside a master journal", async () => {
+    const f = fixture();
+    prepareMasterUpload(f.ledger, KEY);
+    f.ledger.logStep(KEY, "node_upload", "start");
+
+    expect(JSON.parse(f.ledger.get(KEY)!.uploadJournal!).legacy).toBe(false);
+    expect(masterUploadHasUnresolvedSubmission(f.ledger, KEY)).toBe(true);
+    const conflict = await runNowConflict({ ledger: f.ledger, transports: new Map() }, KEY, {
+      force: true, targetKey: KEY,
+    });
+    expect(conflict).toMatch(/rerun blocked.*unresolved or legacy/i);
+  });
+
 
   it("force cannot race a same-broadcast retrying job", async () => {
     const f = fixture();
