@@ -27,6 +27,10 @@
 - **Current evidence:** focused `master-upload.test.ts` 55/55, full `pnpm test` 5,832 passed / 42 skipped, `pnpm typecheck`, `pnpm bundle`, `git diff --check`, and both CI checks for `ca69f42f` passed. `scripts/pr-risk-scan.sh origin/main` still reports `RISK` for the upload/ledger scope.
 - **Current state:** PR remains open and undeployed. A fresh independent review of `ca69f42f` is still required; merge also requires the owner decision to keep the PR2-only, fail-closed scope. Deployment still requires measured idle state on the master and selected node.
 
+- **Additional entry-path audit:** `retryNode` enters the same centralized `submit` gate as automatic and `runNow` uploads. The gate now rejects node-upload history without a recorded BV before any create/append API call; a regression asserts that no create call occurs. This closes the same at-most-once invariant at the remaining manual entry point without adding another queue or persistence mechanism.
+- **Current local validation:** focused `master-upload.test.ts` 56/56 passed; `pnpm typecheck`, `pnpm arch:check`, `pnpm bundle` (`0.0.415`), `git diff --check`, and `python3 scripts/issue-guard.py --diff origin/main` passed. A later full `pnpm test --reporter=dot` exited 1 after about 24 minutes; its failing-test detail was not retained, so this is not reported as a full-suite pass. The last remote CI on `3569e0a` also failed in unchanged `test/app/task-secrets.test.ts` with truncated JSON; no CI has run on the local fix, and the failure is not yet confirmed against the base. `scripts/pr-risk-scan.sh origin/main` remains `RISK`.
+- **Current state:** the new fix and version `0.0.415` are committed locally as `84e90adb` but not pushed; PR head is still `3569e0a`. No merge or deployment. Manual-force semantics remain a separate owner decision; deployment still requires measured idle state on the master and selected node.
+
 ## Goal
 
 本次 PR2 只为主控增加一种自动回队路径：明确限流拒绝且持久证据证明未提交的单文件，按既有退避重试。其他非限流上传错误、未知回执、部分成功和缺少历史证据都不自动重传；PR3–5 另行实施。任务索引：[TODO.md 的 T-250](../TODO.md)，上游 issue #752；PR1 已合并。
