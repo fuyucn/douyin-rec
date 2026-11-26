@@ -7,6 +7,13 @@
 - 最新本地完整验证：`pnpm test` **5,822 passed / 42 skipped**（387 个文件通过、1 个既有跳过）；`pnpm typecheck`、`pnpm arch:check`、`pnpm bundle`（`0.0.413-3c5bc8`）、`git diff --check` 均通过。代码已提交为 `af30ae8c`，等待推送后 CI 与独立复审。
 - 用户已在 #752 明确批准 PR2 限定行为（仅持久证据证明未提交的单文件限流失败自动重试；未知回执、部分提交、历史任务不自动重传），因此本轮不再重复询问产品决定。风险扫描仍为 `RISK`，属仓库强制风险门禁，须按 review 流程处理；PR 远端待推送 `af30ae8c`，未合并、未部署，生产空闲检查也未执行。
 
+## 2026-11-26 Review convergence round 11
+
+- **Failure family fixed:** retry deferral age now has its own persisted start field. A queue wait, active upload, or recording-resume deferral clears that timer; a persistent non-active refusal starts it once and survives restart. The original job updatedAt is no longer used as a proxy for blocked time.
+- **Evidence:** 4ebe3c1b passed the full local suite (5830 passed / 42 skipped), typecheck, diff-check, and both CI runs including privacy gate, bundle, web build, and browser regression.
+- **Scope decision:** the durable submission journal, existing dispatcher, upload gate, and per-node upload-plan ownership remain necessary for the original at-most-once goal. No second queue or executor was added. Legacy/unknown manual force remains fail-closed pending an explicit product decision.
+- **Current state:** PR remains open and undeployed. Independent review must use 4ebe3c1b; production deployment still requires the master and selected node to be idle for recording and upload.
+
 ## Goal
 
 本次 PR2 只为主控增加一种自动回队路径：明确限流拒绝且持久证据证明未提交的单文件，按既有退避重试。其他非限流上传错误、未知回执、部分成功和缺少历史证据都不自动重传；PR3–5 另行实施。任务索引：[TODO.md 的 T-250](../TODO.md)，上游 issue #752；PR1 已合并。

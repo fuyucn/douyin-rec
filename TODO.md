@@ -15,6 +15,8 @@
 
 ## 进行中
 
+补充状态（2026-11-26，覆盖 T-250 上述旧 SHA/计数）：代码已推送至 4ebe3c1b；该 SHA 的两条 CI 均成功，本地全量 5830 passed / 42 skipped，类型检查与 diff-check 通过。重试阻塞计时已独立持久化，排队、活动上传和收播恢复不会消耗人工升级时限。仍等待独立复审，尚未合并或部署；RISK 与 legacy/未知提交的 fail-closed 边界不变。
+
 - [~] **T-250 主控单文件限流安全回队（issue [#752](https://github.com/fuyucn/douyin-rec/issues/752)，PR2，2026-11-25）** — **做什么/为什么**: 仅对持久证据明确拒绝的单文件限流请求使用退避回队；未知回执、部分成功、非限流上传失败和历史无证据任务不自动重传。复用现有上传闸与冷却，停止/终态不复活。用户已在 #752 明确批准此限定行为。**验收（本地）**: 受影响重试/通知测试 210 passed；两次全量均为 5,829 passed / 42 skipped，但各有 1 个不同的未改动时序测试失败，两个失败点独立复跑均通过；类型、架构、bundle `0.0.414-624266` 与 diff-check 通过。**当前阻塞**: 远端 PR `fe8487b` 的两项 CI 检查通过；本地提交 `1758a435`、`e63c9899` 仍未推送，需在新 SHA 上跑 CI 和独立复审。风险扫描为 RISK；PR 评论要求 owner 决定是否批准限定 PR2 并允许合并。legacy/无证明历史和未知节点队列仍 fail-closed，不能安全地被自动重试。尚未合并或部署；部署须实测 master 及目标节点均无录制、无上传，且由人执行。PR 跟进调度 `ed69afab-3760-408a-a5f1-fb4f684edde8` 仍是 active，但旧 hook 需用户在 Automation 中仅替换 command，保留 180 秒超时。**计划**: [plans/058](plans/058_master_upload_retry.md)。PR3–5 与历史任务迁移不在本步范围。
 
 - [~] **T-249 四库收口为「控制库 + 处理队列库」并把库放进 named volume（issue [#750](https://github.com/fuyucn/douyin-rec/issues/750)，2026-11-25）** — **做什么**: `db/drec-control.db` 一个文件装 tasks/settings/merge_jobs/hub_rules + hub 台账 `sync_*`(7 表) + `room_sessions` + `upload_limits`；`proc-queue.db` 保持独立（多进程 claim/租约独占 WAL）。`compose` 把 `db/` 改挂 named volume `drec-db`，新增一次性 `db-seed`（拷完跑 `integrity_check` 才落 `.seed-complete`）。**为什么**: #747 的 522 是 SQLite `-wal`/`-shm` 经宿主 bind mount 转发时视图分叉，只能重启容器恢复；顺带把「4 份 WAL/4 个连接/4 个备份点」收成一份。**验收**: 主控已部署 `0.0.406`，控制库 12 表 `integrity ok`、tasks 23 / sync_jobs 570 / room_sessions 192 / upload_limits 1 与迁移前一致；宿主侧对 bind 目录改名→改回，`/api/tasks`、`/api/hub/jobs`、`/api/stats` 仍 200（注入验证）。**剩余**: 两台节点当前都在录制（`recording:1`），按部署 guard 等收播后再升级，升级时旧库自动并入并保留原文件。
