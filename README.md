@@ -58,6 +58,9 @@ pnpm bundle       # esbuild → 单文件 dist/douyin-rec.mjs（带 shebang，�
 pnpm build        # （可选）tsc 逐文件转译到 dist/，供调试
 ```
 
+For bounded test execution, memory diagnostics and the test-tooling typecheck,
+see [Testing](./docs/testing.md).
+
 `pnpm bundle` 把全部依赖 + 补丁内联成一个自包含文件 `dist/douyin-rec.mjs`（~2.9MB），拷到任何有 node + ffmpeg 的机器即可运行（无需 `node_modules`）。它顺便规避了 tsx 的 `development` 条件坑（见「已知限制」）。也可 `npm i -g .` 装成全局命令 `douyin-rec`。
 
 ## 快速开始
