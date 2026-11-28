@@ -64,27 +64,33 @@ function fakeFetch(o: {
   viewArchive?: Record<string, unknown> | null;
   edit?: Record<string, unknown>;
   editThrows?: unknown;
+  observeEdits?: boolean;
 }) {
   const hits: string[] = [];
-  const impl = (async (input: string | URL | Request) => {
+  const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+  let viewArchive = o.viewArchive ?? { archive: { aid: 7, bvid: "BILIfake1", title: "T", tid: 21, is_only_self: 1 }, videos: [] };
+  const impl = (async (input: string | URL | Request, init?: RequestInit) => {
     const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
     hits.push(u.pathname);
+    if (init?.method === "POST") posts.push({ path: u.pathname, body: JSON.parse(String(init.body)) as Record<string, unknown> });
     const json = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200 });
     if (u.pathname === "/x/vu/web/add/v3") {
       if (o.createThrows) throw o.createThrows;
       return json(o.create ?? { code: 0, data: { aid: 7, bvid: "BILIfake1" } });
     }
     if (u.pathname === "/x/vupre/web/archive/view") {
-      return json({ code: 0, data: o.viewArchive ?? { archive: { aid: 7, bvid: "BILIfake1", title: "T", tid: 21, is_only_self: 1 }, videos: [] } });
+      return json({ code: 0, data: viewArchive });
     }
     if (u.pathname === "/x/vu/web/edit") {
       if (o.editThrows) throw o.editThrows;
-      return json(o.edit ?? { code: 0, data: { aid: 7, bvid: "BILIfake1" } });
+      const result = o.edit ?? { code: 0, data: { aid: 7, bvid: "BILIfake1" } };
+      if (o.observeEdits && result.code === 0) viewArchive = { ...viewArchive, videos: posts.at(-1)!.body.videos };
+      return json(result);
     }
     if (u.pathname === "/x/web/archives") return json({ code: 0, data: { arc_audits: [] } });
     return json({ code: 0, data: {} });
   }) as unknown as typeof fetch;
-  return { impl, hits };
+  return { impl, hits, posts };
 }
 
 const target = (fetchImpl: typeof fetch) => createUposTarget({ fetchImpl, log: () => {} });
@@ -96,6 +102,75 @@ const create = (t: ReturnType<typeof target>): Promise<unknown> =>
   t.publishStreamed!({ cred: CRED(), ref: null, name: "stem0", title: "P1", archive: ARCHIVE } satisfies PublishStreamedInput);
 
 describe("publishStreamed: append classification", () => {
+  it.each([false, true])("refuses a lagged predecessor snapshot even when the new native key is present: %s", async (newKeyPresent) => {
+    const f = fakeFetch({ viewArchive: {
+      archive: { aid: 7, bvid: "BILIfake1", title: "T", tid: 21 },
+      videos: [{ filename: "stem1", cid: 12 }, ...(newKeyPresent ? [{ filename: "stem2", cid: 13 }] : [])],
+    } });
+    await expect(target(f.impl).publishStreamed!({
+      cred: CRED(), ref: REF, name: "stem2", mustContain: ["stem0", "stem1"],
+    })).resolves.toEqual({ proof: "unknown", ref: null });
+    expect(f.hits).toEqual(["/x/vupre/web/archive/view"]);
+    expect(f.posts).toHaveLength(0);
+  });
+
+  it("preserves every existing video in a complete snapshot and appends the native key once", async () => {
+    const videos = [
+      { cid: 11, filename: "stem0", title: "P1", desc: "first" },
+      { cid: 12, filename: "stem1", title: "P2", desc: "second" },
+      { cid: 19, filename: "remote-extra", title: "Existing remote part", desc: "preserve me" },
+    ];
+    const f = fakeFetch({ observeEdits: true, viewArchive: {
+      archive: { aid: 7, bvid: "BILIfake1", title: "T", tid: 21, is_only_self: 1 }, videos,
+    } });
+    const publishInput = { cred: CRED(), ref: REF, name: "stem2", title: "P3", mustContain: ["stem0", "stem1"] };
+    const uploadTarget = target(f.impl);
+    await expect(uploadTarget.publishStreamed!(publishInput)).resolves.toEqual({ proof: "accepted", ref: REF });
+    await expect(uploadTarget.publishStreamed!(publishInput)).resolves.toEqual({ proof: "confirmed", ref: REF });
+    expect(f.posts).toHaveLength(1);
+    expect(f.posts[0]).toMatchObject({ path: "/x/vu/web/edit", body: { aid: 7 } });
+    expect(f.posts[0]!.body.videos).toEqual([
+      ...videos.map(({ filename, title, desc }) => ({ filename, title, desc })),
+      { filename: "stem2", title: "P3", desc: "" },
+    ]);
+    expect(f.hits.filter((path) => path === "/x/vu/web/edit")).toHaveLength(1);
+    const observed = await uploadTarget.inspect({ cred: CRED(), ref: REF });
+    expect(observed?.parts?.map((part) => part.name)).toEqual(["stem0", "stem1", "remote-extra", "stem2"]);
+  });
+
+  it("holds the driver checkpoint when a durable observed predecessor is missing despite the new key being visible", async () => {
+    const f = fakeFetch({ viewArchive: {
+      archive: { aid: 7, bvid: "BILIfake1", title: "T", tid: 21 },
+      videos: [{ filename: "stem1", cid: 12 }, { filename: "stem2", cid: 13 }],
+    } });
+    const store = memoryStore();
+    const checkpoint: UploadCheckpoint = { targetId: REF.targetId, archiveId: REF.id, parts: [
+      { index: 1, size: 4, mtimeMs: 0, proof: "observed", nativeKey: "stem0", confirmedAt: "2023-11-14T22:13:20.000Z" },
+      { index: 2, size: 4, mtimeMs: 0, proof: "observed", nativeKey: "stem1", confirmedAt: "2023-11-14T22:13:20.000Z" },
+    ] };
+    const key = REF.targetId + ":" + REF.id;
+    store.save(key, checkpoint);
+    const uploadDriver = createUploadDriver({ target: target(f.impl), store, now: () => 1, sleep: async () => {}, log: () => {} });
+    await expect(uploadDriver.appendStreamedPart({ cred: CRED(), ref: REF, name: "stem2" }))
+      .rejects.toMatchObject({ failure: "needs-manual" });
+    expect(f.posts).toHaveLength(0);
+    expect(store.load(key)).toEqual(checkpoint);
+  });
+
+  it("does not lose inherited session predecessors when the driver checkpoint is empty", async () => {
+    const f = fakeFetch({ viewArchive: {
+      archive: { aid: 7, bvid: "BILIfake1", title: "T", tid: 21 }, videos: [{ filename: "stem1", cid: 12 }],
+    } });
+    const store = memoryStore();
+    const key = REF.targetId + ":" + REF.id;
+    store.save(key, { targetId: REF.targetId, archiveId: REF.id, parts: [] });
+    const uploadDriver = createUploadDriver({ target: target(f.impl), store, now: () => 1, sleep: async () => {}, log: () => {} });
+    await expect(uploadDriver.appendStreamedPart({ cred: CRED(), ref: REF, name: "stem1", mustContain: ["session-first"] }))
+      .rejects.toMatchObject({ failure: "needs-manual" });
+    expect(f.posts).toHaveLength(0);
+    expect(store.load(key)?.parts).toEqual([]);
+  });
+
   it("does not confirm an idempotent stem returned by another archive", async () => {
     const f = fakeFetch({ viewArchive: {
       archive: { aid: 8, bvid: "different-archive", title: "T", tid: 21 },

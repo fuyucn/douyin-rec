@@ -23,6 +23,7 @@ interface PublicationOptions {
   kind: "create" | "append";
   archive: Readonly<ArchiveMetadata>;
   part: Readonly<CompletedPart>;
+  mustContain?: readonly string[];
   signal?: AbortSignal;
 }
 
@@ -78,6 +79,7 @@ export async function publishLivePumpPart(o: PublicationOptions): Promise<Public
       const out = await submitter.appendStreamedPart({
         ref: { targetId: o.targetId ?? "bilibili-upos", id: archive.bvid ?? String(archive.aid) },
         name: part.stem,
+        ...(o.mustContain ? { mustContain: o.mustContain } : {}),
         ...(part.title ? { title: part.title.slice(0, 80) } : {}),
         size: part.bytes,
         ...(signal ? { signal } : {}),

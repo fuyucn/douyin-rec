@@ -173,11 +173,57 @@ describe("upload driver: streamed publish", () => {
 
   it("appends one part and continues the checkpoint numbering", async () => {
     const { d, store, calls } = driver({ publishStreamed: async () => ({ proof: "confirmed", ref: REF }) });
-    store.save("t:a1", { targetId: "t", archiveId: "a1", parts: [{ index: 1, size: 6, mtimeMs: 0 }] });
+    store.save("t:a1", { targetId: "t", archiveId: "a1", parts: [{
+      index: 1, size: 6, mtimeMs: 0, nativeKey: "stem0", proof: "observed", confirmedAt: "2023-11-14T22:13:20.000Z",
+    }] });
     const out = await d.appendStreamedPart({ cred: CRED, ref: REF, name: "stem1", title: "P2", size: 6 });
     expect(out).toEqual({ confirmed: [2], accepted: [] });
     expect(calls[0]!.ref).toEqual(REF);
+    expect(calls[0]!.mustContain).toEqual(["stem0"]);
     expect(store.parts.map((p) => p.index)).toEqual([2]);
+  });
+
+  it.each(["legacy", "observed-without-key", "key-without-observation"] as const)("holds a %s checkpoint without publishing a successor", async (kind) => {
+    const { d, store, calls, sleeps } = driver({ publishStreamed: async () => ({ proof: "confirmed", ref: REF }) });
+    const part: UploadPartRecord = {
+      index: 1, size: 6, mtimeMs: 0,
+      ...(kind === "observed-without-key" ? { proof: "observed" as const, confirmedAt: "2023-11-14T22:13:20.000Z" } : {}),
+      ...(kind === "key-without-observation" ? { nativeKey: "stem0" } : {}),
+    };
+    const checkpoint = { targetId: "t", archiveId: "a1", parts: [part] };
+    store.save("t:a1", checkpoint);
+    await expect(d.appendStreamedPart({ cred: CRED, ref: REF, name: "stem1", size: 6 }))
+      .rejects.toMatchObject({ failure: "needs-manual" });
+    expect(calls).toHaveLength(0);
+    expect(sleeps).toHaveLength(0);
+    expect(store.parts).toHaveLength(0);
+    expect(store.load("t:a1")).toEqual(checkpoint);
+  });
+
+  it.each(["missing", "empty"] as const)("forwards inherited native keys with a %s driver checkpoint", async (checkpointKind) => {
+    const { d, store, calls } = driver({ publishStreamed: async () => ({ proof: "confirmed", ref: REF }) });
+    if (checkpointKind === "empty") store.save("t:a1", { targetId: "t", archiveId: "a1", parts: [] });
+    const mustContain = ["session-first", "session-second", "session-first"] as const;
+    await expect(d.appendStreamedPart({ cred: CRED, ref: REF, name: "stem2", mustContain }))
+      .resolves.toEqual({ confirmed: [1], accepted: [] });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.mustContain).toEqual(["session-first", "session-second"]);
+    expect(store.parts.map((part) => part.nativeKey)).toEqual(["stem2"]);
+    expect(mustContain).toEqual(["session-first", "session-second", "session-first"]);
+  });
+
+  it("unions inherited session keys with every durably observed driver predecessor", async () => {
+    const { d, store, calls } = driver({ publishStreamed: async () => ({ proof: "confirmed", ref: REF }) });
+    store.save("t:a1", { targetId: "t", archiveId: "a1", parts: [{
+      index: 1, size: 6, mtimeMs: 0, nativeKey: "stem0", proof: "observed", confirmedAt: "2023-11-14T22:13:20.000Z",
+    }] });
+    await d.appendStreamedPart({ cred: CRED, ref: REF, name: "stem1", mustContain: ["session-first", "stem0"] });
+    await d.appendStreamedPart({ cred: CRED, ref: REF, name: "stem2", mustContain: ["session-first"] });
+    expect(calls.map((input) => input.mustContain)).toEqual([
+      ["session-first", "stem0"],
+      ["session-first", "stem0", "stem1"],
+    ]);
+    expect(store.parts.map((part) => part.index)).toEqual([2, 3]);
   });
 
   it("retries only confirmed-not-submitted, then records the part", async () => {

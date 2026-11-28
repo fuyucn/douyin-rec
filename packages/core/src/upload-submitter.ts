@@ -39,6 +39,7 @@ export interface PartSubmitter {
   /** Publish one part whose bytes the runner already uploaded. Bytes are not sent. */
   appendStreamedPart(req: {
     ref: ArchiveRef;
+    mustContain?: readonly string[];
     name: string;
     title?: string;
     size?: number;

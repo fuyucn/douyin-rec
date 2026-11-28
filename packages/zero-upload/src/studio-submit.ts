@@ -93,6 +93,7 @@ export async function appendStudioPart(o: {
   bvid?: string;
   aid?: number;
   video: StudioVideo;
+  mustContain?: readonly string[];
   fetchImpl?: typeof fetch;
 }): Promise<SubmitResult & { archive?: StudioArchive }> {
   const found = await lookupArchive({
@@ -107,6 +108,12 @@ export async function appendStudioPart(o: {
   const existing = found.archive;
   if ((o.bvid && existing.bvid !== o.bvid) || (o.aid && existing.aid !== o.aid)) {
     return { ok: false, raw: { error: "archive identity mismatch; refusing to append" } };
+  }
+  if (o.mustContain !== undefined && (!Array.isArray(o.mustContain)
+    || Array.from(o.mustContain).some((nativeKey) => typeof nativeKey !== "string"
+      || nativeKey.trim().length === 0
+      || !existing.videos.some((video) => video.filename === nativeKey)))) {
+    return { ok: false, raw: { error: "required native predecessor is missing or invalid; refusing to append" } };
   }
   if (existing.videos.some((v) => v.filename === o.video.filename)) {
     return { ok: true, aid: existing.aid, ...(existing.bvid ? { bvid: existing.bvid } : {}), raw: { idempotent: true }, archive: existing };

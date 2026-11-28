@@ -51,7 +51,9 @@ export function rolloverStaleState(path: string, room: string, nowMs: number, lo
     return alert ? msg : "";
   };
   const state = readLivePumpState(path);
-  if (!state) return archive("无法读取或已损坏", true) || undefined;
+  if (!state) throw new Error("Live upload state is unreadable or incompatible; refusing rollover and metadata submission");
+  if (state.room !== room && requiresLivePumpProof(state))
+    throw new Error("Protected live upload state belongs to another room; refusing rollover");
   if (state.room !== room) return archive(`房间不匹配(${state.room})`, true) || undefined;
   // T-221: journal-aware — a part the queue already confirmed (journal entry, state row still
   // unconfirmed) is settled, so a fully-delivered queue-managed state ages out normally.

@@ -148,6 +148,7 @@ export class LivePumpSessionRecovery {
           submissionState: "accepted", partIndex: accepted.index, stem: accepted.nativeKey,
           title: accepted.title, bytes: accepted.bytes, durationSec: accepted.durationSec,
           spoolPath: accepted.spoolPath, acceptedAt: accepted.acceptedAt,
+          sourceFp: accepted.sourceFp,
         } };
         try { this.checkpoint.persist(); }
         catch (error) { return { ok: false, reason: "cannot restore accepted intent: " + String(error) }; }
@@ -227,6 +228,7 @@ export class LivePumpSessionRecovery {
       confirmed,
       proof,
       nativeKey: p.stem,
+      sourceFp: p.sourceFp,
       ...(confirmed ? { observedAt: Date.now() } : {}),
     };
     this.checkpoint.state = {
@@ -236,6 +238,7 @@ export class LivePumpSessionRecovery {
         confirmed,
         proof,
         nativeKey: p.stem,
+        sourceFp: p.sourceFp,
         ...(confirmed ? { observedAt: Date.now() } : {}),
         ...(p.stem ? { stem: p.stem } : {}),
       } : x) : [...this.checkpoint.state.parts, part],

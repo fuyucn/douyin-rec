@@ -3,7 +3,7 @@ import { existsSync, rmSync } from "node:fs";
 import { basename } from "node:path";
 import { noteRecorderProgress } from "@drec/core";
 import { lookupArchive, type StudioVideo } from "./upos-stream.js";
-import { isLivePumpPartObserved, readLivePumpState, type LivePumpState } from "./live-pump-state.js";
+import { fingerprintLivePumpSource, isLivePumpPartObserved, matchesLivePumpSource, readLivePumpState, type LivePumpState } from "./live-pump-state.js";
 import { LivePumpSeason } from "./live-pump-season.js";
 import { publishLivePumpPart } from "./live-pump-publication.js";
 import { publishLegacyLivePumpPart } from "./live-pump-legacy-publication.js";
@@ -172,6 +172,10 @@ export class LivePumpSession {
       return { ok: false, error: `part ${unconfirmed.index} is not confirmed; refusing to submit part ${input.index}` };
     }
     const existing = this.state.parts.find(p => p.index === input.index);
+    if (this.state.parts.some(part => part.index !== input.index && part.stem === input.stem && (part.confirmed || part.proof !== undefined)))
+      return { ok: false, needsManual: true, error: "native part key is already bound to another local part; source retained" };
+    if (this.state.parts.some(isLivePumpPartObserved) && !this.state.bvid && !this.state.aid)
+      return { ok: false, needsManual: true, error: "observed archive identity is missing; source retained" };
     if (existing?.proof === "accepted")
       return { ok: false, needsManual: true, error: "accepted part requires observation, never resubmission" };
     if (existing && (existing.confirmed || existing.proof === "observed") && !isLivePumpPartObserved(existing))
@@ -192,6 +196,8 @@ export class LivePumpSession {
     }
     if (existing?.confirmed)
       return { ok: false, needsManual: true, error: "legacy confirmation has no per-part observation proof; source retained" };
+    if (this.state.parts.some(part => (part.confirmed || part.proof !== undefined) && !isLivePumpPartObserved(part)))
+      return { ok: false, needsManual: true, error: "archive prefix lacks native observation proof; source retained" };
     if (this.o.submitter)
       return this.submitPartViaSubmitter(input, existing, signal);
     return this.submitLegacy(input, existing, signal);
@@ -214,6 +220,7 @@ export class LivePumpSession {
       bytes: input.bytes,
       durationSec: input.durationSec,
       spoolPath: input.spoolPath,
+      sourceFp: fingerprintLivePumpSource(input.spoolPath),
     };
     this.state = { ...this.state, pending };
     try {
@@ -225,6 +232,7 @@ export class LivePumpSession {
     const result = await publishLegacyLivePumpPart({
       kind: pending.kind,
       video,
+      mustContain: this.state.parts.filter(isLivePumpPartObserved).map(part => part.nativeKey!),
       cookiesPath: this.o.cookiesPath,
       fetchImpl: doFetch,
       readArchive: () => {
@@ -269,6 +277,7 @@ export class LivePumpSession {
         proof: "observed",
         nativeKey: input.stem,
         observedAt: Date.now(),
+        sourceFp: this.state.pending?.sourceFp,
       } : p) : [...this.state.parts, {
           index: input.index,
           spoolPath: input.spoolPath,
@@ -281,6 +290,7 @@ export class LivePumpSession {
           proof: "observed",
           nativeKey: input.stem,
           observedAt: Date.now(),
+          sourceFp: this.state.pending?.sourceFp,
         }],
       pending: undefined,
     };
@@ -366,6 +376,7 @@ export class LivePumpSession {
         bytes: input.bytes,
         durationSec: input.durationSec,
         spoolPath: input.spoolPath,
+        sourceFp: fingerprintLivePumpSource(input.spoolPath),
       },
     };
     try {
@@ -379,6 +390,7 @@ export class LivePumpSession {
       targetId: this.o.submitterTargetId,
       kind,
       part: input,
+      mustContain: this.state.parts.filter(isLivePumpPartObserved).map(part => part.nativeKey!),
       signal,
       archive: {
         bvid: this.state.bvid,
@@ -419,7 +431,7 @@ export class LivePumpSession {
         ...(aid !== undefined ? { acceptedAid: aid } : {}),
       },
       parts: existing ? this.state.parts.map((part) => part.index === input.index
-        ? { ...part, proof: "accepted", nativeKey: input.stem, acceptedAt: Date.now(), confirmed: false }
+        ? { ...part, proof: "accepted", nativeKey: input.stem, acceptedAt: Date.now(), confirmed: false, sourceFp: pending.sourceFp }
         : part)
         : [...this.state.parts, {
           index: input.index,
@@ -433,6 +445,7 @@ export class LivePumpSession {
           proof: "accepted",
           nativeKey: input.stem,
           acceptedAt: Date.now(),
+          sourceFp: pending.sourceFp,
         }],
     };
     try {
@@ -481,11 +494,17 @@ export class LivePumpSession {
     if (!durable || durable.createdAt !== this.state.createdAt || durable.room !== this.state.room
       || durable.bvid !== this.state.bvid || durable.aid !== this.state.aid)
       return;
+    if (!durable.bvid && !(Number.isSafeInteger(durable.aid) && durable.aid! > 0))
+      return;
     for (const p of durable.parts) {
       if (!isLivePumpPartObserved(p) || durable.pending?.partIndex === p.index)
         continue;
       if (!existsSync(p.spoolPath))
         continue;
+      if (p.sealed === false || p.spoolIncomplete || !matchesLivePumpSource(p.spoolPath, p.sourceFp)) {
+        this.log("[live-pump] part " + p.index + " source fingerprint is missing or changed; spool retained");
+        continue;
+      }
       try {
         this.o.submitter?.observeStreamedPart({
           ref: { targetId: this.o.submitterTargetId ?? "bilibili-upos", id: durable.bvid ?? String(durable.aid) },

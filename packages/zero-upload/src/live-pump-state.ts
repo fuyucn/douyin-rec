@@ -1,7 +1,33 @@
 import {
-  closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync,
+  closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+
+export interface LivePumpSourceFingerprint {
+  size: number;
+  mtimeMs: number;
+  dev: number;
+  ino: number;
+}
+
+export function fingerprintLivePumpSource(path: string): LivePumpSourceFingerprint | undefined {
+  try {
+    const stat = lstatSync(path);
+    if (!stat.isFile()) return undefined;
+    return { size: stat.size, mtimeMs: stat.mtimeMs, dev: stat.dev, ino: stat.ino };
+  } catch {
+    return undefined;
+  }
+}
+
+export function matchesLivePumpSource(path: string, expected?: LivePumpSourceFingerprint): boolean {
+  if (!expected || !Number.isSafeInteger(expected.size) || expected.size < 0
+    || !Number.isFinite(expected.mtimeMs) || !Number.isSafeInteger(expected.dev)
+    || !Number.isSafeInteger(expected.ino)) return false;
+  const actual = fingerprintLivePumpSource(path);
+  return !!actual && actual.size === expected.size && actual.mtimeMs === expected.mtimeMs
+    && actual.dev === expected.dev && actual.ino === expected.ino;
+}
 
 /** Durable archive state. Only the recording process writes this file. */
 export interface LivePumpState {
@@ -34,6 +60,7 @@ export interface LivePumpState {
     nativeKey?: string;
     acceptedAt?: number;
     observedAt?: number;
+    sourceFp?: LivePumpSourceFingerprint;
     /** Incomplete spools cannot be auto-resubmitted after a write failure (issue #579). */
     spoolIncomplete?: boolean;
     /** Absent means sealed for old schemaVersion 1 states. False is an open-time WAL placeholder
@@ -64,6 +91,7 @@ export interface LivePumpState {
     bytes: number;
     durationSec: number;
     spoolPath: string;
+    sourceFp?: LivePumpSourceFingerprint;
   };
   updatedAt: number;
 }
@@ -98,6 +126,7 @@ export function readLivePumpState(path: string): LivePumpState | null {
   try {
     const s = JSON.parse(readFileSync(path, "utf-8")) as LivePumpState;
     if (s.schemaVersion !== 1 || !s.room || !Array.isArray(s.parts)) return null;
+    if (s.submissionProofVersion !== undefined && s.submissionProofVersion !== 1) return null;
     return s;
   } catch {
     return null;

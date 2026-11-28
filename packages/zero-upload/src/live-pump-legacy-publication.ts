@@ -18,6 +18,7 @@ type LegacyArchive = Readonly<Pick<LivePumpState,
 type LegacyPublication = {
   kind: "create" | "append";
   video: StudioVideo;
+  mustContain?: readonly string[];
   /** Read at each attempt; concurrent reconciliation may replace the session checkpoint. */
   readArchive: () => LegacyArchive;
   cookiesPath: string;
@@ -43,6 +44,7 @@ function publishOnce(o: LegacyPublication): Promise<SubmitResult> {
       cookiesPath,
       ...(archive.bvid ? { bvid: archive.bvid } : { aid: archive.aid }),
       video,
+      ...(o.mustContain ? { mustContain: o.mustContain } : {}),
       fetchImpl,
     });
   }

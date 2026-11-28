@@ -119,6 +119,7 @@ export interface StreamedArchiveRequest {
 }
 
 export interface StreamedPartRequest {
+  mustContain?: readonly string[];
   cred: CredentialRef;
   ref: ArchiveRef;
   name: string;
@@ -561,6 +562,12 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
       const policy: UploadPolicy = target.hardPolicy();
       for (let attempt = 0; attempt < attempts; attempt++) {
         assertNotStopped("流式追加", req.signal);
+        const prior = store.load(key);
+        if (prior && (prior.targetId !== req.ref.targetId || prior.archiveId !== req.ref.id
+          || prior.parts.some(part => part.proof !== "observed" || !part.nativeKey))) {
+          throw new UploadDriverError("needs-manual", "Archive prefix lacks observed native identities; refusing an unsafe edit");
+        }
+        const mustContain = [...new Set([...(req.mustContain ?? []), ...(prior?.parts.map(part => part.nativeKey!) ?? [])])];
         noteSubmit();
         let acknowledged = false;
         try {
@@ -568,6 +575,7 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
             cred: req.cred,
             ref: req.ref,
             name: req.name,
+            mustContain,
             ...(req.title ? { title: req.title } : {}),
           });
           if (res.proof === "unknown") {

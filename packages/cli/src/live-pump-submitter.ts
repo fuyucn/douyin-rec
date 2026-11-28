@@ -143,6 +143,7 @@ export function buildLivePumpSubmitter(o: LivePumpSubmitterOpts): PartSubmitter 
         name: req.name,
         ...(req.title ? { title: req.title } : {}),
         ...(req.size !== undefined ? { size: req.size } : {}),
+        ...(req.mustContain ? { mustContain: req.mustContain } : {}),
         ...(req.signal ? { signal: req.signal } : {}),
       });
       return { confirmed: out.confirmed, accepted: out.accepted };

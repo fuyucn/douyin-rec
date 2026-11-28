@@ -336,6 +336,7 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
           cookiesPath,
           bvid: input.ref.id,
           video,
+          ...(input.mustContain !== undefined ? { mustContain: input.mustContain } : {}),
           ...(fetchImpl ? { fetchImpl } : {}),
         });
       } catch (e) {

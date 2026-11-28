@@ -167,6 +167,7 @@ export interface PublishStreamedInput {
   cred: CredentialRef;
   /** null = this is the first part: create the archive. */
   ref: ArchiveRef | null;
+  mustContain?: readonly string[];
   /** File name the transport already produced for these bytes. */
   name: string;
   /** Part title. */

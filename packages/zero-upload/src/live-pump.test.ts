@@ -3295,7 +3295,7 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
       schemaVersion: 1, room: "r", createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
       bvid: "BILIfake1", aid: 7,
       parts: [
-        { index: 0, spoolPath: join(dir, "gone.ts"), filename: "gone.ts", stem: "stem0", title: "P1", bytes: 1, durationSec: 1, confirmed: true },
+        { index: 0, spoolPath: join(dir, "gone.ts"), filename: "gone.ts", stem: "stem0", title: "P1", bytes: 1, durationSec: 1, confirmed: true, proof: "observed", nativeKey: "stem0", observedAt: Date.now() },
         { index: 1, spoolPath: spool, filename: "p1.ts", stem: "stem1", title: "P2", bytes: 19, durationSec: 10, confirmed: false },
       ],
       updatedAt: 1,
@@ -3551,12 +3551,14 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
     const laterSpool = join(dir, "p1.ts");
     writeFileSync(spool, "0");
     writeFileSync(laterSpool, "later");
+    const source = statSync(spool);
+    const sourceFp = { size: source.size, mtimeMs: source.mtimeMs, dev: source.dev, ino: source.ino };
     const statePath = join(dir, "live-pump-r.state.json");
     writeLivePumpState(statePath, {
       schemaVersion: 1, room: "r", createdAt: 1, title: "测试-1", tid: 21, tag: "x", private: true,
       parts: [], pending: {
         kind: "create", partIndex: 0, stem: "stem0", title: "P1",
-        bytes: 1, durationSec: 1, spoolPath: join(dir, "p0.ts"),
+        bytes: 1, durationSec: 1, spoolPath: join(dir, "p0.ts"), sourceFp,
       }, updatedAt: 1,
     });
     let readingView = false;
@@ -3599,7 +3601,7 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
       expect(checkpoint.pending).toBeUndefined();
       expect(checkpoint.deliveryDeferred).toBe(true);
       expect(checkpoint.parts.find((part) => part.index === 0)).toMatchObject({
-        confirmed: true, stem: "stem0", spoolPath: spool, title: "P1", bytes: 1, durationSec: 1,
+        confirmed: true, stem: "stem0", spoolPath: spool, title: "P1", bytes: 1, durationSec: 1, sourceFp,
       });
       expect(checkpoint.parts.filter((part) => part.index !== 0)).toEqual([laterRow]);
       expect(session.parts).toEqual(checkpoint.parts);
@@ -3795,16 +3797,16 @@ describe("same-broadcast rule on the room-keyed state (issue #293)", () => {
     expect(existsSync(`${livePumpStatePath(dir, "rec")}.activity`)).toBe(true);
   });
 
-  it("corrupt state: archived byte-for-byte, one alert, new submission, never throws", () => {
+  it("corrupt state is preserved byte-for-byte and refuses a new session", () => {
     writeFileSync(statePath(), "{not json");
+    const spool = join(dir, "corrupt-owned.ts");
+    writeFileSync(spool, "original source");
     const alerts: string[] = [];
-    const s = openWithAlerts(alerts);
-    expect(s.hasArchiveIdentity).toBe(false);
-    expect(alerts.length).toBe(1);
-    const a = archives();
-    expect(a.length).toBe(1);
-    expect(readFileSync(join(dir, a[0]!), "utf-8")).toBe("{not json");
-    expect(existsSync(statePath())).toBe(false);
+    expect(() => openWithAlerts(alerts)).toThrow(/unreadable|incompatible/);
+    expect(readFileSync(statePath(), "utf-8")).toBe("{not json");
+    expect(readFileSync(spool, "utf-8")).toBe("original source");
+    expect(archives()).toHaveLength(0);
+    expect(alerts).toHaveLength(0);
   });
 
   it("old state without a timestamp and with unconfirmed parts: archived + one alert, not appended to", () => {
@@ -3819,12 +3821,13 @@ describe("same-broadcast rule on the room-keyed state (issue #293)", () => {
   it("two archives in the same millisecond never overwrite each other", () => {
     const now = vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
     try {
-      writeFileSync(statePath(), "{bad1");
+      seed(31, { title: "first" });
       open();
-      writeFileSync(statePath(), "{bad2");
+      seed(31, { title: "second" });
       open();
     } finally { now.mockRestore(); }
     expect(archives().length).toBe(2);
+    expect(archives().map((name) => readLivePumpState(join(dir, name))?.title).sort()).toEqual(["first", "second"]);
   });
 
   it("spoolSweepSafe is false while any live or archived state is unreadable", () => {
@@ -3838,36 +3841,28 @@ describe("same-broadcast rule on the room-keyed state (issue #293)", () => {
     expect(spoolSweepSafe(dir, "gap")).toBe(false);
   });
 
-  it("runLivePump with a corrupt old state: alerts once, archives, and still records into a new submission", async () => {
+  it("runLivePump refuses corrupt state without archiving it or starting a new submission", async () => {
     writeFileSync(join(dir, "cookies.json"), JSON.stringify({
       cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
     }));
-    writeFileSync(statePath(), "{not json");
-    const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
-    const fake = withSubmittedArchive(((input: string | URL | Request) => {
-      const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
-      if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
-      if (u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
-      if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
-      if (u.pathname === "/x/vu/web/add/v3") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BILInew1" } }));
-      if (u.pathname === "/x/vu/web/edit") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BILInew1" } }));
-      if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BILInew1", title: "t", tid: 21 }, videos: [] } }));
-      if (u.pathname === "/x/web/archives") return Promise.resolve(json({ code: 0, data: { arc_audits: [] } }));
-      return Promise.resolve(json({ code: 0, data: {} }));
-    }) as unknown as typeof fetch);
-    installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 0x5a));
+    const original = "{not json";
+    writeFileSync(statePath(), original);
+    const spool = join(dir, "p0.ts");
+    writeFileSync(spool, "original source");
+    const fake = vi.fn(async () => { throw new Error("corrupt state must prevent upload requests"); });
     const alerts: string[] = [];
-    const r = await runLivePump({
+    await expect(runLivePump({
       cookiesPath: join(dir, "cookies.json"), room: "gap", spoolDir: dir, title: "t",
       tid: 21, tag: "x", private: true, sizeCap: CHUNK, maxMs: 300, maxSegments: 1,
       quality: "origin", submit: true, spoolMode: "none", fetchImpl: fake,
       fetch: async () => ({ living: true, url: "http://x/y.ts" }),
       sleep: async () => {}, log: () => {}, onAlert: (m) => alerts.push(m),
-    });
-    expect(r.ok, r.error ?? "").toBe(true);
-    expect(r.bvid).toBe("BILInew1");
-    expect(alerts.length).toBe(1);
-    expect(archives().length).toBe(1);
+    })).rejects.toThrow(/unreadable|incompatible/);
+    expect(fake).not.toHaveBeenCalled();
+    expect(readFileSync(statePath(), "utf8")).toBe(original);
+    expect(readFileSync(spool, "utf8")).toBe("original source");
+    expect(alerts).toEqual([]);
+    expect(archives()).toEqual([]);
   }, 20_000);
 
   it("old fully confirmed state without a timestamp falls back to file mtime", () => {
@@ -4540,12 +4535,12 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
   it("a resumed run that delivered nothing itself and loses its only part is not ok (inherited confirmed rows do not count as delivered)", async () => {
     writeLivePumpState(livePumpStatePath(dir, "sm"), {
       schemaVersion: 1, room: "sm", createdAt: Date.now(), title: "t", tid: 21, tag: "x", private: true, bvid: "BILIfake1", aid: 7,
-      parts: [{ index: 0, spoolPath: join(dir, "old.live.ts"), filename: "old.live.ts", stem: "old", title: "P1", bytes: 1, durationSec: 1, confirmed: true }],
+      parts: [{ index: 0, spoolPath: join(dir, "old.live.ts"), filename: "old.live.ts", stem: "old", title: "P1", bytes: 1, durationSec: 1, confirmed: true, proof: "observed", nativeKey: "old", observedAt: Date.now() }],
       updatedAt: Date.now(),
     });
     installFakeFfmpeg(tsStream({ gops: 40 }), { chunkEvery: 752, delayMs: 3 });
     const ac = new AbortController();
-    const u = fakeUpos({ completeDelayMs: (n) => (n === 1 ? 2_500 : 0), completeIgnoresAbort: (n) => n === 1 });
+    const u = fakeUpos({ initialArchive: ["old"], completeDelayMs: (n) => (n === 1 ? 2_500 : 0), completeIgnoresAbort: (n) => n === 1 });
     const t = setInterval(() => { if (u.events.includes("complete-start 1")) { ac.abort(); clearInterval(t); } }, 5);
     let r;
     try {
@@ -5929,13 +5924,15 @@ describe("T-221 spool-mode continuation", () => {
     failComplete?: (n: number) => boolean;
     /** The studio create/edit answers code 406 (the production rate-limit failure, T-219). */
     rateLimitedSubmit?: boolean;
+    initialArchive?: string[];
   }
   /** Minimal UPOS + studio fake (session numbers come from the upos path). */
   function makeFake(opts: FakeOpts = {}) {
     let preuploadCalls = 0;
     const events: string[] = [];
+    const submitAttempts: string[][] = [];
     const sessions = new Map<number, Array<{ partNumber: number; body: Buffer }>>();
-    let archive: string[] = [];
+    let archive: string[] = [...(opts.initialArchive ?? [])];
     const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
     const sessionOf = (u: URL): number => Number(/p(\d+)\.ts/.exec(u.pathname)?.[1] ?? 0);
     const fake = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -5962,6 +5959,7 @@ describe("T-221 spool-mode continuation", () => {
       }
       if (u.pathname === "/x/vu/web/add/v3" || u.pathname === "/x/vu/web/edit") {
         const body = JSON.parse(String(init!.body)) as { videos: Array<{ filename: string }> };
+        submitAttempts.push(body.videos.map((v) => v.filename));
         if (opts.rateLimitedSubmit) { events.push("submit-406"); return json({ code: 406, message: "too fast" }); }
         archive = body.videos.map((v) => v.filename);
         events.push(`submit ${archive.join(",")}`);
@@ -5973,7 +5971,7 @@ describe("T-221 spool-mode continuation", () => {
       if (u.pathname === "/x/web/archives") return json({ code: 0, data: { arc_audits: [] } });
       return json({ code: 0, data: {} });
     }) as unknown as typeof fetch;
-    return { fake, events, get preuploadCalls() { return preuploadCalls; }, archive };
+    return { fake, events, submitAttempts, get preuploadCalls() { return preuploadCalls; }, archive };
   }
 
   const seedState = (parts: Array<{ index: number; spoolPath: string; confirmed?: boolean; sealed?: boolean; validated?: boolean }>, extra: Partial<Record<string, unknown>> = {}): string => {
@@ -6027,8 +6025,10 @@ describe("T-221 spool-mode continuation", () => {
     expect(st?.submissionProofVersion).toBe(1);
     expect(st?.pending).toMatchObject({
       kind: "create", partIndex: 0, submissionState: "intent",
-      stem: st?.parts[0]?.stem, spoolPath: st?.parts[0]?.spoolPath,
+      stem: "p1", spoolPath: st?.parts[0]?.spoolPath,
     });
+    expect(f.submitAttempts.length).toBeGreaterThan(0);
+    for (const videos of f.submitAttempts) expect(videos).toEqual([st?.pending?.stem]);
     expect(st?.queueManaged).toBeUndefined();
     expect(st?.parts.every((p) => !p.confirmed)).toBe(true);
     expect(st?.parts.every((p) => p.proof === undefined)).toBe(true);
@@ -6491,11 +6491,11 @@ describe("T-221 spool-mode continuation", () => {
     expect(existsSync(spoolPathOf(0))).toBe(true);
   }, 30_000);
 
-  it("a fully journal-settled session returns to direct mode", async () => {
+  it("a fully journal-settled legacy session cannot authorize a new native append", async () => {
     writeFileSync(spoolPathOf(0), "aaa");
     const statePath = seedState([{ index: 0, spoolPath: spoolPathOf(0) }], { queueManaged: true });
-    appendConfirmedJournal(statePath, { index: 0, bv: "BV1", at: 1, createdAt: 1 });
-    const f = makeFake();
+    appendConfirmedJournal(statePath, { index: 0, bv: "BILIfake1", at: 1, createdAt: 1 });
+    const f = makeFake({ initialArchive: ["stem0"] });
     installFakeFfmpeg(Buffer.alloc(CHUNK, 0x5a));
     const r = await runLivePump({
       cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
@@ -6503,14 +6503,23 @@ describe("T-221 spool-mode continuation", () => {
       fetchImpl: f.fake, fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
       probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
     });
-    expect(r.ok, r.error ?? "").toBe(true);
+    expect(r.ok).toBe(false);
+    expect(r.error).toBe("archive prefix lacks native observation proof; source retained");
+    expect(r.uploadPending).toBe(false);
     expect(f.preuploadCalls).toBe(1);
+    expect(f.submitAttempts).toEqual([]);
     const st = readLivePumpState(statePath);
-    expect(st?.parts.map((p) => p.confirmed)).toEqual([true, true]);
+    expect(st?.bvid).toBe("BILIfake1");
+    expect(st?.parts.map((p) => p.confirmed)).toEqual([true, false]);
     expect(st?.queueManaged).toBeUndefined();
     expect(existsSync(spoolPathOf(0))).toBe(true);
     expect(st?.parts[0]?.proof).toBeUndefined();
-    expect(st?.parts[1]?.proof).toBe("observed");
+    expect(st?.parts[1]?.proof).toBeUndefined();
+    expect(st?.parts[1]?.observedAt).toBeUndefined();
+    expect(st?.pending).toBeUndefined();
+    expect(readConfirmedJournal(statePath).size).toBe(1);
+    expect(st?.parts).toHaveLength(2);
+    expect(st?.parts.every((part) => existsSync(part.spoolPath))).toBe(true);
   }, 30_000);
 
   it("crash after sealing and timed-out validation preserve the recovery boundary", async () => {
