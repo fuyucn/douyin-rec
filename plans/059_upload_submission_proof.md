@@ -632,6 +632,37 @@ runs no tests and changes no runtime files.
   No full-feature checkbox is completed by this runtime checkpoint. No real
   upload, merge, deployment, release or activation was performed.
 
+### 2026-11-28: protected handoff receipts, runtime gates pending
+
+- Source checkpoint 6e0a4875 is pushed and remote-verified. This is an incremental
+  development checkpoint, not a green delivery or activation candidate.
+- Protected queue handoff returns an explicit blocked reason before credentials,
+  journal filtering or queue access, including all-observed orders with no new
+  rows. The classifier preserves that hold ahead of errors and historical counts.
+- Early handoff rejects an unqualified owned callback locally. Final handoff
+  reports failure and observation-paused detail before any success receipt/ledger
+  update; blocked work returns manual failure rather than exit-75 retry. A blocked
+  receipt is retained only within the current lifecycle; transient retryable
+  errors are not cached. This is not a durable observer or an execution fence.
+- Review found that sharing the legacy full-spool branch still called recovery
+  and could mutate proof or delete the retained source. A distinct protected hold
+  now skips recovery, cleanup, dropping and revalidation of old rows while leaving
+  capture-only recording possible. No-spool restart returns manual failure without
+  claiming queue ownership. Capture also reserves pending-only part indexes.
+- Separate QA added 21 expanded fault cases and strengthened two existing cases.
+  Coverage includes accepted without pending, intent, observed, later protected P,
+  historical queue/journal facts, source aliases, early/final receipts, stale owned
+  adapters, both spool modes and pending-only index reservation. These tests are
+  frozen but NOT executed: the shared Vitest window has not been handed over.
+- Root typecheck, separate typecheck for the affected integration tests, architecture,
+  supported source-quality metrics and whitespace checks passed. Independent narrow
+  static review passed after the recovery bypass was corrected. None of this
+  supersedes runtime validation; the earlier 5,770/0/42 applies only to d18f6fe8.
+- Old no-proof and replay/cleanup containment remain incomplete, as do qualified
+  ownership, durable nonblocking observation, rolling/whole-order containment,
+  mixed-version gates and the master typed-receipt dependency. No full-feature
+  checkbox or issue is closed. No real upload, merge, deployment or release.
+
 ## Out of scope
 
 - No production spool=none enablement, disk-watermark product decision, or
