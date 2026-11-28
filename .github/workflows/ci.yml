@@ -44,6 +44,9 @@ jobs:
       - name: "Typecheck (root, 18 packages)"
         run: pnpm typecheck
 
+      - name: "Typecheck Vitest configuration and resource guards"
+        run: pnpm exec tsc --noEmit -p tsconfig.vitest.json
+
       - name: "Unit tests (vitest, 含分层守护)"
         run: pnpm test
 

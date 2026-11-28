@@ -1,5 +1,10 @@
 import { defineConfig } from "vitest/config";
+import { availableParallelism } from "node:os";
 import { fileURLToPath } from "node:url";
+
+export function vitestWorkerLimit(cpuCount: number): number {
+  return Math.min(2, Math.max(cpuCount - 1, 1));
+}
 
 // node:sqlite is a Node 24 builtin. module.builtinModules / isBuiltin only
 // recognise it WITH the "node:" prefix ("sqlite" alone is not a builtin). Vite
@@ -40,6 +45,13 @@ export default defineConfig({
   // 测试就近(co-located,纯包):packages/**/*.test.ts 挨着源码;集成/元测试(假平台 setup、
   // arch 分层、app/session 等)仍在 test/。排除 web(自带 vite)与产物目录。
   test: {
+    pool: "forks",
+    minWorkers: 1,
+    maxWorkers: vitestWorkerLimit(availableParallelism()),
+    isolate: true,
+    poolOptions: {
+      forks: { execArgv: ["--max-old-space-size=512", "--max-semi-space-size=16"] },
+    },
     include: ["test/**/*.test.ts", "packages/**/*.test.ts"],
     exclude: ["**/node_modules/**", "**/dist/**", "packages/web/**"],
     setupFiles: ["./test/setup.ts"],
