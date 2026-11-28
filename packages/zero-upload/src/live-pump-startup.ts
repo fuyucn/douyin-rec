@@ -3,7 +3,7 @@ import { ffprobeDuration } from "@drec/post-process";
 import { LivePumpSession } from "./live-pump-session.js";
 import { LivePumpObserver } from "./live-pump-observer.js";
 import { LivePumpSource } from "./live-pump-source.js";
-import { livePumpStatePath, readLivePumpState, type LivePumpState } from "./live-pump-state.js";
+import { livePumpStatePath, readLivePumpState, requiresLivePumpProof, type LivePumpState } from "./live-pump-state.js";
 import { livePumpHasUnconfirmed } from "./live-pump-confirmations.js";
 import { defaultScanDtsGap, heldGapPath } from "./live-pump-spool-recovery.js";
 import { MiB } from "./live-pump-policy.js";
@@ -32,8 +32,10 @@ export class LivePumpStartup {
       const queued = this.queueOwnership(session);
       if (typeof queued === "object")
         return queued;
-      spoolOnlyRun ||= queued === true;
-      if (spoolOnlyRun)
+      spoolOnlyRun ||= queued === true || queued === "protected-hold";
+      if (queued === "protected-hold")
+        pendingNeedsManual = true;
+      else if (spoolOnlyRun)
         pendingNeedsManual = await this.recoverSpool(session);
       else {
         const failed = await this.recoverDirect(session);
@@ -44,13 +46,22 @@ export class LivePumpStartup {
     const handoff = spoolOnlyRun ? await this.handoff(session, pendingNeedsManual) : undefined;
     return handoff ?? { session, spoolOnlyRun };
   }
-  private queueOwnership(session: LivePumpSession): true | {
+  private queueOwnership(session: LivePumpSession): true | "protected-hold" | {
     pending: RunLivePumpResult;
+  } | {
+    fail: RunLivePumpResult;
   } | undefined {
     const path = livePumpStatePath(this.o.spoolDir, this.o.room);
     const queued = readLivePumpState(path);
     if (!(queued?.queueManaged || queued?.deliveryDeferred) || !livePumpHasUnconfirmed(path))
       return;
+    if (requiresLivePumpProof(queued)) {
+      const error = "Protected delivery observation paused; legacy queue markers do not transfer its UPOS ownership";
+      this.events.log("[live-pump] " + error);
+      if (this.o.spoolMode === "none")
+        return { fail: this.result(session, { error, bvid: queued.bvid, aid: queued.aid }) };
+      return "protected-hold";
+    }
     if (!session.reconcileConfirmedJournal().unconfirmedRemain)
       return;
     if (this.o.spoolMode === "none") {
@@ -238,7 +249,10 @@ export class LivePumpStartup {
     if (!livePumpHasUnconfirmed(handoffPath))
       return;
     let receipt: LivePumpHandoffReceipt;
-    try {
+    if (requiresLivePumpProof(session.snapshot())) {
+      receipt = { status: "blocked", detail: "Protected UPOS delivery cannot transfer to an unqualified queue executor" };
+    }
+    else try {
       receipt = await this.o.onHandoff(handoffPath) ?? { status: "blocked", detail: "handoff 未返回回执" };
     }
     catch (e) {

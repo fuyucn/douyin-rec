@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import {
-  existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync,
+  existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -9,6 +9,7 @@ import * as core from "@drec/core";
 import * as app from "@drec/app";
 import * as pump from "@drec/zero-upload";
 import * as ledger from "@drec/orchestrator";
+import { uploadAliasPath } from "@drec/processors";
 import * as submitter from "./live-pump-submitter.js";
 import { runStreamUploadRecord } from "./stream-upload-record.js";
 import { registerLivePumpCommand } from "./live-pump-command.js";
@@ -231,6 +232,73 @@ describe("production stream-upload entry", () => {
     await runStreamUploadRecord(input);
     expect(app.enqueueLivePumpPending).toHaveBeenCalledTimes(2);
     expect(exit.mock.calls).toEqual([[75]]);
+  });
+
+  it.each([false, true])("a blocked final receipt cannot report malformed pending success (managed=%s)", async (managed) => {
+    const file = join(input.recording.outDir, "pending.ts");
+    writeFileSync(file, "video");
+    const alias = uploadAliasPath(file);
+    mkdirSync(join(input.recording.outDir, ".upload"));
+    linkSync(file, alias);
+    writeState(input.recording.outDir);
+    const statePath = result().statePath;
+    const state = pump.readLivePumpState(statePath)!;
+    pump.writeLivePumpState(statePath, { ...state, submissionProofVersion: 1, bvid: ref.id,
+      parts: state.parts.map((part) => ({ ...part, proof: "accepted", nativeKey: part.stem, acceptedAt: 1 })) });
+    const before = readFileSync(statePath, "utf-8");
+    if (managed) {
+      input.options.zeroDiskManaged = "1";
+      vi.mocked(app.zeroDiskNodePreflight).mockReturnValue({ ok: true,
+        delivery: { v: 1, accountKey: "bilibili:test", meta: { tid: 21, tag: "test", private: true } },
+        cookiesPath: join(root, "upload.json"), credentialSource: "env" });
+    }
+    const blocked = "Protected UPOS delivery retains its original owner";
+    vi.mocked(app.enqueueLivePumpPending).mockReturnValue({
+      queued: 0, already: 3, failed: 0, blocked, error: "stale queue error",
+    });
+    vi.mocked(pump.runLivePump).mockResolvedValue(result({
+      ok: true, uploadPending: true, outcome: "uploaded", bvid: ref.id,
+    }));
+
+    await runStreamUploadRecord(input);
+
+    expect(app.enqueueLivePumpPending).toHaveBeenCalledTimes(1);
+    expect(exit.mock.calls).toEqual([[1]]);
+    expect(ledger.recordStreamUpload).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    if (managed) {
+      expect(reporter.finish).toHaveBeenCalledTimes(1);
+      expect(reporter.finish).toHaveBeenCalledWith(expect.objectContaining({
+        ok: false, bvid: ref.id, error: expect.stringContaining("observation paused"),
+      }));
+      expect(reporter.finish.mock.calls[0]![0].error).toContain(blocked);
+      expect(vi.mocked(app.enqueueLivePumpPending).mock.invocationCallOrder[0]).toBeLessThan(
+        reporter.finish.mock.invocationCallOrder[0]!,
+      );
+    } else expect(reporter.finish).not.toHaveBeenCalled();
+    const liveReporter = vi.mocked(app.LiveUploadReporter).mock.results.at(-1)!.value;
+    expect(liveReporter.event).toHaveBeenLastCalledWith(expect.objectContaining({
+      kind: "run_end", outcome: "failed", message: expect.stringContaining(blocked),
+    }));
+    expect(readFileSync(statePath, "utf-8")).toBe(before);
+    expect(readFileSync(file, "utf-8")).toBe("video");
+    expect(readFileSync(alias, "utf-8")).toBe("video");
+  });
+
+  it("does not enqueue again after an early protected blocked receipt", async () => {
+    const blocked = "Protected UPOS delivery requires observation or manual repair";
+    vi.mocked(app.enqueueLivePumpPending).mockReturnValue({ queued: 0, already: 4, failed: 0, blocked });
+    vi.mocked(pump.runLivePump).mockImplementationOnce(async (options) => {
+      expect(await options.onHandoff!(result().statePath)).toEqual({ status: "blocked", detail: blocked });
+      return result({ ok: false, uploadPending: true, bvid: ref.id });
+    });
+
+    await runStreamUploadRecord(input);
+
+    expect(app.enqueueLivePumpPending).toHaveBeenCalledTimes(1);
+    expect(exit.mock.calls).toEqual([[1]]);
+    expect(ledger.recordStreamUpload).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("awaits a ledger-failure notification before the otherwise successful process exits", async () => {

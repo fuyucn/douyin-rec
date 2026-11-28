@@ -68,6 +68,17 @@ async function handoff(ctx: PreparedStreamUpload, statePath: string): Promise<Li
   return receipt;
 }
 
+function createHandoff(ctx: PreparedStreamUpload) {
+  const blocked = new Map<string, LivePumpHandoffReceipt>();
+  return async (statePath: string): Promise<LivePumpHandoffReceipt> => {
+    const previous = blocked.get(statePath);
+    if (previous) return previous;
+    const receipt = await handoff(ctx, statePath);
+    if (receipt.status === "blocked") blocked.set(statePath, receipt);
+    return receipt;
+  };
+}
+
 async function reportResult(
   ctx: PreparedStreamUpload, reporter: ReceiptReporter | undefined,
   res: RunLivePumpResult, startMs: number,
@@ -119,20 +130,25 @@ export function createStreamUploadLifecycle(ctx: PreparedStreamUpload) {
   const submitGate = ctx.delivery
     ? makeNodeSubmitGate({ cookiesPath: ctx.uploadCookies, log: console.log }) : undefined;
   const signals = installSignals();
-  const enqueue = (statePath: string) => handoff(ctx, statePath);
+  const enqueue = createHandoff(ctx);
   return {
     ...signals, reporter: liveReporter, submitGate, onHandoff: enqueue,
     onPartConfirmed: (info: { count: number; bvid?: string }) => reporter?.partConfirmed(info),
     finish: async (res: RunLivePumpResult, startMs: number): Promise<number> => {
       console.log("[直播直传] " + JSON.stringify(res));
-      await reportResult(ctx, reporter, res, startMs);
       if (isUploadPendingResult(res)) {
-        await enqueue(res.statePath);
-        console.error("[直播直传] 上传待补(保留 spool,稍后重试): " + (res.error ?? "upload pending"));
+        const receipt = await enqueue(res.statePath);
+        const pending = { ...res, ok: false,
+          ...(receipt.status === "blocked" ? { error: "Delivery observation paused: " + receipt.detail } : {}) };
+        await reportResult(ctx, reporter, pending, startMs);
+        console.error(receipt.status === "blocked"
+          ? "[live-pump] Delivery blocked; preserve spool for observation or manual repair: " + receipt.detail
+          : "[直播直传] 上传待补(保留 spool,稍后重试): " + (res.error ?? "upload pending"));
         liveReporter.event({ at: Date.now(), kind: "run_end", outcome: "failed",
-          ...(res.error ? { message: res.error } : {}) });
-        return 75;
+          ...(pending.error ? { message: pending.error } : {}) });
+        return receipt.status === "blocked" ? 1 : 75;
       }
+      await reportResult(ctx, reporter, res, startMs);
       const clean = res.ok && res.outcome !== "no-stream";
       const stopped = signals.signal.aborted || signals.drainSignal.aborted;
       liveReporter.event({ at: Date.now(), kind: "run_end",

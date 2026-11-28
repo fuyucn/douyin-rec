@@ -3,6 +3,19 @@ import { describe, it, expect } from "vitest";
 import { livePumpHandoffReceipt } from "./live-pump-handoff.js";
 
 describe("livePumpHandoffReceipt", () => {
+  it.each([
+    { queued: 0, already: 0, failed: 0 },
+    { queued: 0, already: 3, failed: 0 },
+    { queued: 2, already: 3, failed: 0 },
+    { queued: 0, already: 3, failed: 1, needsManual: 1, error: "stale queue error" },
+  ])("preserves an explicit protected hold ahead of error and ownership counts: %j", (counts) => {
+    const blocked = "Protected UPOS delivery remains with its original owner";
+    expect(livePumpHandoffReceipt({ ...counts, blocked }))
+      .toEqual({ status: "blocked", detail: blocked });
+    expect(livePumpHandoffReceipt({ ...counts, blocked }, new Error("later adapter error")))
+      .toEqual({ status: "blocked", detail: blocked });
+  });
+
   it("only a clean non-zero enqueue is owned", () => {
     expect(livePumpHandoffReceipt({ queued: 2, already: 0, failed: 0 })).toEqual({ status: "owned" });
     expect(livePumpHandoffReceipt({ queued: 0, already: 3, failed: 0 })).toEqual({ status: "owned" });

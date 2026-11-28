@@ -73,7 +73,8 @@ export class LivePumpCheckpoint {
     return this.state.title;
   }
   get nextPartIndex(): number {
-    return this.state.parts.reduce((m, p) => Math.max(m, p.index + 1), 0);
+    const reserved = this.state.pending ? this.state.pending.partIndex + 1 : 0;
+    return this.state.parts.reduce((m, p) => Math.max(m, p.index + 1), reserved);
   }
   get hasArchiveIdentity(): boolean {
     return !!this.state.bvid || !!this.state.aid || this.state.parts.length > 0 || !!this.state.pending;

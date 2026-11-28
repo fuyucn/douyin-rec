@@ -5,7 +5,7 @@
  * helper, and asserts a real proc-queue row exists BEFORE the offline wait begins.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PART_KINDS } from "@drec/core";
@@ -63,13 +63,13 @@ describe("T-221 startup handoff into the real node queue", () => {
 
     const handoffs: string[] = [];
     let polls = 0;
-    let rowsBeforeWait = -1;
     const onHandoff = (sp: string): LivePumpHandoffReceipt => {
       handoffs.push(sp);
       const queued = enqueueLivePumpPending({
         statePath: sp, cookiesPath: join(root, "cookies.json"), log: () => {},
       });
       const store = new ProcQueueStore(procQueueDbPath(root));
+      let rowsBeforeWait: number;
       try {
         rowsBeforeWait = store.rowsForOrderSeq("t221:1", 1, PART_KINDS.upload, 1)
           .filter((r) => r.state === "pending" || r.state === "running").length;
@@ -91,8 +91,8 @@ describe("T-221 startup handoff into the real node queue", () => {
       probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
     });
 
-    expect(handoffs).toEqual([statePath]);
-    expect(rowsBeforeWait).toBe(0);
+    expect(handoffs).toEqual([]);
+    expect(existsSync(procQueueDbPath(root))).toBe(false);
     const st = readLivePumpState(statePath);
     expect(st?.pending).toEqual(state.pending);
     expect(st?.parts[0]?.validated).toBeUndefined();

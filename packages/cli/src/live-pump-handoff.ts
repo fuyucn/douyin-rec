@@ -17,6 +17,7 @@ export function livePumpHandoffReceipt(
   queued: EnqueueLivePumpResult | undefined,
   error?: unknown,
 ): LivePumpHandoffReceipt {
+  if (queued?.blocked !== undefined) return { status: "blocked", detail: queued.blocked };
   if (error !== undefined) {
     return { status: "retryable", detail: String((error as Error)?.message ?? error) };
   }

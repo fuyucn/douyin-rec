@@ -49,6 +49,7 @@ export interface EnqueueLivePumpResult {
    */
   needsManual?: number;
   deferred?: number;
+  blocked?: string;
   error?: string;
 }
 
@@ -72,7 +73,7 @@ export function enqueueLivePumpPending(input: EnqueueLivePumpInput): EnqueueLive
     const unresolved = state.parts.filter(part => !isLivePumpPartObserved(part)).length;
     const held = Math.max(unresolved, state.pending ? 1 : 0);
     return { queued: 0, already: 0, failed: held, needsManual: held,
-      ...(held ? { error: "protected live delivery retains its original UPOS owner; biliup queue handoff is unsupported" } : {}) };
+      blocked: "Protected live delivery retains its original UPOS owner; biliup queue handoff is unsupported" };
   }
   if (!state.parts.some((p) => !p.confirmed)) return { queued: 0, already: 0, failed: 0 };
 
@@ -123,7 +124,7 @@ export function enqueueLivePumpPending(input: EnqueueLivePumpInput): EnqueueLive
         if (terminal) { already++; continue; }
         const active = existing.some((r) => r.state === "pending" || r.state === "running" || r.state === "reconciling");
         if (active) { already++; continue; }
-        // failed / cancelled / uncertain: retrying it would only spam; leave it visible for a human.
+        // failed / cancelled / uncertain: retries would only spam; leave it visible for a human.
         failed++;
         needsManual++;
         log("[live-queue] 分 P " + part.index + " 已有终态失败行(" + existing.map((r) => r.state).join(",") + "),不再入队;后续分 P 暂缓以保分 P 顺序");

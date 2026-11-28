@@ -1,17 +1,18 @@
 // T-220: zero-disk upload-pending handoff must be durable, idempotent, and must not duplicate
 // a part that the queue already owns.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { existsSync, fsyncSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { existsSync, fsyncSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { PART_KINDS } from "@drec/core";
+import { dirname, join } from "node:path";
+import { PART_KINDS, jobIdOf, partLogicalKey, type ProcessJob } from "@drec/core";
 import { ProcQueueStore, procQueueDbPath } from "@drec/proc-queue";
+import { uploadAliasPath } from "@drec/processors";
 import { appendConfirmedJournal, confirmLivePumpPart, livePumpHasUnconfirmed, livePumpStatePath, readConfirmedJournal, readLivePumpState, writeLivePumpState, type LivePumpState } from "@drec/zero-upload";
 import { enqueueLivePumpPending } from "./live-pump-queue.js";
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
-  return { ...actual, fsyncSync: vi.fn(actual.fsyncSync), writeSync: vi.fn(actual.writeSync) };
+  return { ...actual, fsyncSync: vi.fn(actual.fsyncSync), readFileSync: vi.fn(actual.readFileSync), writeSync: vi.fn(actual.writeSync) };
 });
 
 let root: string;
@@ -34,6 +35,7 @@ function stateWith(parts: Array<{ index: number; spoolPath: string; confirmed?: 
 beforeEach(async () => {
   const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
   vi.mocked(fsyncSync).mockImplementation(actual.fsyncSync);
+  vi.mocked(readFileSync).mockImplementation(actual.readFileSync);
   vi.mocked(writeSync).mockImplementation(actual.writeSync);
   oldRoot = process.env.DOUYIN_REC_ROOT;
   root = mkdtempSync(join(tmpdir(), "live-queue-"));
@@ -58,11 +60,103 @@ describe("enqueueLivePumpPending", () => {
     state.parts[0]!.proof = "accepted";
     writeLivePumpState(path, state);
     expect(enqueueLivePumpPending({ statePath: path, cookiesPath: "unused" })).toMatchObject({
-      queued: 0, already: 0, failed: 1, needsManual: 1,
+      queued: 0, already: 0, failed: 1, needsManual: 1, blocked: expect.stringContaining("UPOS"),
     });
     expect(readLivePumpState(path)!.queueManaged).toBeUndefined();
     expect(existsSync(procQueueDbPath(root))).toBe(false);
   });
+
+  it.each(["accepted without pending", "intent", "observed", "never-attempted successor"] as const)(
+    "blocks protected %s before credentials, journal or queue access", (disposition) => {
+      const dir = join(root, "recordings", "q");
+      const file = join(dir, "protected.ts");
+      const later = join(dir, "later.ts");
+      writeFileSync(file, "video");
+      const alias = uploadAliasPath(file);
+      mkdirSync(dirname(alias), { recursive: true });
+      linkSync(file, alias);
+      const state = stateWith([{ index: 0, spoolPath: file }]);
+      state.submissionProofVersion = 1;
+      state.bvid = "BV1";
+      state.aid = 7;
+      const part = state.parts[0]!;
+      part.bytes = 5;
+      part.stem = "native-first";
+      part.nativeKey = part.stem;
+      if (disposition === "accepted without pending") {
+        part.proof = "accepted";
+        part.acceptedAt = 1_001;
+      } else if (disposition === "intent") {
+        state.pending = { kind: "append", submissionState: "intent", partIndex: 0,
+          stem: part.stem, title: part.title, bytes: part.bytes, durationSec: part.durationSec, spoolPath: file };
+      } else {
+        part.confirmed = true;
+        part.proof = "observed";
+        part.observedAt = 1_002;
+      }
+      if (disposition === "never-attempted successor") {
+        writeFileSync(later, "later");
+        state.parts.push({ ...stateWith([{ index: 1, spoolPath: later }]).parts[0]!, stem: "native-later" });
+      }
+      const statePath = livePumpStatePath(dir, "q");
+      writeLivePumpState(statePath, state);
+      appendConfirmedJournal(statePath, { index: 0, bv: "BV-stale", at: 1_003, createdAt: state.createdAt });
+      const before = readFileSync(statePath, "utf-8");
+      vi.mocked(readFileSync).mockClear();
+
+      const queued = enqueueLivePumpPending({ statePath, cookiesPath: join(root, "missing-cookies.json") });
+
+      expect(queued).toMatchObject({ queued: 0, already: 0,
+        failed: disposition === "observed" ? 0 : 1, blocked: expect.stringContaining("UPOS") });
+      expect(queued.error).toBeUndefined();
+      expect(vi.mocked(readFileSync).mock.calls.map(([path]) => String(path))).toEqual([statePath]);
+      expect(existsSync(procQueueDbPath(root))).toBe(false);
+      expect(readFileSync(statePath, "utf-8")).toBe(before);
+      expect(readFileSync(file, "utf-8")).toBe("video");
+      expect(readFileSync(alias, "utf-8")).toBe("video");
+      if (disposition === "never-attempted successor") expect(readFileSync(later, "utf-8")).toBe("later");
+    },
+  );
+
+  it.each(["pending", "done", "skipped"] as const)(
+    "does not derive protected ownership from a stale %s row or confirmation journal", (history) => {
+      const file = join(root, "recordings", "q", "protected.ts");
+      writeFileSync(file, "video");
+      const statePath = livePumpStatePath(dirname(file), "q");
+      const state = stateWith([{ index: 0, spoolPath: file }]);
+      state.parts[0] = { ...state.parts[0]!, proof: "accepted", nativeKey: "s", acceptedAt: 1_001 };
+      writeLivePumpState(statePath, state);
+      appendConfirmedJournal(statePath, { index: 0, bv: "BV-stale", at: 1_002, createdAt: state.createdAt });
+      const orderKey = "q:1000";
+      const logicalKey = partLogicalKey(orderKey, 1);
+      const stat = statSync(file);
+      const job: ProcessJob = { jobId: jobIdOf(PART_KINDS.upload, logicalKey, 1), kind: PART_KINDS.upload,
+        logicalKey, generation: 1, inputs: [file], params: { partWorkflow: "live-pump", liveStatePath: statePath,
+          ctx: { v: 1, orderKey, index: 1, file, fp: { size: stat.size, mtimeMs: stat.mtimeMs } } },
+        replaceInputs: false, owner: { streamKey: orderKey }, createdAt: 1_000, orderKey, seq: 1 };
+      const store = new ProcQueueStore(procQueueDbPath(root));
+      try {
+        const seeded = history === "done"
+          ? store.importConfirmedPart(job, { allowedRoots: [root], bv: "BV-stale" })
+          : history === "skipped" ? store.enqueueSourceGone(job, { allowedRoots: [root] })
+            : store.enqueue(job, { allowedRoots: [root] });
+        expect(seeded.state).toBe(history);
+        const rows = store.list();
+        const before = readFileSync(statePath, "utf-8");
+        vi.mocked(readFileSync).mockClear();
+
+        expect(enqueueLivePumpPending({ statePath, cookiesPath: "unused" })).toMatchObject({
+          queued: 0, already: 0, failed: 1, blocked: expect.stringContaining("UPOS"),
+        });
+
+        expect(vi.mocked(readFileSync).mock.calls.map(([path]) => String(path))).toEqual([statePath]);
+        expect(store.list()).toEqual(rows);
+        expect(readFileSync(statePath, "utf-8")).toBe(before);
+        expect(readFileSync(file, "utf-8")).toBe("video");
+      } finally { store.close(); }
+    },
+  );
+
   it("queues every sealed unconfirmed part atomically and marks the state queue-managed", () => {
     const dir = join(root, "recordings", "q");
     const p0 = join(dir, "a_000.live.ts");
