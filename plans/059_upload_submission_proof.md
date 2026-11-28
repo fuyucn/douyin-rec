@@ -596,6 +596,42 @@ runs no tests and changes no runtime files.
   containment, compatibility/activation gates and the repository runtime gates.
   Existing owner decisions and deployment restrictions are unchanged.
 
+### 2026-11-28: direct recovery checkpoint, full runtime gate passed
+
+- Code checkpoints eca36613, 91119854 and d18f6fe8 are pushed to the task branch.
+  This supersedes the pending runtime results above for this direct-flow slice;
+  it is not T-251 completion, a release, deployment or activation approval.
+- Self-review and runtime regression found that an adopted, validated orphan
+  could retain an open seal after recovery and therefore never become eligible
+  for proof-gated cleanup. Recovery now persists an explicit seal only after
+  successful preparation and the abort check, before metadata publication. A
+  failed durable write stops publication and preserves the source; failed or
+  aborted preparation never promotes the row.
+- Four focused regressions cover seal-before-publication ordering, checkpoint
+  write failure, failed preparation and stop during preparation. The existing
+  real SIGKILL recovery test also asserts the durable seal and retains its
+  original WAL and source-deletion checks.
+- Test fixtures now bind native keys to their requests and retain remote archive
+  history across local restarts. Signal tests wait for installed handlers rather
+  than a fixed startup delay. Identity-recovery tests qualify their observed
+  prefix and assert the actual GET-only lookup endpoints; the legacy-prefix hold
+  and duplicate-native-key negative regressions remain in place. The streamed
+  append contract explicitly asserts its required native predecessor.
+- On d18f6fe8, the full runtime suite passed: 5,770 passed, 0 failed, 42 existing
+  skips across 389 test files, exit 0 without timeout (407.3 seconds). The focused
+  contract gate passed 13/13. Typecheck, architecture, bundle, privacy and diff
+  checks passed. The ignored bundle was rebuilt without changing version 0.0.408.
+- Independent narrow static review found no P0/P1 in the recovery slice; it does
+  not certify the unimplemented account/owner binding, observer or whole-order
+  scope. Prior failing reports remain historical failures, not green evidence.
+- The remote prerequisite is unchanged: main e4569d33 has no PR #754 journal;
+  PR #754 remains open at eeb2caf9. The typed core/master receipt must use that
+  existing journal, without adding a second store or changing its retry policy.
+- Complete identity qualification, durable nonblocking observation, whole-order/
+  rolling/queue containment, compatibility and activation gates remain open.
+  No full-feature checkbox is completed by this runtime checkpoint. No real
+  upload, merge, deployment, release or activation was performed.
+
 ## Out of scope
 
 - No production spool=none enablement, disk-watermark product decision, or
