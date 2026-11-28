@@ -146,6 +146,7 @@ describe("live-pump -> PartSubmitter seam", () => {
     expect(calls.append).toHaveLength(1);
     expect(calls.append[0]).toEqual({
       ref: { targetId: "custom-target", id: REF.id }, name: "stem1", title: title.slice(0, 80), size: 6, signal,
+      mustContain: ["stem0"],
     });
     expect(calls.append[0]!.signal).toBe(signal);
     expect(s.parts.map((p) => p.confirmed)).toEqual([true, true]);

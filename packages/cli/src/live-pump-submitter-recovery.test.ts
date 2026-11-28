@@ -97,17 +97,22 @@ describe("default live-pump driver legacy identity recovery", () => {
   });
 
   it.each([
-    ["different aid", () => archiveResponse(8)],
-    ["missing bvid", () => archiveResponse(7, "")],
-    ["unreadable archive", () => Response.json({ code: -404 })],
-  ] as const)("preserves state and spool on %s without submitting", async (_name, response) => {
+    ["different aid", () => archiveResponse(8), ["/x/vupre/web/archive/view?aid=7"]],
+    ["missing bvid", () => archiveResponse(7, ""), ["/x/vupre/web/archive/view?aid=7"]],
+    ["unreadable archive", () => Response.json({ code: -404 }),
+      ["/x/vupre/web/archive/view?aid=7", "/x/client/archive/view?aid=7"]],
+  ] as const)("preserves state and spool on %s without submitting", async (_name, response, expectedReads) => {
     const fetchImpl = vi.fn<typeof fetch>(async () => response());
-    const { session, input, statePath, append } = legacySession(fetchImpl);
+    const { session, input, statePath, append } = legacySession(fetchImpl, false, true);
     const before = readFileSync(statePath, "utf8");
     await expect(session.submitPart(input)).resolves.toMatchObject({ ok: false, needsManual: true });
     expect(append).not.toHaveBeenCalled();
     expect(readFileSync(statePath, "utf8")).toBe(before);
     expect(readFileSync(input.spoolPath, "utf8")).toBe("part-2!");
+    expect(fetchImpl.mock.calls.map(([input]) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      return url.pathname + url.search;
+    })).toEqual(expectedReads);
     expect(fetchImpl.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
   });
 
@@ -126,7 +131,7 @@ describe("default live-pump driver legacy identity recovery", () => {
 
   it("refuses further submission when normalized identity cannot be persisted", async () => {
     const fetchImpl = vi.fn<typeof fetch>(async () => archiveResponse());
-    const { session, input, statePath, append } = legacySession(fetchImpl);
+    const { session, input, statePath, append } = legacySession(fetchImpl, false, true);
     const before = readFileSync(statePath, "utf8");
     const now = Date.now();
     vi.spyOn(Date, "now").mockReturnValue(now);
@@ -149,7 +154,7 @@ describe("default live-pump driver legacy identity recovery", () => {
         init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
       });
     });
-    const { session, input, statePath, append } = legacySession(fetchImpl);
+    const { session, input, statePath, append } = legacySession(fetchImpl, false, true);
     const before = readFileSync(statePath, "utf8");
     const controller = new AbortController();
     const result = session.submitPart(input, controller.signal);
