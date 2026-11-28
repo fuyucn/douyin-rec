@@ -82,12 +82,12 @@ describe("protected live-pump handoff containment", () => {
     });
 
     expect(result.ok).toBe(false);
+    expect(result.uploadPending).toBeUndefined();
+    expect(result.outcome).not.toBe("idle");
+    expect(result.error).toContain("observation paused");
     if (spoolMode === "none") {
-      expect(result.uploadPending).toBeUndefined();
-      expect(result.error).toContain("observation paused");
       expect(polls).toBe(0);
     } else {
-      expect(result.uploadPending).toBe(true);
       expect(polls).toBeGreaterThan(0);
     }
     expect(recover).not.toHaveBeenCalled();
@@ -124,7 +124,9 @@ describe("protected live-pump handoff containment", () => {
     });
 
     expect(result.ok).toBe(false);
-    expect(result.uploadPending).toBe(true);
+    expect(result.uploadPending).toBeUndefined();
+    expect(result.outcome).not.toBe("idle");
+    expect(result.error).toBe("Live delivery observation paused; source and queue history require manual review");
     expect(polls).toBeGreaterThan(0);
     expect(onHandoff).not.toHaveBeenCalled();
     expect(fetchImpl).not.toHaveBeenCalled();

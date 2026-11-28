@@ -55,6 +55,7 @@ export class LivePumpStartup {
     const error = requiresLivePumpProof(queued)
       ? "Protected delivery observation paused; legacy queue markers do not transfer its UPOS ownership"
       : "Legacy delivery has no native per-part observation; queue ownership is unqualified and source is retained for manual review";
+    this.events.phase("finalizing");
     this.events.log("[live-pump] " + error);
     if (this.o.spoolMode === "none")
       return { fail: this.result(session, { error, bvid: queued.bvid, aid: queued.aid }) };

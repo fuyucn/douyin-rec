@@ -3761,10 +3761,14 @@ describe("same-broadcast rule on the room-keyed state (issue #293)", () => {
     };
     writeFileSync(statePath(), JSON.stringify(base));
   }
+  function seedObserved(agoMin: number, extra: Record<string, unknown> = {}): void {
+    seed(agoMin, { submissionProofVersion: 1, aid: 7,
+      parts: [{ ...part(true), proof: "observed", nativeKey: "s", observedAt: 1 }], ...extra });
+  }
   const archives = () => readdirSync(dir).filter((f) => f.includes(".archived-"));
 
   it("31 min gap: starts a new submission and archives the old state", () => {
-    seed(31);
+    seedObserved(31);
     const logs: string[] = [];
     const s = open((m) => logs.push(m));
     expect(s.hasArchiveIdentity).toBe(false);
@@ -3778,7 +3782,7 @@ describe("same-broadcast rule on the room-keyed state (issue #293)", () => {
 
   it("29 and 30 min gaps continue the same submission", () => {
     for (const ago of [29, 30]) {
-      seed(ago - 0.01);
+      seedObserved(ago - 0.01);
       const s = open();
       expect(s.bvid).toBe(FAKE_BV);
       expect(archives().length).toBe(0);
@@ -3808,16 +3812,27 @@ describe("same-broadcast rule on the room-keyed state (issue #293)", () => {
     expect(readFileSync(pending.spoolPath, "utf8")).toBe("pending-part");
   });
 
-  it("stale state with an unconfirmed part: archived + one alert + fresh submission", () => {
+  it("stale legacy state with an unconfirmed part is held without rollover or source mutation", () => {
     seed(120, { parts: [part(false)] });
+    const spool = join(dir, "p0.ts");
+    writeFileSync(spool, "x");
+    const old = new Date(Date.now() - 120 * MIN);
+    utimesSync(spool, old, old);
+    const before = readFileSync(statePath(), "utf-8");
     const alerts: string[] = [];
-    expect(openWithAlerts(alerts).hasArchiveIdentity).toBe(false);
-    expect(alerts.length).toBe(1);
-    expect(archives().length).toBe(1);
+    const session = openWithAlerts(alerts);
+    expect(session.hasArchiveIdentity).toBe(true);
+    expect(session.hasUnconfirmed).toBe(true);
+    expect(session.bvid).toBe(FAKE_BV);
+    expect(alerts).toEqual([]);
+    expect(archives()).toEqual([]);
+    expect(readFileSync(statePath(), "utf-8")).toBe(before);
+    expect(readFileSync(spool, "utf-8")).toBe("x");
+    expect(spoolPathsToKeep(session.snapshot())).toContain(spool);
   });
 
-  it("stale but fully confirmed state: archived without an alert", () => {
-    seed(120);
+  it("stale native-observed state is archived without an alert", () => {
+    seedObserved(120);
     const alerts: string[] = [];
     expect(openWithAlerts(alerts).hasArchiveIdentity).toBe(false);
     expect(alerts.length).toBe(0);
@@ -3842,21 +3857,30 @@ describe("same-broadcast rule on the room-keyed state (issue #293)", () => {
     expect(archives().length).toBe(0);
   });
 
-  it("issue #642: recovery progress marker keeps a slow resubmit in the same broadcast", () => {
-    seed(54);
-    writeFileSync(`${statePath()}.activity`, "x");   // chunk progress 20 min into the retry
+  it("issue #642: a recent progress marker keeps a native-observed archive in the same broadcast", () => {
+    seedObserved(54);
+    writeFileSync(`${statePath()}.activity`, "x");
     expect(open().bvid).toBe(FAKE_BV);
     expect(archives().length).toBe(0);
   });
 
-  it("issue #642: a stuck recovery with no chunk progress still ages out", () => {
+  it("issue #642: a stale activity marker cannot age out unobserved legacy work", () => {
     seed(54);
+    const spool = join(dir, "p0.ts");
+    writeFileSync(spool, "x");
     const marker = `${statePath()}.activity`;
     writeFileSync(marker, "x");
     const old = new Date(Date.now() - 40 * MIN);
     utimesSync(marker, old, old);
-    expect(open().bvid).toBeUndefined();
-    expect(archives().length).toBe(1);
+    utimesSync(spool, old, old);
+    const before = readFileSync(statePath(), "utf-8");
+    const session = open();
+    expect(session.bvid).toBe(FAKE_BV);
+    expect(session.hasUnconfirmed).toBe(true);
+    expect(archives()).toEqual([]);
+    expect(readFileSync(statePath(), "utf-8")).toBe(before);
+    expect(readFileSync(spool, "utf-8")).toBe("x");
+    expect(readFileSync(marker, "utf-8")).toBe("x");
   });
 
   it("issue #642: an aborted startup recovery performs no submit and keeps the part unconfirmed", async () => {
@@ -3903,21 +3927,27 @@ describe("same-broadcast rule on the room-keyed state (issue #293)", () => {
     expect(alerts).toHaveLength(0);
   });
 
-  it("old state without a timestamp and with unconfirmed parts: archived + one alert, not appended to", () => {
+  it("legacy unconfirmed state without a timestamp retains its archive identity and source for manual review", () => {
     seed(0, { updatedAt: undefined, parts: [part(false)] });
+    const spool = join(dir, "p0.ts");
+    writeFileSync(spool, "x");
+    const before = readFileSync(statePath(), "utf-8");
     const alerts: string[] = [];
     const s = openWithAlerts(alerts);
-    expect(s.bvid).toBeUndefined();
-    expect(alerts.length).toBe(1);
-    expect(archives().length).toBe(1);
+    expect(s.bvid).toBe(FAKE_BV);
+    expect(s.hasUnconfirmed).toBe(true);
+    expect(alerts).toEqual([]);
+    expect(archives()).toEqual([]);
+    expect(readFileSync(statePath(), "utf-8")).toBe(before);
+    expect(readFileSync(spool, "utf-8")).toBe("x");
   });
 
   it("two archives in the same millisecond never overwrite each other", () => {
     const now = vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
     try {
-      seed(31, { title: "first" });
+      seedObserved(31, { title: "first" });
       open();
-      seed(31, { title: "second" });
+      seedObserved(31, { title: "second" });
       open();
     } finally { now.mockRestore(); }
     expect(archives().length).toBe(2);
@@ -3959,18 +3989,18 @@ describe("same-broadcast rule on the room-keyed state (issue #293)", () => {
     expect(archives()).toEqual([]);
   }, 20_000);
 
-  it("old fully confirmed state without a timestamp falls back to file mtime", () => {
-    seed(0, { updatedAt: undefined });
+  it("native-observed state without a timestamp falls back to file mtime", () => {
+    seedObserved(0, { updatedAt: undefined });
     const old = new Date(Date.now() - 90 * MIN);
     utimesSync(statePath(), old, old);
     expect(open().hasArchiveIdentity).toBe(false);
     expect(archives().length).toBe(1);
-    seed(0, { updatedAt: undefined });
+    seedObserved(0, { updatedAt: undefined });
     expect(open().bvid).toBe(FAKE_BV);
   });
 
   it("waitForBroadcast: same-broadcast is decided when the room goes live, not at process start (#308)", async () => {
-    seed(30); // fresh when the process starts
+    seedObserved(30);
     let calls = 0;
     const logs: string[] = [];
     const r = await runLivePump({
@@ -3984,7 +4014,7 @@ describe("same-broadcast rule on the room-keyed state (issue #293)", () => {
         // Still waiting: the old state must not even be opened yet.
         expect(logs.some((m) => m.includes("resumed state"))).toBe(false);
         if (calls < 3) return { living: false };
-        seed(120); // hours passed while waiting in-process
+        seedObserved(120);
         return { living: true, url: "http://x/y.ts" };
       },
       log: (m) => logs.push(m),
@@ -3995,7 +4025,8 @@ describe("same-broadcast rule on the room-keyed state (issue #293)", () => {
   });
 
   it("waitForBroadcast: stopped while still waiting -> old state untouched", async () => {
-    seed(120);
+    seedObserved(120);
+    const before = readFileSync(statePath(), "utf-8");
     const drain = new AbortController();
     const r = await runLivePump({
       cookiesPath: COOKIES, room: "gap", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
@@ -4008,10 +4039,11 @@ describe("same-broadcast rule on the room-keyed state (issue #293)", () => {
     expect(r.bvid).toBeUndefined(); // no ledger writeback for a run that never went live
     expect(archives().length).toBe(0);
     expect(existsSync(statePath())).toBe(true);
+    expect(readFileSync(statePath(), "utf-8")).toBe(before);
   });
 
   it("every state write refreshes last activity so the rule works after a restart", () => {
-    seed(500);
+    seedObserved(500);
     const st = readLivePumpState(statePath())!;
     writeLivePumpState(statePath(), st);
     expect(open().bvid).toBe(FAKE_BV);
@@ -4985,8 +5017,8 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     const u = fakeUpos();
     const r = await runLivePump(baseOpts(u, { spoolMode: "full", fetch: async () => ({ living: false }) }));
     expect(r.ok).toBe(false);
-    expect(r.uploadPending).toBeUndefined();
-    expect(r.error).toContain("manual review");
+    expect(r.uploadPending).toBe(true);
+    expect(r.error).toBe("queued uploads pending");
     expect(readLivePumpState(livePumpStatePath(dir, "sm"))!.parts[0]?.confirmed).toBe(false);
     expect(existsSync(spool)).toBe(true);
     expect(u.events).toEqual([]);
@@ -5190,7 +5222,8 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     const u = fakeUpos({ initialArchive: ["stem0", "stem1"] });
     const r = await runLivePump(baseOpts(u, { spoolMode: "full", fetch: async () => ({ living: false }) }));
     expect(r.ok).toBe(false);
-    expect(r.error).toContain("manual review");
+    expect(r.uploadPending).toBe(true);
+    expect(r.error).toBe("queued uploads pending");
     const st = readLivePumpState(livePumpStatePath(dir, "sm"))!;
     expect(st.parts.map((p) => p.index)).toEqual([0, 1, 2]);
     expect(st.parts.map((p) => p.confirmed)).toEqual([true, true, false]);
@@ -5214,8 +5247,8 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     const u = fakeUpos();
     const r = await runLivePump(baseOpts(u, { spoolMode: "full", fetch: async () => ({ living: false }) }));
     expect(r.ok).toBe(false);
-    expect(r.uploadPending).toBeUndefined();
-    expect(r.error).toContain("manual review");
+    expect(r.uploadPending).toBe(true);
+    expect(r.error).toBe("queued uploads pending");
     expect(readLivePumpState(livePumpStatePath(dir, "sm"))!.parts[0]?.confirmed).toBe(false);
     expect(existsSync(spool)).toBe(true);
     expect(u.events).toEqual([]);
