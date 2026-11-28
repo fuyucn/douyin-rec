@@ -709,6 +709,46 @@ runs no tests and changes no runtime files.
   No full-feature checkbox or issue is closed. No real upload, merge, deployment,
   release or activation was performed.
 
+### 2026-11-28: legacy live-pump containment and corrected runtime checkpoint
+
+- Source checkpoints 31745dc0 and da7d0691 are pushed and remote-verified;
+  the latter is version 0.0.411. This is another development increment, not
+  completion, deployment, release or activation permission.
+- Every readable legacy live-pump queue handoff is blocked before credentials,
+  confirmation journals, old queue rows or ownership shortcuts. Persisted and
+  direct live-pump upload-part entry points refuse execution before effects.
+  ACK/journal confirmation and checkpoint merging no longer invent native
+  observation, clear pending intent or transfer ownership.
+- Startup and checkpoints share the native-unobserved work predicate. Legacy
+  pending/part/marker/archive facts are retained before broadcast rollover;
+  wrong-room state is rejected. Markerless legacy work and custom handoff
+  callbacks cannot produce false ownership or idle success. Full spool can
+  continue capture-only; no-spool and offline prewait holds require manual review.
+- Source CI for 31745dc0 failed with 5,807 passing, 16 failing and 48 skipped
+  tests. Review found one real regression: the new startup hold bypassed the
+  finalizing phase notification. The one-line correction preserves that phase
+  assertion. QA corrected legacy-only rollover positives to native-observed
+  fixtures and distinguished prewait manual holds from non-prewait full-spool
+  pending results; all effect/source/alias/proof protections remain in place.
+- Source CI for da7d0691 passed 5,823 tests, zero failures and
+  48 skips across 390 files in 128.03 seconds. The test total is unchanged from
+  the failed run: the 16 failures became passes, not skips. CI root typecheck,
+  bundle, web install/typecheck/build, CSS and browser regressions all passed.
+  Historical failed runs remain failed, not retrospectively validated.
+- Local root and expanded integration-test typechecks, architecture, whitespace
+  and committed-branch privacy gates passed. Independent narrow source and test
+  reviews passed. Supported source-size/comment metrics passed; the checker
+  does not measure TypeScript function size or nesting. The ignored bundle was
+  rebuilt as 0.0.411-f97414; it was not force-added. No local Vitest was launched
+  for this increment, preserving the explicitly reserved peer test window.
+- Generic old-done/importConfirmedPart cleanup repair, rolling/replay/cursor
+  containment, complete identity binding, durable nonblocking observation,
+  mixed-version and activation gates remain unfinished. PR #754 remains open
+  at eeb2caf9 and main e4569d33 lacks its journal; the typed master seam must
+  reuse that journal without changing the approved #752 retry policy.
+- No full-feature checkbox or issue is closed. No real upload, merge,
+  deployment, release, activation or new persistent store was performed.
+
 ## Out of scope
 
 - No production spool=none enablement, disk-watermark product decision, or

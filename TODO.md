@@ -15,13 +15,15 @@
 
 ## 进行中
 
-T-251 latest source checkpoint: c6b8188b is pushed; protected handoff and legacy
-cleanup-consumer containment passed the full suite: 5,796 passed, 0 failed and
-42 existing skips across 390 files. Handoff/startup regression passed 316/316;
-cleanup, queue runner and architecture regression passed 96/96. Root/integration
-typecheck, architecture, bundle, privacy and narrow static reviews passed.
-Legacy replay/import/cursor, qualified observation and the master receipt seam
-remain incomplete. No full-feature checkbox or issue is closed.
+T-251 latest source checkpoint: da7d0691 is pushed, version 0.0.411. Legacy
+live-pump import, execution, confirmation and startup shortcuts are quarantined;
+native-observed rollover positives and the finalizing phase remain covered.
+Source CI for da7d0691 passed 5,823 tests, 0 failed and 48 skipped across 390 files;
+bundle, web build/typecheck, CSS and browser gates also passed. The earlier
+16-failure source CI remains a historical failure. Root/integration typecheck,
+architecture, bundle, privacy and independent narrow static reviews passed.
+Generic old-done import/repair, rolling/replay/cursor, qualified observation and
+the master receipt seam remain incomplete. No feature checkbox or issue is closed.
 This is development progress only, not completion, release or deployment.
 
 - [~] **T-251 提交证据与逐P清理安全闸（issue [#755](https://github.com/fuyucn/douyin-rec/issues/755)，plan [059](plans/059_upload_submission_proof.md)，2026-11-27）** — **做什么**:禁止 rolling/直播直传/恢复路径用数量、空查询或普通 ACK 推断未提交或本P已完成；持久区分 accepted 与 observed，只有同稿同P正向证据才能清理源文件。**为什么**:响应丢失、读回延迟或其他P先到达时，旧路径可能重复投稿或删除仍需恢复的源。**验收**:未知不重发、不清 intent、不假确认；accepted 跨重启保留且不重发；无稳定P身份的旧 target 保源待核验；所有 cleanup 入口检查同一 proof；新增四路故障回归并通过全量门禁。**不做**:不新增数据库/队列/跨机租约，不改 #752 已批准的明确限流回队，不做直播磁盘产品决策或强制停止协议。
