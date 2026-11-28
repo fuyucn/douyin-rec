@@ -1,25 +1,10 @@
-/**
- * processors/cleanup-part.ts — the ONE queue processor allowed to delete recording sources
- * (plan 046 PR2: §3 principle 1, §4.1 ctx, §5.4, §8 risk 3).
- *
- * Contracts only in this PR: nothing enqueues `cleanup-part` rows yet (PR5 wires the chain),
- * so shipped behaviour is unchanged. Semantics:
- *   - params.ctx is the only input: an absolute video file + fingerprint + confirmed draft id.
- *   - Never queries the archive (§5.4): Bilibili list/part data lags; the deletion evidence is
- *     the confirmed upload ctx (completeAndChain already required a bv; this re-checks it).
- *   - Fingerprint mismatch => keep both files and reject (§5.4 constraint 2: never delete another
- *     file just because the path matches). The runner alerts rejections once, so the processor
- *     does not alert again (same convention as remux.ts).
- *   - Source already gone => idempotent success.
- *   - assertLease before the first irreversible unlink; alias first, source second; a failure of
- *     either step keeps the other file and throws (retryable, never silent).
- */
-import { existsSync, statSync, unlinkSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import {
   PART_KINDS, assertJobInvariants, isVideoFileName, type PartCtx,
-  type ProcessContext, type ProcessJob, type ProcessResult, type Processor,
+  type ProcessJob, type ProcessResult, type Processor,
 } from "@drec/core";
+
+const CLEANUP_PROOF_HOLD = "cleanup-part has no qualified per-part observation executor; preserve source and alias for manual review";
 
 /** Hard-link directory biliup renders part titles into (mirrors ALIAS_DIR in biliup.ts). */
 export const UPLOAD_ALIAS_DIR = ".upload";
@@ -66,20 +51,13 @@ function readCtx(job: ProcessJob): CtxResult {
   return { ok: true, ctx: c as unknown as PartCtx };
 }
 
-/**
- * cleanup-part processor (plan 046 §5.4). Inputs stay exactly one video file; the deletion
- * evidence is the confirmed upload ctx, not any Bilibili query.
- */
 export function makeCleanupPartProcessor(deps: CleanupPartDeps = {}): Processor {
-  const exists = deps.exists ?? ((p: string): boolean => existsSync(p));
-  const stat = deps.stat ?? ((p: string) => { const s = statSync(p); return { size: s.size, mtimeMs: s.mtimeMs }; });
-  const unlink = deps.unlink ?? ((p: string): void => { unlinkSync(p); });
   return {
     kind: PART_KINDS.cleanup,
     resource: "cpu",
     // copy lane: pure local IO, never blocks or shares the biliup upload slot (plan 046 §5.6).
     lane: "copy",
-    retryable: true,
+    retryable: false,
     interruptible: true,
     validate(job: ProcessJob): string | null {
       try {
@@ -89,48 +67,14 @@ export function makeCleanupPartProcessor(deps: CleanupPartDeps = {}): Processor 
       if (job.replaceInputs) return "cleanup-part 自己按 ctx 精确删除,不走通用 replaceInputs";
       if (!isVideoFileName(job.inputs[0])) return "cleanup-part 输入须是视频文件(拒 xml/ass/边车): " + basename(job.inputs[0]);
       const checked = readCtx(job);
-      return checked.ok ? null : checked.error;
+      return checked.ok ? CLEANUP_PROOF_HOLD : checked.error;
     },
-    // Deletion only frees space; nothing is written (runner disk admission stays a no-op).
     estimateDiskBytes(): number { return 0; },
-    async run(job: ProcessJob, ctx: ProcessContext): Promise<ProcessResult> {
+    async run(job: ProcessJob): Promise<ProcessResult> {
       const checked = readCtx(job);
-      if (!checked.ok) throw new Error(checked.error); // validate already gates this; defense in depth
-      const c = checked.ctx;
-      const file = c.file;
-      const name = basename(file);
-      if (!exists(file)) return { outputs: [], note: "源文件已不存在,幂等完成: " + name };
-      const now = stat(file);
-      if (now.size !== c.fp.size || now.mtimeMs !== c.fp.mtimeMs) {
-        throw new Error(
-          "cleanup-part 指纹不符,拒绝删除 " + name + ":磁盘 " + now.size + "B/" + now.mtimeMs
-            + " ≠ 入队 " + c.fp.size + "B/" + c.fp.mtimeMs + "(文件被替换?两份都保留待人工)",
-        );
-      }
-      // Every unlink below is irreversible: the lease must still be ours (§5.4).
-      ctx.assertLease();
-      const alias = uploadAliasPath(file);
-      const aliasWasThere = exists(alias);
-      if (aliasWasThere) {
-        try { unlink(alias); }
-        catch (e) { throw new Error("cleanup-part 删除别名失败,源文件保留 " + name + ": " + (e as Error).message); }
-      }
-      try { unlink(file); }
-      catch (e) {
-        if ((e as NodeJS.ErrnoException).code === "ENOENT") {
-          // Raced away after the stat: same meaning as the pre-check — nothing left to delete.
-          return { outputs: [], note: "源文件在删除前已消失,幂等完成: " + name };
-        }
-        throw new Error(
-          "cleanup-part 删除源文件失败" + (aliasWasThere ? "(别名已删,源文件仍在,可安全重试)" : "")
-            + ": " + name + ": " + (e as Error).message,
-        );
-      }
-      ctx.log("cleanup-part 已删 " + name + (aliasWasThere ? " 及其上传别名" : ""));
-      return { outputs: [], note: "deleted " + name };
+      throw new Error(checked.ok ? CLEANUP_PROOF_HOLD : checked.error);
     },
-    // Re-running a cleanup only re-checks existence + fingerprint; safe to rerun after any abort.
-    async recover(): Promise<"rerun"> { return "rerun"; },
+    async recover(): Promise<"uncertain"> { return "uncertain"; },
   };
 }
 

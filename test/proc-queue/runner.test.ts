@@ -1,10 +1,11 @@
 // plans/036 T3:ProcRunner —— 租约 / 心跳 / fencing / 限额 / 磁盘准入 / 接管 recover / 关停 / 快照(假处理器)。
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { registerProcessor, _resetProcessors, UncertainOutcome, type ProcessContext, type ProcessJob } from "@drec/core";
+import { PART_KINDS, registerProcessor, _resetProcessors, UncertainOutcome, type ProcessContext, type ProcessJob } from "@drec/core";
 import { ProcRunner, SimpleSlotLimiter, readProcActive, LEASE_MS, type ProcRunnerOpts } from "@drec/proc-queue";
 import { makeUploadPartProcessor } from "@drec/bilibili-upload";
+import { makeCleanupPartProcessor, uploadAliasPath } from "@drec/processors";
 import type { BiliupHooks } from "../../packages/bilibili-upload/src/run-biliup.js";
 import { makeEnv, fakeProcessor, gate, type Env } from "./helpers.js";
 
@@ -112,6 +113,111 @@ describe("基本执行", () => {
       host: true, running: { fake: 1, idle: 0 }, pending: { fake: 1, idle: 0 }, leaseAlive: { fake: true, idle: true },
     });
     g.resolve();
+  });
+});
+
+describe("plan 059 legacy cleanup consumer containment", () => {
+  it("rejects an old pending cleanup after SQLite restart without deletion or retries", async () => {
+    const file = env.file("legacy.ts", "video");
+    const alias = uploadAliasPath(file);
+    mkdirSync(dirname(alias), { recursive: true });
+    linkSync(file, alias);
+    const fingerprint = statSync(file);
+    const legacyJob = env.job("legacy.ts", { kind: PART_KINDS.cleanup, params: { ctx: {
+      v: 1, orderKey: "legacy-order", index: 1, file,
+      fp: { size: fingerprint.size, mtimeMs: fingerprint.mtimeMs }, bv: "LEGACY-DRAFT",
+    } } });
+    const store = env.open();
+    const { jobId } = store.enqueue(legacyJob, allowed());
+    expect(store.get(jobId)?.state).toBe("pending");
+    const before = store.get(jobId)!;
+    store.close();
+    const reopened = env.open();
+    expect(reopened.get(jobId)).toEqual(before);
+    const exists = vi.fn(() => true);
+    const stat = vi.fn(() => ({ size: fingerprint.size, mtimeMs: fingerprint.mtimeMs }));
+    const unlink = vi.fn();
+    const processor = makeCleanupPartProcessor({ allowedRoots: () => [env.root], exists, stat, unlink });
+    const run = vi.fn(processor.run);
+    const recover = vi.fn(processor.recover!);
+    registerProcessor({ ...processor, run, recover });
+    const runner = mkRunner("proof-aware", { store: reopened });
+    runner.tick();
+
+    await vi.waitFor(() => expect(reopened.get(jobId)?.state).toBe("failed"));
+    expect(reopened.get(jobId)).toMatchObject({ attempts: 1, params: before.params,
+      error: expect.stringMatching(/no qualified per-part observation executor/i) });
+    expect(alerts).toEqual([[1, expect.stringMatching(/manual/i)]]);
+    expect(run).not.toHaveBeenCalled();
+    expect(recover).not.toHaveBeenCalled();
+    expect(exists).not.toHaveBeenCalled();
+    expect(stat).not.toHaveBeenCalled();
+    expect(unlink).not.toHaveBeenCalled();
+    expect(retryTasks).toHaveLength(0);
+    await advanceRetryClock(24 * 60 * 60 * 1_000);
+    expect(reopened.get(jobId)).toMatchObject({ state: "failed", attempts: 1, params: before.params });
+    expect(reopened.get(jobId)?.params).toEqual(before.params);
+    expect(reopened.get(jobId)?.bv).toBe(before.bv);
+    expect(run).not.toHaveBeenCalled();
+    expect(retryTasks).toHaveLength(0);
+    expect(alerts).toHaveLength(1);
+    expect(reopened.list({ kind: PART_KINDS.cleanup })).toHaveLength(1);
+    expect(readFileSync(file, "utf-8")).toBe("video");
+    expect(readFileSync(alias, "utf-8")).toBe("video");
+  });
+
+  it("takes over an old running cleanup as uncertain without rerun or automatic retry", async () => {
+    const file = env.file("orphan.ts", "video");
+    const alias = uploadAliasPath(file);
+    mkdirSync(dirname(alias), { recursive: true });
+    linkSync(file, alias);
+    const fingerprint = statSync(file);
+    const legacyJob = env.job("orphan.ts", { kind: PART_KINDS.cleanup, params: { ctx: {
+      v: 1, orderKey: "legacy-order", index: 1, file,
+      fp: { size: fingerprint.size, mtimeMs: fingerprint.mtimeMs }, bv: "LEGACY-DRAFT",
+    } } });
+    const store = env.open();
+    const { jobId } = store.enqueue(legacyJob, allowed());
+    expect(store.acquireLease(PART_KINDS.cleanup, "legacy-owner", { pid: process.pid }).acquired).toBe(true);
+    expect(store.claim({ kinds: [PART_KINDS.cleanup], owner: "legacy-owner" }))
+      .toMatchObject({ jobId, state: "running", attempts: 1 });
+    const before = store.get(jobId)!;
+    store.close();
+    env.clock.t += LEASE_MS + 1;
+    const reopened = env.open();
+    expect(reopened.get(jobId)).toEqual(before);
+    const exists = vi.fn(() => true);
+    const stat = vi.fn(() => ({ size: fingerprint.size, mtimeMs: fingerprint.mtimeMs }));
+    const unlink = vi.fn();
+    const processor = makeCleanupPartProcessor({ allowedRoots: () => [env.root], exists, stat, unlink });
+    const run = vi.fn(processor.run);
+    const recover = vi.fn(processor.recover!);
+    registerProcessor({ ...processor, run, recover });
+    const runner = mkRunner("proof-aware", { store: reopened });
+    runner.tick();
+
+    await vi.waitFor(() => expect(reopened.get(jobId)?.state).toBe("uncertain"));
+    expect(reopened.getLease(PART_KINDS.cleanup)?.owner).toBe("proof-aware");
+    expect(reopened.get(jobId)).toMatchObject({ attempts: 1, params: before.params, error: expect.any(String) });
+    expect(recover).toHaveBeenCalledTimes(1);
+    expect(recover).toHaveBeenCalledWith(expect.objectContaining({ jobId, params: before.params }), expect.any(Object));
+    expect(run).not.toHaveBeenCalled();
+    expect(exists).not.toHaveBeenCalled();
+    expect(stat).not.toHaveBeenCalled();
+    expect(unlink).not.toHaveBeenCalled();
+    expect(alerts).toEqual([[1, expect.stringContaining(PART_KINDS.cleanup)]]);
+    expect(retryTasks).toHaveLength(0);
+    await advanceRetryClock(24 * 60 * 60 * 1_000);
+    expect(reopened.get(jobId)).toMatchObject({ state: "uncertain", attempts: 1, params: before.params });
+    expect(reopened.get(jobId)?.params).toEqual(before.params);
+    expect(reopened.get(jobId)?.bv).toBe(before.bv);
+    expect(recover).toHaveBeenCalledTimes(1);
+    expect(run).not.toHaveBeenCalled();
+    expect(retryTasks).toHaveLength(0);
+    expect(alerts).toHaveLength(1);
+    expect(reopened.list({ kind: PART_KINDS.cleanup })).toHaveLength(1);
+    expect(readFileSync(file, "utf-8")).toBe("video");
+    expect(readFileSync(alias, "utf-8")).toBe("video");
   });
 });
 

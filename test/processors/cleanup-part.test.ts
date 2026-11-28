@@ -1,7 +1,6 @@
-// plan 046 PR2: cleanup-part — the only queue processor allowed to delete sources (§5.4 / §8 risk 3).
-// Real temp dirs; fs seams (unlink / allowedRoots) inject failures. Contracts only: no caller is wired yet.
+// plan 059 P0a: unqualified cleanup consumers retain legacy sources and upload aliases.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PART_KINDS, jobIdOf, type ProcessContext, type ProcessJob } from "@drec/core";
@@ -47,17 +46,24 @@ const okJob = (): { file: string; j: ProcessJob } => {
 };
 
 describe("cleanup-part contract table", () => {
-  it("kind / lane / flags match plan 046 decisions", () => {
+  it("keeps the cleanup lane but refuses automatic retries without a qualified executor", () => {
     expect(cleanupPartProcessor.kind).toBe(PART_KINDS.cleanup);
     expect(cleanupPartProcessor.resource).toBe("cpu");
     expect(cleanupPartProcessor.lane).toBe("copy");
-    expect(cleanupPartProcessor.retryable).toBe(true);
+    expect(cleanupPartProcessor.retryable).toBe(false);
     expect(cleanupPartProcessor.interruptible).toBe(true);
   });
 
-  it("validate accepts the canonical confirmed-upload ctx job", () => {
-    const { j } = okJob();
-    expect(cleanupPartProcessor.validate(j)).toBeNull();
+  it("validate holds a canonical legacy v1 ctx even without a protection marker", () => {
+    const { file, j: legacyJob } = okJob();
+    const alias = putAlias(file);
+    const before = JSON.stringify(legacyJob);
+    const error = cleanupPartProcessor.validate(legacyJob);
+    expect(error).toMatch(/no qualified per-part observation executor/i);
+    expect(error).toMatch(/manual/i);
+    expect(JSON.stringify(legacyJob)).toBe(before);
+    expect(readFileSync(file, "utf-8")).toBe("x");
+    expect(readFileSync(alias, "utf-8")).toBe("x");
   });
 
   it("validate rejects anything that could point the delete at another file", () => {
@@ -100,99 +106,166 @@ describe("cleanup-part contract table", () => {
 });
 
 describe("cleanup-part run", () => {
-  it("deletes the source and its upload alias hardlink", async () => {
+  it("rejects direct run before existence, stat, lease or unlink and retains both hardlinks", async () => {
     const file = put("a_000.ts");
     const alias = putAlias(file);
+    const legacyJob = job(file);
+    const before = JSON.stringify(legacyJob);
+    const exists = vi.fn(() => true);
+    const stat = vi.fn(() => fpOf(file));
+    const unlink = vi.fn();
+    const assertLease = vi.fn();
     const alert = vi.fn();
-    const res = await cleanupPartProcessor.run(job(file), runCtx({ alert }));
-    expect(res.note).toContain("deleted");
+    const processor = makeCleanupPartProcessor({ exists, stat, unlink });
+    await expect(processor.run(legacyJob, runCtx({ assertLease, alert }))).rejects.toThrow(/no qualified per-part observation executor/i);
+    expect(exists).not.toHaveBeenCalled();
+    expect(stat).not.toHaveBeenCalled();
+    expect(assertLease).not.toHaveBeenCalled();
+    expect(unlink).not.toHaveBeenCalled();
+    expect(alert).not.toHaveBeenCalled();
+    expect(JSON.stringify(legacyJob)).toBe(before);
+    expect(readFileSync(file, "utf-8")).toBe("x");
+    expect(readFileSync(alias, "utf-8")).toBe("x");
+  });
+
+  it("retains the source when no alias exists", async () => {
+    const file = put("a_000.ts");
+    await expect(cleanupPartProcessor.run(job(file), runCtx())).rejects.toThrow(/no qualified per-part observation executor/i);
+    expect(readFileSync(file, "utf-8")).toBe("x");
+  });
+
+  it("retains a replaced source and its alias without treating a fingerprint mismatch as permission", async () => {
+    const legacyJob = job(put("a_000.ts"));
+    const file = legacyJob.inputs[0]!;
+    const alias = putAlias(file);
+    writeFileSync(file, "content replaced after sealing");
+    await expect(cleanupPartProcessor.run(legacyJob, runCtx())).rejects.toThrow(/no qualified per-part observation executor/i);
+    expect(readFileSync(file, "utf-8")).toBe("content replaced after sealing");
+    expect(readFileSync(alias, "utf-8")).toBe("content replaced after sealing");
+  });
+
+  it("retains the source and alias after an mtime change", async () => {
+    const legacyJob = job(put("a_000.ts"));
+    const file = legacyJob.inputs[0]!;
+    const alias = putAlias(file);
+    utimesSync(file, new Date(1_700_000_000), new Date(1_700_000_000));
+    await expect(cleanupPartProcessor.run(legacyJob, runCtx())).rejects.toThrow(/no qualified per-part observation executor/i);
+    expect(readFileSync(file, "utf-8")).toBe("x");
+    expect(readFileSync(alias, "utf-8")).toBe("x");
+  });
+
+  it("does not report idempotent success when only the upload alias remains", async () => {
+    const legacyJob = job(put("a_000.ts"));
+    const file = legacyJob.inputs[0]!;
+    const alias = putAlias(file);
+    const exists = vi.fn(() => false);
+    const stat = vi.fn(() => { throw new Error("Unexpected source stat"); });
+    const unlink = vi.fn();
+    const processor = makeCleanupPartProcessor({ exists, stat, unlink });
+    rmSync(file);
+    await expect(processor.run(legacyJob, runCtx())).rejects.toThrow(/no qualified per-part observation executor/i);
+    expect(exists).not.toHaveBeenCalled();
+    expect(stat).not.toHaveBeenCalled();
+    expect(unlink).not.toHaveBeenCalled();
     expect(existsSync(file)).toBe(false);
-    expect(existsSync(alias)).toBe(false);
-    expect(alert).not.toHaveBeenCalled(); // the runner alerts rejections once; success must stay quiet
+    expect(readFileSync(alias, "utf-8")).toBe("x");
   });
 
-  it("succeeds when no alias exists", async () => {
-    const file = put("a_000.ts");
-    await cleanupPartProcessor.run(job(file), runCtx());
-    expect(existsSync(file)).toBe(false);
-  });
-
-  it("a changed file fingerprint keeps BOTH files and never deletes", async () => {
-    const j = job(put("a_000.ts"));
-    const file = j.inputs[0]!;
-    const alias = putAlias(file);
-    writeFileSync(file, "content replaced after sealing"); // size drifts: another file wearing the path
-    await expect(cleanupPartProcessor.run(j, runCtx())).rejects.toThrow(/指纹不符/);
-    expect(existsSync(file)).toBe(true);
-    expect(existsSync(alias)).toBe(true);
-  });
-
-  it("a touched mtime alone also refuses the delete", async () => {
-    const j = job(put("a_000.ts"));
-    utimesSync(j.inputs[0]!, new Date(1_700_000_000), new Date(1_700_000_000));
-    await expect(cleanupPartProcessor.run(j, runCtx())).rejects.toThrow(/指纹不符/);
-    expect(existsSync(j.inputs[0]!)).toBe(true);
-  });
-
-  it("an already-deleted source is idempotent success", async () => {
-    const j = job(put("a_000.ts"));
-    rmSync(j.inputs[0]!);
-    const res = await cleanupPartProcessor.run(j, runCtx());
-    expect(res.note).toMatch(/幂等/);
-  });
-
-  it("a lost lease aborts before any unlink", async () => {
+  it("holds unproved work before consulting even a lost lease", async () => {
     const file = put("a_000.ts");
     const alias = putAlias(file);
-    const p = makeCleanupPartProcessor({ unlink: vi.fn() });
-    await expect(p.run(job(file), runCtx({ assertLease: () => { throw new Error("lease lost"); } })))
-      .rejects.toThrow(/lease lost/);
-    expect(existsSync(file)).toBe(true);
-    expect(existsSync(alias)).toBe(true);
+    const unlink = vi.fn();
+    const assertLease = vi.fn(() => { throw new Error("lease lost"); });
+    const processor = makeCleanupPartProcessor({ unlink });
+    await expect(processor.run(job(file), runCtx({ assertLease }))).rejects.toThrow(/no qualified per-part observation executor/i);
+    expect(assertLease).not.toHaveBeenCalled();
+    expect(unlink).not.toHaveBeenCalled();
+    expect(readFileSync(file, "utf-8")).toBe("x");
+    expect(readFileSync(alias, "utf-8")).toBe("x");
   });
 
-  it("alias unlink failure keeps the source and throws (never half-silent)", async () => {
+  it("never reaches an alias unlink failure while proof is missing", async () => {
     const file = put("a_000.ts");
     const alias = putAlias(file);
-    const p = makeCleanupPartProcessor({
-      unlink: (path) => { if (path === alias) throw new Error("EACCES simulated"); },
+    const unlink = vi.fn((path: string) => { if (path === alias) throw new Error("EACCES simulated"); });
+    const processor = makeCleanupPartProcessor({ unlink });
+    await expect(processor.run(job(file), runCtx())).rejects.toThrow(/no qualified per-part observation executor/i);
+    expect(unlink).not.toHaveBeenCalled();
+    expect(readFileSync(file, "utf-8")).toBe("x");
+    expect(readFileSync(alias, "utf-8")).toBe("x");
+  });
+
+  it("never deletes the alias before an unreachable source unlink failure", async () => {
+    const file = put("a_000.ts");
+    const alias = putAlias(file);
+    const unlink = vi.fn((path: string) => { if (path === file) throw new Error("EIO simulated"); rmSync(path); });
+    const processor = makeCleanupPartProcessor({ unlink });
+    await expect(processor.run(job(file), runCtx())).rejects.toThrow(/no qualified per-part observation executor/i);
+    expect(unlink).not.toHaveBeenCalled();
+    expect(readFileSync(file, "utf-8")).toBe("x");
+    expect(readFileSync(alias, "utf-8")).toBe("x");
+  });
+
+  it("never converts a simulated unlink ENOENT into success without proof", async () => {
+    const file = put("a_000.ts");
+    const alias = putAlias(file);
+    const unlink = vi.fn(() => {
+      const error = new Error("ENOENT simulated") as NodeJS.ErrnoException;
+      error.code = "ENOENT";
+      throw error;
     });
-    await expect(p.run(job(file), runCtx())).rejects.toThrow(/删除别名失败/);
-    expect(existsSync(file)).toBe(true);
-    expect(existsSync(alias)).toBe(true);
+    const processor = makeCleanupPartProcessor({ unlink });
+    await expect(processor.run(job(file), runCtx())).rejects.toThrow(/no qualified per-part observation executor/i);
+    expect(unlink).not.toHaveBeenCalled();
+    expect(readFileSync(file, "utf-8")).toBe("x");
+    expect(readFileSync(alias, "utf-8")).toBe("x");
   });
 
-  it("source unlink failure throws with the alias already gone and the source kept", async () => {
+  it("repeated direct calls remain rejected without upgrading legacy ctx", async () => {
+    const legacyJob = job(put("a_000.ts"));
+    const file = legacyJob.inputs[0]!;
+    const alias = putAlias(file);
+    const before = JSON.stringify(legacyJob);
+    await expect(cleanupPartProcessor.run(legacyJob, runCtx())).rejects.toThrow(/no qualified per-part observation executor/i);
+    await expect(cleanupPartProcessor.run(legacyJob, runCtx())).rejects.toThrow(/no qualified per-part observation executor/i);
+    expect(JSON.stringify(legacyJob)).toBe(before);
+    expect(readFileSync(file, "utf-8")).toBe("x");
+    expect(readFileSync(alias, "utf-8")).toBe("x");
+  });
+
+  it("recover holds uncertain before any filesystem access instead of rerunning", async () => {
     const file = put("a_000.ts");
     const alias = putAlias(file);
-    const p = makeCleanupPartProcessor({
-      unlink: (path) => { if (path === file) throw new Error("EIO simulated"); unlinkSyncSafe(path); },
-    });
-    await expect(p.run(job(file), runCtx())).rejects.toThrow(/别名已删/);
-    expect(existsSync(file)).toBe(true);
-    expect(existsSync(alias)).toBe(false);
+    const legacyJob = job(file);
+    const before = JSON.stringify(legacyJob);
+    const exists = vi.fn(() => true);
+    const stat = vi.fn(() => fpOf(file));
+    const unlink = vi.fn();
+    const processor = makeCleanupPartProcessor({ exists, stat, unlink });
+    await expect(processor.recover!(legacyJob, runCtx())).resolves.toBe("uncertain");
+    expect(exists).not.toHaveBeenCalled();
+    expect(stat).not.toHaveBeenCalled();
+    expect(unlink).not.toHaveBeenCalled();
+    expect(JSON.stringify(legacyJob)).toBe(before);
+    expect(readFileSync(file, "utf-8")).toBe("x");
+    expect(readFileSync(alias, "utf-8")).toBe("x");
   });
-
-  it("a source that races away during unlink is still idempotent success", async () => {
+  it.each([2, 99])("does not invent a positive executor for ctx version %s", async (version) => {
     const file = put("a_000.ts");
-    const p = makeCleanupPartProcessor({
-      unlink: (path) => { if (path !== file) unlinkSyncSafe(path); else { const e = new Error("ENOENT simulated") as NodeJS.ErrnoException; e.code = "ENOENT"; throw e; } },
-    });
-    const res = await p.run(job(file), runCtx());
-    expect(res.note).toMatch(/幂等/);
-  });
-
-  it("running twice after success stays idempotent", async () => {
-    const j = job(put("a_000.ts"));
-    putAlias(j.inputs[0]!);
-    await cleanupPartProcessor.run(j, runCtx());
-    const again = await cleanupPartProcessor.run(j, runCtx());
-    expect(again.note).toMatch(/幂等/);
-  });
-
-  it("recover reruns (existence + fingerprint re-checked every attempt)", async () => {
-    await expect(cleanupPartProcessor.recover!(job(put("a_000.ts")), runCtx())).resolves.toBe("rerun");
+    const alias = putAlias(file);
+    const unsupportedJob = job(file, { ctx: { v: version, orderKey: "same-broadcast", index: 1,
+      file, fp: fpOf(file), bv: "DRAFT-1" } });
+    const exists = vi.fn(() => true);
+    const stat = vi.fn(() => fpOf(file));
+    const unlink = vi.fn();
+    const processor = makeCleanupPartProcessor({ exists, stat, unlink });
+    expect(processor.validate(unsupportedJob)).not.toBeNull();
+    await expect(processor.run(unsupportedJob, runCtx())).rejects.toThrow();
+    await expect(processor.recover!(unsupportedJob, runCtx())).resolves.toBe("uncertain");
+    expect(exists).not.toHaveBeenCalled();
+    expect(stat).not.toHaveBeenCalled();
+    expect(unlink).not.toHaveBeenCalled();
+    expect(readFileSync(file, "utf-8")).toBe("x");
+    expect(readFileSync(alias, "utf-8")).toBe("x");
   });
 });
-
-function unlinkSyncSafe(p: string): void { rmSync(p, { force: true }); }
