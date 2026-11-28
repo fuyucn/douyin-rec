@@ -13,7 +13,7 @@ import { TaskStore, type Task } from "../../packages/app/src/store.js";
 import type { Spawner } from "../../packages/app/src/process/spawner.js";
 import type { ExitInfo, RecorderProcess } from "../../packages/app/src/process/recorder-process.js";
 import { probeRoomLiving, zeroDiskHasUnconfirmedParts } from "../../packages/app/src/live-gate.js";
-import { livePumpStatePath } from "@drec/zero-upload";
+import { livePumpStatePath, writeLivePumpState } from "@drec/zero-upload";
 
 class FakeProc implements RecorderProcess {
   readonly pid = 1;
@@ -61,7 +61,7 @@ function mk(probe: (t: Task) => Promise<boolean>, over: Partial<TaskManagerOpts>
 // 生产里进入 TaskManager 的任务都是「用户/daemon 启动意图」= enabled=true;默认值取真实形态。
 const add = (over: Partial<Parameters<TaskStore["addTask"]>[0]> = {}): number =>
   store.addTask({ room: "12345", enabled: true, ...over }).id;
-const advance = (ms: number): Promise<void> => vi.advanceTimersByTimeAsync(ms);
+const advance = async (ms: number): Promise<void> => { await vi.advanceTimersByTimeAsync(ms); };
 
 describe("live gate: not live", () => {
   it("holds no process but reads as running (not recording, status running, gated)", async () => {
@@ -481,8 +481,17 @@ describe("zero-disk unconfirmed-parts check (real state files)", () => {
   it("missing state file = nothing to recover = gate", () => {
     expect(zeroDiskHasUnconfirmedParts(mkTask(), "legacy")).toBe(false);
   });
-  it("all parts confirmed = gate", () => {
+  it("legacy confirmed booleans cannot settle delivery and must spawn recovery", () => {
     writeFileSync(statePath(), state([{ confirmed: true }]));
+    expect(zeroDiskHasUnconfirmedParts(mkTask(), "legacy")).toBe(true);
+  });
+  it("native-observed parts without queue markers are settled and may use the live gate", () => {
+    writeLivePumpState(statePath(), {
+      schemaVersion: 1, submissionProofVersion: 1, room: "12345", createdAt: 1, updatedAt: 1,
+      title: "t", tid: 21, tag: "x", private: true, bvid: "BV1", aid: 7,
+      parts: [{ index: 0, spoolPath: join(dir, "part.ts"), filename: "part.ts", stem: "native",
+        title: "P1", bytes: 3, durationSec: 2, confirmed: true, proof: "observed", nativeKey: "native", observedAt: 2 }],
+    });
     expect(zeroDiskHasUnconfirmedParts(mkTask(), "legacy")).toBe(false);
   });
   it("an unconfirmed part = spawn now", () => {

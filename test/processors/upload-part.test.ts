@@ -1,5 +1,5 @@
 // plan 046 §5.4: upload-part — one part, explicit bv/ack + byte/fp proof; no B 站查询、无目录扫描。
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync, statSync, rmSync, symlinkSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +10,13 @@ import { makeUploadPartProcessor, shouldChainCleanup, PART_WORKFLOW_PARAM, uploa
 import { livePumpStatePath, readConfirmedJournal, readLivePumpState, writeLivePumpState, type LivePumpState } from "@drec/zero-upload";
 import type { BiliupHooks } from "../../packages/bilibili-upload/src/run-biliup.js";
 import { parseSsAcked } from "../../packages/bilibili-upload/src/biliup-progress.js";
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, existsSync: vi.fn(actual.existsSync), readFileSync: vi.fn(actual.readFileSync), statSync: vi.fn(actual.statSync) };
+});
+
+afterEach(() => { vi.clearAllMocks(); });
 
 let dir: string;
 const setup = (): void => { dir = mkdtempSync(join(tmpdir(), "upload-part-")); };
@@ -63,22 +70,52 @@ const processor = (s: Seam, extra: Record<string, unknown> = {}) => makeUploadPa
 });
 
 describe("upload-part processor", () => {
-  it("rejects protected live state before spawning biliup", async () => {
+  it.each(["protected", "legacy", "legacy confirmed", "missing state"] as const)(
+    "rejects persisted %s live-pump work before credentials, filesystem, slots or upload effects", async (history) => {
     setup();
     try {
       const file = put("part.ts");
       const liveStatePath = join(dir, "live-pump-test.state.json");
-      writeFileSync(liveStatePath, JSON.stringify({
-        schemaVersion: 1, room: "test", submissionProofVersion: 1, parts: [],
+      if (history !== "missing state") writeFileSync(liveStatePath, JSON.stringify({
+        schemaVersion: 1, room: "test", createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
+        ...(history === "protected" ? { submissionProofVersion: 1 } : {}), queueManaged: true,
+        parts: [{ index: 0, spoolPath: file, filename: "part.ts", stem: "old", title: "P1",
+          bytes: 10, durationSec: 2, confirmed: history === "legacy confirmed" }],
       }));
+      const before = history === "missing state" ? undefined : readFileSync(liveStatePath, "utf-8");
       const seam = seams();
-      const proc = processor(seam);
-      await expect(proc.run(job(file, { params: { partWorkflow: "live-pump", liveStatePath, liveStateIndex: 0 } }), pc()))
-        .rejects.toThrow("cannot be submitted by the biliup executor");
+      const localCookies = vi.fn(() => "unused");
+      const stat = vi.fn(() => fp(file));
+      const acquire = vi.fn(async () => true);
+      const addSeason = vi.fn();
+      const gate = vi.fn();
+      const proc = processor(seam, { localCookies, stat, slot: { acquire }, gate, addSeason });
+      const persisted = job(file, { params: { partWorkflow: "live-pump", liveStatePath, liveStateIndex: 0, seasonSectionId: 3 } });
+      const context = pc();
+      vi.mocked(existsSync).mockClear();
+      vi.mocked(readFileSync).mockClear();
+      vi.mocked(statSync).mockClear();
+      const error = "live-pump queue executor has no qualified per-part observation; preserve source and history for manual review";
+
+      expect(proc.validate(persisted)).toBe(error);
+      await expect(proc.run(persisted, context)).rejects.toThrow(error);
+
+      expect(existsSync).not.toHaveBeenCalled();
+      expect(readFileSync).not.toHaveBeenCalled();
+      expect(statSync).not.toHaveBeenCalled();
+      expect(localCookies).not.toHaveBeenCalled();
+      expect(stat).not.toHaveBeenCalled();
+      expect(acquire).not.toHaveBeenCalled();
+      expect(gate).not.toHaveBeenCalled();
+      expect(addSeason).not.toHaveBeenCalled();
+      expect(context.setState).not.toHaveBeenCalled();
       expect(seam.run).not.toHaveBeenCalled();
-      expect(existsSync(file)).toBe(true);
+      expect(readFileSync(file, "utf-8")).toBe("abcdefghij");
+      if (before !== undefined) expect(readFileSync(liveStatePath, "utf-8")).toBe(before);
+      expect(existsSync(liveStatePath + ".confirmed")).toBe(false);
     } finally { teardown(); }
-  });
+    },
+  );
   it("contract table + workflow template decisions", () => {
     setup();
     expect(uploadPartProcessor).toMatchObject({ kind: PART_KINDS.upload, resource: "upload", lane: "biliup", retryable: false, interruptible: false });
@@ -313,7 +350,7 @@ describe("upload-part processor", () => {
     setup();
     try {
       const f = put();
-      const addSeason = vi.fn(async () => ({ status: "added" as const, sectionId: 9, aid: 1, cid: 2, title: "t" }));
+      const addSeason = vi.fn(async (_input: unknown) => ({ status: "added" as const, sectionId: 9, aid: 1, cid: 2, title: "t" }));
       const c = pc();
       const p = makeUploadPartProcessor({ run: seams().run as never, readAcked: seams().readAcked, addSeason: addSeason as never });
       await p.run(job(f, { params: { seasonSectionId: 9 } }), c);
@@ -375,29 +412,32 @@ describe("upload-part processor", () => {
   });
 
 
-  it("live-pump: confirms the pump state (not the rolling sidecar) before cleanup can chain", async () => {
+  it("live-pump: refuses legacy submission without a journal or rolling sidecar confirmation", async () => {
     setup();
     try {
       const f = put("a_000.live.ts");
       const statePath = livePumpStatePath(dir, "r");
       const st: LivePumpState = {
-        schemaVersion: 1, room: "r", createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
+        schemaVersion: 1, room: "r", createdAt: 1, title: "t", tid: 21, tag: "x", private: true, updatedAt: 1,
         parts: [{ index: 0, spoolPath: f, filename: "a_000.live.ts", stem: "s", title: "P1", bytes: 10, durationSec: 2, confirmed: false }],
       };
       writeLivePumpState(statePath, st);
-      const p = processor(seams());
+      const seam = seams();
+      const p = processor(seam);
       const jobLive = job(f, { params: { [PART_WORKFLOW_PARAM]: "live-pump", liveStatePath: statePath } });
-      expect(p.validate(jobLive)).toBeNull();
-      await p.run(jobLive, pc());
-      // T-221: the confirmation lands in the journal, not in the state (the pump owns the state
-      // file while it keeps recording). Cleanup may chain, but the state is untouched.
+      const before = readFileSync(statePath, "utf-8");
+      expect(p.validate(jobLive)).toContain("no qualified per-part observation");
+      await expect(p.run(jobLive, pc())).rejects.toThrow("no qualified per-part observation");
       const after = readLivePumpState(statePath);
       expect(after?.parts[0]?.confirmed).toBe(false);
       expect(after?.bvid).toBeUndefined();
-      expect(readConfirmedJournal(statePath).get(0)?.bv).toBe(BV);
+      expect(readConfirmedJournal(statePath).size).toBe(0);
+      expect(readFileSync(statePath, "utf-8")).toBe(before);
+      expect(seam.run).not.toHaveBeenCalled();
+      expect(readFileSync(f, "utf-8")).toBe("abcdefghij");
       expect(existsSync(join(dir, "a_000.rolling.json"))).toBe(false);
-      // The untrusted path rule is enforced before the transfer starts.
-      expect(p.validate(job(f, { params: { [PART_WORKFLOW_PARAM]: "live-pump", liveStatePath: "/tmp/nope.json" } }))).toMatch(/state/);
+      expect(p.validate(job(f, { params: { [PART_WORKFLOW_PARAM]: "live-pump", liveStatePath: "/tmp/nope.json" } })))
+        .toContain("no qualified per-part observation");
     } finally { teardown(); }
   });
 

@@ -46,7 +46,7 @@ export interface LivePumpState {
   aid?: number;
   /** Persist with archive identity before the best-effort season call so restart can recover. */
   seasonState?: "pending" | "done" | "failed";
-  /** Completed parts in submit order. Spool is deleted only after a part is confirmed. */
+  /** Local part history; cleanup requires qualified native per-part observation. */
   parts: Array<{
     index: number;
     spoolPath: string;
@@ -75,8 +75,8 @@ export interface LivePumpState {
   /** Delivery degraded to spool-only but the queue accepted no rows (for example an order hole).
    * This preserves spool-mode recording on restart without claiming that the queue owns work. */
   deliveryDeferred?: boolean;
-  /** The queue owns remaining sealed parts. Do not re-upload them on restart; clear only once
-   * all are confirmed, and report upload-pending while queue delivery remains outstanding. */
+  /** Historical queue ownership marker. Preserve the hold until delivery is qualified;
+   * old confirmations and journal ACKs cannot clear it. */
   queueManaged?: boolean;
   /** WAL for crash recovery. */
   pending?: {
@@ -107,6 +107,12 @@ export function isLivePumpPartObserved(part: LivePumpState["parts"][number]): bo
     && typeof part.nativeKey === "string" && part.nativeKey.length > 0
     && part.nativeKey === part.stem
     && Number.isFinite(part.observedAt) && part.observedAt! > 0;
+}
+
+export function hasUnobservedLivePumpWork(state: LivePumpState): boolean {
+  return !!state.pending || !!state.queueManaged || !!state.deliveryDeferred
+    || state.parts.some(part => !isLivePumpPartObserved(part))
+    || (!requiresLivePumpProof(state) && (!!state.bvid || state.aid !== undefined));
 }
 
 /** Protect both part rows and pending WAL paths: either can own the only recovery copy. */

@@ -1,7 +1,6 @@
 import { mkdirSync, statSync } from "node:fs";
 import { basename } from "node:path";
-import { isLivePumpPartObserved, livePumpStatePath, readLivePumpState, requiresLivePumpProof, writeLivePumpState, type LivePumpState } from "./live-pump-state.js";
-import { readConfirmedJournal } from "./live-pump-confirmations.js";
+import { hasUnobservedLivePumpWork, isLivePumpPartObserved, livePumpStatePath, readLivePumpState, writeLivePumpState, type LivePumpState } from "./live-pump-state.js";
 import { markActivity, rolloverStaleState } from "./live-pump-spool-policy.js";
 import type { LivePumpSessionOpts } from "./live-pump-session-options.js";
 /** Sole local writer: staged publication changes persist before any irreversible request. */
@@ -16,10 +15,14 @@ export class LivePumpCheckpoint {
     mkdirSync(o.spoolDir, { recursive: true });
     this.log = o.log ?? (m => process.stderr.write(`${m}\n`));
     this.statePath = livePumpStatePath(o.spoolDir, o.room);
-    const rolloverAlert = rolloverStaleState(this.statePath, o.room, Date.now(), this.log);
+    const previous = readLivePumpState(this.statePath);
+    if (previous && previous.room !== o.room)
+      throw new Error("live-pump state room mismatch; source and queue history require manual review");
+    const held = previous && hasUnobservedLivePumpWork(previous);
+    const rolloverAlert = held ? undefined : rolloverStaleState(this.statePath, o.room, Date.now(), this.log);
     if (rolloverAlert)
       o.onAlert?.(rolloverAlert);
-    const loaded = readLivePumpState(this.statePath);
+    const loaded = held ? previous : readLivePumpState(this.statePath);
     this.resumed = !!loaded;
     if (loaded && loaded.room !== o.room) {
       throw new Error(`live-pump state room mismatch: ${loaded.room} != ${o.room}`);
@@ -39,10 +42,6 @@ export class LivePumpCheckpoint {
     };
     if (loaded) {
       this.log(`[直播直传] resumed state ${this.statePath} (${loaded.parts.length} parts, title=${loaded.title})`);
-      const rec = this.reconcileConfirmedJournal();
-      if (rec.changed) {
-        this.log(rec.unconfirmedRemain ? "[直播直传] 已收编队列确认日志(仍有未确认分 P 待队列补传)" : "[直播直传] 已收编队列确认日志(全部分 P 已确认)");
-      }
     }
   }
   get bvid(): string | undefined {
@@ -62,9 +61,7 @@ export class LivePumpCheckpoint {
     return [...this.state.parts];
   }
   get hasUnconfirmed(): boolean {
-    if (requiresLivePumpProof(this.state))
-      return !!this.state.pending || this.state.parts.some(part => !isLivePumpPartObserved(part));
-    return !!this.state.pending || this.state.parts.some(p => !p.confirmed);
+    return hasUnobservedLivePumpWork(this.state);
   }
   get roomKey(): string {
     return this.state.room;
@@ -91,7 +88,7 @@ export class LivePumpCheckpoint {
   lowestUnconfirmed(): LivePumpState["parts"][number] | undefined {
     let best: LivePumpState["parts"][number] | undefined;
     for (const p of this.state.parts)
-      if (!(requiresLivePumpProof(this.state) ? isLivePumpPartObserved(p) : p.confirmed) && (!best || p.index < best.index))
+      if (!isLivePumpPartObserved(p) && (!best || p.index < best.index))
         best = p;
     return best;
   }
@@ -258,41 +255,6 @@ export class LivePumpCheckpoint {
     changed: boolean;
     unconfirmedRemain: boolean;
   } {
-    if (requiresLivePumpProof(this.state))
-      return { changed: false, unconfirmedRemain: this.hasUnconfirmed };
-    const journal = readConfirmedJournal(this.statePath, this.state.createdAt);
-    let changed = false;
-    let bvid = this.state.bvid;
-    const parts = this.state.parts.map(p => {
-      if (p.confirmed)
-        return p;
-      const j = journal.get(p.index);
-      if (!j)
-        return p;
-      changed = true;
-      if (!bvid && j.bv)
-        bvid = j.bv;
-      return { ...p, confirmed: true };
-    });
-    const pending = this.state.pending && journal.has(this.state.pending.partIndex) ? undefined : this.state.pending;
-    const unconfirmedRemain = parts.some(p => !p.confirmed) || !!pending;
-    const settled = !unconfirmedRemain;
-    const markerChanged = settled && (!!this.state.queueManaged || !!this.state.deliveryDeferred);
-    if (!changed && !markerChanged && pending === this.state.pending)
-      return { changed: false, unconfirmedRemain };
-    this.state = {
-      ...this.state,
-      ...(bvid ? { bvid } : {}),
-      parts,
-      ...(pending ? { pending } : { pending: undefined }),
-      ...(markerChanged ? { queueManaged: undefined, deliveryDeferred: undefined } : {}),
-    };
-    try {
-      this.persist();
-    }
-    catch (e) {
-      this.log(`[直播直传] ⚠️ 无法持久化确认日志收编结果(下次启动重试): ${String((e as Error)?.message ?? e)}`);
-    }
-    return { changed: true, unconfirmedRemain };
+    return { changed: false, unconfirmedRemain: this.hasUnconfirmed };
   }
 }

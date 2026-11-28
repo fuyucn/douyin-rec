@@ -50,8 +50,10 @@ import {
   type ChildProcessLike,
   type SealedPart,
   type SpawnFn,
+  type LivePumpState,
 } from "./live-pump.js";
 import type { PreuploadResult } from "./upos-stream.js";
+import { LivePumpCheckpoint } from "./live-pump-checkpoint.js";
 import { initRecorderState, parseRecorderState, recorderActivity, recorderStatePath, resetRecorderStateForTest, setRecorderPhase } from "@drec/core";
 import { stream as tsStream, pat, pmt, VIDEO, AUDIO } from "./ts-fixture.js";
 import { TS_PACKET as TS_PACKET_BYTES, TsCutter } from "./ts-cutter.js";
@@ -700,7 +702,7 @@ describe("T-220 queue-managed recovery", () => {
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "live-pump-queue-managed-")); });
   afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
-  it("does not whole-file resubmit sealed parts the node queue already owns", async () => {
+  it("holds legacy queue markers without assuming ownership or whole-file resubmission", async () => {
     const spool = join(dir, "a_000.live.ts");
     writeFileSync(spool, "aaa");
     writeFileSync(join(dir, "cookies.json"), JSON.stringify({
@@ -720,10 +722,9 @@ describe("T-220 queue-managed recovery", () => {
       sleep: async () => {},
     });
     expect(r.ok).toBe(false);
-    expect(r.uploadPending).toBe(true);
-    expect(r.error).toBe("queued uploads pending");
+    expect(r.uploadPending).toBeUndefined();
+    expect(r.error).toContain("manual review");
     expect(r.segments).toEqual([]);
-    // No stream request and no submit: the queue owns the remaining part.
     expect(fetches.length).toBe(0);
     expect(readLivePumpState(statePath)?.parts[0]?.confirmed).toBe(false);
   });
@@ -2857,6 +2858,86 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "live-pump-session-")); });
   afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
 
+  it.each(["confirmed", "journal-only", "stale unconfirmed", "empty queue marker", "empty deferred marker", "archive-only"] as const)(
+    "quarantines legacy %s before rollover without journal merge or marker clearing", (history) => {
+      const file = join(dir, "old.ts");
+      writeFileSync(file, "old");
+      utimesSync(file, new Date(1_000), new Date(1_000));
+      const statePath = livePumpStatePath(dir, "r");
+      const empty = history === "empty queue marker" || history === "empty deferred marker" || history === "archive-only";
+      const state: LivePumpState = {
+        schemaVersion: 1, room: "r", createdAt: 1, updatedAt: 1, title: "t", tid: 21, tag: "x", private: true,
+        ...(history === "archive-only" ? { bvid: "BV-old", aid: 7 } : {}),
+        ...(history === "empty queue marker" ? { queueManaged: true } : {}),
+        ...(history === "empty deferred marker" ? { deliveryDeferred: true } : {}),
+        parts: empty ? [] : [{ index: 0, spoolPath: file, filename: "old.ts", stem: "old-key", title: "P1",
+          bytes: 3, durationSec: 2, confirmed: history === "confirmed" }],
+      };
+      writeFileSync(statePath, JSON.stringify(state));
+      appendConfirmedJournal(statePath, { index: 0, bv: "BV-old", at: 2, createdAt: 1 });
+      const before = readFileSync(statePath, "utf-8");
+      const journal = readFileSync(statePath + ".confirmed", "utf-8");
+
+      const checkpoint = new LivePumpCheckpoint({ cookiesPath: COOKIES, room: "r", spoolDir: dir,
+        title: "new", tid: 21, tag: "x", private: true, log: () => {} });
+
+      expect(checkpoint.hasUnconfirmed).toBe(true);
+      expect(livePumpHasUnconfirmed(statePath)).toBe(true);
+      expect(checkpoint.lowestUnconfirmed()?.index).toBe(empty ? undefined : 0);
+      expect(checkpoint.reconcileConfirmedJournal()).toEqual({ changed: false, unconfirmedRemain: true });
+      expect(checkpoint.snapshot()).toEqual(JSON.parse(before));
+      expect(readFileSync(statePath, "utf-8")).toBe(before);
+      expect(readFileSync(statePath + ".confirmed", "utf-8")).toBe(journal);
+      expect(readFileSync(file, "utf-8")).toBe("old");
+      expect(readdirSync(dir).filter(name => name.includes(".archived-"))).toEqual([]);
+    },
+  );
+
+  it("refuses a wrong-room legacy state before rollover and preserves its source and journal", () => {
+    const file = join(dir, "wrong-room.ts");
+    writeFileSync(file, "old");
+    const statePath = livePumpStatePath(dir, "r");
+    const state: LivePumpState = { schemaVersion: 1, room: "other", createdAt: 1, updatedAt: 1,
+      title: "old", tid: 21, tag: "x", private: true, parts: [], queueManaged: true };
+    writeFileSync(statePath, JSON.stringify(state));
+    appendConfirmedJournal(statePath, { index: 0, bv: "BV-old", at: 2, createdAt: 1 });
+    const before = readFileSync(statePath, "utf-8");
+    const journal = readFileSync(statePath + ".confirmed", "utf-8");
+    expect(() => new LivePumpSession({ cookiesPath: COOKIES, room: "r", spoolDir: dir,
+      title: "new", tid: 21, tag: "x", private: true, log: () => {} })).toThrow(/room mismatch/);
+    expect(readFileSync(statePath, "utf-8")).toBe(before);
+    expect(readFileSync(statePath + ".confirmed", "utf-8")).toBe(journal);
+    expect(readFileSync(file, "utf-8")).toBe("old");
+    expect(readdirSync(dir).filter(name => name.includes(".archived-"))).toEqual([]);
+  });
+
+  it("does not advance past a legacy confirmed prefix to submit a successor", async () => {
+    const file = join(dir, "first.ts");
+    const later = join(dir, "later.ts");
+    writeFileSync(file, "old");
+    writeFileSync(later, "new");
+    const statePath = livePumpStatePath(dir, "r");
+    writeLivePumpState(statePath, { schemaVersion: 1, room: "r", createdAt: 1, updatedAt: 1,
+      title: "t", tid: 21, tag: "x", private: true, bvid: "BV-old", aid: 7,
+      parts: [{ index: 0, spoolPath: file, filename: "first.ts", stem: "first", title: "P1",
+        bytes: 3, durationSec: 2, confirmed: true }] });
+    appendConfirmedJournal(statePath, { index: 0, bv: "BV-old", at: 2, createdAt: 1 });
+    const before = readFileSync(statePath, "utf-8");
+    const fetchImpl = vi.fn(async () => new Response("unexpected request"));
+    const session = new LivePumpSession({ cookiesPath: COOKIES, room: "r", spoolDir: dir,
+      title: "t", tid: 21, tag: "x", private: true, fetchImpl, log: () => {} });
+
+    const result = await session.submitPart({ index: 1, spoolPath: later, stem: "later", title: "P2", bytes: 3, durationSec: 2 });
+
+    expect(result).toMatchObject({ ok: false, error: "part 0 is not confirmed; refusing to submit part 1" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(session.hasUnconfirmed).toBe(true);
+    expect(session.parts.map(part => part.index)).toEqual([0]);
+    expect(readFileSync(statePath, "utf-8")).toBe(before);
+    expect(readFileSync(file, "utf-8")).toBe("old");
+    expect(readFileSync(later, "utf-8")).toBe("new");
+  });
+
   it("T-221 (sol P1-3): adoptQueueManaged survives the pump's next state write", () => {
     const statePath = livePumpStatePath(dir, "r2");
     const spool = join(dir, "p0.ts");
@@ -4502,7 +4583,7 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     const paths = names.map((n) => join(dir, n));
     paths.forEach((p) => writeFileSync(p, tsStream({ gops: 6 })));
     writeLivePumpState(livePumpStatePath(dir, "sm"), {
-      schemaVersion: 1, room: "sm", createdAt: Date.now(), title: "t", tid: 21, tag: "x", private: true,
+      schemaVersion: 1, submissionProofVersion: 1, room: "sm", createdAt: Date.now(), title: "t", tid: 21, tag: "x", private: true,
       bvid: "BILIfake1", aid: 7,
       parts: paths.map((p, i) => ({ index: i, spoolPath: p, filename: basename(p), stem: "", title: `P${i + 1}`, bytes: statSync(p).size, durationSec: 1, confirmed: false })),
       updatedAt: Date.now(),
@@ -4891,7 +4972,7 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     expect(readdirSync(dir).filter((f) => f.endsWith(".live.ts"))).toEqual([]);
   }, 30_000);
 
-  it("a state file from before the ordered list (one unconfirmed part) still loads and recovers", async () => {
+  it("a legacy state from before the ordered list loads but cannot authorize recovery", async () => {
     // Legacy shape: a single unconfirmed part with an empty stem, as the old WAL wrote it.
     const spool = join(dir, "old_001.live.ts");
     writeFileSync(spool, tsStream({ gops: 6 }));
@@ -4903,8 +4984,12 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     });
     const u = fakeUpos();
     const r = await runLivePump(baseOpts(u, { spoolMode: "full", fetch: async () => ({ living: false }) }));
-    expect(r.ok, r.error ?? "").toBe(true);
-    expect(readLivePumpState(livePumpStatePath(dir, "sm"))!.parts.every((p) => p.confirmed)).toBe(true);
+    expect(r.ok).toBe(false);
+    expect(r.uploadPending).toBeUndefined();
+    expect(r.error).toContain("manual review");
+    expect(readLivePumpState(livePumpStatePath(dir, "sm"))!.parts[0]?.confirmed).toBe(false);
+    expect(existsSync(spool)).toBe(true);
+    expect(u.events).toEqual([]);
   }, 30_000);
 
   it.each([
@@ -5002,7 +5087,7 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     const spool = join(dir, "zero_000.live.ts");
     writeFileSync(spool, Buffer.alloc(0));
     writeLivePumpState(livePumpStatePath(dir, "sm"), {
-      schemaVersion: 1, room: "sm", createdAt: Date.now(), title: "t", tid: 21, tag: "x", private: true,
+      schemaVersion: 1, submissionProofVersion: 1, room: "sm", createdAt: Date.now(), title: "t", tid: 21, tag: "x", private: true,
       bvid: "BILIfake1", aid: 7,
       parts: [{ index: 0, spoolPath: spool, filename: "zero_000.live.ts", stem: "", title: "P1", bytes: 0, durationSec: 0, confirmed: false, sealed: false }],
       updatedAt: Date.now(),
@@ -5021,7 +5106,7 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     // after openPart. Must not become an unreadable "real gap" that needs a human.
     writeFileSync(spool, Buffer.concat([pat(), pmt([[0x1b, VIDEO], [0x0f, AUDIO]])]));
     writeLivePumpState(livePumpStatePath(dir, "sm"), {
-      schemaVersion: 1, room: "sm", createdAt: Date.now(), title: "t", tid: 21, tag: "x", private: true,
+      schemaVersion: 1, submissionProofVersion: 1, room: "sm", createdAt: Date.now(), title: "t", tid: 21, tag: "x", private: true,
       bvid: "BILIfake1", aid: 7,
       parts: [{ index: 0, spoolPath: spool, filename: "head_000.live.ts", stem: "", title: "P1", bytes: statSync(spool).size, durationSec: 0, confirmed: false, sealed: false }],
       updatedAt: Date.now(),
@@ -5105,7 +5190,7 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     const u = fakeUpos({ initialArchive: ["stem0", "stem1"] });
     const r = await runLivePump(baseOpts(u, { spoolMode: "full", fetch: async () => ({ living: false }) }));
     expect(r.ok).toBe(false);
-    expect(r.error).toContain("legacy confirmation is not native part proof");
+    expect(r.error).toContain("manual review");
     const st = readLivePumpState(livePumpStatePath(dir, "sm"))!;
     expect(st.parts.map((p) => p.index)).toEqual([0, 1, 2]);
     expect(st.parts.map((p) => p.confirmed)).toEqual([true, true, false]);
@@ -5117,7 +5202,7 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     expect(u.archive).toEqual(["stem0", "stem1"]);
   }, 30_000);
 
-  it("issue #581: old state without `sealed` is treated as sealed (backward compatible)", async () => {
+  it("issue #581: legacy state without sealed remains readable but quarantined", async () => {
     const spool = join(dir, "old_000.live.ts");
     writeFileSync(spool, tsStream({ gops: 4 }));
     writeLivePumpState(livePumpStatePath(dir, "sm"), {
@@ -5128,8 +5213,12 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     }); // no `sealed` field
     const u = fakeUpos();
     const r = await runLivePump(baseOpts(u, { spoolMode: "full", fetch: async () => ({ living: false }) }));
-    expect(r.ok, r.error ?? "").toBe(true);
-    expect(readLivePumpState(livePumpStatePath(dir, "sm"))!.parts.every((p) => p.confirmed)).toBe(true);
+    expect(r.ok).toBe(false);
+    expect(r.uploadPending).toBeUndefined();
+    expect(r.error).toContain("manual review");
+    expect(readLivePumpState(livePumpStatePath(dir, "sm"))!.parts[0]?.confirmed).toBe(false);
+    expect(existsSync(spool)).toBe(true);
+    expect(u.events).toEqual([]);
   }, 30_000);
 
   it("issue #581: old state without `sealed` + a missing spool still blocks (never silently dropped)", async () => {
@@ -6113,7 +6202,7 @@ describe("T-221 spool-mode continuation", () => {
     expect(alerts.some((m) => m.includes("低于水位"))).toBe(true);
   }, 30_000);
 
-  it("queue confirmations in the journal are folded in at open; recording continues at the right index", async () => {
+  it("historical journal ACKs remain unmerged while capture continues at the next reserved index", async () => {
     writeFileSync(spoolPathOf(0), "aaa");
     writeFileSync(spoolPathOf(1), "bbb");
     const statePath = seedState([{ index: 0, spoolPath: spoolPathOf(0) }, { index: 1, spoolPath: spoolPathOf(1) }], { queueManaged: true });
@@ -6127,16 +6216,14 @@ describe("T-221 spool-mode continuation", () => {
       log: () => {},
     });
     expect(r.uploadPending, JSON.stringify(r)).toBe(true);
-    // No Bilibili contact: part 1 is still the queue's, and the new part spools only.
     expect(f.preuploadCalls).toBe(0);
     const st = readLivePumpState(statePath);
-    expect(st?.parts[0]?.confirmed).toBe(true);
+    expect(st?.parts[0]?.confirmed).toBe(false);
     expect(st?.parts[1]?.confirmed).toBe(false);
-    // The new part continues at index 2 (no re-indexing over the queue-owned part).
     expect(st?.parts).toHaveLength(3);
     expect(st?.parts[2]?.index).toBe(2);
     expect(st?.parts[2] ? existsSync(st.parts[2].spoolPath) : false).toBe(true);
-    expect(st?.bvid).toBe("BV1");
+    expect(st?.bvid).toBeUndefined();
     expect(st?.queueManaged).toBe(true);
     expect(readConfirmedJournal(statePath).size).toBe(1);
   }, 30_000);
@@ -6243,17 +6330,13 @@ describe("T-221 spool-mode continuation", () => {
     })).rejects.toThrow(/spoolMode/);
   });
 
-  it("a SIGKILL-mid-part unsealed row is validated at startup and promoted, not stuck forever", async () => {
-    // Non-empty spool, sealed:false, no pending: recover() cannot settle it and the enqueue skips
-    // it — without the startup promotion the row would keep queueManaged on forever (review P1).
+  it("a legacy SIGKILL-mid-part row is held without startup promotion while new capture continues", async () => {
     writeFileSync(spoolPathOf(0), "aaa");
     writeFileSync(spoolPathOf(1), "bbb");
     const statePath = seedState([
       { index: 0, spoolPath: spoolPathOf(0), sealed: false },
       { index: 1, spoolPath: spoolPathOf(1) },
     ], { queueManaged: true });
-    // sol P1-2: a stop-timeout row persisted WITHOUT the local gates has no POSITIVE marker and
-    // must be re-validated (default-deny rather than a negative flag that a write path can forget).
     {
       const st0 = readLivePumpState(statePath)!;
       writeLivePumpState(statePath, { ...st0, parts: st0.parts.map((p) => p.index === 1 ? { ...p, validated: undefined } : p) });
@@ -6268,15 +6351,17 @@ describe("T-221 spool-mode continuation", () => {
     });
     expect(r.uploadPending).toBe(true);
     const st = readLivePumpState(statePath);
-    // Part 0 was promoted to a deliverable sealed row with its REAL bytes; part 1 stayed the
-    // queue's; the new part continued at index 2.
-    expect(st?.parts[0]?.sealed).not.toBe(false);
+    expect(st?.parts[0]?.sealed).toBe(false);
     expect(st?.parts[0]?.bytes).toBe(3);
-    expect(st?.parts[0]?.durationSec).toBe(60);
-    expect(st?.parts[1]?.validated).toBe(true);
+    expect(st?.parts[0]?.durationSec).toBe(2);
+    expect(st?.parts[0]?.validated).toBeUndefined();
+    expect(st?.parts[1]?.validated).toBeUndefined();
     expect(st?.parts[1]?.sealed).not.toBe(false);
     expect(st?.parts).toHaveLength(3);
     expect(st?.parts[2]?.index).toBe(2);
+    expect(f.preuploadCalls).toBe(0);
+    expect(readFileSync(spoolPathOf(0), "utf-8")).toBe("aaa");
+    expect(readFileSync(spoolPathOf(1), "utf-8")).toBe("bbb");
   }, 30_000);
 
   it("sol P1-1: local gate verdict is explicit, independent of a simultaneous transport error", async () => {
@@ -6423,7 +6508,7 @@ describe("T-221 spool-mode continuation", () => {
     expect(clean.uploadError).toBeUndefined();
   }, 30_000);
 
-  it("sol P1-1: startup revalidation also rejects an unjudgeable DTS scan", async () => {
+  it("legacy quarantine does not invent a validation verdict from an unjudgeable DTS scan", async () => {
     writeFileSync(spoolPathOf(0), "sealed-but-never-probed");
     const statePath = seedState([{ index: 0, spoolPath: spoolPathOf(0), validated: false }], { queueManaged: true, bvid: "BV1" });
     const f = makeFake();
@@ -6436,7 +6521,7 @@ describe("T-221 spool-mode continuation", () => {
     });
     const st = readLivePumpState(statePath);
     expect(st?.parts[0]?.validated).toBeUndefined();
-    expect(st?.parts[0]?.spoolIncomplete).toBe(true);
+    expect(st?.parts[0]?.spoolIncomplete).toBeUndefined();
     expect(st?.parts[0]?.confirmed).toBe(false);
     expect(existsSync(spoolPathOf(0))).toBe(true);
   }, 30_000);
@@ -6520,14 +6605,14 @@ describe("T-221 spool-mode continuation", () => {
       probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
     });
     expect(r.ok).toBe(false);
-    expect(r.error).toBe("archive prefix lacks native observation proof; source retained");
-    expect(r.uploadPending).toBe(false);
-    expect(f.preuploadCalls).toBe(1);
+    expect(r.error).toBe("queued uploads pending");
+    expect(r.uploadPending).toBe(true);
+    expect(f.preuploadCalls).toBe(0);
     expect(f.submitAttempts).toEqual([]);
     const st = readLivePumpState(statePath);
-    expect(st?.bvid).toBe("BILIfake1");
-    expect(st?.parts.map((p) => p.confirmed)).toEqual([true, false]);
-    expect(st?.queueManaged).toBeUndefined();
+    expect(st?.bvid).toBeUndefined();
+    expect(st?.parts.map((p) => p.confirmed)).toEqual([false, false]);
+    expect(st?.queueManaged).toBe(true);
     expect(existsSync(spoolPathOf(0))).toBe(true);
     expect(st?.parts[0]?.proof).toBeUndefined();
     expect(st?.parts[1]?.proof).toBeUndefined();
@@ -6604,11 +6689,6 @@ describe("T-221 spool-mode continuation", () => {
         await new Promise<void>((resolve) => setImmediate(resolve));
       }
     }
-    // noteSealed writes real bytes + an estimated duration the moment a part is sealed. The
-    // background finalize (probe + DTS) has NOT run. Simulate that crash window with exactly that
-    // WAL row and a file the probe cannot read: startup must mark it needs-manual and it must keep
-    // NO positive `validated` marker, so `enqueueLivePumpPending` default-denies it (see the
-    // matching queue-level test). The spool is kept for a human.
     writeFileSync(spoolPathOf(0), "sealed-but-never-probed");
     const statePath = seedState([{ index: 0, spoolPath: spoolPathOf(0), validated: false }], { queueManaged: true, bvid: "BV1" });
     const f = makeFake();
@@ -6621,16 +6701,12 @@ describe("T-221 spool-mode continuation", () => {
     });
     const st = readLivePumpState(statePath);
     expect(st?.parts[0]?.validated).toBeUndefined();
-    expect(st?.parts[0]?.spoolIncomplete).toBe(true);
+    expect(st?.parts[0]?.spoolIncomplete).toBeUndefined();
     expect(st?.parts[0]?.confirmed).toBe(false);
     expect(existsSync(spoolPathOf(0))).toBe(true);
   }, 30_000);
 
-  it("sol P1-3: an offline room hands off crash-time parts BEFORE waiting; stop returns pending", async () => {
-    // A queue-managed session that recorded new spool parts and was SIGKILLed before the show
-    // ended restarts into spool mode. If the room never goes live again, enqueueing only at run
-    // end would strand those parts forever. The early handoff and the idle-exit pending shape
-    // close both halves of that window.
+  it("an offline legacy backlog stays manual without revalidation or invoking a stale owned callback", async () => {
     writeFileSync(spoolPathOf(0), "aaa");
     writeFileSync(spoolPathOf(1), "bbb");
     const statePath = seedState([
@@ -6648,16 +6724,15 @@ describe("T-221 spool-mode continuation", () => {
       onHandoff: (p) => { handoffs.push(p); return { status: "owned" as const }; },
       probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
     });
-    expect(handoffs).toEqual([statePath]);
-    // Startup revalidation adopted the crash-time part with the positive marker.
-    expect(readLivePumpState(statePath)?.parts[1]?.validated).toBe(true);
+    expect(handoffs).toEqual([]);
+    expect(readLivePumpState(statePath)?.parts[1]?.validated).toBeUndefined();
     expect(r.ok).toBe(false);
-    expect(r.uploadPending).toBe(true);
+    expect(r.uploadPending).toBeUndefined();
     expect(r.outcome).not.toBe("idle");
-    expect(r.error).toBe("queued uploads pending");
+    expect(r.error).toContain("manual review");
   }, 30_000);
 
-  it("sol P1-3: a SIGUSR2 drain while waiting offline returns uploadPending, not bare idle", async () => {
+  it("a SIGUSR2 drain preserves a manual legacy hold without waiting for a prohibited callback", async () => {
     writeFileSync(spoolPathOf(0), "aaa");
     const statePath = seedState([{ index: 0, spoolPath: spoolPathOf(0) }], { queueManaged: true, bvid: "BV1" });
     const drain = new AbortController();
@@ -6667,25 +6742,19 @@ describe("T-221 spool-mode continuation", () => {
       sizeCap: CHUNK, maxSegments: 1, submit: true, spoolMode: "full", quality: "origin",
       waitForBroadcast: true, idlePollMs: 1, drainSignal: drain.signal,
       fetchImpl: makeFake().fake, fetch: async () => ({ living: false }),
-      // Abort the drain only once the wait has begun (after the early handoff), never during
-      // openSession's own recovery sleeps.
-      sleep: async () => { if (handoffs.length) drain.abort(); },
+      sleep: async () => { drain.abort(); },
       onHandoff: (p) => { handoffs.push(p); return { status: "owned" as const }; },
       probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
     });
-    expect(handoffs).toEqual([statePath]);
+    expect(handoffs).toEqual([]);
     expect(r.ok).toBe(false);
-    expect(r.uploadPending).toBe(true);
+    expect(r.uploadPending).toBeUndefined();
     expect(r.outcome).not.toBe("idle");
-    expect(r.error).toBe("queued uploads pending");
-    // The queue marker must survive the pump's in-memory session (adoptQueueManaged).
+    expect(r.error).toContain("manual review");
     expect(readLivePumpState(statePath)?.queueManaged).toBe(true);
   }, 30_000);
 
-  it("sol P1-4: a retryable handoff failure returns uploadPending instead of waiting forever", async () => {
-    // A transient SQLite / cookie failure on the FIRST early enqueue must not be logged and
-    // forgotten while the pump waits (potentially forever) for a broadcast that never comes.
-    // The receipt goes back through the structured uploadPending / exit-75 / TaskManager path.
+  it("a legacy hold never invokes a retryable adapter or disguises the hold as queue ownership", async () => {
     writeFileSync(spoolPathOf(0), "aaa");
     const statePath = seedState([{ index: 0, spoolPath: spoolPathOf(0) }], { queueManaged: true, bvid: "BV1" });
     const alerts: string[] = [];
@@ -6701,20 +6770,22 @@ describe("T-221 spool-mode continuation", () => {
       onAlert: (m) => alerts.push(m),
       probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
     });
-    expect(handoffs).toBe(1);
-    expect(polls).toBe(0); // never entered the offline wait
+    expect(handoffs).toBe(0);
+    expect(polls).toBeGreaterThan(0);
     expect(r.ok).toBe(false);
-    expect(r.uploadPending).toBe(true);
+    expect(r.uploadPending).toBeUndefined();
     expect(r.outcome).not.toBe("idle");
-    expect(r.error).toBe("queued uploads pending");
+    expect(r.error).toContain("manual review");
     expect(r.statePath).toBe(statePath);
     expect(existsSync(spoolPathOf(0))).toBe(true); // spool + intent preserved
-    expect(alerts.some((m) => m.includes("sqlite is locked"))).toBe(true);
+    expect(alerts.some((m) => m.includes("sqlite is locked"))).toBe(false);
+    expect(alerts.some((m) => m.includes("Live delivery handoff blocked; manual review required"))).toBe(true);
   }, 30_000);
 
-  it("sol P1-4: a throwing handoff is a retryable receipt, not a swallowed success", async () => {
+  it("a legacy hold never calls a throwing adapter or reports its error as retryable", async () => {
     writeFileSync(spoolPathOf(0), "aaa");
     seedState([{ index: 0, spoolPath: spoolPathOf(0) }], { queueManaged: true, bvid: "BV1" });
+    const onHandoff = vi.fn(async () => { throw new Error("cookies unreadable"); });
     let polls = 0;
     const r = await runLivePump({
       cookiesPath: COOKIES, room: "t221", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
@@ -6722,12 +6793,13 @@ describe("T-221 spool-mode continuation", () => {
       waitForBroadcast: true, idlePollMs: 1,
       fetchImpl: makeFake().fake, fetch: async () => ({ living: false }),
       sleep: async () => { polls++; }, shouldStop: () => polls >= 3,
-      onHandoff: async () => { throw new Error("cookies unreadable"); },
+      onHandoff,
       probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
     });
-    expect(polls).toBe(0);
-    expect(r.uploadPending).toBe(true);
-    expect(r.error).toBe("queued uploads pending");
+    expect(onHandoff).not.toHaveBeenCalled();
+    expect(polls).toBeGreaterThan(0);
+    expect(r.uploadPending).toBeUndefined();
+    expect(r.error).toContain("manual review");
   }, 30_000);
 
   it("sol P1-4: a human-blocked handoff keeps recording wait but never claims delivery", async () => {
@@ -6746,12 +6818,13 @@ describe("T-221 spool-mode continuation", () => {
       onAlert: (m) => alerts.push(m),
       probeDuration: async () => 60, scanDtsGap: async () => null, log: () => {},
     });
-    expect(handoffs).toBe(1);
+    expect(handoffs).toBe(0);
     expect(polls).toBeGreaterThan(0); // the T-221 recording wait still runs
-    expect(r.uploadPending).toBe(true); // an idle exit still hands the backlog back
+    expect(r.uploadPending).toBeUndefined();
+    expect(r.error).toContain("manual review");
     expect(r.outcome).not.toBe("idle");
     expect(existsSync(spoolPathOf(0))).toBe(true);
-    expect(alerts.some((m) => m.includes("需人工"))).toBe(true);
+    expect(alerts.some((m) => m.includes("Live delivery handoff blocked; manual review required"))).toBe(true);
     expect(readLivePumpState(statePath)?.parts[0]?.confirmed).toBe(false);
   }, 30_000);
 });

@@ -1,26 +1,19 @@
 import {
   closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync,
-  statSync, writeSync,
+  writeSync,
 } from "node:fs";
 import { dirname } from "node:path";
-import { isLivePumpPartObserved, readLivePumpState, requiresLivePumpProof } from "./live-pump-state.js";
+import { hasUnobservedLivePumpWork, readLivePumpState } from "./live-pump-state.js";
 
 /** Missing state has no work; unreadable state is unknown and must block cleanup. */
 export function livePumpHasUnconfirmed(path: string): boolean {
   if (!existsSync(path)) return false;
   const state = readLivePumpState(path);
   if (!state) return true;
-  if (requiresLivePumpProof(state))
-    return !!state.pending || state.parts.some(part => !isLivePumpPartObserved(part));
-  // T-221: the queue records confirmations in the journal, not in the state (the pump owns the
-  // state file while it keeps recording). A part the journal already confirmed is settled even
-  // though the state row still says unconfirmed.
-  const journal = readConfirmedJournal(path, state.createdAt);
-  return !!(state.pending && !journal.has(state.pending.partIndex))
-    || state.parts.some((p) => !p?.confirmed && !journal.has(p.index));
+  return hasUnobservedLivePumpWork(state);
 }
 
-/** One queue-proven confirmation, scoped to the original session by createdAt. */
+/** A historical queue acknowledgement, scoped to the original session by createdAt. */
 export interface ConfirmedJournalEntry {
   index: number;
   bv: string;
@@ -89,12 +82,10 @@ function probeJournalTail(
   }
 }
 
-/** Fsync before returning: successful confirmation permits the chained spool cleanup. */
+/** Durable historical ACKs are retained, but do not authorize source cleanup. */
 export function appendConfirmedJournal(statePath: string, entry: ConfirmedJournalEntry): void {
   mkdirSync(dirname(statePath), { recursive: true });
   const journal = confirmedJournalPath(statePath);
-  // fsync before returning: the caller deletes the spool right after (cleanup chain), so a
-  // lost page cache would leave a confirmed-in-queue part that nothing can settle again.
   const fd = openSync(journal, "a");
   const writeAll = (data: Buffer): void => {
     // POSIX writeSync may return a short count without throwing (review P2): a partial line that
@@ -117,56 +108,15 @@ export function appendConfirmedJournal(statePath: string, entry: ConfirmedJourna
   }
 }
 
-/** The queue writes only this journal, never the recorder-owned state.
- * Cleanup is allowed only after a matching part is durably confirmed. */
+/** Historical ACKs are not qualified native per-part observations. */
 export function confirmLivePumpPart(
   statePath: string,
-  index: number,
+  _index: number,
   bv: string,
-  fp: { size: number; mtimeMs: number },
+  _fp: { size: number; mtimeMs: number },
 ): { ok: true } | { ok: false; error: string } {
   if (!bv) return { ok: false, error: "confirmLivePumpPart requires a confirmed bv" };
   const state = readLivePumpState(statePath);
   if (!state) return { ok: false, error: "live state missing or unreadable: " + statePath };
-  if (requiresLivePumpProof(state))
-    return { ok: false, error: "protected live delivery requires native per-part observation; queue ACK cannot confirm it" };
-  const part = state.parts.find((p) => p.index === index);
-  if (!part) return { ok: false, error: "live state has no part index " + index };
-  const journal = readConfirmedJournal(statePath, state.createdAt);
-  if (state.bvid && state.bvid !== bv) {
-    return { ok: false, error: "live state bvid does not match the queue result: " + state.bvid + " vs " + bv };
-  }
-  if (part.confirmed || journal.has(index)) {
-    // Idempotent re-confirm: the same part proven twice (queue retry after a lost ack) must not
-    // duplicate the journal line's effect. A DIFFERENT bv for the same index is still an error.
-    const prev = journal.get(index);
-    if (prev && prev.bv !== bv) {
-      return { ok: false, error: "live part already confirmed under another bv: " + prev.bv + " vs " + bv };
-    }
-    if (!part.confirmed) {
-      // A readable journal hit may still be unsynced after a failed append. Re-sync before cleanup.
-      try {
-        appendConfirmedJournal(statePath, { index, bv, at: prev?.at ?? Date.now(), createdAt: prev?.createdAt ?? state.createdAt });
-      } catch (e) {
-        return { ok: false, error: "confirmation journal re-sync failed: " + String((e as Error)?.message ?? e) };
-      }
-    }
-    return { ok: true };
-  }
-  let now: { size: number; mtimeMs: number };
-  try {
-    const s = statSync(part.spoolPath);
-    now = { size: s.size, mtimeMs: s.mtimeMs };
-  } catch (e) {
-    return { ok: false, error: "live part spool cannot be stat-ed: " + String((e as Error)?.message ?? e) };
-  }
-  if (now.size !== fp.size || now.mtimeMs !== fp.mtimeMs) {
-    return { ok: false, error: "live part fingerprint changed after queue upload" };
-  }
-  try {
-    appendConfirmedJournal(statePath, { index, bv, at: Date.now(), createdAt: state.createdAt });
-    return { ok: true };
-  } catch (e) {
-    return { ok: false, error: "confirmation journal append failed: " + String((e as Error)?.message ?? e) };
-  }
+  return { ok: false, error: "live delivery requires native per-part observation; queue ACK cannot confirm it" };
 }

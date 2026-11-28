@@ -19,10 +19,9 @@
  * later, after the settle-window measurement. No trustNo and no automatic resend are enabled.
  */
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { basename, dirname, isAbsolute } from "node:path";
+import { basename, isAbsolute } from "node:path";
 import { APPEND_AMBIGUOUS_MARKER, PART_KINDS, PART_WORKFLOW_TEMPLATES, isAppendAmbiguous, isSlotBusy, SLOT_BUSY_MARKER, RETRY_BACKOFF_MS, isVideoFileName, assertJobInvariants, writeFileAtomicSync, withFileLockSync, rollingSidecarPathOf, type PartCtx, type ProcessContext, type ProcessJob, type ProcessResult, type Processor } from "@drec/core";
 import { addArchiveToSeasonIfConfigured, seasonCheckpointState } from "@drec/bilibili-api";
-import { confirmLivePumpPart, readLivePumpState, requiresLivePumpProof } from "@drec/zero-upload";
 import { appendGroup, isAllFilesUploadedLine, uploadPlain } from "./run-biliup.js";
 import { BILIUP_TARGET_ID } from "./target-id.js";
 import {
@@ -32,6 +31,8 @@ import {
 
 /** Explicit workflow mode in job.params; missing/invalid = no chaining (fail-closed). */
 export const PART_WORKFLOW_PARAM = "partWorkflow";
+
+const LIVE_PUMP_QUEUE_HOLD = "live-pump queue executor has no qualified per-part observation; preserve source and history for manual review";
 
 export interface UploadPartDeps extends BiliupDeps {
   /** File fingerprint seam (tests). Defaults to statSync size+mtimeMs. */
@@ -74,37 +75,13 @@ export function shouldChainCleanup(job: ProcessJob): boolean {
   return mode !== null && PART_WORKFLOW_TEMPLATES[mode].cleanupAt === "part-confirmed";
 }
 
-/**
- * The live-pump state file must sit next to its spool and use the pump's naming scheme. This is
- * not a trusted caller path: a remote `_enqueue` payload could otherwise claim an arbitrary file.
- */
-function liveStateIndex(job: ProcessJob, ctx: PartCtx): number {
-  const raw = job.params.liveStateIndex;
-  if (raw === undefined) return ctx.index - 1;
-  if (!Number.isSafeInteger(raw) || (raw as number) < 0) throw new Error("upload-part liveStateIndex must be a non-negative integer");
-  return raw as number;
-}
-
-function liveStatePathOf(job: ProcessJob, file: string): string {
-  const raw = job.params.liveStatePath;
-  if (typeof raw !== "string" || !isAbsolute(raw)) throw new Error("upload-part live-pump requires an absolute params.liveStatePath");
-  if (dirname(raw) !== dirname(file)) throw new Error("upload-part live state must sit next to the spool file");
-  const base = basename(raw);
-  if (!/^live-pump-.+\.state\.json$/.test(base)) throw new Error("upload-part live state has an invalid name: " + base);
-  return raw;
-}
-
 /** Shared "one biliup run for this one part" driver; existing biliup processor keeps its own multi-part loop. */
 export async function runOneBiliupPart(
   job: ProcessJob, c: ProcessContext, deps: UploadPartDeps, sup: Supervisor,
 ): Promise<ProcessResult> {
+  if (workflowMode(job) === "live-pump") throw new Error(LIVE_PUMP_QUEUE_HOLD);
   const ctx = ctxOf(job);
   const p = params(job);
-  if (workflowMode(job) === "live-pump") {
-    const state = readLivePumpState(liveStatePathOf(job, ctx.file));
-    if (!state || requiresLivePumpProof(state))
-      throw new Error("protected or unreadable live delivery cannot be submitted by the biliup executor");
-  }
   const cookies = cookiesOf(p, deps);
   const file = ctx.file;
   if (!existsSync(file)) throw new Error("upload-part source missing: " + basename(file));
@@ -166,29 +143,18 @@ export async function runOneBiliupPart(
     // could not run. The biliup success signal above remains the authority (§5.4(a)).
     c.log("upload-part byte check unavailable (no tcp acked sample at the transfer boundary); confirming on biliup's explicit success signal: " + basename(file));
   }
-  // T-220: live-pump parts are confirmed into the live state, not the rolling sidecar. The queue
-  // runner chains cleanup only after this write succeeds, so a spool is never deleted while the
-  // state still says "unconfirmed" (which would make the next pump start refuse as a real gap).
-  if (workflowMode(job) === "live-pump") {
-    const liveStatePath = liveStatePathOf(job, file);
-    const stateIndex = liveStateIndex(job, ctx);
-    const confirmed = confirmLivePumpPart(liveStatePath, stateIndex, st.bv, now);
-    if (!confirmed.ok) throw new Error("upload-part could not confirm live state: " + confirmed.error);
-    c.log("live-pump state confirmed part " + ctx.index + " (" + basename(file) + ")");
-  } else {
-    // Persist the confirmed evidence back into the rolling sidecar so the master's duplicate guard
-    // (rolling.bv short-circuit / scan) still sees an uploaded session (plan 046 PR6 addendum 2).
-    // The path is DERIVED from the part file: a caller-supplied params.sidecarPath is never trusted
-    // (a remote _enqueue payload could otherwise rewrite any file on this node).
-    const sidecarPath = rollingSidecarPathOf(file);
-    if (existsSync(sidecarPath)) {
-      try { mergeRollingSidecar(sidecarPath, c, st.bv, job); }
-      catch (e) { c.alert("upload-part could not update the rolling sidecar (master may re-upload): " + String((e as Error)?.message ?? e).slice(0, 200)); }
-    } else if (typeof job.params.sidecarPath === "string") {
-      // The producer declared a sidecar, so its absence is a real regression (the master's duplicate
-      // guard reads it). Callers that never declared one (non-rolling uses) stay silent.
-      c.alert("upload-part confirmed " + basename(file) + " but its rolling sidecar is missing (master may re-upload)");
-    }
+  // Persist the confirmed evidence back into the rolling sidecar so the master's duplicate guard
+  // (rolling.bv short-circuit / scan) still sees an uploaded session (plan 046 PR6 addendum 2).
+  // The path is DERIVED from the part file: a caller-supplied params.sidecarPath is never trusted
+  // (a remote _enqueue payload could otherwise rewrite any file on this node).
+  const sidecarPath = rollingSidecarPathOf(file);
+  if (existsSync(sidecarPath)) {
+    try { mergeRollingSidecar(sidecarPath, c, st.bv, job); }
+    catch (e) { c.alert("upload-part could not update the rolling sidecar (master may re-upload): " + String((e as Error)?.message ?? e).slice(0, 200)); }
+  } else if (typeof job.params.sidecarPath === "string") {
+    // The producer declared a sidecar, so its absence is a real regression (the master's duplicate
+    // guard reads it). Callers that never declared one (non-rolling uses) stay silent.
+    c.alert("upload-part confirmed " + basename(file) + " but its rolling sidecar is missing (master may re-upload)");
   }
   // Season association for the create branch, same helper/checkpoint as the biliup processor.
   if (!ctx.bv && p.seasonSectionId && st.bv) {
@@ -243,21 +209,19 @@ export function makeUploadPartProcessor(deps: UploadPartDeps = {}): Processor {
       try { assertJobInvariants(job, { allowedRoots: ["/"] }); } catch (e) { return (e as Error).message; }
       if (job.inputs.length !== 1) return "upload-part accepts exactly one input";
       if (!isVideoFileName(job.inputs[0])) return "upload-part input must be a video file";
+      if (workflowMode(job) === "live-pump") return LIVE_PUMP_QUEUE_HOLD;
       const p = params(job);
       if (!p.cookies || !p.title || !Number.isInteger(p.tid) || p.tid <= 0 || !p.tag) return "missing biliup metadata";
       if (!existsSync(job.inputs[0])) return "upload-part source missing";
       try {
         const c = ctxOf(job);
         if (c.file !== job.inputs[0]) return "params.ctx.file must equal inputs[0]";
-        if (workflowMode(job) === "live-pump") {
-          liveStatePathOf(job, c.file);
-          liveStateIndex(job, c);
-        }
       } catch (e) { return (e as Error).message; }
       return null;
     },
     estimateDiskBytes(): number { return 0; },
     async run(job: ProcessJob, ctx: ProcessContext): Promise<ProcessResult> {
+      if (workflowMode(job) === "live-pump") throw new Error(LIVE_PUMP_QUEUE_HOLD);
       const sup = supervise(job, ctx, deps);
       const work = runOneBiliupPart(job, ctx, deps, sup);
       work.catch(() => {});

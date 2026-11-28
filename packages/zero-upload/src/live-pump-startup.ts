@@ -3,11 +3,11 @@ import { ffprobeDuration } from "@drec/post-process";
 import { LivePumpSession } from "./live-pump-session.js";
 import { LivePumpObserver } from "./live-pump-observer.js";
 import { LivePumpSource } from "./live-pump-source.js";
-import { livePumpStatePath, readLivePumpState, requiresLivePumpProof, type LivePumpState } from "./live-pump-state.js";
+import { hasUnobservedLivePumpWork, livePumpStatePath, readLivePumpState, requiresLivePumpProof, type LivePumpState } from "./live-pump-state.js";
 import { livePumpHasUnconfirmed } from "./live-pump-confirmations.js";
 import { defaultScanDtsGap, heldGapPath } from "./live-pump-spool-recovery.js";
 import { MiB } from "./live-pump-policy.js";
-import type { RunLivePumpOptions, RunLivePumpResult, LivePumpHandoffReceipt } from "./live-pump-run-options.js";
+import type { RunLivePumpOptions, RunLivePumpResult } from "./live-pump-run-options.js";
 type OpenSession = {
   session: LivePumpSession;
   spoolOnlyRun: boolean;
@@ -18,7 +18,6 @@ type OpenSession = {
 };
 /** Recover old work before waiting, then decide broadcast identity again once live. */
 export class LivePumpStartup {
-  private handoffDone = false;
   constructor(private readonly o: RunLivePumpOptions, private readonly events: LivePumpObserver, private readonly source: LivePumpSource) {
   }
   private result(session: LivePumpSession, values: Partial<RunLivePumpResult>): RunLivePumpResult {
@@ -27,54 +26,39 @@ export class LivePumpStartup {
   async open(): Promise<OpenSession> {
     const session = this.create();
     let spoolOnlyRun = this.o.submitMode === "spool";
-    let pendingNeedsManual = false;
     if (this.o.submit !== false) {
       const queued = this.queueOwnership(session);
       if (typeof queued === "object")
         return queued;
-      spoolOnlyRun ||= queued === true || queued === "protected-hold";
-      if (queued === "protected-hold")
-        pendingNeedsManual = true;
-      else if (spoolOnlyRun)
-        pendingNeedsManual = await this.recoverSpool(session);
-      else {
+      spoolOnlyRun ||= queued === "protected-hold";
+      if (queued !== "protected-hold" && spoolOnlyRun)
+        await this.recoverSpool(session);
+      else if (queued !== "protected-hold") {
         const failed = await this.recoverDirect(session);
         if (failed)
           return failed;
       }
     }
-    const handoff = spoolOnlyRun ? await this.handoff(session, pendingNeedsManual) : undefined;
-    return handoff ?? { session, spoolOnlyRun };
+    if (spoolOnlyRun)
+      this.handoff(session);
+    return { session, spoolOnlyRun };
   }
-  private queueOwnership(session: LivePumpSession): true | "protected-hold" | {
-    pending: RunLivePumpResult;
-  } | {
+  private queueOwnership(session: LivePumpSession): "protected-hold" | {
     fail: RunLivePumpResult;
   } | undefined {
     const path = livePumpStatePath(this.o.spoolDir, this.o.room);
     const queued = readLivePumpState(path);
-    if (!(queued?.queueManaged || queued?.deliveryDeferred) || !livePumpHasUnconfirmed(path))
+    if (!queued || !hasUnobservedLivePumpWork(queued))
       return;
-    if (requiresLivePumpProof(queued)) {
-      const error = "Protected delivery observation paused; legacy queue markers do not transfer its UPOS ownership";
-      this.events.log("[live-pump] " + error);
-      if (this.o.spoolMode === "none")
-        return { fail: this.result(session, { error, bvid: queued.bvid, aid: queued.aid }) };
-      return "protected-hold";
-    }
-    if (!session.reconcileConfirmedJournal().unconfirmedRemain)
+    if (requiresLivePumpProof(queued) && !(queued.queueManaged || queued.deliveryDeferred))
       return;
-    if (this.o.spoolMode === "none") {
-      this.events.log("[直播直传] 未确认分 P 已交给节点上传队列,本次不重传;等待队列确认");
-      return { pending: this.result(session, {
-          uploadPending: true,
-          error: "queued uploads pending",
-          ...(queued.bvid ? { bvid: queued.bvid } : {}),
-          ...(queued.aid ? { aid: queued.aid } : {}),
-        }) };
-    }
-    this.events.log("[直播直传] 未确认分 P 由节点队列补传;本场继续录制但不再直传(封口落盘,收播后一次性入队)");
-    return true;
+    const error = requiresLivePumpProof(queued)
+      ? "Protected delivery observation paused; legacy queue markers do not transfer its UPOS ownership"
+      : "Legacy delivery has no native per-part observation; queue ownership is unqualified and source is retained for manual review";
+    this.events.log("[live-pump] " + error);
+    if (this.o.spoolMode === "none")
+      return { fail: this.result(session, { error, bvid: queued.bvid, aid: queued.aid }) };
+    return "protected-hold";
   }
   private async recoverDirect(session: LivePumpSession): Promise<Exclude<OpenSession, {
     session: LivePumpSession;
@@ -240,60 +224,18 @@ export class LivePumpStartup {
       }
     }
   }
-  private async handoff(session: LivePumpSession, pendingNeedsManual: boolean): Promise<{
-    pending: RunLivePumpResult;
-  } | undefined> {
-    if (!this.o.onHandoff || this.handoffDone)
+  private handoff(session: LivePumpSession): void {
+    if (!this.o.onHandoff || !hasUnobservedLivePumpWork(session.snapshot()))
       return;
-    const handoffPath = livePumpStatePath(this.o.spoolDir, this.o.room);
-    if (!livePumpHasUnconfirmed(handoffPath))
-      return;
-    let receipt: LivePumpHandoffReceipt;
-    if (requiresLivePumpProof(session.snapshot())) {
-      receipt = { status: "blocked", detail: "Protected UPOS delivery cannot transfer to an unqualified queue executor" };
+    const detail = requiresLivePumpProof(session.snapshot())
+      ? "Protected UPOS delivery cannot transfer to an unqualified queue executor"
+      : "Legacy live delivery has no native per-part observation";
+    const message = "Live delivery handoff blocked; manual review required: " + detail;
+    this.events.log("[live-pump] " + message);
+    try {
+      this.o.onAlert?.(message);
     }
-    else try {
-      receipt = await this.o.onHandoff(handoffPath) ?? { status: "blocked", detail: "handoff 未返回回执" };
-    }
-    catch (e) {
-      receipt = { status: "retryable", detail: String((e as Error)?.message ?? e) };
-    }
-    if (pendingNeedsManual && receipt.status === "retryable") {
-      receipt = { status: "blocked", detail: `待决提交意图需人工消歧,不自动重投: ${receipt.detail}` };
-    }
-    if (receipt.status === "owned") {
-      this.handoffDone = true;
-      session.adoptQueueManaged();
-    }
-    else if (receipt.status === "retryable") {
-      const msg = `待补分 P 提前交接失败,交回上传待补流程重试: ${receipt.detail}`;
-      this.events.log(`[直播直传] ⚠️ ${msg}`);
-      try {
-        this.o.onAlert?.(msg);
-      }
-      catch {
-      }
-      const st = readLivePumpState(handoffPath);
-      return { pending: {
-          ok: false,
-          uploadPending: true,
-          error: "queued uploads pending",
-          title: session.archiveTitle,
-          segments: [],
-          spoolDir: this.o.spoolDir,
-          statePath: handoffPath,
-          ...(st?.bvid ? { bvid: st.bvid } : {}),
-          ...(st?.aid ? { aid: st.aid } : {}),
-        } };
-    }
-    else {
-      const msg = `待补分 P 提前交接未全部接管(需人工): ${receipt.detail}`;
-      this.events.log(`[直播直传] ⚠️ ${msg}`);
-      try {
-        this.o.onAlert?.(msg);
-      }
-      catch {
-      }
+    catch {
     }
   }
   async prepare(): Promise<RunLivePumpResult | undefined> {
@@ -301,7 +243,7 @@ export class LivePumpStartup {
     let preRecoverySpoolOnlyRun = false;
     if (this.o.waitForBroadcast) {
       const st = existsSync(livePumpStatePath(this.o.spoolDir, this.o.room)) ? readLivePumpState(livePumpStatePath(this.o.spoolDir, this.o.room)) : undefined;
-      if (this.o.submit !== false && st !== undefined && (!st || !!st.pending || st.parts.some(p => !p.confirmed))) {
+      if (this.o.submit !== false && st !== undefined && (!st || st.room !== this.o.room || hasUnobservedLivePumpWork(st))) {
         this.events.log("[直播直传] 上次运行留有未确认分 P,等待开播前先恢复");
         const pre = await this.open();
         if ("pending" in pre)
@@ -320,8 +262,7 @@ export class LivePumpStartup {
           const idleState = readLivePumpState(idleStatePath);
           return {
             ok: false,
-            uploadPending: true,
-            error: "queued uploads pending",
+            error: "Live delivery observation paused; source and queue history require manual review",
             ...(idleState?.bvid ? { bvid: idleState.bvid } : {}),
             ...(idleState?.aid ? { aid: idleState.aid } : {}),
             title: this.o.title,
