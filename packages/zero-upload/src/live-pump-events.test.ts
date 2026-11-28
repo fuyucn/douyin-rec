@@ -43,6 +43,7 @@ function fakeFfmpeg(bytes: number): void {
 
 function fakeUpos(): typeof fetch {
   const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
+  let videos: Array<{ filename: string; title?: string }> = [];
   return ((input: string | URL | Request, init?: RequestInit) => {
     const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
     const m = (init?.method ?? "GET").toUpperCase();
@@ -50,9 +51,11 @@ function fakeUpos(): typeof fetch {
     if (m === "POST" && u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
     if (m === "PUT") return Promise.resolve(new Response("", { status: 200 }));
     if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
-    if (u.pathname === "/x/vu/web/add/v3") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } }));
-    if (u.pathname === "/x/vu/web/edit") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } }));
-    if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BILIfake1", title: "t", tid: 21 }, videos: [] } }));
+    if (u.pathname === "/x/vu/web/add/v3" || u.pathname === "/x/vu/web/edit") {
+      videos = (JSON.parse(String(init?.body)) as { videos: typeof videos }).videos;
+      return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } }));
+    }
+    if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BILIfake1", title: "t", tid: 21 }, videos } }));
     if (u.pathname === "/x/web/archives") return Promise.resolve(json({ code: 0, data: { arc_audits: [] } }));
     return Promise.resolve(json({ code: 0, data: {} }));
   }) as unknown as typeof fetch;

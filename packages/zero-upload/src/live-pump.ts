@@ -5,7 +5,7 @@ export { SpoolWriteError } from "./live-pump-part-spool.js";
 export { DTS_GAP_FORWARD_SEC, heldGapPath, reuploadSpoolFile } from "./live-pump-spool-recovery.js";
 export type { SubmitGate } from "./live-pump-legacy-publication.js";
 export { sleepUnlessAborted } from "./live-pump-wait.js";
-export { livePumpStatePath, readLivePumpState, writeLivePumpState, spoolPathsToKeep, type LivePumpState } from "./live-pump-state.js";
+export { livePumpStatePath, readLivePumpState, writeLivePumpState, spoolPathsToKeep, requiresLivePumpProof, isLivePumpPartObserved, type LivePumpState } from "./live-pump-state.js";
 export { livePumpHasUnconfirmed, confirmedJournalPath, readConfirmedJournal, needsConfirmedJournalSeparator, appendConfirmedJournal, confirmLivePumpPart, type ConfirmedJournalEntry } from "./live-pump-confirmations.js";
 export { spoolSweepSafe, archivedSpoolPathsToKeep, resolvePumpDir } from "./live-pump-spool-policy.js";
 export type { SpawnFn, ChildProcessLike, SealPolicy, FfmpegPipeArgs, SegmentExit, SegmentRunResult, SealedPart, RunStreamOpts, StreamRunResult, RunSegmentOpts } from "./live-pump-types.js";

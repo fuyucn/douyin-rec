@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 /** Durable archive state. Only the recording process writes this file. */
 export interface LivePumpState {
   schemaVersion: 1;
+  submissionProofVersion?: 1;
   room: string;
   createdAt: number;
   title: string;
@@ -29,6 +30,10 @@ export interface LivePumpState {
     bytes: number;
     durationSec: number;
     confirmed: boolean;
+    proof?: "accepted" | "observed";
+    nativeKey?: string;
+    acceptedAt?: number;
+    observedAt?: number;
     /** Incomplete spools cannot be auto-resubmitted after a write failure (issue #579). */
     spoolIncomplete?: boolean;
     /** Absent means sealed for old schemaVersion 1 states. False is an open-time WAL placeholder
@@ -49,6 +54,10 @@ export interface LivePumpState {
   /** WAL for crash recovery. */
   pending?: {
     kind: "create" | "append";
+    submissionState?: "intent" | "accepted";
+    acceptedAt?: number;
+    acceptedBvid?: string;
+    acceptedAid?: number;
     partIndex: number;
     stem: string;
     title: string;
@@ -57,6 +66,19 @@ export interface LivePumpState {
     spoolPath: string;
   };
   updatedAt: number;
+}
+
+export function requiresLivePumpProof(state: LivePumpState): boolean {
+  return state.submissionProofVersion !== undefined
+    || !!state.pending
+    || state.parts.some(part => part?.proof !== undefined);
+}
+
+export function isLivePumpPartObserved(part: LivePumpState["parts"][number]): boolean {
+  return part?.confirmed === true && part.proof === "observed"
+    && typeof part.nativeKey === "string" && part.nativeKey.length > 0
+    && part.nativeKey === part.stem
+    && Number.isFinite(part.observedAt) && part.observedAt! > 0;
 }
 
 /** Protect both part rows and pending WAL paths: either can own the only recovery copy. */

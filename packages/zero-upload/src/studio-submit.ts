@@ -105,6 +105,9 @@ export async function appendStudioPart(o: {
     return { ok: false, raw: { error: "lookup archive failed", ...found.raw } };
   }
   const existing = found.archive;
+  if ((o.bvid && existing.bvid !== o.bvid) || (o.aid && existing.aid !== o.aid)) {
+    return { ok: false, raw: { error: "archive identity mismatch; refusing to append" } };
+  }
   if (existing.videos.some((v) => v.filename === o.video.filename)) {
     return { ok: true, aid: existing.aid, ...(existing.bvid ? { bvid: existing.bvid } : {}), raw: { idempotent: true }, archive: existing };
   }

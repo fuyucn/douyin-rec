@@ -253,7 +253,7 @@ describe("upos target: append", () => {
       files: [{ path: "/tmp/b.mp4", title: "P2" }],
       policy: POLICY,
     });
-    expect(r.proof).toBe("observed");
+    expect(r.proof).toBe("accepted");
     const edit = net.calls.find((c) => c.url.includes("/x/vu/web/edit"));
     const videos = (edit!.body as { videos: Array<{ filename: string }>; aid: number }).videos;
     expect(videos.map((v) => v.filename)).toEqual(["stem0", "stem1"]);
@@ -334,7 +334,7 @@ describe("upos target: inspect and findRecent", () => {
     expect(info).not.toBeNull();
     expect(info!.visibility).toBe("private");
     expect(info!.partCount).toBe(1);
-    expect(info!.parts).toEqual([{ index: 1, title: "P1" }]);
+    expect(info!.parts).toEqual([{ index: 1, name: "stem0", title: "P1" }]);
   });
 
   it("inspect returns null when the archive cannot be read", async () => {
@@ -429,7 +429,7 @@ describe("upos target: publishStreamed (stage 2b-2b)", () => {
     const t = netTarget(net, 6);
     const ref = { targetId: UPOS_TARGET_ID, id: FAKE_BV };
     const r = await t.publishStreamed!({ cred: CRED, ref, name: "stem1", title: "P2" });
-    expect(r).toEqual({ proof: "confirmed", ref });
+    expect(r).toEqual({ proof: "accepted", ref });
     expect(net.calls.some((c) => c.url.includes("preupload"))).toBe(false);
     expect(net.calls.filter((c) => c.url.includes("/x/vu/web/edit"))).toHaveLength(1);
   });

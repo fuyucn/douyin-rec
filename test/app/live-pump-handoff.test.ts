@@ -43,7 +43,7 @@ const archiveFetch = (() => Promise.resolve(new Response(JSON.stringify({
 }), { status: 200 }))) as unknown as typeof fetch;
 
 describe("T-221 startup handoff into the real node queue", () => {
-  it("pending + unvalidated row: recover first, revalidate, then a REAL queue row before the idle wait", async () => {
+  it("retains ambiguous pending intent instead of handing it to the legacy queue", async () => {
     const dir = join(root, "recordings", "t221");
     const p0 = join(dir, "a_000.live.ts");
     writeFileSync(p0, "aaa");
@@ -92,10 +92,10 @@ describe("T-221 startup handoff into the real node queue", () => {
     });
 
     expect(handoffs).toEqual([statePath]);
-    expect(rowsBeforeWait).toBe(1); // the REAL queue owns the row before the offline wait
+    expect(rowsBeforeWait).toBe(0);
     const st = readLivePumpState(statePath);
-    expect(st?.pending).toBeUndefined(); // disambiguated
-    expect(st?.parts[0]?.validated).toBe(true); // revalidated AFTER recover
+    expect(st?.pending).toEqual(state.pending);
+    expect(st?.parts[0]?.validated).toBeUndefined();
     expect(st?.parts[0]?.confirmed).toBe(false);
     expect(r.uploadPending).toBe(true);
     expect(r.error).toBe("queued uploads pending");

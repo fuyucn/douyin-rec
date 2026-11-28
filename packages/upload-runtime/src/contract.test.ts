@@ -63,6 +63,16 @@ describe("upload-target 契约", () => {
         if (!current) return;
         current.parts.push(part);
       },
+      observePart: (key, nativeKey, observedAt) => {
+        const current = mem.get(key);
+        const part = current?.parts.find((candidate) => candidate.nativeKey === nativeKey && (candidate.proof === "accepted" || candidate.proof === "observed"));
+        if (!current || !part) return false;
+        if (part.proof === "observed") return true;
+        part.proof = "observed";
+        part.confirmedAt = observedAt;
+        delete part.acceptedAt;
+        return true;
+      },
     };
     store.save("k", { targetId: "fake-upload", archiveId: "archive-1", parts: [] });
     store.confirmPart("k", { index: 1, size: 10, mtimeMs: 20 });

@@ -51,6 +51,18 @@ afterEach(() => {
 });
 
 describe("enqueueLivePumpPending", () => {
+  it("keeps protected accepted work with its original owner without opening the queue", () => {
+    const path = livePumpStatePath(root, "q");
+    const state = stateWith([{ index: 0, spoolPath: join(root, "part.ts") }]);
+    state.submissionProofVersion = 1;
+    state.parts[0]!.proof = "accepted";
+    writeLivePumpState(path, state);
+    expect(enqueueLivePumpPending({ statePath: path, cookiesPath: "unused" })).toMatchObject({
+      queued: 0, already: 0, failed: 1, needsManual: 1,
+    });
+    expect(readLivePumpState(path)!.queueManaged).toBeUndefined();
+    expect(existsSync(procQueueDbPath(root))).toBe(false);
+  });
   it("queues every sealed unconfirmed part atomically and marks the state queue-managed", () => {
     const dir = join(root, "recordings", "q");
     const p0 = join(dir, "a_000.live.ts");

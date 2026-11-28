@@ -1,6 +1,6 @@
 import { mkdirSync, statSync } from "node:fs";
 import { basename } from "node:path";
-import { livePumpStatePath, readLivePumpState, writeLivePumpState, type LivePumpState } from "./live-pump-state.js";
+import { isLivePumpPartObserved, livePumpStatePath, readLivePumpState, requiresLivePumpProof, writeLivePumpState, type LivePumpState } from "./live-pump-state.js";
 import { readConfirmedJournal } from "./live-pump-confirmations.js";
 import { markActivity, rolloverStaleState } from "./live-pump-spool-policy.js";
 import type { LivePumpSessionOpts } from "./live-pump-session-options.js";
@@ -26,6 +26,7 @@ export class LivePumpCheckpoint {
     }
     this.state = loaded ?? {
       schemaVersion: 1,
+      submissionProofVersion: 1,
       room: o.room,
       createdAt: Date.now(),
       title: o.title,
@@ -61,6 +62,8 @@ export class LivePumpCheckpoint {
     return [...this.state.parts];
   }
   get hasUnconfirmed(): boolean {
+    if (requiresLivePumpProof(this.state))
+      return !!this.state.pending || this.state.parts.some(part => !isLivePumpPartObserved(part));
     return !!this.state.pending || this.state.parts.some(p => !p.confirmed);
   }
   get roomKey(): string {
@@ -87,7 +90,7 @@ export class LivePumpCheckpoint {
   lowestUnconfirmed(): LivePumpState["parts"][number] | undefined {
     let best: LivePumpState["parts"][number] | undefined;
     for (const p of this.state.parts)
-      if (!p.confirmed && (!best || p.index < best.index))
+      if (!(requiresLivePumpProof(this.state) ? isLivePumpPartObserved(p) : p.confirmed) && (!best || p.index < best.index))
         best = p;
     return best;
   }
@@ -122,6 +125,8 @@ export class LivePumpCheckpoint {
     if (this.state.pending && this.state.pending.partIndex === input.index)
       return { ok: false, error: "another submit is pending" };
     const existing = this.state.parts.find(p => p.index === input.index);
+    if (existing?.proof === "accepted")
+      return { ok: false, error: "accepted part must be observed by its original owner" };
     if (existing?.confirmed)
       return { ok: true };
     const part = {
@@ -252,6 +257,8 @@ export class LivePumpCheckpoint {
     changed: boolean;
     unconfirmedRemain: boolean;
   } {
+    if (requiresLivePumpProof(this.state))
+      return { changed: false, unconfirmedRemain: this.hasUnconfirmed };
     const journal = readConfirmedJournal(this.statePath, this.state.createdAt);
     let changed = false;
     let bvid = this.state.bvid;

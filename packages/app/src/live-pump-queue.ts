@@ -23,7 +23,7 @@ import {
 } from "@drec/core";
 import { biliupCookieHeader } from "@drec/bilibili-api";
 import { ProcQueueStore, procQueueDbPath } from "@drec/proc-queue";
-import { readConfirmedJournal, readLivePumpState, writeLivePumpState } from "@drec/zero-upload";
+import { isLivePumpPartObserved, readConfirmedJournal, readLivePumpState, requiresLivePumpProof, writeLivePumpState } from "@drec/zero-upload";
 import { drecRoot } from "./paths.js";
 import { nodeAllowedRoots } from "./node-enqueue.js";
 
@@ -68,6 +68,12 @@ export function enqueueLivePumpPending(input: EnqueueLivePumpInput): EnqueueLive
   const log = input.log ?? (() => {});
   const state = readLivePumpState(input.statePath);
   if (!state) return { queued: 0, already: 0, failed: 0, error: "live state missing or unreadable" };
+  if (requiresLivePumpProof(state)) {
+    const unresolved = state.parts.filter(part => !isLivePumpPartObserved(part)).length;
+    const held = Math.max(unresolved, state.pending ? 1 : 0);
+    return { queued: 0, already: 0, failed: held, needsManual: held,
+      ...(held ? { error: "protected live delivery retains its original UPOS owner; biliup queue handoff is unsupported" } : {}) };
+  }
   if (!state.parts.some((p) => !p.confirmed)) return { queued: 0, already: 0, failed: 0 };
 
   let cookieHeader: string | null;

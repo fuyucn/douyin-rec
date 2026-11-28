@@ -22,7 +22,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute } from "node:path";
 import { APPEND_AMBIGUOUS_MARKER, PART_KINDS, PART_WORKFLOW_TEMPLATES, isAppendAmbiguous, isSlotBusy, SLOT_BUSY_MARKER, RETRY_BACKOFF_MS, isVideoFileName, assertJobInvariants, writeFileAtomicSync, withFileLockSync, rollingSidecarPathOf, type PartCtx, type ProcessContext, type ProcessJob, type ProcessResult, type Processor } from "@drec/core";
 import { addArchiveToSeasonIfConfigured, seasonCheckpointState } from "@drec/bilibili-api";
-import { confirmLivePumpPart } from "@drec/zero-upload";
+import { confirmLivePumpPart, readLivePumpState, requiresLivePumpProof } from "@drec/zero-upload";
 import { appendGroup, isAllFilesUploadedLine, uploadPlain } from "./run-biliup.js";
 import { BILIUP_TARGET_ID } from "./target-id.js";
 import {
@@ -100,6 +100,11 @@ export async function runOneBiliupPart(
 ): Promise<ProcessResult> {
   const ctx = ctxOf(job);
   const p = params(job);
+  if (workflowMode(job) === "live-pump") {
+    const state = readLivePumpState(liveStatePathOf(job, ctx.file));
+    if (!state || requiresLivePumpProof(state))
+      throw new Error("protected or unreadable live delivery cannot be submitted by the biliup executor");
+  }
   const cookies = cookiesOf(p, deps);
   const file = ctx.file;
   if (!existsSync(file)) throw new Error("upload-part source missing: " + basename(file));

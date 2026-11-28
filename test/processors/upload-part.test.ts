@@ -63,6 +63,22 @@ const processor = (s: Seam, extra: Record<string, unknown> = {}) => makeUploadPa
 });
 
 describe("upload-part processor", () => {
+  it("rejects protected live state before spawning biliup", async () => {
+    setup();
+    try {
+      const file = put("part.ts");
+      const liveStatePath = join(dir, "live-pump-test.state.json");
+      writeFileSync(liveStatePath, JSON.stringify({
+        schemaVersion: 1, room: "test", submissionProofVersion: 1, parts: [],
+      }));
+      const seam = seams();
+      const proc = processor(seam);
+      await expect(proc.run(job(file, { params: { partWorkflow: "live-pump", liveStatePath, liveStateIndex: 0 } }), pc()))
+        .rejects.toThrow("cannot be submitted by the biliup executor");
+      expect(seam.run).not.toHaveBeenCalled();
+      expect(existsSync(file)).toBe(true);
+    } finally { teardown(); }
+  });
   it("contract table + workflow template decisions", () => {
     setup();
     expect(uploadPartProcessor).toMatchObject({ kind: PART_KINDS.upload, resource: "upload", lane: "biliup", retryable: false, interruptible: false });

@@ -30,13 +30,14 @@ function fakeSubmitter(mode: "ok" | "needs-manual" | "retry-exhausted" = "ok"): 
       ensureStreamedArchive: async (req) => {
         calls.ensure.push(req);
         if (mode !== "ok") fail();
-        return { ref: REF, reused: false };
+        return { ref: REF, reused: false, partProof: "observed" };
       },
       appendStreamedPart: async (req) => {
         calls.append.push(req);
         if (mode !== "ok") fail();
-        return { confirmed: [1] };
+        return { confirmed: [1], accepted: [] };
       },
+      observeStreamedPart: () => {},
       verify: async () => ({ ok: true, observedParts: null }),
     },
   };

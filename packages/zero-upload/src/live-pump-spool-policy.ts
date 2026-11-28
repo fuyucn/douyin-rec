@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { isSameBroadcastGap } from "@drec/core";
-import { livePumpStatePath, readLivePumpState, spoolPathsToKeep } from "./live-pump-state.js";
+import { livePumpStatePath, readLivePumpState, requiresLivePumpProof, spoolPathsToKeep } from "./live-pump-state.js";
 import { confirmedJournalPath, livePumpHasUnconfirmed } from "./live-pump-confirmations.js";
 
 /** Archived states remain intact for audit and recovery. */
@@ -56,6 +56,7 @@ export function rolloverStaleState(path: string, room: string, nowMs: number, lo
   // T-221: journal-aware — a part the queue already confirmed (journal entry, state row still
   // unconfirmed) is settled, so a fully-delivered queue-managed state ages out normally.
   const unconfirmed = livePumpHasUnconfirmed(path);
+  if (requiresLivePumpProof(state) && unconfirmed) return undefined;
   // T-220: a queue-managed state is active work, not a finished broadcast. Ageing it out would
   // archive the very state the queue is about to confirm (and lose the association mid-upload).
   // T-221 (sol P1-3): `deliveryDeferred` means the queue has NOT taken these parts yet (a mid-run

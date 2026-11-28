@@ -30,6 +30,16 @@ function memoryStore(): UploadStateStore & { saved: UploadCheckpoint[]; parts: U
       const cur = byKey.get(key);
       if (cur) byKey.set(key, { ...cur, parts: [...cur.parts, part] });
     },
+    observePart: (key, nativeKey, observedAt) => {
+      const cur = byKey.get(key);
+      const part = cur?.parts.find((candidate) => candidate.nativeKey === nativeKey && (candidate.proof === "accepted" || candidate.proof === "observed"));
+      if (!cur || !part) return false;
+      if (part.proof === "observed") return true;
+      byKey.set(key, { ...cur, parts: cur.parts.map((candidate) => candidate === part
+        ? { ...candidate, proof: "observed", confirmedAt: observedAt, acceptedAt: undefined }
+        : candidate) });
+      return true;
+    },
   };
 }
 

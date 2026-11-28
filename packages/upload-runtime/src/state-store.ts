@@ -11,6 +11,9 @@ export interface UploadPartRecord {
   size: number;
   mtimeMs: number;
   title?: string;
+  proof?: "accepted" | "observed";
+  nativeKey?: string;
+  acceptedAt?: string;
   confirmedAt?: string;
 }
 
@@ -26,4 +29,6 @@ export interface UploadStateStore {
   save(key: string, checkpoint: UploadCheckpoint): void;
   /** 单段确认:proof = observed 时调用。 */
   confirmPart(key: string, part: UploadPartRecord): void;
+  /** Upgrade only the accepted streamed part whose frozen native key was read back exactly. */
+  observePart(key: string, nativeKey: string, observedAt: string): boolean;
 }

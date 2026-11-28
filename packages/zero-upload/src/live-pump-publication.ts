@@ -33,7 +33,7 @@ type PublicationFailure = {
   retryable?: true;
 };
 
-type PublicationResult = { ok: true; bvid?: string; aid?: number } | PublicationFailure;
+type PublicationResult = { ok: true; proof: "accepted" | "observed"; bvid?: string; aid?: number } | PublicationFailure;
 
 function createRequest(
   archive: Readonly<ArchiveMetadata>,
@@ -75,17 +75,18 @@ export async function publishLivePumpPart(o: PublicationOptions): Promise<Public
   const { submitter, archive, part, signal } = o;
   try {
     if (o.kind === "append") {
-      await submitter.appendStreamedPart({
+      const out = await submitter.appendStreamedPart({
         ref: { targetId: o.targetId ?? "bilibili-upos", id: archive.bvid ?? String(archive.aid) },
         name: part.stem,
         ...(part.title ? { title: part.title.slice(0, 80) } : {}),
         size: part.bytes,
         ...(signal ? { signal } : {}),
       });
-      return { ok: true, bvid: archive.bvid, aid: archive.aid };
+      const proof = out.confirmed.length > 0 ? "observed" : "accepted";
+      return { ok: true, proof, bvid: archive.bvid, aid: archive.aid };
     }
     const out = await submitter.ensureStreamedArchive(createRequest(archive, part, signal));
-    return { ok: true, bvid: out.ref.id, aid: undefined };
+    return { ok: true, proof: out.partProof ?? "accepted", bvid: out.ref.id, aid: undefined };
   } catch (error) {
     return publicationFailure(error);
   }

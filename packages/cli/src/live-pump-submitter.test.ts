@@ -28,13 +28,15 @@ function streamedWire() {
     const path = new URL(input instanceof Request ? input.url : String(input)).pathname;
     hits.push(path);
     if (path === "/x/vu/web/add/v3" || path === "/x/vu/web/edit") {
-      posts.push(JSON.parse(String(init?.body)));
+      const body = JSON.parse(String(init?.body));
+      posts.push(body);
       return Response.json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } });
     }
     if (path === "/x/vupre/web/archive/view") {
+      const latest = posts.at(-1) as { videos?: Array<{ filename: string; title: string }> } | undefined;
       return Response.json({ code: 0, data: {
         archive: { aid: 7, bvid: "BILIfake1", title: "T", tid: 21, is_only_self: 1 },
-        videos: [{ cid: 1, filename: "stem0", title: "P1" }],
+        videos: (latest?.videos ?? [{ filename: "stem0", title: "P1" }]).map((video, index) => ({ cid: index + 1, ...video })),
       } });
     }
     throw new Error("Unexpected network request: " + path);
@@ -59,19 +61,26 @@ describe("buildLivePumpSubmitter", () => {
       const created = await buildLivePumpSubmitter(opts).ensureStreamedArchive({
         archive: ARCHIVE, name: "stem0", title: "P1", skipFindRecent: true,
       });
-      expect(created).toEqual({ ref: { targetId: "bilibili-upos", id: "BILIfake1" }, reused: false });
+      expect(created).toEqual({ ref: { targetId: "bilibili-upos", id: "BILIfake1" }, reused: false, partProof: "observed" });
       const part = { spoolPath: join(dir, "p1.ts"), filename: "p1.ts", stem: "stem0",
         title: "P1", bytes: 1, durationSec: 180 };
       writeLivePumpState(livePumpStatePath(dir, opts.pumpRoom), {
         schemaVersion: 1, room: opts.pumpRoom, createdAt: 1, updatedAt: 1,
         title: "T", tid: 21, tag: "", private: true, bvid: created.ref.id,
-        parts: [{ ...part, index: 0, confirmed: true }, { ...part, index: 1, confirmed: false }],
+        parts: [{ ...part, index: 0, confirmed: false, proof: "accepted", nativeKey: "stem0", acceptedAt: 1 },
+          { ...part, index: 1, confirmed: false }],
       });
       vi.stubEnv("DREC_LIVE_PUMP_DRIVER", "0");
       const resumed = buildLivePumpSubmitter(opts);
       await expect(resumed.appendStreamedPart({ ref: created.ref, name: "stem1", title: "P2", size: 1 }))
-        .resolves.toEqual({ confirmed: [2] });
-      expect(wire.hits).toEqual(["/x/vu/web/add/v3", "/x/vupre/web/archive/view", "/x/vu/web/edit"]);
+        .rejects.toMatchObject({ failure: "needs-manual" });
+      expect(resumed.observeStreamedPart({ ref: created.ref, name: "stem0" })).toBeUndefined();
+      await expect(resumed.appendStreamedPart({ ref: created.ref, name: "stem1", title: "P2", size: 1 }))
+        .resolves.toEqual({ confirmed: [2], accepted: [] });
+      expect(wire.hits).toEqual([
+        "/x/vu/web/add/v3", "/x/vupre/web/archive/view",
+        "/x/vupre/web/archive/view", "/x/vu/web/edit", "/x/vupre/web/archive/view",
+      ]);
       expect(wire.posts[0]).toMatchObject({ is_only_self: 1, copyright: 1, watermark: { state: 0 },
         videos: [{ filename: "stem0", title: "P1" }] });
       expect(wire.posts[1]).toMatchObject({ aid: 7, is_only_self: 1, watermark: { state: 0 },

@@ -35,7 +35,7 @@ export interface PartSubmitter {
     skipFindRecent?: boolean;
     /** Hard-stop: once aborted, no new attempt is made and no further irreversible request fires. */
     signal?: AbortSignal;
-  }): Promise<{ ref: ArchiveRef; reused: boolean }>;
+  }): Promise<{ ref: ArchiveRef; reused: boolean; partProof?: "accepted" | "observed" }>;
   /** Publish one part whose bytes the runner already uploaded. Bytes are not sent. */
   appendStreamedPart(req: {
     ref: ArchiveRef;
@@ -44,7 +44,9 @@ export interface PartSubmitter {
     size?: number;
     /** Hard-stop: once aborted, no new attempt is made and no further irreversible request fires. */
     signal?: AbortSignal;
-  }): Promise<{ confirmed: number[] }>;
+  }): Promise<{ confirmed: number[]; accepted: number[] }>;
+  /** Persist positive observation for the same exact archive and frozen target-native part key. */
+  observeStreamedPart(req: { ref: ArchiveRef; name: string }): void;
   verify(req: { ref: ArchiveRef; expectedParts: number | null }):
     Promise<{ ok: boolean; observedParts: number | null }>;
 }

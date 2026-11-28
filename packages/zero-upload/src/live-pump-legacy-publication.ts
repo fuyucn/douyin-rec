@@ -31,7 +31,7 @@ type LegacyPublication = {
 };
 
 type LegacyPublicationResult =
-  | { ok: true; bvid?: string; aid?: number }
+  | { ok: true; proof: "accepted"; bvid?: string; aid?: number }
   | { ok: false; error: string; retryable?: boolean };
 
 /** Map one metadata request; intent and confirmation writes remain owned by the session. */
@@ -77,7 +77,7 @@ export async function publishLegacyLivePumpPart(o: LegacyPublication): Promise<L
       return { ok: false, error: String((e as Error)?.message ?? e).slice(0, 300) };
     }
     const { ok, raw, bvid, aid } = result;
-    if (ok) return { ok: true, ...(bvid ? { bvid } : {}), ...(aid ? { aid } : {}) };
+    if (ok) return { ok: true, proof: "accepted", ...(bvid ? { bvid } : {}), ...(aid ? { aid } : {}) };
     const detail = `${o.kind} failed: ${JSON.stringify(raw).slice(0, 300)}`;
     lastError = detail;
     if (!isUploadRateLimited(detail)) return { ok: false, error: detail };

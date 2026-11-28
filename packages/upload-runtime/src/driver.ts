@@ -85,6 +85,8 @@ export interface EnsureArchiveOutcome {
   ref: ArchiveRef;
   /** true = findRecent matched an existing archive, nothing was created. */
   reused: boolean;
+  /** Positive proof for the streamed part that created this archive. */
+  partProof?: "accepted" | "observed";
 }
 
 export interface AppendPartsRequest {
@@ -99,6 +101,8 @@ export interface AppendPartsRequest {
 export interface AppendPartsOutcome {
   /** 1-based part numbers this call confirmed (proof = observed). */
   confirmed: number[];
+  /** 1-based part numbers accepted remotely but not yet observed in the member view. */
+  accepted: number[];
 }
 
 export interface StreamedArchiveRequest {
@@ -155,6 +159,7 @@ export interface UploadDriver {
   ensureStreamedArchive(req: StreamedArchiveRequest): Promise<EnsureArchiveOutcome>;
   /** Publish one already-uploaded part; the returned number is the one this call proved. */
   appendStreamedPart(req: StreamedPartRequest): Promise<AppendPartsOutcome>;
+  observeStreamedPart(req: { ref: ArchiveRef; name: string }): boolean;
 }
 
 const DEFAULTS = {
@@ -322,7 +327,7 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
   }
 
   /** Record each appended file once. Indexes continue from the stored checkpoint. */
-  function confirm(req: AppendPartsRequest, key: string): number[] {
+  function confirm(req: AppendPartsRequest, key: string, nativeKey?: string): number[] {
     let existing: UploadCheckpoint | null = store.load(key);
     if (!existing) {
       // A checkpoint must exist for every archive we confirm into; otherwise part numbers restart.
@@ -339,12 +344,42 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
         size: file.size ?? file.source?.size ?? 0,
         mtimeMs: file.mtimeMs ?? 0,
         ...(file.title ? { title: file.title } : {}),
+        ...(nativeKey ? { nativeKey } : {}),
+        proof: "observed",
         confirmedAt,
       };
       store.confirmPart(key, part);
       indexes.push(index);
     });
     return indexes;
+  }
+
+  function acceptedPart(key: string, ref: ArchiveRef, part: UploadPartRecord): number {
+    const existing = store.load(key) ?? { targetId: ref.targetId, archiveId: ref.id, parts: [] };
+    if (existing.parts.some((record) => record.proof === "accepted")) {
+      throw new UploadDriverError("needs-manual", "An accepted part remains unobserved; refusing another archive append");
+    }
+    const index = existing.parts.length + 1;
+    store.save(key, {
+      ...existing,
+      parts: [...existing.parts, { ...part, index, proof: "accepted", acceptedAt: new Date(now()).toISOString() }],
+    });
+    return index;
+  }
+
+  function observeStreamedPart(req: { ref: ArchiveRef; name: string }): boolean {
+    const key = checkpointKey(req.ref.targetId, req.ref.id);
+    return store.observePart(key, req.name, new Date(now()).toISOString());
+  }
+
+  async function observesName(cred: CredentialRef, ref: ArchiveRef, name: string): Promise<boolean> {
+    try {
+      const info = await target.inspect({ cred, ref });
+      if (info?.ref.targetId !== ref.targetId || info.ref.id !== ref.id) return false;
+      return info?.parts?.some((part) => part.name === name) ?? false;
+    } catch {
+      return false;
+    }
   }
 
   return {
@@ -428,7 +463,7 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
             continue;
           }
           const confirmed = confirm(req, key);
-          return { confirmed };
+          return { confirmed, accepted: [] };
         } catch (err) {
           if (err instanceof UploadDriverError) throw err;
           const cls = classifyAttempt(err);
@@ -464,6 +499,7 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
       for (let attempt = 0; attempt < attempts; attempt++) {
         assertNotStopped("流式建稿", req.signal);
         noteSubmit();
+        let acknowledged = false;
         try {
           const res = await publish({
             cred: req.cred,
@@ -475,7 +511,11 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
           if (res.proof === "unknown" || !res.ref) {
             throw new UploadDriverError("needs-manual", "流式建稿结果不确定（没有可读的稿件号）");
           }
+          acknowledged = true;
           const key = checkpointKey(res.ref.targetId, res.ref.id);
+          const observed = await observesName(req.cred, res.ref, req.name);
+          const proof = observed ? "observed" : "accepted";
+          const timestamp = new Date(now()).toISOString();
           // The create already published this part, so the checkpoint must start at P1. Saving
           // "parts: []" made the NEXT streamed part confirm itself as P1: the archive really had
           // two parts while the checkpoint (and every proof built on it) said one.
@@ -486,13 +526,17 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
               index: 1,
               size: 0,
               mtimeMs: 0,
+              nativeKey: req.name,
               ...(req.title ? { title: req.title } : {}),
-              confirmedAt: new Date(now()).toISOString(),
+              proof,
+              ...(observed ? { confirmedAt: timestamp } : { acceptedAt: timestamp }),
             }],
           });
-          return { ref: res.ref, reused: false };
+          return { ref: res.ref, reused: false, partProof: proof };
         } catch (err) {
           if (err instanceof UploadDriverError) throw err;
+          if (acknowledged)
+            throw new UploadDriverError("needs-manual", "Accepted streamed create could not be checkpointed: " + messageOf(err));
           const cls = classifyAttempt(err);
           const stop = stopFor(cls, "流式建稿");
           if (stop) throw stop;
@@ -511,10 +555,14 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
         throw new UploadDriverError("fatal", "目标不支持流式发布（publishStreamed 缺失）");
       }
       const key = checkpointKey(req.ref.targetId, req.ref.id);
+      if (store.load(key)?.parts.some((part) => part.proof === "accepted")) {
+        throw new UploadDriverError("needs-manual", "An accepted part remains unobserved; refusing another archive append");
+      }
       const policy: UploadPolicy = target.hardPolicy();
       for (let attempt = 0; attempt < attempts; attempt++) {
         assertNotStopped("流式追加", req.signal);
         noteSubmit();
+        let acknowledged = false;
         try {
           const res = await publish({
             cred: req.cred,
@@ -532,11 +580,29 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
             await pause(attempt, { kind: "transient", reason: "confirmed-not-submitted" }, req.signal);
             continue;
           }
+          acknowledged = true;
+          if (res.proof === "confirmed") {
+            const file: UploadFile = { path: req.name, size: req.size ?? 0, mtimeMs: 0, ...(req.title ? { title: req.title } : {}) };
+            const confirmed = confirm({ cred: req.cred, ref: req.ref, files: [file], policy }, key, req.name);
+            return { confirmed, accepted: [] };
+          }
           const file: UploadFile = { path: req.name, size: req.size ?? 0, mtimeMs: 0, ...(req.title ? { title: req.title } : {}) };
-          const confirmed = confirm({ cred: req.cred, ref: req.ref, files: [file], policy }, key);
-          return { confirmed };
+          if (await observesName(req.cred, req.ref, req.name)) {
+            const confirmed = confirm({ cred: req.cred, ref: req.ref, files: [file], policy }, key, req.name);
+            return { confirmed, accepted: [] };
+          }
+          const index = acceptedPart(key, req.ref, {
+            index: 0,
+            size: file.size ?? 0,
+            mtimeMs: 0,
+            nativeKey: req.name,
+            ...(file.title ? { title: file.title } : {}),
+          });
+          return { confirmed: [], accepted: [index] };
         } catch (err) {
           if (err instanceof UploadDriverError) throw err;
+          if (acknowledged)
+            throw new UploadDriverError("needs-manual", "Accepted streamed append could not be checkpointed: " + messageOf(err));
           const cls = classifyAttempt(err);
           const stop = stopFor(cls, "流式追加");
           if (stop) throw stop;
@@ -548,6 +614,8 @@ export function createUploadDriver(deps: UploadRuntimeDeps): UploadDriver {
       }
       throw new UploadDriverError("retry-exhausted", "流式追加重试耗尽");
     },
+
+    observeStreamedPart,
 
     async verify(req: VerifyRequest): Promise<VerifyOutcome> {
       const info = await target.inspect({ ref: req.ref, cred: req.cred });

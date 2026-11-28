@@ -3,13 +3,15 @@ import {
   statSync, writeSync,
 } from "node:fs";
 import { dirname } from "node:path";
-import { readLivePumpState } from "./live-pump-state.js";
+import { isLivePumpPartObserved, readLivePumpState, requiresLivePumpProof } from "./live-pump-state.js";
 
 /** Missing state has no work; unreadable state is unknown and must block cleanup. */
 export function livePumpHasUnconfirmed(path: string): boolean {
   if (!existsSync(path)) return false;
   const state = readLivePumpState(path);
   if (!state) return true;
+  if (requiresLivePumpProof(state))
+    return !!state.pending || state.parts.some(part => !isLivePumpPartObserved(part));
   // T-221: the queue records confirmations in the journal, not in the state (the pump owns the
   // state file while it keeps recording). A part the journal already confirmed is settled even
   // though the state row still says unconfirmed.
@@ -126,6 +128,8 @@ export function confirmLivePumpPart(
   if (!bv) return { ok: false, error: "confirmLivePumpPart requires a confirmed bv" };
   const state = readLivePumpState(statePath);
   if (!state) return { ok: false, error: "live state missing or unreadable: " + statePath };
+  if (requiresLivePumpProof(state))
+    return { ok: false, error: "protected live delivery requires native per-part observation; queue ACK cannot confirm it" };
   const part = state.parts.find((p) => p.index === index);
   if (!part) return { ok: false, error: "live state has no part index " + index };
   const journal = readConfirmedJournal(statePath, state.createdAt);

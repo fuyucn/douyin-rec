@@ -42,6 +42,17 @@ function memoryStore(): UploadStateStore {
       const cur = map.get(key);
       if (cur) map.set(key, { ...cur, parts: [...cur.parts, part] });
     },
+    observePart: (key, nativeKey, observedAt) => {
+      const cur = map.get(key);
+      if (!cur?.parts.some((part) => part.nativeKey === nativeKey && part.proof === "accepted")) return false;
+      map.set(key, {
+        ...cur,
+        parts: cur.parts.map((part) => part.nativeKey === nativeKey && part.proof === "accepted"
+          ? { ...part, proof: "observed", confirmedAt: observedAt, acceptedAt: undefined }
+          : part),
+      });
+      return true;
+    },
   };
 }
 const ARCHIVE = { title: "T", tid: 21, tags: ["x"], policy: { visibility: "private", watermark: false, copyright: "self" } as const };
@@ -85,6 +96,29 @@ const create = (t: ReturnType<typeof target>): Promise<unknown> =>
   t.publishStreamed!({ cred: CRED(), ref: null, name: "stem0", title: "P1", archive: ARCHIVE } satisfies PublishStreamedInput);
 
 describe("publishStreamed: append classification", () => {
+  it("does not confirm an idempotent stem returned by another archive", async () => {
+    const f = fakeFetch({ viewArchive: {
+      archive: { aid: 8, bvid: "different-archive", title: "T", tid: 21 },
+      videos: [{ filename: "stem1", cid: 1 }],
+    } });
+    const t = target(f.impl);
+    await expect(append(t)).resolves.toMatchObject({ proof: "unknown", ref: null });
+    expect(f.hits).not.toContain("/x/vu/web/edit");
+  });
+
+  it("does not expose wrong-archive members through an inspect request ref", async () => {
+    const f = fakeFetch({ viewArchive: {
+      archive: { aid: 8, bvid: "different-archive", title: "T", tid: 21 },
+      videos: [{ filename: "stem0", cid: 1 }],
+    } });
+    const t = target(f.impl);
+    await expect(t.inspect({ cred: CRED(), ref: REF })).resolves.toBeNull();
+    const store = memoryStore();
+    const driver = createUploadDriver({ target: t, store, now: () => 1, sleep: async () => {}, log: () => {} });
+    await expect(driver.ensureStreamedArchive({ cred: CRED(), archive: ARCHIVE, name: "stem0", skipFindRecent: true }))
+      .resolves.toMatchObject({ partProof: "accepted" });
+    expect(store.load(REF.targetId + ":" + REF.id)?.parts[0]?.proof).toBe("accepted");
+  });
   it("a submission rate limit keeps its raw body and still classifies as rate-limited", async () => {
     // Returning a bare "confirmed-not-submitted" here made the driver wait 1s/2s/4s/8s with no
     // cooldown and no account cooling, unlike the legacy path's 60s+ schedule.

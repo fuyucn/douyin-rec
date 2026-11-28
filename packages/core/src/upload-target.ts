@@ -79,7 +79,7 @@ export interface ArchiveInfo {
   visibility?: UploadVisibility;
   /** null = 查不到 / 无法确认，不是 0。 */
   partCount: number | null;
-  parts?: Array<{ index: number; title?: string }>;
+  parts?: Array<{ index: number; name?: string; title?: string }>;
 }
 
 export type UploadErrorClass =
@@ -175,9 +175,10 @@ export interface PublishStreamedInput {
   archive?: { title: string; tid?: number; tags?: string[]; desc?: string; policy?: UploadPolicy };
 }
 
-export type PublishStreamedProof = "created" | "confirmed" | "confirmed-not-submitted" | "unknown";
+export type PublishStreamedProof = "created" | "confirmed" | "accepted" | "confirmed-not-submitted" | "unknown";
 
 export interface PublishStreamedResult {
+  /** "confirmed" means this exact native part key is already present in the bound archive. */
   /** "created" must carry a ref; "unknown" must not claim one. */
   proof: PublishStreamedProof;
   ref: ArchiveRef | null;

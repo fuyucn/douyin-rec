@@ -36,6 +36,16 @@ function memoryStore(): UploadStateStore & { saved: UploadCheckpoint[]; parts: U
       const cur = byKey.get(key);
       if (cur) byKey.set(key, { ...cur, parts: [...cur.parts, part] });
     },
+    observePart: (key, nativeKey, observedAt) => {
+      const cur = byKey.get(key);
+      const part = cur?.parts.find((candidate) => candidate.nativeKey === nativeKey && (candidate.proof === "accepted" || candidate.proof === "observed"));
+      if (!cur || !part) return false;
+      if (part.proof === "observed") return true;
+      byKey.set(key, { ...cur, parts: cur.parts.map((candidate) => candidate === part
+        ? { ...candidate, proof: "observed", confirmedAt: observedAt, acceptedAt: undefined }
+        : candidate) });
+      return true;
+    },
   };
 }
 
@@ -55,6 +65,7 @@ function driver(o: {
   const store = memoryStore();
   const sleeps: number[] = [];
   const calls: PublishStreamedInput[] = [];
+  const observedStems = new Set<string>();
   const findRecentCalls: Array<Parameters<UploadTarget["findRecent"]>[0]> = [];
   const target: UploadTarget = {
     id: "t",
@@ -65,7 +76,12 @@ function driver(o: {
     defaults: () => ({ tid: 1, tags: [], titleMaxLength: 80, maxParts: null }),
     create: async () => ({ proof: "created", ref: REF }),
     append: async () => ({ proof: "observed" }),
-    inspect: async () => ({ ref: REF, title: "T", partCount: 1 } as ArchiveInfo),
+    inspect: async () => ({
+      ref: REF,
+      title: "T",
+      partCount: observedStems.size,
+      parts: [...observedStems].map((name, index) => ({ index: index + 1, name })),
+    } as ArchiveInfo),
     findRecent: async (input) => { findRecentCalls.push(input); return o.findRecent ? o.findRecent(input) : "none"; },
     classifyError: (err): UploadErrorClass =>
       err instanceof RateLimited
@@ -75,7 +91,12 @@ function driver(o: {
           : { kind: "permanent", reason: String((err as Error)?.message ?? err) },
     capabilities: { appendGranularity: "single", seasons: false, ...(o.streamPublish === false ? {} : { streamPublish: true }) },
     ...(o.publishStreamed
-      ? { publishStreamed: async (input: PublishStreamedInput) => { calls.push(input); return o.publishStreamed!(input); } }
+      ? { publishStreamed: async (input: PublishStreamedInput) => {
+        calls.push(input);
+        const result = await o.publishStreamed!(input);
+        if (result.proof === "created" || result.proof === "confirmed") observedStems.add(input.name);
+        return result;
+      } }
       : {}),
   };
   const d = createUploadDriver({
@@ -111,7 +132,7 @@ describe("upload driver: streamed publish", () => {
   it("creates with metadata only and stores a checkpoint", async () => {
     const { d, store, calls } = driver({ publishStreamed: async () => ({ proof: "created", ref: REF }) });
     const out = await d.ensureStreamedArchive({ cred: CRED, archive: ARCHIVE, name: "stem0", title: "P1", expectedDurationSec: 10 });
-    expect(out).toEqual({ ref: REF, reused: false });
+    expect(out).toEqual({ ref: REF, reused: false, partProof: "observed" });
     expect(calls).toHaveLength(1);
     expect(calls[0]!.ref).toBeNull();
     expect(calls[0]!.archive).toMatchObject({ title: "T" });
@@ -119,7 +140,7 @@ describe("upload driver: streamed publish", () => {
     expect(store.saved).toEqual([{
       targetId: "t",
       archiveId: "a1",
-      parts: [{ index: 1, size: 0, mtimeMs: 0, title: "P1", confirmedAt: "2023-11-14T22:13:20.000Z" }],
+      parts: [{ index: 1, size: 0, mtimeMs: 0, nativeKey: "stem0", title: "P1", proof: "observed", confirmedAt: "2023-11-14T22:13:20.000Z" }],
     }]);
   });
 
@@ -154,7 +175,7 @@ describe("upload driver: streamed publish", () => {
     const { d, store, calls } = driver({ publishStreamed: async () => ({ proof: "confirmed", ref: REF }) });
     store.save("t:a1", { targetId: "t", archiveId: "a1", parts: [{ index: 1, size: 6, mtimeMs: 0 }] });
     const out = await d.appendStreamedPart({ cred: CRED, ref: REF, name: "stem1", title: "P2", size: 6 });
-    expect(out).toEqual({ confirmed: [2] });
+    expect(out).toEqual({ confirmed: [2], accepted: [] });
     expect(calls[0]!.ref).toEqual(REF);
     expect(store.parts.map((p) => p.index)).toEqual([2]);
   });
@@ -168,7 +189,7 @@ describe("upload driver: streamed publish", () => {
       },
     });
     const out = await d.appendStreamedPart({ cred: CRED, ref: REF, name: "stem0", size: 6 });
-    expect(out).toEqual({ confirmed: [1] });
+    expect(out).toEqual({ confirmed: [1], accepted: [] });
     expect(sleeps).toEqual([1_000]);
     expect(store.parts).toHaveLength(1);
   });
@@ -248,7 +269,7 @@ describe("upload driver: streamed publish", () => {
     // A broken accounting store must not be able to eat a live part: the retry still happens and
     // the confirmation is still recorded.
     const out = await d.appendStreamedPart({ cred: CRED, ref: REF, name: "stem0", size: 6 });
-    expect(out).toEqual({ confirmed: [1] });
+    expect(out).toEqual({ confirmed: [1], accepted: [] });
     expect(store.parts).toHaveLength(1);
   });
 
@@ -337,13 +358,31 @@ describe("upload driver: streamed publish", () => {
     expect(calls).toHaveLength(1);
   });
 
+  it("does not repeat an acknowledged create when checkpoint persistence fails transiently", async () => {
+    const { d, store, calls } = driver({ publishStreamed: async () => ({ proof: "created", ref: REF }) });
+    store.save = () => { throw new Transient("storage unavailable"); };
+    await expect(d.ensureStreamedArchive({ cred: CRED, archive: ARCHIVE, name: "stem0", skipFindRecent: true }))
+      .rejects.toMatchObject({ failure: "needs-manual" });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("does not repeat an acknowledged append when checkpoint persistence fails transiently", async () => {
+    const { d, store, calls } = driver({ publishStreamed: async () => ({ proof: "confirmed", ref: REF }) });
+    store.confirmPart = () => { throw new Transient("storage unavailable"); };
+    await expect(d.appendStreamedPart({ cred: CRED, ref: REF, name: "stem0" }))
+      .rejects.toMatchObject({ failure: "needs-manual" });
+    expect(calls).toHaveLength(1);
+  });
+
   it("the create checkpoint starts at P1, so the next part is P2", async () => {
-    const { d, store } = driver({ publishStreamed: async () => ({ proof: "created", ref: REF }) });
+    const { d, store } = driver({ publishStreamed: async (input) => input.ref
+      ? { proof: "confirmed", ref: input.ref }
+      : { proof: "created", ref: REF } });
     await d.ensureStreamedArchive({ cred: CRED, archive: ARCHIVE, name: "stem0", title: "P1", skipFindRecent: true });
     // A checkpoint of "parts: []" made the next streamed part confirm itself as P1 while the
     // archive really held two parts.
     expect(store.saved.at(-1)!.parts.map((p) => p.index)).toEqual([1]);
     const next = await d.appendStreamedPart({ cred: CRED, ref: REF, name: "stem1", title: "P2", size: 6 });
-    expect(next).toEqual({ confirmed: [2] });
+    expect(next).toEqual({ confirmed: [2], accepted: [] });
   });
 });

@@ -97,7 +97,7 @@ function archiveInfoOf(ref: ArchiveInfo["ref"], a: StudioArchive): ArchiveInfo {
     // The view endpoint reports the archive's own flag: keep it instead of guessing.
     visibility: a.private ? "private" : "public",
     partCount: a.videos.length,
-    parts: a.videos.map((v, i) => ({ index: i + 1, ...(v.title ? { title: v.title } : {}) })),
+    parts: a.videos.map((v, i) => ({ index: i + 1, name: v.filename, ...(v.title ? { title: v.title } : {}) })),
   };
 }
 
@@ -253,6 +253,7 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
     async append(input: AppendPartsInput): Promise<AppendPartsResult> {
       const cookiesPath = credPath(input.cred);
       let appended = 0;
+      let allAlreadyObserved = true;
       for (const file of input.files) {
         const video = await uploadPart(file, cookiesPath);
         let res: SubmitResult;
@@ -276,13 +277,10 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
           if (!isUploadRateLimited(JSON.stringify(res.raw))) return { proof: "unknown" };
           throw submitFailure(res, "append");
         }
+        if (res.raw.idempotent !== true) allAlreadyObserved = false;
         appended++;
       }
-      if (input.countParts) {
-        const observed = await input.countParts();
-        if (observed === null) return { proof: "unknown" };
-      }
-      return { proof: "observed" };
+      return { proof: allAlreadyObserved ? "observed" : "accepted" };
     },
 
     /**
@@ -360,7 +358,7 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
         // submits an invalid payload again, and an unknown body may already have applied.
         return { proof: "unknown", ref: null };
       }
-      return { proof: "confirmed", ref: input.ref };
+      return { proof: res.raw.idempotent === true ? "confirmed" : "accepted", ref: input.ref };
     },
 
     async inspect({ ref, cred }): Promise<ArchiveInfo | null> {
@@ -370,6 +368,7 @@ export function createUposTarget(deps: UposTargetDeps = {}): UploadTarget {
         ...(fetchImpl ? { fetchImpl } : {}),
       });
       if (!r.ok || !r.archive) return null;
+      if (r.archive.bvid !== ref.id) return null;
       return archiveInfoOf(ref, r.archive);
     },
 

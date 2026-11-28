@@ -2,7 +2,7 @@ import { renameSync } from "node:fs";
 import { basename } from "node:path";
 import type { DtsGap } from "@drec/post-process";
 import type { LivePumpCheckpoint } from "./live-pump-checkpoint.js";
-import type { LivePumpState } from "./live-pump-state.js";
+import { isLivePumpPartObserved, type LivePumpState } from "./live-pump-state.js";
 import type { LivePumpSessionOpts, PartSubmitInput, SpoolResubmitResult } from "./live-pump-session-options.js";
 import { resolveInterruptedPublication, type RecoveryResult } from "./live-pump-recovery.js";
 import { heldGapPath, prepareRecoveredSpool, type RecoverySpool, type SpoolRecoveryDisposition } from "./live-pump-spool-recovery.js";
@@ -40,6 +40,8 @@ export class LivePumpSessionRecovery {
       last = { ok: r.ok, bvid: r.bvid, aid: r.aid, error: r.error, ...(r.retryable ? { retryable: true } : {}) };
       if (!r.ok)
         return { ...last, ...(held.length ? { held } : {}) };
+      if (this.checkpoint.lowestUnconfirmed()?.index === before)
+        return { ok: false, error: "recovery made no durable progress; source retained", ...(held.length ? { held } : {}) };
     }
     return { ...last, ...(held.length ? { held } : {}) };
   }
@@ -51,6 +53,11 @@ export class LivePumpSessionRecovery {
     const target = this.checkpoint.lowestUnconfirmed();
     if (!target)
       return { ok: true, bvid: this.checkpoint.state.bvid, aid: this.checkpoint.state.aid };
+    if (target.proof === "accepted" || target.confirmed) {
+      const result = await this.recover();
+      return { ok: result.ok, bvid: this.checkpoint.state.bvid, aid: this.checkpoint.state.aid,
+        ...(result.ok ? {} : { error: result.reason ?? "accepted part requires native observation" }) };
+    }
     const recovered = await prepareRecoveredSpool({
       target,
       cookiesPath: this.o.cookiesPath,
@@ -129,9 +136,41 @@ export class LivePumpSessionRecovery {
     }
   }
   async recover(): Promise<RecoveryResult> {
+    if (this.checkpoint.stateUntrusted)
+      return { ok: false, needsManual: true, reason: "state sidecar is untrusted; source retained" };
+    if (!this.checkpoint.state.pending) {
+      const accepted = this.checkpoint.state.parts.find(part => part.proof === "accepted");
+      if (accepted) {
+        if (!accepted.nativeKey || accepted.nativeKey !== accepted.stem)
+          return { ok: false, needsManual: true, reason: "accepted part has no bound native key; source retained" };
+        this.checkpoint.state = { ...this.checkpoint.state, pending: {
+          kind: this.checkpoint.state.bvid || this.checkpoint.state.aid ? "append" : "create",
+          submissionState: "accepted", partIndex: accepted.index, stem: accepted.nativeKey,
+          title: accepted.title, bytes: accepted.bytes, durationSec: accepted.durationSec,
+          spoolPath: accepted.spoolPath, acceptedAt: accepted.acceptedAt,
+        } };
+        try { this.checkpoint.persist(); }
+        catch (error) { return { ok: false, reason: "cannot restore accepted intent: " + String(error) }; }
+      }
+    }
     const p = this.checkpoint.state.pending;
-    if (!p)
+    if (!p) {
+      try {
+        for (const part of this.checkpoint.state.parts) {
+          if (!part.confirmed || part.proof !== "observed" || !part.nativeKey) continue;
+          this.o.submitter?.observeStreamedPart({
+            ref: { targetId: this.o.submitterTargetId ?? "bilibili-upos", id: this.checkpoint.state.bvid ?? String(this.checkpoint.state.aid) },
+            name: part.nativeKey,
+          });
+        }
+      } catch (e) {
+        return { ok: false, reason: "cannot restore observed upload checkpoint: " + String((e as Error)?.message ?? e).slice(0, 200) };
+      }
+      this.cleanup();
+      if (this.checkpoint.hasUnconfirmed && this.checkpoint.parts.some(part => part.confirmed && !isLivePumpPartObserved(part)))
+        return { ok: false, needsManual: true, reason: "legacy confirmation is not native part proof; source retained" };
       return { ok: true };
+    }
     const resolution = await resolveInterruptedPublication({
       pending: p,
       cookiesPath: this.o.cookiesPath,
@@ -143,22 +182,30 @@ export class LivePumpSessionRecovery {
     if (resolution.kind === "existing" && this.checkpoint.state.aid !== undefined && resolution.aid !== this.checkpoint.state.aid) {
       return { ok: false, needsManual: true, reason: "archive identity mismatch during recovery" };
     }
-    if (resolution.kind === "not-created") {
-      this.checkpoint.state = { ...this.checkpoint.state, pending: undefined };
-    }
-    else {
-      this.checkpoint.state = resolution.kind === "created" ? { ...this.checkpoint.state, ...(resolution.bvid ? { bvid: resolution.bvid } : {}), ...(resolution.aid !== undefined ? { aid: resolution.aid } : {}) } : { ...this.checkpoint.state, bvid: resolution.bvid ?? this.checkpoint.state.bvid, aid: resolution.aid };
-      this.markRecoveredPending(p, resolution.kind === "created" || resolution.confirmed);
-    }
+    const prior = this.checkpoint.state;
+    this.checkpoint.state = resolution.kind === "created"
+      ? { ...this.checkpoint.state, ...(resolution.bvid ? { bvid: resolution.bvid } : {}), ...(resolution.aid !== undefined ? { aid: resolution.aid } : {}) }
+      : { ...this.checkpoint.state, bvid: resolution.bvid ?? this.checkpoint.state.bvid, aid: resolution.aid };
+    this.markRecoveredPending(p, true);
     try {
       this.checkpoint.persist();
     }
     catch (e) {
-      const reason = resolution.kind === "not-created" ? "create did not happen but cannot persist recovery" : resolution.kind === "created" ? "recovered archive but cannot persist state" : "recovered append but cannot persist state";
-      return { ok: false, ...(resolution.kind === "not-created" ? {} : { archiveExists: true }), reason: reason + ": " + String((e as Error)?.message ?? e).slice(0, 200) };
+      this.checkpoint.state = prior;
+      const reason = resolution.kind === "created" ? "recovered archive but cannot persist state" : "recovered append but cannot persist state";
+      return { ok: false, archiveExists: true, reason: reason + ": " + String((e as Error)?.message ?? e).slice(0, 200) };
     }
-    if (resolution.kind !== "not-created")
-      this.cleanup();
+    if (this.o.submitter) {
+      try {
+        this.o.submitter.observeStreamedPart({
+          ref: { targetId: this.o.submitterTargetId ?? "bilibili-upos", id: resolution.bvid ?? String(resolution.aid ?? this.checkpoint.state.aid) },
+          name: p.stem,
+        });
+      } catch (e) {
+        return { ok: false, archiveExists: true, reason: "cannot persist observed upload checkpoint: " + String((e as Error)?.message ?? e).slice(0, 200) };
+      }
+    }
+    this.cleanup();
     try {
       this.o.reporter?.event({ at: Date.now(), kind: "recovered", part: p.partIndex });
     }
@@ -168,6 +215,7 @@ export class LivePumpSessionRecovery {
   }
   private markRecoveredPending(p: NonNullable<LivePumpState["pending"]>, confirmed: boolean): void {
     const existing = this.checkpoint.state.parts.find(x => x.index === p.partIndex);
+    const proof: NonNullable<LivePumpState["parts"][number]["proof"]> = confirmed ? "observed" : "accepted";
     const part = {
       index: p.partIndex,
       spoolPath: p.spoolPath,
@@ -177,10 +225,20 @@ export class LivePumpSessionRecovery {
       bytes: p.bytes,
       durationSec: p.durationSec,
       confirmed,
+      proof,
+      nativeKey: p.stem,
+      ...(confirmed ? { observedAt: Date.now() } : {}),
     };
     this.checkpoint.state = {
       ...this.checkpoint.state,
-      parts: existing ? this.checkpoint.state.parts.map(x => x.index === p.partIndex ? { ...x, confirmed, ...(p.stem ? { stem: p.stem } : {}) } : x) : [...this.checkpoint.state.parts, part],
+      parts: existing ? this.checkpoint.state.parts.map(x => x.index === p.partIndex ? {
+        ...x,
+        confirmed,
+        proof,
+        nativeKey: p.stem,
+        ...(confirmed ? { observedAt: Date.now() } : {}),
+        ...(p.stem ? { stem: p.stem } : {}),
+      } : x) : [...this.checkpoint.state.parts, part],
       pending: undefined,
     };
   }

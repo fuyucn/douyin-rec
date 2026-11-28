@@ -6,7 +6,7 @@
 import { build } from "esbuild";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll, onTestFinished, vi } from "vitest";
 import { mkdtempSync, chmodSync, rmSync, readFileSync, statSync, writeFileSync, existsSync, writeSync, mkdirSync, readdirSync, utimesSync, truncateSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -57,6 +57,42 @@ import { stream as tsStream, pat, pmt, VIDEO, AUDIO } from "./ts-fixture.js";
 import { TS_PACKET as TS_PACKET_BYTES, TsCutter } from "./ts-cutter.js";
 
 const CHUNK = 1024;
+
+function withSubmittedArchive(fetchImpl: typeof fetch): typeof fetch {
+  const archives = new Map<string, {
+    archive: Record<string, unknown>;
+    videos: Array<{ cid: number; filename: string; title: string }>;
+  }>();
+  return (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+    const method = (init?.method ?? "GET").toUpperCase();
+    const response = await fetchImpl(input, init);
+    if (method === "POST" && ["/x/vu/web/add/v3", "/x/vu/web/edit"].includes(url.pathname) && response.ok) {
+      const result = await response.clone().json() as { code?: number; data?: { aid?: number; bvid?: string } };
+      if (result.code === 0) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> & {
+          videos: Array<{ filename: string; title?: string }>;
+        };
+        const archive = { ...body, ...result.data };
+        const key = String(archive.bvid ?? archive.aid);
+        archives.set(key, {
+          archive,
+          videos: body.videos.map((video, index) => ({ cid: index + 1, filename: video.filename, title: video.title ?? "" })),
+        });
+      }
+    }
+    if (method === "GET" && url.pathname === "/x/vupre/web/archive/view") {
+      const bvid = url.searchParams.get("bvid");
+      const aid = url.searchParams.get("aid");
+      const submitted = [...archives.values()].find(({ archive }) =>
+        (bvid !== null || aid !== null)
+        && (bvid === null || archive.bvid === bvid)
+        && (aid === null || String(archive.aid) === aid));
+      if (submitted) return new Response(JSON.stringify({ code: 0, data: submitted }), { status: 200 });
+    }
+    return response;
+  }) as typeof fetch;
+}
 
 /** argv 是否含相邻的 [k, v](Rust 的 `windows(2)` 在 JS 无对应物)。 */
 function hasPair(args: readonly string[], k: string, v: string): boolean {
@@ -568,7 +604,7 @@ describe("runLivePump 的 fetchImpl 必须贯通到稿件提交", () => {
       cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
     }));
     const seen: string[] = [];
-    const fake = ((input: string | URL | Request) => {
+    const fake = withSubmittedArchive(((input: string | URL | Request) => {
       const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
       seen.push(u.pathname);
       const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
@@ -580,7 +616,7 @@ describe("runLivePump 的 fetchImpl 必须贯通到稿件提交", () => {
       if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BILIfake1", title: "t", tid: 21 }, videos: [] } }));
       if (u.pathname === "/x/web/archives") return Promise.resolve(json({ code: 0, data: { arc_audits: [] } }));
       return Promise.resolve(json({ code: 0, data: {} }));
-    }) as unknown as typeof fetch;
+    }) as unknown as typeof fetch);
 
     installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 0x5a));
     const r = await runLivePump({
@@ -592,6 +628,7 @@ describe("runLivePump 的 fetchImpl 必须贯通到稿件提交", () => {
     });
     expect(r.ok, r.error ?? "").toBe(true);
     expect(seen).toContain("/x/vu/web/add/v3");
+    expect(seen).toContain("/x/vupre/web/archive/view");
     expect(r.bvid).toBe("BILIfake1");
   }, 20_000);
 });
@@ -608,15 +645,20 @@ describe("runLivePump must actually use the injected submitter (issue #688)", ()
       cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
     }));
     const calls: string[] = [];
+    const submittedNames: string[] = [];
+    const observedNames: string[] = [];
     const submitter = {
       ensureStreamedArchive: async (req: { name: string; skipFindRecent?: boolean }) => {
         calls.push("ensure:" + req.name + (req.skipFindRecent ? ":skip" : ":search"));
+        submittedNames.push(req.name);
         return { ref: { targetId: "bilibili-upos", id: "BILIfake1" }, reused: false };
       },
       appendStreamedPart: async (req: { name: string }) => {
         calls.push("append:" + req.name);
-        return { confirmed: [1] };
+        submittedNames.push(req.name);
+        return { confirmed: [1], accepted: [] };
       },
+      observeStreamedPart: (req: { name: string }) => { observedNames.push(req.name); },
       verify: async () => ({ ok: true, observedParts: null }),
     };
     // The bytes still travel over UPOS; only the submit endpoints prove the legacy path was used.
@@ -631,7 +673,7 @@ describe("runLivePump must actually use the injected submitter (issue #688)", ()
         submitHits.push(u.pathname);
         return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } }));
       }
-      if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BILIfake1", title: "t", tid: 21 }, videos: [] } }));
+      if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BILIfake1", title: "t", tid: 21 }, videos: submittedNames.map((filename, index) => ({ cid: index + 1, filename })) } }));
       if (u.pathname === "/x/web/archives") return Promise.resolve(json({ code: 0, data: { arc_audits: [] } }));
       return Promise.resolve(json({ code: 0, data: {} }));
     }) as unknown as typeof fetch;
@@ -649,6 +691,7 @@ describe("runLivePump must actually use the injected submitter (issue #688)", ()
     expect(calls[0]).toContain(":skip");
     // The submitter owned every submission: no studio create/edit reached the wire.
     expect(submitHits).toEqual([]);
+    expect(observedNames).toEqual(submittedNames);
   }, 20_000);
 });
 
@@ -694,7 +737,7 @@ describe("archive description survives state and reaches the create request", ()
         cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
       }));
       let createBody: Record<string, unknown> | undefined;
-      const fake = ((input: string | URL | Request, init?: RequestInit) => {
+      const fake = withSubmittedArchive(((input: string | URL | Request, init?: RequestInit) => {
         const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
         const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
         if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
@@ -705,7 +748,7 @@ describe("archive description survives state and reaches the create request", ()
           return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } }));
         }
         return Promise.resolve(json({ code: 0, data: {} }));
-      }) as unknown as typeof fetch;
+      }) as unknown as typeof fetch);
 
       installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 0x5a));
       const r = await runLivePump({
@@ -761,7 +804,7 @@ describe("titleForLive / partTitle reach the archive identity and part submissio
       writeFileSync(join(dir, "cookies.json"), JSON.stringify({
         cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
       }));
-      const fake = ((input: string | URL | Request) => {
+      const fake = withSubmittedArchive(((input: string | URL | Request) => {
         const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
         const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
         if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
@@ -769,7 +812,7 @@ describe("titleForLive / partTitle reach the archive identity and part submissio
         if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
         if (u.pathname === "/x/vu/web/add/v3") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } }));
         return Promise.resolve(json({ code: 0, data: {} }));
-      }) as unknown as typeof fetch;
+      }) as unknown as typeof fetch);
 
       installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 0x5a));
       const r = await runLivePump({
@@ -797,7 +840,7 @@ describe("titleForLive / partTitle reach the archive identity and part submissio
         cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
       }));
       let createBody: Record<string, unknown> | undefined;
-      const fake = ((input: string | URL | Request, init?: RequestInit) => {
+      const fake = withSubmittedArchive(((input: string | URL | Request, init?: RequestInit) => {
         const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
         const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
         if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
@@ -817,7 +860,7 @@ describe("titleForLive / partTitle reach the archive identity and part submissio
           }));
         }
         return Promise.resolve(json({ code: 0, data: {} }));
-      }) as unknown as typeof fetch;
+      }) as unknown as typeof fetch);
 
       installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 0x5a), { chunkEvery: 1024, delayMs: 1 });
       const r = await runLivePump({
@@ -1000,7 +1043,7 @@ describe("多房间并发:各自独立稿件与状态,互不串稿", () => {
     }));
     const bvByTitle = new Map<string, string>();
     let n = 0;
-    const fake = ((input: string | URL | Request, init?: RequestInit) => {
+    const fake = withSubmittedArchive(((input: string | URL | Request, init?: RequestInit) => {
       const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
       const m = (init?.method ?? "GET").toUpperCase();
       const p = u.pathname;
@@ -1025,7 +1068,7 @@ describe("多房间并发:各自独立稿件与状态,互不串稿", () => {
       }
       if (p === "/x/web/archives") return Promise.resolve(json({ code: 0, data: { arc_audits: [] } }));
       return Promise.resolve(json({ code: 0, data: {} }));
-    }) as unknown as typeof fetch;
+    }) as unknown as typeof fetch);
 
     const rooms = ["111111", "222222"];
     installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 0x5a));
@@ -1091,7 +1134,7 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
       cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
     }));
     const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
-    return ((input: string | URL | Request, init?: RequestInit) => {
+    return withSubmittedArchive(((input: string | URL | Request, init?: RequestInit) => {
       const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
       const m = (init?.method ?? "GET").toUpperCase();
       if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: chunkSize, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
@@ -1114,7 +1157,7 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
       // lookupArchive 读 `data.archive`(扁平形状会被当成空,append 因此失败)。
       if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BILIfake1", title: "t", tid: 21 }, videos: [{ cid: 9, filename: "existing" }] } }));
       return Promise.resolve(json({ code: 0, data: {} }));
-    }) as unknown as typeof fetch;
+    }) as unknown as typeof fetch);
   }
 
   /** 字节兜底先到期(maxMs 给得足够长),与排空无关地每段 12 MiB。 */
@@ -1202,7 +1245,7 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
     let preuploads = 0;
     let completes = 0;
     const logs: string[] = [];
-    const fake = (async (input: string | URL | Request, init?: RequestInit) => {
+    const fake = withSubmittedArchive((async (input: string | URL | Request, init?: RequestInit) => {
       const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
       const method = (init?.method ?? "GET").toUpperCase();
       const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
@@ -1221,7 +1264,7 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
       }
       if (u.pathname === "/x/vu/web/add/v3") return json({ code: 0, data: { aid: 7, bvid: "BILIretry" } });
       return new Response(JSON.stringify({ code: 1, message: "unexpected" }), { status: 500 });
-    }) as unknown as typeof fetch;
+    }) as unknown as typeof fetch);
     installFakeFfmpeg(Buffer.alloc(1100, 0x5a), { holdOpen: true });
     const r = await runLivePump({
       ...base({ maxSegments: 1 }),
@@ -1579,7 +1622,7 @@ describe("outcome:区分「一场都没录到」与「分 P 都已进稿」", ()
   it("有分 P 进稿 → outcome=uploaded", async () => {
     const dir = mkdtempSync(join(tmpdir(), "oc-up-"));
     const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
-    const fetchImpl = ((input: string | URL | Request) => {
+    const fetchImpl = withSubmittedArchive(((input: string | URL | Request) => {
       const u = new URL(typeof input === "string" ? input : input.toString());
       if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
       if (u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
@@ -1588,7 +1631,7 @@ describe("outcome:区分「一场都没录到」与「分 P 都已进稿」", ()
       if (u.pathname === "/x/vu/web/edit") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } }));
       if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BILIfake1", title: "t", tid: 21 }, videos: [] } }));
       return Promise.resolve(json({ code: 0, data: {} }));
-    }) as unknown as typeof fetch;
+    }) as unknown as typeof fetch);
     installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 0x5a));
     const r = await runLivePump({
       room: "oc2", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
@@ -2878,7 +2921,7 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
   };
 
   it("P1 creates immediately, P2/P3 append to the same archive with the full list", async () => {
-    const { impl, posts } = makeSessionFetch();
+    const { impl, posts, videos } = makeSessionFetch();
     const session = new LivePumpSession({
       cookiesPath: COOKIES, room: "r", spoolDir: dir, title: "测试-1",
       tid: 21, tag: "x", private: true, fetchImpl: impl, cleanupConfirmedSpool: false,
@@ -2890,7 +2933,7 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
         index: i, spoolPath: spool, stem: `stem${i}`, title: `P${i + 1}`,
         bytes: 6, durationSec: 10,
       });
-      expect(r.ok).toBe(true);
+      expect(r.ok, JSON.stringify({ error: r.error, posts, videos: videos(), state: session.snapshot() })).toBe(true);
       expect(session.bvid).toBe("BILIfake1");
     }
     expect(posts.map((p) => p.path.includes("/add/v3") ? "create" : "edit")).toEqual(["create", "edit", "edit"]);
@@ -3008,8 +3051,10 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
     }
   });
 
-  it("recovery clears create intent only when the list was readable and found no match", async () => {
+  it("keeps create intent when a readable title search returns no match", async () => {
     const statePath = join(dir, "live-pump-r.state.json");
+    const spool = join(dir, "p0.ts");
+    writeFileSync(spool, "0");
     writeLivePumpState(statePath, {
       schemaVersion: 1, room: "r", createdAt: 1, title: "测试-1", tid: 21, tag: "x", private: true,
       parts: [], pending: {
@@ -3025,9 +3070,39 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
       tid: 21, tag: "x", private: true, fetchImpl: impl, cleanupConfirmedSpool: false,
     });
     const r = await session.recover();
-    expect(r.ok).toBe(true);
-    expect(readLivePumpState(statePath)?.pending).toBeUndefined();
+    expect(r).toMatchObject({ ok: false, needsManual: true });
+    expect(readLivePumpState(statePath)?.pending).toMatchObject({ kind: "create", stem: "stem0" });
     expect(session.bvid).toBeUndefined();
+    expect(existsSync(spool)).toBe(true);
+    await expect(session.submitPart({
+      index: 1, spoolPath: join(dir, "p1.ts"), stem: "stem1", title: "P2", bytes: 1, durationSec: 1,
+    })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("pending") });
+  });
+
+  it("keeps append intent when the archive view omits its pending stem", async () => {
+    const statePath = join(dir, "live-pump-r.state.json");
+    const spool = join(dir, "p1.ts");
+    writeFileSync(spool, "1");
+    const { impl, posts } = makeSessionFetch();
+    writeLivePumpState(statePath, {
+      schemaVersion: 1, room: "r", createdAt: 1, title: "测试-1", tid: 21, tag: "x", private: true,
+      bvid: "BILIfake1", aid: 7, parts: [], pending: {
+        kind: "append", partIndex: 1, stem: "stem1", title: "P2",
+        bytes: 1, durationSec: 1, spoolPath: spool,
+      }, updatedAt: 1,
+    });
+    const session = new LivePumpSession({
+      cookiesPath: COOKIES, room: "r", spoolDir: dir, title: "测试-1",
+      tid: 21, tag: "x", private: true, fetchImpl: impl,
+    });
+    const r = await session.recover();
+    expect(r).toMatchObject({ ok: false, needsManual: true });
+    expect(readLivePumpState(statePath)?.pending).toMatchObject({ kind: "append", stem: "stem1" });
+    expect(existsSync(spool)).toBe(true);
+    await expect(session.submitPart({
+      index: 2, spoolPath: join(dir, "p2.ts"), stem: "stem2", title: "P3", bytes: 1, durationSec: 1,
+    })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("pending") });
+    expect(posts).toHaveLength(0);
   });
 
   it("resumed runs must not reuse an already-confirmed part index", async () => {
@@ -3186,7 +3261,7 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
     // Real run 2026-10-18: a part hit 21540 after `complete()`, so the stem exists on the server
     // but not on the archive. Recovery stopped the whole broadcast; the spool can finish the job.
     let completes = 0;
-    const impl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const impl = withSubmittedArchive((async (input: string | URL | Request, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       const method = (init?.method ?? "GET").toUpperCase();
       const u = new URL(url);
@@ -3212,7 +3287,7 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
           videos: [{ cid: 10, filename: "stem0", title: "P1" }],
         },
       }), { status: 200 });
-    }) as unknown as typeof fetch;
+    }) as unknown as typeof fetch);
     const statePath = join(dir, "live-pump-r.state.json");
     const spool = join(dir, "p1.ts");
     writeFileSync(spool, "recovered-part-bytes");
@@ -3293,7 +3368,7 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
   });
 
   it("can recover the first unconfirmed part without an archive identity by creating it", async () => {
-    const impl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const impl = withSubmittedArchive((async (input: string | URL | Request, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       const u = new URL(url);
       const method = (init?.method ?? "GET").toUpperCase();
@@ -3314,7 +3389,7 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
         return new Response(JSON.stringify({ code: 0, data: { aid: 7, bvid: "BILIcreated" } }), { status: 200 });
       }
       return new Response(JSON.stringify({ code: 1, message: "unexpected request" }), { status: 500 });
-    }) as unknown as typeof fetch;
+    }) as unknown as typeof fetch);
     const statePath = join(dir, "live-pump-first.state.json");
     const spool = join(dir, "first.ts");
     writeFileSync(spool, "first-part-bytes");
@@ -3341,7 +3416,7 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
     // Last part's submit failed as the show ended; the restart finds the room offline. Recovery
     // must not be deferred to the next broadcast, where the gap rule would archive it for a human.
     let completes = 0;
-    const impl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const impl = withSubmittedArchive((async (input: string | URL | Request, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       const method = (init?.method ?? "GET").toUpperCase();
       const u = new URL(url);
@@ -3367,7 +3442,7 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
           videos: [{ cid: 10, filename: "stem0", title: "P1" }],
         },
       }), { status: 200 });
-    }) as unknown as typeof fetch;
+    }) as unknown as typeof fetch);
     const statePath = join(dir, "live-pump-r.state.json");
     const spool = join(dir, "p1.ts");
     writeFileSync(spool, "recovered-part-bytes");
@@ -3375,7 +3450,7 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
       schemaVersion: 1, room: "r", createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
       bvid: "BILIfake1", aid: 7,
       parts: [
-        { index: 0, spoolPath: join(dir, "gone.ts"), filename: "gone.ts", stem: "stem0", title: "P1", bytes: 1, durationSec: 1, confirmed: true },
+        { index: 0, spoolPath: join(dir, "gone.ts"), filename: "gone.ts", stem: "stem0", title: "P1", bytes: 1, durationSec: 1, confirmed: true, proof: "observed", nativeKey: "stem0", observedAt: Date.now() },
         { index: 1, spoolPath: spool, filename: "p1.ts", stem: "stem1", title: "P2", bytes: 19, durationSec: 10, confirmed: false },
       ],
       updatedAt: Date.now(),
@@ -3397,7 +3472,7 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
     let cur = "none";
     const phases: string[] = [];
     const netPhases: string[] = [];
-    const impl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const impl = withSubmittedArchive((async (input: string | URL | Request, init?: RequestInit) => {
       netPhases.push(cur);
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       const method = (init?.method ?? "GET").toUpperCase();
@@ -3419,7 +3494,7 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
           videos: [{ cid: 10, filename: "stem0", title: "P1" }],
         },
       }), { status: 200 });
-    }) as unknown as typeof fetch;
+    }) as unknown as typeof fetch);
     const statePath = join(dir, "live-pump-r.state.json");
     const spool = join(dir, "p1.ts");
     writeFileSync(spool, "recovered-part-bytes");
@@ -3427,7 +3502,7 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
       schemaVersion: 1, room: "r", createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
       bvid: "BILIfake1", aid: 7,
       parts: [
-        { index: 0, spoolPath: join(dir, "gone.ts"), filename: "gone.ts", stem: "stem0", title: "P1", bytes: 1, durationSec: 1, confirmed: true },
+        { index: 0, spoolPath: join(dir, "gone.ts"), filename: "gone.ts", stem: "stem0", title: "P1", bytes: 1, durationSec: 1, confirmed: true, proof: "observed", nativeKey: "stem0", observedAt: Date.now() },
         { index: 1, spoolPath: spool, filename: "p1.ts", stem: "stem1", title: "P2", bytes: 19, durationSec: 10, confirmed: false },
       ],
       updatedAt: Date.now(),
@@ -3619,17 +3694,22 @@ describe("same-broadcast rule on the room-keyed state (issue #293)", () => {
     log: () => {}, onAlert: (m) => alerts.push(m),
   });
 
-  it("stale state with pending WAL: archived intact, ONE alert, new submission starts (never throws)", () => {
+  it("stale state with pending WAL retains its original owner and cannot start a new submission", () => {
     const pending = { kind: "append", partIndex: 1, stem: "s1", title: "P2", bytes: 1, durationSec: 1, spoolPath: join(dir, "p1.ts") };
+    writeFileSync(pending.spoolPath, "pending-part");
     seed(120, { pending });
     const alerts: string[] = [];
     const s = openWithAlerts(alerts);
-    expect(s.hasArchiveIdentity).toBe(false);
-    expect(alerts.length).toBe(1);
-    const a = archives();
-    expect(a.length).toBe(1);
-    expect(readLivePumpState(join(dir, a[0]!))?.pending?.stem).toBe("s1");
-    expect(archivedSpoolPathsToKeep(dir, "gap")).toContain(pending.spoolPath);
+    expect(s.hasArchiveIdentity).toBe(true);
+    expect(s.bvid).toBe(FAKE_BV);
+    expect(s.hasUnconfirmed).toBe(true);
+    expect(alerts).toEqual([]);
+    expect(archives()).toEqual([]);
+    const state = readLivePumpState(statePath());
+    expect(state?.pending).toEqual(pending);
+    expect(state?.queueManaged).toBeUndefined();
+    expect(spoolPathsToKeep(state)).toContain(pending.spoolPath);
+    expect(readFileSync(pending.spoolPath, "utf8")).toBe("pending-part");
   });
 
   it("stale state with an unconfirmed part: archived + one alert + fresh submission", () => {
@@ -3764,7 +3844,7 @@ describe("same-broadcast rule on the room-keyed state (issue #293)", () => {
     }));
     writeFileSync(statePath(), "{not json");
     const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
-    const fake = ((input: string | URL | Request) => {
+    const fake = withSubmittedArchive(((input: string | URL | Request) => {
       const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
       if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
       if (u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
@@ -3774,7 +3854,7 @@ describe("same-broadcast rule on the room-keyed state (issue #293)", () => {
       if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BILInew1", title: "t", tid: 21 }, videos: [] } }));
       if (u.pathname === "/x/web/archives") return Promise.resolve(json({ code: 0, data: { arc_audits: [] } }));
       return Promise.resolve(json({ code: 0, data: {} }));
-    }) as unknown as typeof fetch;
+    }) as unknown as typeof fetch);
     installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 0x5a));
     const alerts: string[] = [];
     const r = await runLivePump({
@@ -3857,7 +3937,7 @@ describe("part progress hook (issue #331)", () => {
       writeFileSync(join(dir, "cookies.json"), JSON.stringify({
         cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
       }));
-      const fake = ((input: string | URL | Request) => {
+      const fake = withSubmittedArchive(((input: string | URL | Request) => {
         const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
         const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
         if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
@@ -3865,7 +3945,7 @@ describe("part progress hook (issue #331)", () => {
         if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
         if (u.pathname === "/x/vu/web/add/v3") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } }));
         return Promise.resolve(json({ code: 0, data: {} }));
-      }) as unknown as typeof fetch;
+      }) as unknown as typeof fetch);
       installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 0x5a));
       const seen: Array<{ count: number; bvid?: string }> = [];
       const r = await runLivePump({
@@ -5000,7 +5080,7 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     expect(st.parts.every((p) => p.sealed !== false)).toBe(true);
   }, 30_000);
 
-  it("issue #581: adopting an open-time orphan keeps the confirmed parts' index order (F5)", async () => {
+  it("issue #581: legacy confirmations hold an open-time orphan without changing part ownership or order", async () => {
     const spool = join(dir, "orphan_002.live.ts");
     writeFileSync(spool, tsStream({ gops: 4 }));
     writeLivePumpState(livePumpStatePath(dir, "sm"), {
@@ -5015,11 +5095,17 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     });
     const u = fakeUpos({ initialArchive: ["stem0", "stem1"] });
     const r = await runLivePump(baseOpts(u, { spoolMode: "full", fetch: async () => ({ living: false }) }));
-    expect(r.ok, r.error ?? "").toBe(true);
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("legacy confirmation is not native part proof");
     const st = readLivePumpState(livePumpStatePath(dir, "sm"))!;
-    expect(st.parts.map((p) => p.index)).toEqual([0, 1, 2]); // orphan adopted in place, no reorder/dup
-    expect(st.parts.every((p) => p.confirmed)).toBe(true);
-    expect(u.archive).toEqual(["stem0", "stem1", st.parts[2]!.stem]); // appended as P3, after the confirmed parts
+    expect(st.parts.map((p) => p.index)).toEqual([0, 1, 2]);
+    expect(st.parts.map((p) => p.confirmed)).toEqual([true, true, false]);
+    expect(st.parts.every((p) => p.proof === undefined)).toBe(true);
+    expect(st.parts[2]).toMatchObject({ spoolPath: spool, stem: "", sealed: false });
+    expect(st.queueManaged).toBeUndefined();
+    expect(readFileSync(spool)).toEqual(tsStream({ gops: 4 }));
+    expect(u.events).toEqual([]);
+    expect(u.archive).toEqual(["stem0", "stem1"]);
   }, 30_000);
 
   it("issue #581: old state without `sealed` is treated as sealed (backward compatible)", async () => {
@@ -5249,6 +5335,11 @@ describe("plans/044: bounded upload waits are progress for the finalizing judge"
 });
 
 describe("issue #464: stall watchdog (user-decided 120s default) and per-part media accounting", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    setSpawnForTest(undefined);
+  });
+
   it("defaults the no-write watchdog to 120s (user decision, issue #464)", () => {
     expect(DEFAULT_STALL_TIMEOUT_MS).toBe(120_000);
   });
@@ -5369,7 +5460,7 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
       writeFileSync(join(dir, "cookies.json"), JSON.stringify({
         cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
       }));
-      const fake = ((input: string | URL | Request) => {
+      const fake = withSubmittedArchive(((input: string | URL | Request) => {
         const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
         const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
         if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
@@ -5378,7 +5469,7 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
         if (u.pathname === "/x/vu/web/add/v3") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BVLratio1" } }));
         if (u.pathname === "/x/vu/web/edit") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BVLratio1" } }));
         return Promise.resolve(json({ code: 0, data: {} }));
-      }) as unknown as typeof fetch;
+      }) as unknown as typeof fetch);
       const alerts: string[] = [];
       const logs: string[] = [];
       let confirmed = 0;
@@ -5426,7 +5517,7 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
       writeFileSync(join(dir, "cookies.json"), JSON.stringify({
         cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
       }));
-      const fake = ((input: string | URL | Request) => {
+      const fake = withSubmittedArchive(((input: string | URL | Request) => {
         const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
         const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
         if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
@@ -5437,7 +5528,7 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
         if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BVLratio3", title: "t", tid: 21 }, videos: [] } }));
         if (u.pathname === "/x/web/archives") return Promise.resolve(json({ code: 0, data: { arc_audits: [] } }));
         return Promise.resolve(json({ code: 0, data: {} }));
-      }) as unknown as typeof fetch;
+      }) as unknown as typeof fetch);
       const alerts: string[] = [];
       const logs: string[] = [];
       let confirmed = 0;
@@ -5487,7 +5578,7 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
       writeFileSync(join(dir, "cookies.json"), JSON.stringify({
         cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
       }));
-      const fake = ((input: string | URL | Request) => {
+      const fake = withSubmittedArchive(((input: string | URL | Request) => {
         const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
         const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
         if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
@@ -5497,7 +5588,7 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
         if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BVLratio2", title: "t", tid: 21 }, videos: [] } }));
         if (u.pathname === "/x/web/archives") return Promise.resolve(json({ code: 0, data: { arc_audits: [] } }));
         return Promise.resolve(json({ code: 0, data: {} }));
-      }) as unknown as typeof fetch;
+      }) as unknown as typeof fetch);
       const alerts: string[] = [];
       let acquisitions = 0;
       // Healthy connection: the stream ends on its own (EOF), so wall time tracks media time
@@ -5526,7 +5617,7 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
       writeFileSync(join(dir, "cookies.json"), JSON.stringify({
         cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
       }));
-      const fake = ((input: string | URL | Request) => {
+      const fake = withSubmittedArchive(((input: string | URL | Request) => {
         const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
         const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
         if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
@@ -5536,7 +5627,7 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
         if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BVLcool1", title: "t", tid: 21 }, videos: [] } }));
         if (u.pathname === "/x/web/archives") return Promise.resolve(json({ code: 0, data: { arc_audits: [] } }));
         return Promise.resolve(json({ code: 0, data: {} }));
-      }) as unknown as typeof fetch;
+      }) as unknown as typeof fetch);
       const alerts: string[] = [];
       const logs: string[] = [];
       let confirmed = 0;
@@ -5584,17 +5675,23 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
       writeFileSync(join(dir, "cookies.json"), JSON.stringify({
         cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
       }));
-      const fake = ((input: string | URL | Request) => {
+      let preuploads = 0;
+      let edits = 0;
+      const fake = withSubmittedArchive(((input: string | URL | Request) => {
         const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
         const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
-        if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
+        if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p" + (++preuploads) + ".ts" }));
         if (u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
-        if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
+        if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: u.pathname.replace(/^\//, "") }));
         if (u.pathname === "/x/vu/web/add/v3") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BVLcap01" } }));
-        if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BVLcap01", title: "t", tid: 21 }, videos: [] } }));
+        if (u.pathname === "/x/vu/web/edit") {
+          edits++;
+          return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BVLcap01" } }));
+        }
+        if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BVLcap01", title: "t", tid: 21 }, videos: parts.map((part, index) => ({ cid: index + 1, filename: part.stem, title: part.title })) } }));
         if (u.pathname === "/x/web/archives") return Promise.resolve(json({ code: 0, data: { arc_audits: [] } }));
         return Promise.resolve(json({ code: 0, data: {} }));
-      }) as unknown as typeof fetch;
+      }) as unknown as typeof fetch);
       const alerts: string[] = [];
       let acquisitions = 0;
       // Resume an archive that already holds the warning line minus one confirmed part; the
@@ -5603,6 +5700,7 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
         index: i, spoolPath: join(dir, `gone_${i}.ts`), filename: `gone_${i}.ts`,
         stem: `n260000cap${String(i).padStart(4, "0")}`, title: `P${i + 1}`,
         bytes: CHUNK, durationSec: 1, confirmed: true,
+        proof: "observed", nativeKey: "n260000cap" + String(i).padStart(4, "0"), observedAt: Date.now(),
       }));
       writeFileSync(livePumpStatePath(dir, "cap"), JSON.stringify({
         schemaVersion: 1, room: "cap", createdAt: Date.now(), title: "cap", tid: 21, tag: "x",
@@ -5619,6 +5717,8 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
         log: () => {},
       });
       expect(r.ok, r.error ?? "").toBe(true);
+      expect(edits).toBe(1);
+      expect(readLivePumpState(livePumpStatePath(dir, "cap"))?.parts.every((part) => part.proof === "observed" && part.nativeKey === part.stem)).toBe(true);
       expect(alerts).toHaveLength(1);
       expect(alerts[0]).toContain(`已达 ${ARCHIVE_PARTS_WARN_AT} 个`);
       expect(alerts[0]).toContain("据信");
@@ -5634,17 +5734,23 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
       writeFileSync(join(dir, "cookies.json"), JSON.stringify({
         cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
       }));
-      const fake = ((input: string | URL | Request) => {
+      let preuploads = 0;
+      let edits = 0;
+      const fake = withSubmittedArchive(((input: string | URL | Request) => {
         const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
         const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
-        if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
+        if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p" + (++preuploads) + ".ts" }));
         if (u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
-        if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
+        if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: u.pathname.replace(/^\//, "") }));
         if (u.pathname === "/x/vu/web/add/v3") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BVLcap02" } }));
-        if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BVLcap02", title: "t", tid: 21 }, videos: [] } }));
+        if (u.pathname === "/x/vu/web/edit") {
+          edits++;
+          return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BVLcap02" } }));
+        }
+        if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BVLcap02", title: "t", tid: 21 }, videos: parts.map((part, index) => ({ cid: index + 1, filename: part.stem, title: part.title })) } }));
         if (u.pathname === "/x/web/archives") return Promise.resolve(json({ code: 0, data: { arc_audits: [] } }));
         return Promise.resolve(json({ code: 0, data: {} }));
-      }) as unknown as typeof fetch;
+      }) as unknown as typeof fetch);
       const alerts: string[] = [];
       let acquisitions = 0;
       // One part crosses the line (80 confirmed), the next one confirms at 81: still exactly
@@ -5653,6 +5759,7 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
         index: i, spoolPath: join(dir, `gone_${i}.ts`), filename: `gone_${i}.ts`,
         stem: `n260000cb2${String(i).padStart(4, "0")}`, title: `P${i + 1}`,
         bytes: CHUNK, durationSec: 1, confirmed: true,
+        proof: "observed", nativeKey: "n260000cb2" + String(i).padStart(4, "0"), observedAt: Date.now(),
       }));
       writeFileSync(livePumpStatePath(dir, "cap2"), JSON.stringify({
         schemaVersion: 1, room: "cap2", createdAt: Date.now(), title: "cap2", tid: 21, tag: "x",
@@ -5669,7 +5776,9 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
         log: () => {},
       });
       expect(r.ok, r.error ?? "").toBe(true);
+      expect(edits).toBe(2);
       expect(readLivePumpState(livePumpStatePath(dir, "cap2"))!.parts.length).toBe(ARCHIVE_PARTS_WARN_AT + 1);
+      expect(readLivePumpState(livePumpStatePath(dir, "cap2"))?.parts.every((part) => part.proof === "observed" && part.nativeKey === part.stem)).toBe(true);
       expect(alerts.filter((m) => m.includes(`已达 ${ARCHIVE_PARTS_WARN_AT} 个`))).toHaveLength(1);
       expect(alerts).toHaveLength(1);
     } finally {
@@ -5684,7 +5793,7 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
       writeFileSync(join(dir, "cookies.json"), JSON.stringify({
         cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
       }));
-      const fake = ((input: string | URL | Request) => {
+      const fake = withSubmittedArchive(((input: string | URL | Request) => {
         const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
         const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
         if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
@@ -5694,7 +5803,7 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
         if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BVLcool2", title: "t", tid: 21 }, videos: [] } }));
         if (u.pathname === "/x/web/archives") return Promise.resolve(json({ code: 0, data: { arc_audits: [] } }));
         return Promise.resolve(json({ code: 0, data: {} }));
-      }) as unknown as typeof fetch;
+      }) as unknown as typeof fetch);
       const alerts: string[] = [];
       let confirmed = 0;
       // Each part dribbles ~53s of media over ~146s of data time (real gap) and then stalls for
@@ -5735,23 +5844,34 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
 
   it("logs the suppressed count on the fatal early-exit path, exactly once", async () => {
     const dir = mkdtempSync(join(tmpdir(), "live-pump-fatalf-"));
+    const stop = new AbortController();
+    onTestFinished(() => {
+      vi.useRealTimers();
+      stop.abort();
+      setSpawnForTest(undefined);
+    });
     try {
       writeFileSync(join(dir, "cookies.json"), JSON.stringify({
         cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
       }));
       let failEdit = false;
-      const fake = ((input: string | URL | Request) => {
+      let preuploads = 0;
+      let failedEdits = 0;
+      const fake = withSubmittedArchive(((input: string | URL | Request) => {
         const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
         const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
-        if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
+        if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p" + (++preuploads) + ".ts" }));
         if (u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
-        if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
+        if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: u.pathname.replace(/^\//, "") }));
         if (u.pathname === "/x/vu/web/add/v3") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BVLfatal1" } }));
-        if (u.pathname === "/x/vu/web/edit") return Promise.resolve(json(failEdit ? { code: 1, message: "edit boom" } : { code: 0, data: { aid: 7, bvid: "BVLfatal1" } }));
+        if (u.pathname === "/x/vu/web/edit") {
+          if (failEdit) failedEdits++;
+          return Promise.resolve(json(failEdit ? { code: 1, message: "edit boom" } : { code: 0, data: { aid: 7, bvid: "BVLfatal1" } }));
+        }
         if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BVLfatal1", title: "t", tid: 21 }, videos: [] } }));
         if (u.pathname === "/x/web/archives") return Promise.resolve(json({ code: 0, data: { arc_audits: [] } }));
         return Promise.resolve(json({ OK: 1, key: "bucket/fb.ts" }));
-      }) as unknown as typeof fetch;
+      }) as unknown as typeof fetch);
       const alerts: string[] = [];
       const logs: string[] = [];
       let confirmed = 0;
@@ -5766,6 +5886,7 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
           tid: 21, tag: "x", private: true, sizeCap: 8 * 1024 * 1024,
           queueCapacity: 4096, stallTimeoutMs: 100_000,
           quality: "origin", submit: true, spoolMode: "none", fetchImpl: fake,
+          signal: stop.signal,
           fetch: async () => ({ living: true, url: "http://x/y.ts" }),
           sleep: async () => {},
           onPartConfirmed: (info: { count: number }) => {
@@ -5778,12 +5899,18 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
         await vi.advanceTimersByTimeAsync(800_000);
         const r = await p;
         expect(r.ok, r.error ?? "").toBe(false);
+        expect(confirmed).toBe(2);
+        expect(failedEdits).toBe(1);
+        expect(readLivePumpState(livePumpStatePath(dir, "fatalf"))?.pending).toMatchObject({
+          kind: "append", partIndex: 2, submissionState: "intent",
+        });
         expect(alerts).toHaveLength(1);
         const lines = logs.filter((m) => m.includes("抑制"));
         expect(lines).toHaveLength(1);
         expect(lines[0]).toContain("共抑制 1 条");
       } finally {
         vi.useRealTimers();
+        stop.abort();
         setSpawnForTest(undefined);
       }
     } finally {
@@ -5868,10 +5995,10 @@ describe("T-221 spool-mode continuation", () => {
 
   const spoolPathOf = (index: number): string => join(dir, `${String.fromCharCode(97 + index)}_000.live.ts`);
 
-  it("submit failure mid-run hands the rest of the show to the queue and keeps recording", async () => {
+  it("submit failure mid-run retains protected intent and keeps later parts spooled without queue ownership", async () => {
     // Session 1's studio submit hits the real production failure (406 rate limit): the run must
-    // NOT end, must not contact Bilibili for later parts, must keep both spools, and must end
-    // with the queue-handoff shape.
+    // keep recording without submitting successors. The pending owner and both spools survive;
+    // an upload-pending result is not permission for a different queue to repost them.
     const f = makeFake({ rateLimitedSubmit: true });
     installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 0x5a));
     const alerts: string[] = [];
@@ -5886,7 +6013,7 @@ describe("T-221 spool-mode continuation", () => {
     expect(r.ok).toBe(false);
     expect(r.uploadPending).toBe(true);
     expect(r.error).toBe("queued uploads pending");
-    // Bilibili contact stops at the handoff: part 1's session plus its (already fired) prefetch
+    // Bilibili contact stops after failure: part 1's session plus its already-fired prefetch
     // for part 2 — no further preuploads, and no successful studio submit afterwards.
     expect(f.preuploadCalls).toBe(2);
     expect(f.events.filter((e) => e.startsWith("submit-406")).length).toBeGreaterThan(0);
@@ -5897,12 +6024,19 @@ describe("T-221 spool-mode continuation", () => {
     expect(st?.parts[0]?.confirmed).toBe(false);
     expect(st?.parts[0]?.sealed).not.toBe(false);
     expect(st?.parts[1]?.sealed).not.toBe(false);
-    expect(st?.pending).toBeUndefined();
+    expect(st?.submissionProofVersion).toBe(1);
+    expect(st?.pending).toMatchObject({
+      kind: "create", partIndex: 0, submissionState: "intent",
+      stem: st?.parts[0]?.stem, spoolPath: st?.parts[0]?.spoolPath,
+    });
+    expect(st?.queueManaged).toBeUndefined();
     expect(st?.parts.every((p) => !p.confirmed)).toBe(true);
+    expect(st?.parts.every((p) => p.proof === undefined)).toBe(true);
     expect(r.segments[0]?.uploadError).toBeTruthy();
     expect(readConfirmedJournal(statePath).size).toBe(0);
-    // Both spools are on disk: the queue can deliver them after the run ends.
+    // Both spools remain with the original owner until the pending native identity is observed.
     expect(st?.parts.every((p) => existsSync(p.spoolPath))).toBe(true);
+    expect(spoolPathsToKeep(st)).toContain(st?.pending?.spoolPath);
     expect(alerts.some((m) => m.includes("改为落盘"))).toBe(true);
   }, 30_000);
 
@@ -6374,7 +6508,9 @@ describe("T-221 spool-mode continuation", () => {
     const st = readLivePumpState(statePath);
     expect(st?.parts.map((p) => p.confirmed)).toEqual([true, true]);
     expect(st?.queueManaged).toBeUndefined();
-    expect(existsSync(spoolPathOf(0))).toBe(false); // confirmed and cleaned up
+    expect(existsSync(spoolPathOf(0))).toBe(true);
+    expect(st?.parts[0]?.proof).toBeUndefined();
+    expect(st?.parts[1]?.proof).toBe("observed");
   }, 30_000);
 
   it("crash after sealing and timed-out validation preserve the recovery boundary", async () => {

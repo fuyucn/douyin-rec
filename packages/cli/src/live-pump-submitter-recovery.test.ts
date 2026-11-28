@@ -13,7 +13,7 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-function legacySession(fetchImpl: typeof fetch, pending = false) {
+function legacySession(fetchImpl: typeof fetch, pending = false, observed = false) {
   const cookiesPath = join(dir, "cookies.json");
   writeFileSync(cookiesPath, JSON.stringify({ cookie_info: { cookies: [
     { name: "SESSDATA", value: "test-session" }, { name: "bili_jct", value: "test-csrf" },
@@ -27,7 +27,8 @@ function legacySession(fetchImpl: typeof fetch, pending = false) {
     title: "T", tid: 21, tag: "", private: true, aid: 7,
     parts: [
       { ...input, index: 0, stem: "stem0", title: "P1", spoolPath: join(dir, "gone.ts"),
-        filename: "gone.ts", confirmed: true },
+        filename: "gone.ts", confirmed: true,
+        ...(observed ? { proof: "observed" as const, nativeKey: "stem0", observedAt: Date.now() } : {}) },
       { ...input, filename: "p2.ts", confirmed: false },
     ],
     ...(pending ? { pending: { ...input, partIndex: 1, kind: "append" as const } } : {}),
@@ -42,10 +43,11 @@ function legacySession(fetchImpl: typeof fetch, pending = false) {
   return { session, input, statePath, append };
 }
 
-function archiveResponse(aid = 7, bvid: string | undefined = "BILIfake1") {
+function archiveResponse(aid = 7, bvid: string | undefined = "BILIfake1", appended = false) {
   return Response.json({ code: 0, data: {
     archive: { aid, bvid, title: "T", tid: 21, is_only_self: 1 },
-    videos: [{ cid: 1, filename: "stem0", title: "P1" }],
+    videos: [{ cid: 1, filename: "stem0", title: "P1" },
+      ...(appended ? [{ cid: 2, filename: "stem1", title: "P2" }] : [])],
   } });
 }
 
@@ -60,18 +62,19 @@ describe("default live-pump driver legacy identity recovery", () => {
         posts.push(JSON.parse(String(init?.body)));
         return Response.json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } });
       }
-      if (url.search === "?aid=7" || url.search === "?bvid=BILIfake1") return archiveResponse();
+      if (url.search === "?aid=7" || url.search === "?bvid=BILIfake1") return archiveResponse(7, "BILIfake1", posts.length > 0);
       return Response.json({ code: -404 });
     };
-    const { session, input, statePath, append } = legacySession(fetchImpl);
+    const { session, input, statePath, append } = legacySession(fetchImpl, false, true);
     await expect(session.recover()).resolves.toEqual({ ok: true });
     await expect(session.submitPart(input)).resolves.toMatchObject({ ok: true, bvid: "BILIfake1", aid: 7 });
     expect(append).toHaveBeenCalledOnce();
-    await expect(append.mock.results[0]!.value).resolves.toEqual({ confirmed: [2] });
+    await expect(append.mock.results[0]!.value).resolves.toEqual({ confirmed: [2], accepted: [] });
     expect(hits).toEqual([
       "/x/vupre/web/archive/view?aid=7",
       "/x/vupre/web/archive/view?bvid=BILIfake1",
       "/x/vu/web/edit",
+      "/x/vupre/web/archive/view?bvid=BILIfake1",
     ]);
     expect(posts).toEqual([expect.objectContaining({ aid: 7, is_only_self: 1,
       watermark: { state: 0 }, videos: [
@@ -80,6 +83,17 @@ describe("default live-pump driver legacy identity recovery", () => {
     expect(readLivePumpState(statePath)).toMatchObject({ aid: 7, bvid: "BILIfake1",
       parts: [{ index: 0, confirmed: true }, { index: 1, confirmed: true }] });
     expect(existsSync(input.spoolPath)).toBe(false);
+  });
+
+  it("holds unproved historical confirmations without another metadata submission", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => archiveResponse());
+    const { session, input, statePath, append } = legacySession(fetchImpl);
+    const before = readFileSync(statePath, "utf8");
+    await expect(session.recover()).resolves.toMatchObject({ ok: false, needsManual: true });
+    expect(append).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(readFileSync(statePath, "utf8")).toBe(before);
+    expect(existsSync(input.spoolPath)).toBe(true);
   });
 
   it.each([

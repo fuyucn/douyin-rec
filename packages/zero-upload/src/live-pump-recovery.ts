@@ -18,9 +18,8 @@ type RecoveryOptions = {
 };
 
 type RecoveryOutcome =
-  | { kind: "not-created" }
   | { kind: "created"; bvid?: string; aid?: number }
-  | { kind: "existing"; bvid?: string; aid: number; confirmed: boolean }
+  | { kind: "existing"; bvid?: string; aid: number }
   | { kind: "blocked"; result: RecoveryResult };
 
 /** Query only: the caller retains every pending row, durable write and cleanup decision. */
@@ -46,11 +45,19 @@ export async function resolveInterruptedPublication(o: RecoveryOptions): Promise
   if (!found.ok || !found.archive) {
     return { kind: "blocked", result: { ok: false, reason: "cannot read archive during recovery" } };
   }
-  return { kind: "existing", bvid: found.archive.bvid, aid: found.archive.aid,
-    confirmed: found.archive.videos.some((video) => video.filename === o.pending.stem) };
+  if ((identity.bvid && found.archive.bvid !== identity.bvid)
+    || (identity.aid !== undefined && found.archive.aid !== identity.aid)) {
+    return { kind: "blocked", result: { ok: false, needsManual: true,
+      reason: "archive identity mismatch during recovery; source retained" } };
+  }
+  if (!found.archive.videos.some((video) => video.filename === o.pending.stem)) {
+    return { kind: "blocked", result: { ok: false, needsManual: true,
+      reason: "pending part stem is absent from the archive view; submission outcome remains ambiguous" } };
+  }
+  return { kind: "existing", bvid: found.archive.bvid, aid: found.archive.aid };
 }
 
-/** Only a readable, empty exact-title search proves that the create request did not happen. */
+/** A negative title search cannot prove that a create request had no side effect. */
 async function resolveCreatedPublication(o: RecoveryOptions, title: string): Promise<RecoveryOutcome> {
   let found;
   try {
@@ -63,7 +70,10 @@ async function resolveCreatedPublication(o: RecoveryOptions, title: string): Pro
     return { kind: "blocked", result: { ok: false, needsManual: true,
       reason: "cannot search archive during recovery; needs manual verification" } };
   }
-  if (found.searched === true && found.matches === 0) return { kind: "not-created" };
+  if (found.searched === true && found.matches === 0) {
+    return { kind: "blocked", result: { ok: false, needsManual: true,
+      reason: "create outcome remains ambiguous after an empty title search; keep the pending intent" } };
+  }
   if (!found.ok || !found.archive) {
     return { kind: "blocked", result: { ok: false, needsManual: true,
       reason: "create outcome ambiguous (matches=" + found.matches + "); needs manual verification" } };

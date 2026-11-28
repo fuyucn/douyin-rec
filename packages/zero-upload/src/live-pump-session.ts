@@ -3,11 +3,11 @@ import { existsSync, rmSync } from "node:fs";
 import { basename } from "node:path";
 import { noteRecorderProgress } from "@drec/core";
 import { lookupArchive, type StudioVideo } from "./upos-stream.js";
-import { type LivePumpState } from "./live-pump-state.js";
+import { isLivePumpPartObserved, readLivePumpState, type LivePumpState } from "./live-pump-state.js";
 import { LivePumpSeason } from "./live-pump-season.js";
 import { publishLivePumpPart } from "./live-pump-publication.js";
 import { publishLegacyLivePumpPart } from "./live-pump-legacy-publication.js";
-import { type RecoveryResult } from "./live-pump-recovery.js";
+import { resolveInterruptedPublication, type RecoveryResult } from "./live-pump-recovery.js";
 import type { LivePumpSessionOpts, PartSubmitInput, SpoolResubmitResult } from "./live-pump-session-options.js";
 import { LivePumpCheckpoint } from "./live-pump-checkpoint.js";
 /** Stable session interface; remote publication and local checkpoint writes share one owner. */
@@ -172,8 +172,26 @@ export class LivePumpSession {
       return { ok: false, error: `part ${unconfirmed.index} is not confirmed; refusing to submit part ${input.index}` };
     }
     const existing = this.state.parts.find(p => p.index === input.index);
-    if (existing?.confirmed)
+    if (existing?.proof === "accepted")
+      return { ok: false, needsManual: true, error: "accepted part requires observation, never resubmission" };
+    if (existing && (existing.confirmed || existing.proof === "observed") && !isLivePumpPartObserved(existing))
+      return { ok: false, needsManual: true, error: "unqualified prior confirmation cannot authorize resubmission" };
+    if (existing && isLivePumpPartObserved(existing)) {
+      if (this.o.submitter && existing.nativeKey) {
+        try {
+          this.o.submitter.observeStreamedPart({
+            ref: { targetId: this.o.submitterTargetId ?? "bilibili-upos", id: this.state.bvid ?? String(this.state.aid) },
+            name: existing.nativeKey,
+          });
+        } catch (e) {
+          return { ok: false, error: "cannot restore observed upload checkpoint: " + String((e as Error)?.message ?? e).slice(0, 200) };
+        }
+      }
+      this.cleanupConfirmed();
       return { ok: true, bvid: this.state.bvid, aid: this.state.aid };
+    }
+    if (existing?.confirmed)
+      return { ok: false, needsManual: true, error: "legacy confirmation has no per-part observation proof; source retained" };
     if (this.o.submitter)
       return this.submitPartViaSubmitter(input, existing, signal);
     return this.submitLegacy(input, existing, signal);
@@ -189,6 +207,7 @@ export class LivePumpSession {
     const video: StudioVideo = { filename: input.stem, title: input.title.slice(0, 80) };
     const pending: LivePumpState["pending"] = {
       kind: this.state.bvid || this.state.aid ? "append" : "create",
+      submissionState: "intent",
       partIndex: input.index,
       stem: input.stem,
       title: input.title,
@@ -221,6 +240,9 @@ export class LivePumpSession {
     });
     if (!result.ok)
       return { ok: false, ...(result.retryable ? { retryable: true } : {}), error: result.error };
+    if (result.proof === "accepted") {
+      return this.recordAcceptedAndObserve(input, existing, pending.kind, result.bvid, result.aid, signal);
+    }
     return this.recordConfirmed(input, existing, pending.kind, result.bvid, result.aid);
   }
   private recordConfirmed(input: PartSubmitInput, existing: LivePumpState["parts"][number] | undefined, kind: "create" | "append", bvid?: string, aid?: number): {
@@ -229,6 +251,7 @@ export class LivePumpSession {
     aid?: number;
     error?: string;
   } {
+    const prior = this.state;
     this.state = {
       ...this.state,
       bvid: bvid ?? this.state.bvid,
@@ -243,6 +266,9 @@ export class LivePumpSession {
         bytes: input.bytes,
         durationSec: input.durationSec,
         confirmed: true,
+        proof: "observed",
+        nativeKey: input.stem,
+        observedAt: Date.now(),
       } : p) : [...this.state.parts, {
           index: input.index,
           spoolPath: input.spoolPath,
@@ -252,6 +278,9 @@ export class LivePumpSession {
           bytes: input.bytes,
           durationSec: input.durationSec,
           confirmed: true,
+          proof: "observed",
+          nativeKey: input.stem,
+          observedAt: Date.now(),
         }],
       pending: undefined,
     };
@@ -266,7 +295,18 @@ export class LivePumpSession {
       this.persist();
     }
     catch (e) {
+      this.state = prior;
       return { ok: false, error: "cannot persist confirmation: " + String((e as Error)?.message ?? e).slice(0, 200) };
+    }
+    if (this.o.submitter) {
+      try {
+        this.o.submitter.observeStreamedPart({
+          ref: { targetId: this.o.submitterTargetId ?? "bilibili-upos", id: this.state.bvid ?? String(this.state.aid) },
+          name: input.stem,
+        });
+      } catch (e) {
+        return { ok: false, error: "cannot persist observed upload checkpoint: " + String((e as Error)?.message ?? e).slice(0, 200) };
+      }
     }
     noteRecorderProgress();
     this.cleanupConfirmed();
@@ -319,6 +359,7 @@ export class LivePumpSession {
       ...this.state,
       pending: {
         kind,
+        submissionState: "intent",
         partIndex: input.index,
         stem: input.stem,
         title: input.title,
@@ -351,7 +392,78 @@ export class LivePumpSession {
     });
     if (!result.ok)
       return result;
+    if (result.proof === "accepted") {
+      return this.recordAcceptedAndObserve(input, existing, kind, result.bvid, result.aid, signal);
+    }
     return this.recordConfirmed(input, existing, kind, result.bvid, result.aid);
+  }
+  private async recordAcceptedAndObserve(
+    input: PartSubmitInput,
+    existing: LivePumpState["parts"][number] | undefined,
+    kind: "create" | "append",
+    bvid?: string,
+    aid?: number,
+    signal?: AbortSignal,
+  ): Promise<{ ok: boolean; bvid?: string; aid?: number; error?: string; needsManual?: boolean }> {
+    const pending = this.state.pending;
+    if (!pending) return { ok: false, error: "accepted upload has no durable pending intent" };
+    this.state = {
+      ...this.state,
+      ...(bvid ? { bvid } : {}),
+      ...(aid !== undefined ? { aid } : {}),
+      pending: {
+        ...pending,
+        submissionState: "accepted",
+        acceptedAt: Date.now(),
+        ...(bvid ? { acceptedBvid: bvid } : {}),
+        ...(aid !== undefined ? { acceptedAid: aid } : {}),
+      },
+      parts: existing ? this.state.parts.map((part) => part.index === input.index
+        ? { ...part, proof: "accepted", nativeKey: input.stem, acceptedAt: Date.now(), confirmed: false }
+        : part)
+        : [...this.state.parts, {
+          index: input.index,
+          spoolPath: input.spoolPath,
+          filename: basename(input.spoolPath),
+          stem: input.stem,
+          title: input.title,
+          bytes: input.bytes,
+          durationSec: input.durationSec,
+          confirmed: false,
+          proof: "accepted",
+          nativeKey: input.stem,
+          acceptedAt: Date.now(),
+        }],
+    };
+    try {
+      this.persist();
+    } catch (e) {
+      return { ok: false, error: "cannot persist accepted upload: " + String((e as Error)?.message ?? e).slice(0, 200) };
+    }
+    if (signal?.aborted) return { ok: false, needsManual: true, error: "accepted upload awaits observation; source retained" };
+    const resolution = await resolveInterruptedPublication({
+      pending: this.state.pending!,
+      cookiesPath: this.o.cookiesPath,
+      fetchImpl: this.o.fetchImpl,
+      archive: { title: this.state.title, bvid: this.state.bvid, aid: this.state.aid },
+    });
+    if (resolution.kind === "blocked") {
+      return { ok: false, needsManual: true, error: resolution.result.reason ?? "accepted part is not yet positively observed; source retained" };
+    }
+    if (resolution.kind === "existing" && this.state.aid !== undefined && resolution.aid !== this.state.aid) {
+      return { ok: false, needsManual: true, error: "archive identity mismatch after accepted upload; source retained" };
+    }
+    const acceptedPart = this.state.parts.find((part) => part.index === input.index);
+    if (!acceptedPart) {
+      return { ok: false, needsManual: true, error: "accepted upload checkpoint disappeared before observation; source retained" };
+    }
+    return this.recordConfirmed(
+      input,
+      acceptedPart,
+      kind,
+      resolution.bvid ?? bvid ?? this.state.bvid,
+      resolution.aid ?? aid ?? this.state.aid,
+    );
   }
   drainSeason(): Promise<void> {
     return this.season.drain();
@@ -363,14 +475,22 @@ export class LivePumpSession {
     await this.season.reconcile(fetchImpl);
   }
   private cleanupConfirmed(): void {
-    if (this.o.cleanupConfirmedSpool === false)
+    if (this.o.cleanupConfirmedSpool === false || this.stateUntrusted)
       return;
-    for (const p of this.state.parts) {
-      if (!p.confirmed)
+    const durable = readLivePumpState(this.checkpoint.statePath);
+    if (!durable || durable.createdAt !== this.state.createdAt || durable.room !== this.state.room
+      || durable.bvid !== this.state.bvid || durable.aid !== this.state.aid)
+      return;
+    for (const p of durable.parts) {
+      if (!isLivePumpPartObserved(p) || durable.pending?.partIndex === p.index)
         continue;
       if (!existsSync(p.spoolPath))
         continue;
       try {
+        this.o.submitter?.observeStreamedPart({
+          ref: { targetId: this.o.submitterTargetId ?? "bilibili-upos", id: durable.bvid ?? String(durable.aid) },
+          name: p.nativeKey!,
+        });
         rmSync(p.spoolPath, { force: true });
         this.log(`[直播直传] confirmed part ${p.index}, removed spool ${p.spoolPath}`);
       }

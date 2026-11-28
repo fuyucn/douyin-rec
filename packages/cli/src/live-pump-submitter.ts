@@ -38,10 +38,19 @@ function stateFileStore(o: LivePumpSubmitterOpts): UploadStateStore {
     if (!key.includes(":")) return null;
     const archiveId = key.slice(key.indexOf(":") + 1);
     const state = readLivePumpState(statePath);
-    if (!state || !state.bvid || state.bvid !== archiveId) return null;
+    if (!state || (state.bvid !== archiveId && String(state.aid ?? "") !== archiveId)) return null;
     const parts: UploadPartRecord[] = state.parts
-      .filter((p) => p.confirmed)
-      .map((p) => ({ index: p.index + 1, size: p.bytes ?? 0, mtimeMs: 0, ...(p.title ? { title: p.title } : {}) }));
+      .filter((p) => p.nativeKey && (p.proof === "accepted" || (p.confirmed && p.proof === "observed")))
+      .map((p) => ({
+        index: p.index + 1,
+        size: p.bytes ?? 0,
+        mtimeMs: 0,
+        proof: p.proof,
+        nativeKey: p.nativeKey,
+        ...(p.acceptedAt ? { acceptedAt: new Date(p.acceptedAt).toISOString() } : {}),
+        ...(p.observedAt ? { confirmedAt: new Date(p.observedAt).toISOString() } : {}),
+        ...(p.title ? { title: p.title } : {}),
+      }));
     const cp: UploadCheckpoint = { targetId: UPOS_TARGET_ID, archiveId, parts };
     cache.set(key, cp);
     return cp;
@@ -52,6 +61,21 @@ function stateFileStore(o: LivePumpSubmitterOpts): UploadStateStore {
     confirmPart: (key, part) => {
       const cur = cache.get(key);
       cache.set(key, cur ? { ...cur, parts: [...cur.parts, part] } : { targetId: UPOS_TARGET_ID, archiveId: key.slice(key.indexOf(":") + 1), parts: [part] });
+    },
+    observePart: (key, nativeKey, observedAt) => {
+      const current = seed(key);
+      if (!current) return false;
+      const part = current.parts.find((candidate) => candidate.nativeKey === nativeKey);
+      if (!part) return false;
+      if (part.proof === "observed") return true;
+      if (part.proof !== "accepted") return false;
+      cache.set(key, {
+        ...current,
+        parts: current.parts.map((candidate) => candidate.nativeKey === nativeKey
+          ? { ...candidate, proof: "observed", confirmedAt: observedAt, acceptedAt: undefined }
+          : candidate),
+      });
+      return true;
     },
   };
 }
@@ -110,7 +134,7 @@ export function buildLivePumpSubmitter(o: LivePumpSubmitterOpts): PartSubmitter 
         ...(req.signal ? { signal: req.signal } : {}),
       });
       const ref: ArchiveRef = out.ref;
-      return { ref, reused: out.reused };
+      return { ref, reused: out.reused, ...(out.partProof ? { partProof: out.partProof } : {}) };
     },
     appendStreamedPart: async (req) => {
       const out = await driver.appendStreamedPart({
@@ -121,7 +145,12 @@ export function buildLivePumpSubmitter(o: LivePumpSubmitterOpts): PartSubmitter 
         ...(req.size !== undefined ? { size: req.size } : {}),
         ...(req.signal ? { signal: req.signal } : {}),
       });
-      return { confirmed: out.confirmed };
+      return { confirmed: out.confirmed, accepted: out.accepted };
+    },
+    observeStreamedPart: (req) => {
+      if (!driver.observeStreamedPart(req)) {
+        throw new Error("accepted streamed part was not found by exact native key");
+      }
     },
     verify: async (req) => {
       const out = await driver.verify({ cred, ref: req.ref, expectedParts: req.expectedParts });
