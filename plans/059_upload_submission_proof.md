@@ -663,6 +663,52 @@ runs no tests and changes no runtime files.
   mixed-version gates and the master typed-receipt dependency. No full-feature
   checkbox or issue is closed. No real upload, merge, deployment or release.
 
+### 2026-11-28: cleanup consumer containment and full runtime checkpoint
+
+- Source checkpoint c6b8188b is pushed and remote-verified, version 0.0.409.
+  This completes one incremental containment slice, not T-251 or activation.
+- Persisted cleanup consumers remain registered, but valid legacy contexts now
+  fail visibly before existence, fingerprint, lease or unlink callbacks. A BV
+  and source fingerprint are not native per-P observation. Automatic retries
+  are disabled; recovery of an old running row returns uncertain, not rerun or
+  done. Sources, aliases, context and historical archive facts are retained.
+- No positive v2 cleanup executor, observation producer, queue or store was
+  invented. Existing public factory/dependency shape and invalid-context/root
+  checks remain compatible. This does not close other direct cleanup exits.
+- QA added real SQLite reopen/pending and expired-lease/running regressions;
+  both assert retained hardlinks, unchanged context/archive facts, one visible
+  hold and no automatic retries. Direct cleanup cases cover absent/replaced
+  sources, aliases, lost leases, repeated calls and unsupported versions.
+- Self-review/runtime validation found an obsolete architecture inventory still
+  requiring the three removed cleanup deletion calls. The correction removes
+  only those pins, preserves both scan directories, the deletion matcher and
+  global missing/unmatched checks, and independently requires zero cleanup
+  deletion calls AND zero cleanup whitelist entries. The other three legacy
+  deletion anchors remain unchanged. Independent narrow static review passed
+  both the consumer change and this non-weakening guard correction.
+- The previously pending protected handoff/startup regression passed 316/316
+  across six files. The final combined cleanup/runner/deletion/layering gate
+  passed 96/96 across four files, without timeout or owned-process remnants.
+- Full-v6 passed 5,796 tests, 0 failed and 42 existing skips across 390 files,
+  exit 0 without timeout in 452.305 seconds, with zero owned-process remnants.
+  Full-v5 remains a historical failed run; its obsolete deletion-inventory
+  failure is not retrospectively green. Root and expanded integration-test
+  typechecks, architecture, whitespace and branch privacy checks passed. The
+  ignored bundle was rebuilt from this source as 0.0.409-03b907, not force-added.
+- A bounded read-only follow-up mapped the next coherent slice: quarantine
+  legacy no-proof live-pump import, persisted executor/confirmation, checkpoint
+  and startup-marker shortcuts. Generic old-done repair and rolling/cursor
+  containment remain separate unfinished paths; scheduler fairness timestamps
+  are not delivery proof. Development follows the approved containment design;
+  pausing/retained-source availability costs still require activation approval.
+- PR #754 remains open at eeb2caf9; main e4569d33 still lacks its existing
+  journal. The required typed master receipt seam must use that journal without
+  creating a second store or changing #752 retry eligibility/budget/policy.
+- Complete identity qualification, durable nonblocking observation, whole-order/
+  rolling/replay containment, compatibility and activation gates remain open.
+  No full-feature checkbox or issue is closed. No real upload, merge, deployment,
+  release or activation was performed.
+
 ## Out of scope
 
 - No production spool=none enablement, disk-watermark product decision, or

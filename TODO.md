@@ -15,11 +15,13 @@
 
 ## 进行中
 
-T-251 latest source checkpoint: 6e0a4875 is pushed; protected handoff containment
-passed root/integration typecheck and narrow static review. Its 21 added runtime
-cases and full-suite gate await the shared Vitest window. The preceding direct
-checkpoint d18f6fe8 passed 5,770 tests with 0 failures and 42 existing skips; that
-result is not validation of the newer source. Remaining feature work stays open.
+T-251 latest source checkpoint: c6b8188b is pushed; protected handoff and legacy
+cleanup-consumer containment passed the full suite: 5,796 passed, 0 failed and
+42 existing skips across 390 files. Handoff/startup regression passed 316/316;
+cleanup, queue runner and architecture regression passed 96/96. Root/integration
+typecheck, architecture, bundle, privacy and narrow static reviews passed.
+Legacy replay/import/cursor, qualified observation and the master receipt seam
+remain incomplete. No full-feature checkbox or issue is closed.
 This is development progress only, not completion, release or deployment.
 
 - [~] **T-251 提交证据与逐P清理安全闸（issue [#755](https://github.com/fuyucn/douyin-rec/issues/755)，plan [059](plans/059_upload_submission_proof.md)，2026-11-27）** — **做什么**:禁止 rolling/直播直传/恢复路径用数量、空查询或普通 ACK 推断未提交或本P已完成；持久区分 accepted 与 observed，只有同稿同P正向证据才能清理源文件。**为什么**:响应丢失、读回延迟或其他P先到达时，旧路径可能重复投稿或删除仍需恢复的源。**验收**:未知不重发、不清 intent、不假确认；accepted 跨重启保留且不重发；无稳定P身份的旧 target 保源待核验；所有 cleanup 入口检查同一 proof；新增四路故障回归并通过全量门禁。**不做**:不新增数据库/队列/跨机租约，不改 #752 已批准的明确限流回队，不做直播磁盘产品决策或强制停止协议。
