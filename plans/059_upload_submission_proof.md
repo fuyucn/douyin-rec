@@ -539,6 +539,32 @@ runs no tests and changes no runtime files.
 - PR754's retry budget and S3's disk-bound capture policy remain separate owner
   decisions, not extensions of this batch. No strong stop guarantee is implied.
 
+## Implementation checkpoints
+
+### 2026-11-28: direct-flow increment, not activation approval
+
+- The first code increment separates streamed metadata acceptance from an exact
+  native-part observation in the existing runtime and live-session state.
+- Unknown and accepted direct submissions keep their original intent, archive
+  identity and source. A negative read does not authorize another metadata POST.
+- Protected direct work cannot fall back to the legacy queue or its confirmation
+  journal. Direct cleanup reloads persisted proof and rejects unreadable state.
+- The increment includes restart, wrong-archive, stale-read and checkpoint-write
+  failure regressions. Code checkpoint bc0f3880 is pushed to the task branch.
+- Validation at that checkpoint: 41 peripheral tests, typecheck, architecture
+  generation check and bundle passed. The earlier full suite reported 5,716
+  passed, 28 failed and 42 skipped; its related fixtures were then repaired.
+  The updated full-suite gate remains open, so this is not a green delivery.
+- Self-review fixes include wrong-archive native-key attribution, preventing
+  an acknowledged request from retrying after a checkpoint write failure, and
+  detecting recovery iterations that make no durable progress. Test fakes now
+  model independent native-member reads instead of treating ACKs as observation.
+- This is not completion of P0a/P0b. Whole-order and rolling containment, the
+  core/master typed-receipt seam, qualified source/owner binding, durable
+  nonblocking observation and mixed-version activation gates remain required.
+- Every verified increment is committed and pushed to the task branch. A push
+  is neither a release nor permission to deploy or activate protected delivery.
+
 ## Out of scope
 
 - No production spool=none enablement, disk-watermark product decision, or
