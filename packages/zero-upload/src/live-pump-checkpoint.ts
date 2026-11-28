@@ -141,7 +141,7 @@ export class LivePumpCheckpoint {
       ...(input.spoolIncomplete ? { spoolIncomplete: true } : {}),
       ...(input.validated ? { validated: true } : {}),
       ...(input.needsValidation ? { needsValidation: true } : {}),
-      ...(input.sealed === false ? { sealed: false } : {}),
+      ...(input.sealed !== undefined ? { sealed: input.sealed } : {}),
     };
     this.state = {
       ...this.state,

@@ -840,16 +840,18 @@ describe("titleForLive / partTitle reach the archive identity and part submissio
         cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
       }));
       let createBody: Record<string, unknown> | undefined;
+      let preuploads = 0;
       const fake = withSubmittedArchive(((input: string | URL | Request, init?: RequestInit) => {
         const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
         const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
-        if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
+        if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: `upos://b/p${++preuploads}.ts` }));
         if (u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
-        if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
+        if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: u.pathname.replace(/^\//, "") }));
         if (u.pathname === "/x/vu/web/add/v3") {
           createBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
           return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } }));
         }
+        if (u.pathname === "/x/vu/web/edit") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } }));
         if (u.pathname === "/x/vupre/web/archive/view") {
           return Promise.resolve(json({
             code: 0,
@@ -1043,14 +1045,15 @@ describe("多房间并发:各自独立稿件与状态,互不串稿", () => {
     }));
     const bvByTitle = new Map<string, string>();
     let n = 0;
+    let preuploads = 0;
     const fake = withSubmittedArchive(((input: string | URL | Request, init?: RequestInit) => {
       const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
       const m = (init?.method ?? "GET").toUpperCase();
       const p = u.pathname;
       const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
-      if (p === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
+      if (p === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: `upos://b/p${++preuploads}.ts` }));
       if (u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
-      if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
+      if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: u.pathname.replace(/^\//, "") }));
       if (p === "/x/vu/web/add/v3") {
         const body = JSON.parse(String(init?.body ?? "{}")) as { title: string };
         const bv = `BV1conc${String(++n).padStart(4, "0")}`;
@@ -1130,6 +1133,7 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
   /** 完整可跑的假 UPOS(建稿/追加都通);参数沿用既有成功组合。 */
   function upos(chunkSize: number, opts: { seasonCalls?: string[]; failSeasonState?: () => void } = {}): typeof fetch {
     let created = false;
+    let preuploads = 0;
     writeFileSync(join(dir, "cookies.json"), JSON.stringify({
       cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
     }));
@@ -1137,10 +1141,10 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
     return withSubmittedArchive(((input: string | URL | Request, init?: RequestInit) => {
       const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
       const m = (init?.method ?? "GET").toUpperCase();
-      if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: chunkSize, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
+      if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: chunkSize, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: `upos://b/p${++preuploads}.ts` }));
       if (m === "POST" && u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
       if (m === "PUT") return Promise.resolve(new Response("", { status: 200 }));
-      if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
+      if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: u.pathname.replace(/^\//, "") }));
       if (u.pathname === "/x/vu/web/add/v3") {
         created = true;
         return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } }));
@@ -1671,15 +1675,23 @@ describe("真子进程:不注册 SIGUSR2 handler 会当场死亡(P1 回归)", ()
       banner: { js: "import{createRequire as __cr}from'module';const require=__cr(import.meta.url);" },
       external: ["node:*"],
     });
+    let signalled = false;
     const res = await new Promise<{ code: number; stdout: string }>((resolve, reject) => {
       const child = execFile(process.execPath, [out], { timeout: 3000 }, (e, so) => {
         resolve({ code: e ? Number((e as { code?: number }).code ?? 1) : 0, stdout: so });
       });
-      // 窗口结束信号在循环跑着的时候到达(生产中 daemon 就是这么发的)。
-      child.on("spawn", () => setTimeout(() => child.kill("SIGUSR2"), 300));
+      let stderr = "";
+      child.stderr?.on("data", (chunk: Buffer | string) => {
+        stderr += chunk.toString();
+        if (!signalled && stderr.includes("READY\n")) {
+          signalled = true;
+          child.kill("SIGUSR2");
+        }
+      });
       child.on("error", reject);
     });
     rmSync(dir, { recursive: true, force: true });
+    expect(signalled, "child never reported signal readiness").toBe(true);
     return res;
   }
 
@@ -4980,6 +4992,7 @@ describe("seamless parts: one ffmpeg per connection (plans/043)", () => {
     expect(r2.ok, r2.error ?? "").toBe(true);
     const st2 = readLivePumpState(statePath)!;
     expect(st2.parts.every((p) => p.confirmed)).toBe(true);
+    expect(st2.parts[0]!.sealed).toBe(true);
     expect(u.archive).toContain(st2.parts[0]!.stem);
     expect(existsSync(spool)).toBe(false); // confirmed spool cleaned up
   }, 30_000);
@@ -5612,13 +5625,14 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
       writeFileSync(join(dir, "cookies.json"), JSON.stringify({
         cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
       }));
+      let preuploads = 0;
       const fake = withSubmittedArchive(((input: string | URL | Request) => {
         const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
         const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
-        if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
+        if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: `upos://b/p${++preuploads}.ts` }));
         if (u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
-        if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
-        if (u.pathname === "/x/vu/web/add/v3") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BVLcool1" } }));
+        if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: u.pathname.replace(/^\//, "") }));
+        if (u.pathname === "/x/vu/web/add/v3" || u.pathname === "/x/vu/web/edit") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BVLcool1" } }));
         if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BVLcool1", title: "t", tid: 21 }, videos: [] } }));
         if (u.pathname === "/x/web/archives") return Promise.resolve(json({ code: 0, data: { arc_audits: [] } }));
         return Promise.resolve(json({ code: 0, data: {} }));
@@ -5788,13 +5802,14 @@ describe("issue #464: stall watchdog (user-decided 120s default) and per-part me
       writeFileSync(join(dir, "cookies.json"), JSON.stringify({
         cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
       }));
+      let preuploads = 0;
       const fake = withSubmittedArchive(((input: string | URL | Request) => {
         const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
         const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
-        if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
+        if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: `upos://b/p${++preuploads}.ts` }));
         if (u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
-        if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
-        if (u.pathname === "/x/vu/web/add/v3") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BVLcool2" } }));
+        if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: u.pathname.replace(/^\//, "") }));
+        if (u.pathname === "/x/vu/web/add/v3" || u.pathname === "/x/vu/web/edit") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BVLcool2" } }));
         if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BVLcool2", title: "t", tid: 21 }, videos: [] } }));
         if (u.pathname === "/x/web/archives") return Promise.resolve(json({ code: 0, data: { arc_audits: [] } }));
         return Promise.resolve(json({ code: 0, data: {} }));

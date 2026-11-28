@@ -75,6 +75,18 @@ export class LivePumpSessionRecovery {
       return this.applyRecoveryDisposition(target, recovered);
     if (signal?.aborted)
       return { ok: false, error: "resubmit aborted" };
+    if (target.sealed === false) {
+      const sealed = this.checkpoint.noteUnconfirmedPart({
+        index: target.index,
+        spoolPath: target.spoolPath,
+        title: target.title,
+        stem: recovered.stem,
+        bytes: recovered.bytes,
+        durationSec: recovered.durationSec,
+        sealed: true,
+      });
+      if (!sealed.ok) return sealed;
+    }
     const submitted = await this.publish({
       index: target.index,
       spoolPath: target.spoolPath,

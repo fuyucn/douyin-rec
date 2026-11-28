@@ -22,6 +22,7 @@ process.on("SIGUSR2", () => drain.abort()); // MUTATION TARGET: delete this line
 // A stand-in for the recording loop: it keeps working until a stop signal lands, and reports
 // which one it saw. The pump reads these between parts (see runLivePump's drainSignal).
 let stoppedBy = "none";
+process.stderr.write("READY\n");
 while (!abort.signal.aborted) {
   await new Promise((r) => setTimeout(r, 20));
   if (drain.signal.aborted) { stoppedBy = "drain"; break; }
