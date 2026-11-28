@@ -598,7 +598,7 @@ runs no tests and changes no runtime files.
 
 ### 2026-11-28: direct recovery checkpoint, full runtime gate passed
 
-- Code checkpoints eca36613, 91119854 and d18f6fe8 are pushed to the task branch.
+- Code checkpoint d18f6fe8 and its two preceding code increments are pushed.
   This supersedes the pending runtime results above for this direct-flow slice;
   it is not T-251 completion, a release, deployment or activation approval.
 - Self-review and runtime regression found that an adopted, validated orphan
