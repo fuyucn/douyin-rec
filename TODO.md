@@ -15,6 +15,10 @@
 
 ## 进行中
 
+T-251 checkpoint: f51b3926 is pushed; direct source/prefix hardening has passed
+static checks and narrow review, while updated Vitest gates remain pending.
+This is development progress only, not completion, release or deployment.
+
 - [~] **T-251 提交证据与逐P清理安全闸（issue [#755](https://github.com/fuyucn/douyin-rec/issues/755)，plan [059](plans/059_upload_submission_proof.md)，2026-11-27）** — **做什么**:禁止 rolling/直播直传/恢复路径用数量、空查询或普通 ACK 推断未提交或本P已完成；持久区分 accepted 与 observed，只有同稿同P正向证据才能清理源文件。**为什么**:响应丢失、读回延迟或其他P先到达时，旧路径可能重复投稿或删除仍需恢复的源。**验收**:未知不重发、不清 intent、不假确认；accepted 跨重启保留且不重发；无稳定P身份的旧 target 保源待核验；所有 cleanup 入口检查同一 proof；新增四路故障回归并通过全量门禁。**不做**:不新增数据库/队列/跨机租约，不改 #752 已批准的明确限流回队，不做直播磁盘产品决策或强制停止协议。
 
 - [~] **T-249 四库收口为「控制库 + 处理队列库」并把库放进 named volume（issue [#750](https://github.com/fuyucn/douyin-rec/issues/750)，2026-11-25）** — **做什么**: `db/drec-control.db` 一个文件装 tasks/settings/merge_jobs/hub_rules + hub 台账 `sync_*`(7 表) + `room_sessions` + `upload_limits`；`proc-queue.db` 保持独立（多进程 claim/租约独占 WAL）。`compose` 把 `db/` 改挂 named volume `drec-db`，新增一次性 `db-seed`（拷完跑 `integrity_check` 才落 `.seed-complete`）。**为什么**: #747 的 522 是 SQLite `-wal`/`-shm` 经宿主 bind mount 转发时视图分叉，只能重启容器恢复；顺带把「4 份 WAL/4 个连接/4 个备份点」收成一份。**验收**: 主控已部署 `0.0.406`，控制库 12 表 `integrity ok`、tasks 23 / sync_jobs 570 / room_sessions 192 / upload_limits 1 与迁移前一致；宿主侧对 bind 目录改名→改回，`/api/tasks`、`/api/hub/jobs`、`/api/stats` 仍 200（注入验证）。**剩余**: 两台节点当前都在录制（`recording:1`），按部署 guard 等收播后再升级，升级时旧库自动并入并保留原文件。

@@ -565,6 +565,37 @@ runs no tests and changes no runtime files.
 - Every verified increment is committed and pushed to the task branch. A push
   is neither a release nor permission to deploy or activate protected delivery.
 
+### 2026-11-28: source and append-prefix checkpoint, runtime gates pending
+
+- Code checkpoint f51b3926 is pushed to the task branch; it is not a green
+  delivery, activation candidate, release or deployment.
+- Source size, mtime, device and inode are frozen in the existing intent before
+  metadata publication and copied through accepted/recovered state. Cleanup
+  retains missing-fingerprint history, changed files, substituted symlinks and
+  incomplete/open spools. These stat facts are not a content hash or an atomic
+  defense against adversarial concurrent filesystem mutation.
+- Streamed append carries the union of inherited session keys and the durable
+  driver prefix. The target checks every required predecessor in the actual
+  member snapshot before both edit and idempotent success. Missing native
+  provenance holds the order instead of overwriting a stale prefix.
+- Self-review also found that unreadable state could previously be archived and
+  replaced with a fresh submission. Unreadable/future-version state now refuses
+  rollover; missing archive identity and cross-part native-key reuse also hold.
+- Independent narrow static review found no P0/P1 in this increment. Typecheck,
+  architecture, bundle, privacy and diff checks passed. Added QA regressions are
+  frozen, but have not run: the shared machine test window is still reserved.
+  The preceding pump run was 265 passed / 2 failed before these fixture and
+  safety changes. The preceding full-suite failure is not superseded by a green
+  result. Neither report may be relabeled as validation of this checkpoint.
+- Rechecked the remote baseline: main remains e4569d33; prerequisite PR #754 is
+  open at eeb2caf9 and its master-upload journal does not exist on main yet. The
+  minimum typed master receipt seam must be integrated on that dependency, not
+  implemented against a nonexistent journal or substituted with another store.
+- Remaining work still includes complete account/owner/generation/source
+  qualification, the durable nonblocking observer, whole-order/rolling/queue
+  containment, compatibility/activation gates and the repository runtime gates.
+  Existing owner decisions and deployment restrictions are unchanged.
+
 ## Out of scope
 
 - No production spool=none enablement, disk-watermark product decision, or
