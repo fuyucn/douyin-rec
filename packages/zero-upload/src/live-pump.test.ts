@@ -1371,11 +1371,12 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
 
   it("seasonSectionId: 首次建稿加入合集;重启只在 pending 时补一次", async () => {
     const calls: string[] = [];
+    const fetchImpl = upos(64 * 1024, { seasonCalls: calls });
     seg();
     const first = await runLivePump({
       ...base({ maxSegments: 1 }),
       cookiesPath: join(dir, "cookies.json"),
-      fetchImpl: upos(64 * 1024, { seasonCalls: calls }),
+      fetchImpl,
       seasonSectionId: 123,
     });
     expect(first.ok, first.error ?? "").toBe(true);
@@ -1391,7 +1392,7 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
     const resumed = await runLivePump({
       ...base({ maxSegments: 1 }),
       cookiesPath: join(dir, "cookies.json"),
-      fetchImpl: upos(64 * 1024, { seasonCalls: calls }),
+      fetchImpl,
       seasonSectionId: 123,
     });
     expect(resumed.ok, resumed.error ?? "").toBe(true);
@@ -1402,7 +1403,7 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
     const again = await runLivePump({
       ...base({ maxSegments: 1 }),
       cookiesPath: join(dir, "cookies.json"),
-      fetchImpl: upos(64 * 1024, { seasonCalls: calls }),
+      fetchImpl,
       seasonSectionId: 123,
     });
     expect(again.ok, again.error ?? "").toBe(true);
